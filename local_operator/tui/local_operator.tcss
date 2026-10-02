@@ -2456,6 +2456,18 @@ Screen.settings #input-dock #prompt-chevron {
     background: $lo-tint-select;
 }
 
+/* The placeholder is the card's only affordance LABEL, and it was the least
+ * legible text in the frame: the framework's default measured 3.38:1 on the
+ * focused input ground (design review round 1, D6) — under the 4.5:1 floor for
+ * normal text and well below every other ink in the card (rows 11.3:1, muted
+ * 6.51:1). `$lo-muted` on that same ground measures 6.72:1 and puts the hint
+ * in the card's own quiet voice, beside the section headers and the legend.
+ * Scoped to the FAMILY class on purpose: the quick-send picker's filter takes
+ * the same treatment, because it has the same placeholder on the same ground. */
+.projects-send-card .input--placeholder {
+    color: $lo-muted;
+}
+
 /* The caret and the selection band, the composer's pair (`Editor`): the
  * surface colour on the foreground step for the caret, the ramp's selected
  * ground with `fg` ink for a selection. */

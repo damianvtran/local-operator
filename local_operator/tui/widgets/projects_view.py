@@ -76,6 +76,7 @@ from local_operator.tui.widgets.projects_send import (
     send_targets,
 )
 from local_operator.tui.widgets.projects_start import (
+    PLAIN_DETAIL,
     PLAIN_LABEL,
     StartPickerCard,
     StartTarget,
@@ -205,6 +206,12 @@ def _style_resolver() -> Callable[[str], Style]:
         # takes it verbatim, so "this is the row you are on" is said one way
         # everywhere. Ground only; the row's own spans carry the foreground.
         "row_selected": Style(bgcolor=color("tint-select")),
+        # The cells a FILTER matched (design review round 1, D2). A typographic
+        # signal rather than an ink: it inherits the run's own foreground, so it
+        # cannot fall under the contrast floor on either theme (the accent
+        # measures 3.49:1 on the card's light ground) and it survives a
+        # colourless terminal, which is the whole point of marking a match.
+        "match": Style(bold=True, underline=True),
         # The session's own projects carry `◆` in the row's leading column
         # (S3b): the accent without the cursor's bold, so `▸` still owns the
         # glyph where both apply — the marker column costs no width either way.
@@ -473,6 +480,10 @@ class ProjectsView(Vertical):
         # injects: the plain row, which is the whole feature on an install with
         # no registries at all (spec D7).
         self._start_card: StartPickerCard | None = None
+        #: Whether the reader dismissed the card while its create was running
+        #: (agent review round 1, F5): one start's worth of state, consumed by
+        #: the hand-off.
+        self._start_cancelled = False
         self._start_rows: list[StartTarget] = [
             StartTarget(kind="plain", name="", label=PLAIN_LABEL)
         ]
@@ -1291,25 +1302,25 @@ class ProjectsView(Vertical):
         # `c create` still painted). `r refresh` sheds first; the pair falls
         # together.
         msg_hint = (self._msg_hint, " message", True)
-        # `s start` (P5b): the second of the new page keys, and the one that
-        # sets a session going. It rides EVERY rung that carries `c create`,
-        # exactly as `m message` does — P5a's measured invariant, pinned by
-        # `test_the_msg_hint_never_vanishes_while_create_is_advertised`. The
-        # spec's finer shed order (`m` before `s` before `c`) would need a rung
-        # that drops `m` while keeping `c`, which that invariant forbids, and
-        # re-ranking P5a's shipped rungs is a change to P5a's measured ladder
-        # rather than to this one.
+        # `s start` (P5b) — the spec's own label for the key that sets a session
+        # going (§3.3). It rides the rungs that carry `c create`, the same
+        # neighbourhood `m message` lives in, but as a SEPARATE, one-rung-wider
+        # VARIANT of each of them rather than as an extra element inside them.
         #
-        # THE LABEL IS `new`, NOT THE SPEC'S `start`, AND ONE CELL DECIDED IT.
-        # Measured with this app's own `_measure_hints`: the timeline's full row
-        # costs 149 cells with " start" against the 148 a 150-column terminal
-        # offers, so the zoom hint — which `+ `/`-` owns and
-        # `test_zoom_hint_is_advertised_only_on_the_timeline` pins at exactly
-        # this width — fell off the row. " new" is two cells cheaper, keeps the
-        # full row at 146 (the spec §3.3 arithmetic for 150 columns), and is the
-        # app's OWN noun for the thing: the hotkey this key stands beside is
-        # already called "the new session hotkey".
-        start_hint = (self._start_hint, " new", True)
+        # WHY A VARIANT AND NOT AN EXTRA ELEMENT, and the arithmetic that
+        # decided it (agent review round 1, F3/F4). The canvas budget is
+        # `size.width - 2`, and the page's `size.width` is terminal − 4 (144 at
+        # a 150-column terminal, 94 at 100) — so the earlier comment here that
+        # said "149 against the 148 a 150-column terminal offers" was measuring
+        # the wrong budget; `s start` fits the row the ladder actually chooses
+        # at 150 columns. What the label DOES move is a shipped row: adding 11
+        # cells to the rungs in place pushed every budget in 103–111 past them
+        # onto the next rung, and `↔↕ scroll` — which the base row carried —
+        # vanished at terminals 109–117. The ladder picks the FIRST rung that
+        # fits, so a wider variant placed in FRONT of its own base row can only
+        # ever ADD the new key: where the variant does not fit, the base row is
+        # chosen unchanged, byte for byte.
+        start_hint = (self._start_hint, " start", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
         nxt = (self._next_hint, " next", True)
@@ -1321,7 +1332,43 @@ class ProjectsView(Vertical):
             (self._zoom_hint, " zoom", True) if self._view == "timeline" else None
         )
 
-        all_leads = leads_of(
+        def with_start(
+            leads: list[tuple[HintButton, str, bool]],
+        ) -> list[tuple[HintButton, str, bool]]:
+            """The same row with `s start` spliced in right after `m message`."""
+            spliced: list[tuple[HintButton, str, bool]] = []
+            for lead in leads:
+                spliced.append(lead)
+                if lead[0] is self._msg_hint:
+                    spliced.append(start_hint)
+            if not any(hint is self._start_hint for hint, _label, _lead in spliced):
+                spliced.append(start_hint)
+            return leads_of(*spliced)
+
+        rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = []
+
+        def add(
+            *hints: tuple[HintButton, str, bool] | None,
+            esc_label: str,
+            state: bool = False,
+            variant: bool = True,
+        ) -> None:
+            """Append the shipped rung, and — when it can be reached — its variant.
+
+            A variant is reachable only when it is NARROWER than the rung before
+            it, because the ladder stops at the first rung that fits: one that
+            is not would sit behind its predecessor forever, which is a dead
+            rung rather than an advertised key. The gate is measured, not
+            tabulated, so it cannot drift when a label or a rung changes.
+            """
+            base = rung(leads_of(*hints), esc_label, state=state)
+            if variant:
+                candidate = rung(with_start(leads_of(*hints)), esc_label, state=state)
+                if not rungs or self._measure_hints(*candidate) < self._measure_hints(*rungs[-1]):
+                    rungs.append(candidate)
+            rungs.append(base)
+
+        add(
             scroll,
             list_hint,
             board_hint,
@@ -1330,149 +1377,130 @@ class ProjectsView(Vertical):
             refresh,
             create_hint,
             msg_hint,
-            start_hint,
             open_hint,
             detail_hint,
             zoom,
+            esc_label="back to conversation",
+            state=True,
         )
-        return [
-            rung(all_leads, "back to conversation", state=True),
-            rung(all_leads, "back to conversation", state=False),
-            rung(all_leads, "back", state=False),
-            # THE TIMELINE'S FULL ROW GIVES UP `d detail` BEFORE IT GIVES UP
-            # ZOOM, and that is arithmetic again. `+`/`-` is the timeline's own
-            # key, so the timeline's row carries one element the other views'
-            # rows do not; measured with `_measure_hints`, the full timeline row
-            # costs 147 cells (with the `s new` label) against the 144 a
-            # 150-column terminal offers, so the row the ladder falls back to
-            # was losing `+/- zoom` — the one hint
-            # `test_zoom_hint_is_advertised_only_on_the_timeline` pins at exactly
-            # this width. This rung is inserted ONLY when `zoom` is present
-            # (i.e. on the timeline; `zoom` is None everywhere else), so the
-            # list and board rows are untouched and keep `d detail` at every
-            # width they have it today. `d` still opens the detail here — the
-            # shed-not-removed rule — and the hint the row gives up is the one
-            # the parity spec's own row never carried.
-            *(
-                [
-                    rung(
-                        leads_of(
-                            scroll,
-                            list_hint,
-                            board_hint,
-                            timeline_hint,
-                            nxt,
-                            refresh,
-                            create_hint,
-                            msg_hint,
-                            start_hint,
-                            open_hint,
-                            zoom,
-                        ),
-                        "back",
-                        state=False,
-                    )
-                ]
-                if zoom is not None
-                else []
-            ),
-            rung(
-                leads_of(
-                    scroll,
-                    list_hint,
-                    board_hint,
-                    timeline_hint,
-                    nxt,
-                    refresh,
-                    create_hint,
-                    msg_hint,
-                    start_hint,
-                    open_hint,
-                    detail_hint,
-                ),
-                "back",
-                state=False,
-            ),
-            rung(
-                leads_of(
-                    scroll,
-                    list_hint,
-                    board_hint,
-                    timeline_hint,
-                    nxt,
-                    refresh,
-                    create_hint,
-                    msg_hint,
-                    start_hint,
-                    detail_hint,
-                ),
-                "back",
-                state=False,
-            ),
-            rung(
-                leads_of(
-                    scroll,
-                    list_hint,
-                    board_hint,
-                    timeline_hint,
-                    nxt,
-                    create_hint,
-                    msg_hint,
-                    start_hint,
-                    detail_hint,
-                ),
-                "back",
-                state=False,
-            ),
-            rung(
-                leads_of(
-                    list_hint,
-                    board_hint,
-                    timeline_hint,
-                    nxt,
-                    create_hint,
-                    msg_hint,
-                    start_hint,
-                    detail_hint,
-                ),
-                "back",
-                state=False,
-            ),
-            # THE P5a ROW ITSELF, and `s start` sheds HERE — one rung before
-            # `m message`, which is the opposite of the spec's §3.3 shed order
-            # and is arithmetic rather than taste. Measured with this app's own
-            # `_measure_hints`: the rung above costs 101 cells against the 98 a
-            # 100-column terminal offers, and the four ways to pay for the last
-            # three cells all cost more than they look — drop `d detail` (this
-            # rung, -10) takes the ONLY hint for the detail page off the row P2
-            # pinned it to, drop `v next` (-9) sheds a view key before its
-            # siblings, and shortening the `esc back` label would move P5a's
-            # own measured 100-column row. This rung keeps that row BYTE-
-            # IDENTICAL (`1 list · 2 board · 3 timeline · v next · c create ·
-            # m message · d detail · esc back`, P5a's QA L1), so the new key
-            # joins the ladder only where the ladder has room for it: at 100
-            # columns `s` still WORKS (the shed-not-removed rule) and is simply
-            # not advertised, exactly as `m` is not at 60.
-            rung(
-                leads_of(
-                    list_hint,
-                    board_hint,
-                    timeline_hint,
-                    nxt,
-                    create_hint,
-                    msg_hint,
-                    detail_hint,
-                ),
-                "back",
-                state=False,
-            ),
-            rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "back", state=False),
-            rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "", state=False),
-            rung(leads_of(list_hint, board_hint, timeline_hint), "", state=False),
-            rung(leads_of(list_hint, board_hint), "", state=False),
-            rung(leads_of(list_hint), "", state=False),
-            rung(leads_of(), "", state=False),
-        ]
+        add(
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            msg_hint,
+            open_hint,
+            detail_hint,
+            zoom,
+            esc_label="back to conversation",
+        )
+        add(
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            msg_hint,
+            open_hint,
+            detail_hint,
+            zoom,
+            esc_label="back",
+        )
+        # The timeline's own row gives up `d detail` before it gives up `+/-`
+        # zoom: zoom acts on THIS view and `d` acts on the page, and the rung
+        # exists only where zoom does (the list and board rows keep `d detail`
+        # at every width they have it today).
+        if zoom is not None:
+            add(
+                scroll,
+                list_hint,
+                board_hint,
+                timeline_hint,
+                nxt,
+                refresh,
+                create_hint,
+                msg_hint,
+                open_hint,
+                zoom,
+                esc_label="back",
+            )
+        add(
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            msg_hint,
+            open_hint,
+            detail_hint,
+            esc_label="back",
+        )
+        # `↵ open` sheds first among the shipped hints (`scale`-free rows keep
+        # `r refresh`): the 116-cell shipped rung, which the ladder chose at
+        # 109–121 columns before this key existed.
+        add(
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            msg_hint,
+            detail_hint,
+            esc_label="back",
+        )
+        add(
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            create_hint,
+            msg_hint,
+            detail_hint,
+            esc_label="back",
+        )
+        add(
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            create_hint,
+            msg_hint,
+            detail_hint,
+            esc_label="back",
+        )
+        # Everything below sheds the page's older keys; none of them carries
+        # `c create` any more, so none of them offers a variant.
+        add(
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            create_hint,
+            msg_hint,
+            detail_hint,
+            esc_label="back",
+            variant=False,
+        )
+        add(list_hint, board_hint, timeline_hint, nxt, esc_label="back", variant=False)
+        for tail in (
+            (list_hint, board_hint, timeline_hint, nxt),
+            (list_hint, board_hint, timeline_hint),
+            (list_hint, board_hint),
+            (list_hint,),
+            (),
+        ):
+            add(*tail, esc_label="", variant=False)
+        return rungs
 
     def _detail_hint_rungs(
         self,
@@ -1513,20 +1541,16 @@ class ProjectsView(Vertical):
         # is the first of the new keys to shed (spec §3.3), so it rides only
         # the two widest rungs of each branch.
         msg = (self._msg_hint, " message", True)
-        # `s new` (P5b). THE ORDER HERE IS THE CANVAS'S, NOT THE SPEC'S, and the
-        # arithmetic is why: with this app's own `_measure_hints`, the widest
-        # detail row on a row reading `↵ toggle groundwork` costs 95 cells
-        # against the 94 a 100-column terminal offers — one cell over, which
-        # would have pushed `r refresh` off the row P5a measured at exactly this
-        # width (`↑↓ move · pgup/pgdn page · ↵ toggle groundwork · m message ·
-        # r refresh · esc back`, 87 cells). So the new key is also the FIRST to
-        # shed here, exactly as on the canvases, and the shipped rows are
-        # preserved BYTE-IDENTICALLY at every width they are chosen today.
-        # The sequence stays monotone — each narrower rung is a SUBSET of the
-        # wider one, so widening a terminal never takes a hint away (P5a's F3
-        # class): the ladder gives up `s`, then `r`, then `m`, then the page
-        # keys. `s` still WORKS wherever it is not advertised.
-        start = (self._start_hint, " new", True)
+        # `s start` (P5b), on the canvas's own rule: the rungs below are the
+        # SHIPPED rows and each one that can carry the new key is preceded by a
+        # wider variant of itself. The ladder stops at the first rung that fits,
+        # so the variant can only ADD `s` — where it does not fit, the shipped
+        # row is chosen unchanged. Measured: the widest detail row on a row
+        # reading `↵ toggle groundwork` costs 87 cells, and with `s start`
+        # spliced in it costs 97 against the 94 a 100-column terminal offers, so
+        # `s` is advertised from 101 columns up and every shipped row holds.
+        # `s` still WORKS wherever it is not advertised.
+        start = (self._start_hint, " start", True)
         if named is None:
             return [
                 rung([move, page, msg, start, refresh], "back"),
@@ -1898,13 +1922,23 @@ class ProjectsView(Vertical):
 
     def current_project_id(self) -> str | None:
         """The selected project's id, or ``None`` (the host seeds from it)."""
+        row = self._current_project_row()
+        return str(row.get("id") or "") or None if row is not None else None
+
+    def current_project_name(self) -> str:
+        """The selected project's NAME — the address the card names and the
+        kickoff's ``@project:`` reference resolves against."""
+        row = self._current_project_row()
+        return str(row.get("name") or "") if row is not None else ""
+
+    def _current_project_row(self) -> dict[str, Any] | None:
+        """The selected row's project payload, or ``None`` (one lookup for both
+        accessors above, so id and name can never come from different rows)."""
         if not (0 <= self._cursor < len(self._views)):
             return None
         view_row = self._views[self._cursor]
         project = view_row.get("project") if isinstance(view_row, dict) else None
-        if not isinstance(project, dict):
-            return None
-        return str(project.get("id") or "") or None
+        return project if isinstance(project, dict) else None
 
     def _move(self, delta: int) -> None:
         """Move the list cursor, CLAMPED, then reveal it (reveal-then-act)."""
@@ -2469,7 +2503,14 @@ class ProjectsView(Vertical):
         """
         if card is None:
             return
-        body = self._body
+        # THE GROUND IS THE SURFACE THAT IS ACTUALLY SHOWING, not the canvas
+        # (UX review round 1, U1 — a BLOCKER). In detail mode the canvas body is
+        # `display=False`, so its region is `[0,0,0,0]` and the card fell to the
+        # `max(20, …)` floor: a 20-cell card whose rows wrapped onto three lines
+        # over the detail prose, at every terminal width. `s` is documented as
+        # working from BOTH entries, so one placement rule must read the ground
+        # the reader is looking at.
+        body = self._body if self._body.display else self._detail_page
         padding = body.styles.padding
         top = body.region.y + padding.top
         # The ground runs from the canvas's first row to the page's own content
@@ -2489,6 +2530,11 @@ class ProjectsView(Vertical):
         # either (a second one is how a width becomes invisible until a frame is
         # inspected).
         card.styles.width = max(20, body.region.width - padding.left - padding.right)
+        # The OFFSET still hangs off the page's own content box: the card is a
+        # child of ProjectsView (mounted before the title) and floats on the
+        # overlay layer, so its position is relative to this widget, not to the
+        # surface it covers. Only the WIDTH and the row budget come from the
+        # displayed ground.
         content = self.content_region
         card.styles.offset = (
             body.region.x + padding.left - content.x,
@@ -2506,7 +2552,9 @@ class ProjectsView(Vertical):
         can honestly offer.
         """
         self._start_rows = (
-            list(rows) if rows else [StartTarget(kind="plain", name="", label=PLAIN_LABEL)]
+            list(rows)
+            if rows
+            else [StartTarget(kind="plain", name="", label=PLAIN_LABEL, detail=PLAIN_DETAIL)]
         )
 
     def action_start(self) -> None:
@@ -2528,8 +2576,13 @@ class ProjectsView(Vertical):
         """Float the start card over the page and let it take the keys."""
         if self._start_card is not None:
             return
-        card = StartPickerCard(self._start_rows, style_for=_style_resolver())
+        card = StartPickerCard(
+            self._start_rows,
+            project=self.current_project_name(),
+            style_for=_style_resolver(),
+        )
         self._start_card = card
+        self._start_cancelled = False
         self._mode = "start"
         self.mount(card, before=self._title)
         self._place_start_card()
@@ -2541,12 +2594,35 @@ class ProjectsView(Vertical):
 
     def _close_start_picker(self) -> None:
         card = self._start_card
+        if card is not None and card.pending:
+            # THE READER CANCELLED A START THAT WAS ALREADY RUNNING (agent
+            # review round 1, F5 / UX U: reproduced — `esc` on `starting
+            # session …` closed the card and the reader was switched into the
+            # new session anyway). The create itself is durable and keeps
+            # going; what `esc` buys is that the app does NOT take them
+            # anywhere, so the flag is consumed by the hand-off and the receipt
+            # goes to the page instead. This matches the card's own documented
+            # behaviour ("the create runs off the loop and its receipt lands on
+            # the page") rather than contradicting it.
+            self._start_cancelled = True
         self._start_card = None
         if card is not None:
             card.remove()
         if self._mode == "start":
             self._mode = "detail" if self._detail_page.display else "canvas"
         self._paint_chrome()
+
+    @property
+    def start_cancelled(self) -> bool:
+        """Whether the reader dismissed the card while its create was running.
+
+        A property rather than a one-shot consume: the app asks it TWICE — once
+        before it sends the kickoff turn and once before it hands off, because
+        the two are separate favours the reader may have cancelled and the flag
+        must not be spent by the first answer. `open_start_card` resets it, so
+        one start's cancellation can never silence the next one's hand-off.
+        """
+        return self._start_cancelled
 
     def start_pending(self) -> None:
         """The create is running off the loop (spec §7.6.2's pending state)."""
