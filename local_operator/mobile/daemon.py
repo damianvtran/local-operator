@@ -3320,6 +3320,14 @@ class MobileDaemon:
                 model=reply.get("error_model"),
                 report=reply.get("error_report"),
                 format_unsupported=reply.get("error_format"),
+                # The same carriage ``attach_client`` performs, field for field,
+                # ``error_reason`` included: without it a fork refusal's cause
+                # would be dropped here and rebuilt as the generic sentence. No
+                # ``/fork`` reaches this decoder today (it is frontend-local), but
+                # the two writers are meant to move together — this one's own
+                # comment above says so — and a silent divergence is exactly how
+                # one of them is forgotten.
+                reason=reply.get("error_reason"),
             )
             if known is not None:
                 raise known
