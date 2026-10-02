@@ -2381,6 +2381,84 @@ Screen.settings #input-dock #prompt-chevron {
     padding: 1 0 0 0;
 }
 
+/* The quick-send card (S6d parity P5a). It FLOATS, and that is the geometry
+ * fix rather than decoration (design review round 1, D1/D2): as a flow child
+ * the card competed with the canvas for rows and lost its own tail at 60x24,
+ * and at 80x24 painted zero target rows while `enter` still picked one. The
+ * page sets a Python offset against the canvas's content box and hands the
+ * card its row budget; the layer keeps it out of the page's flow entirely, so
+ * opening it reflows nothing and the height it was given is the height it
+ * paints. The ground and inset are the family card's (`CopyPickerScreen
+ * .copy-picker`): one elevation step up, content inset 2 cells, no frame —
+ * this sheet has no box glyphs, so D2's "one rule or box" lands as the
+ * title's own rule row, the app's separator vocabulary. */
+.projects-send-card {
+    layer: toast;
+    width: 1fr;
+    max-width: 60;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 2;
+    overflow: hidden;
+}
+
+.projects-send-title {
+    width: 1fr;
+    height: 1;
+}
+
+.projects-send-rule {
+    width: 1fr;
+    height: 1;
+    color: $lo-edge;
+}
+
+/* The form's input treatment, scoped to the card for the form's own recorded
+ * reason (`local_operator.tcss:2199-2203`): stock `Input` is a 3-row box with
+ * a tall border — a near-black slab in this sheet's vocabulary AND three rows
+ * where the card's deterministic height budgets one. */
+.projects-send-card Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-send-card Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The caret and the selection band, the composer's pair (`Editor`): the
+ * surface colour on the foreground step for the caret, the ramp's selected
+ * ground with `fg` ink for a selection. */
+.projects-send-card .input--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+.projects-send-card .input--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+/* The rows block is sized in Python to the painted window (chrome + rows is
+ * the card's whole height, D1's deterministic geometry); the pin here is the
+ * pre-placement default, and `overflow: hidden` keeps a stale frame from
+ * bleeding past the budget. */
+.projects-send-rows {
+    width: 1fr;
+    height: 1;
+    overflow: hidden;
+}
+
+.projects-send-note,
+.projects-send-hints {
+    width: 1fr;
+    height: 1;
+}
+
 /* The dock in projects mode: PRESENT and RECEDED, never removed — the exact
  * treatment `Screen.settings` and `Screen.org-chart` give it, and for the same
  * reason (what recedes is what is inert; the band stays live because it still

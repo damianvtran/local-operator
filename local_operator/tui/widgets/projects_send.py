@@ -6,8 +6,10 @@ Two halves, and the split is the same one every other projects surface keeps:
   the part worth pinning — its ORDER is the feature ("the manager first, then
   the project's own sessions, live ones first"), and a pure list is the only
   place that order can be asserted without a terminal.
-- :class:`SendTargetCard` is the surface: a focusable ``Container`` mounted in
-  the page, NOT a ``ModalScreen``.
+- :class:`SendTargetCard` is the surface: a focusable ``Container`` that
+  FLOATS over the page — mounted on the overlay layer with a deterministic
+  height and a Python-set offset — rather than a ``ModalScreen`` or a flow
+  child of the page (design review round 1, D1/D2).
 
 The card is deliberately not a modal, and that is a deviation from the parity
 spec's §5.6 parenthetical ("overlays are the `/resume`-family card") recorded
@@ -17,6 +19,14 @@ modal covers the surface the question is ABOUT — the tool output being asked
 about there, the project whose session you are messaging here. A card that
 hides the project row it was opened from makes the reader dismiss it to
 re-read what they are answering about.
+
+Floating is what makes the non-modal shape safe. As a flow child the card
+competed with the canvas for rows and lost its own tail at 60x24 (and at
+80x24 painted zero target rows while `enter` still picked one — D1); on the
+overlay layer it is arranged independently, so opening it moves nothing under
+it, and its height (chrome + the rows actually painted) is pinned by
+`SendTargetCard.set_available` to the ground the page handed it, so no row is
+silently clipped.
 
 The keys are the app's picker grammar (↑↓ wrap, ``enter`` selects, ``esc``
 closes, type to filter) because that is what every other card in this app
@@ -50,6 +60,20 @@ NO_TARGET_FOOTER = "no targets — esc closes · link a session from the project
 #: — long enough to be unique in practice, short enough to leave room for it.
 SHORT_ID_CELLS = 12
 
+#: The card's fixed chrome, in rows: one padding row above and below, the
+#: `send to` title, the rule under it, the filter, the note and the legend.
+#: The card's height is exactly this plus the rows it paints — a geometry the
+#: page checks against the ground it floats over (design review round 1,
+#: D1/D5: as a `1fr` flow child the card silently lost its tail at 60x24).
+SEND_CARD_CHROME_ROWS = 7
+
+#: The most target rows painted at once; the window scrolls within this so the
+#: selected row is always on screen ("no unpainted selection", D1).
+SEND_CARD_ROW_CAP = 5
+
+#: The card's widest column count; narrower terminals get the page's width.
+SEND_CARD_MAX_WIDTH = 60
+
 
 def compose_band(target: SendTarget) -> str:
     """The composer's recipient strip while the page is composing (spec §7.5.2).
@@ -60,6 +84,42 @@ def compose_band(target: SendTarget) -> str:
     the way out.
     """
     return f"send to: {target.label} · m target · esc cancel"
+
+
+def pending_line(target: SendTarget) -> str:
+    """The in-flight statement, painted where the reader is looking (UX U2).
+
+    Shown on submit, before the resolver answers; the receipt replaces it.
+    Without it the draft vanished and the band kept inviting another send, so
+    for the seconds a delivery takes the surface said nothing had happened.
+    """
+    return f"sending to {target.label}…"
+
+
+def sent_line(target: SendTarget, state_word: str) -> str:
+    """A receipt in the app's HUMAN vocabulary (agent review F4; UX U3).
+
+    ``state_word`` is :attr:`DeliveryOutcome.state_word` — the same words the
+    send tool's card paints (``delivered`` / ``wake unconfirmed`` /
+    ``delivery unconfirmed``) — rather than the model-facing stdout sentence
+    (``→ <id>: …`` with a raw message uuid) this surface used to echo.
+    """
+    return f"sent to {target.label} · {state_word}"
+
+
+def refusal_line(target: SendTarget, reason: str) -> str:
+    """A refusal that names the row the reader picked, never a lone hex id.
+
+    The band showed ``target.label``; the refusal repeats it (F4/U3: the old
+    sentence named only the session id, so the sentence the reader had to
+    recover from named neither the row nor the person).
+    """
+    return f"could not deliver to {target.label}: {reason}"
+
+
+def send_error_line(target: SendTarget, reason: str) -> str:
+    """A send that never reached delivery: resolution or validation failed."""
+    return f"could not send to {target.label}: {reason}"
 
 
 @dataclass(frozen=True)
@@ -185,6 +245,13 @@ class SendTargetCard(Container):
     and printable characters, all of which the composer would otherwise swallow
     as input (the ask card's recorded reason). Focus returns to the page when
     the card closes.
+
+    It FLOATS: the sheet puts it on the overlay layer (``layer: toast``) and
+    the page positions it with a Python-set offset against the canvas's
+    content box, so opening the card reflows nothing under it (D1/D2). Its
+    height is chrome plus the rows it is actually painting — the budget comes
+    from the page through :meth:`set_available` — so every painted row is
+    inside the card and the card is inside its ground.
     """
 
     can_focus = True
@@ -222,14 +289,26 @@ class SendTargetCard(Container):
         self._rows: list[SendTarget] = list(rows)
         self._index = 0
         self._style_for = style_for
+        #: The painted window's first row; slides so ``_index`` is always
+        #: painted (design review round 1, D1's "no unpainted selection").
+        self._top = 0
+        #: Rows the window is painting right now — ``min(rows, cap, room)``.
+        self._visible = 0
+        #: The row budget the PAGE hands over (the canvas's content height).
+        #: Standalone cards (tests) get a small default so they still paint.
+        self._available = SEND_CARD_CHROME_ROWS + SEND_CARD_ROW_CAP
 
     def compose(self):
         yield Static("send to", classes="projects-send-title")
+        # The one rule every surface here uses under its title (design D2's
+        # "one rule or box", in this sheet's separator vocabulary).
+        yield Static("", id="projects-send-rule", classes="projects-send-rule")
         yield Input(placeholder="type to filter", id="projects-send-filter")
         yield Static("", id="projects-send-rows", classes="projects-send-rows")
         yield Static("", id="projects-send-note", classes="projects-send-note")
         yield Static(
             "type to filter · ↑↓ move · ↵ select · esc close",
+            id="projects-send-legend",
             classes="projects-send-hints",
         )
 
@@ -239,6 +318,11 @@ class SendTargetCard(Container):
             self.focus()
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
+
+    def on_resize(self) -> None:
+        # The rule is cut to the card's measured width, which only exists once
+        # layout has run; this repaint is where the first cut happens.
+        self._repaint()
 
     # -- rows ---------------------------------------------------------------
     @property
@@ -256,9 +340,59 @@ class SendTargetCard(Container):
     def painted_rows(self) -> list[str]:
         return [row.row_text for row in self._rows]
 
+    # -- the painted window (design D1: no unpainted selection) --------------
+    def set_available(self, rows: int) -> None:
+        """Hand the card its row budget — the page's placement call.
+
+        ``rows`` is the height of the ground the card floats over. The card
+        spends it chrome-first and paints only the target rows that fit,
+        capped at :data:`SEND_CARD_ROW_CAP`; :meth:`_sync_window` slides the
+        window so the selection is always painted. Idempotent, and safe to
+        call before the card has composed (an unmounted card has no children
+        to size — ``on_mount`` paints when they exist).
+        """
+        self._available = max(0, rows)
+        try:
+            self._repaint()
+        except Exception:  # noqa: BLE001 — not composed yet; on_mount paints
+            pass
+
+    def window_rows(self) -> list[SendTarget]:
+        """The slice of the rows the card is painting right now."""
+        return self._rows[self._top : self._top + self._visible]
+
+    def painted_range(self) -> range:
+        """The row positions currently painted (empty when the ground is too
+        short for even one — the card then refuses to SELECT, see
+        :meth:`action_choose`)."""
+        return range(self._top, self._top + self._visible)
+
+    def _visible_count(self) -> int:
+        room = self._available - SEND_CARD_CHROME_ROWS
+        return max(0, min(len(self._rows), SEND_CARD_ROW_CAP, room))
+
+    def _sync_window(self) -> None:
+        """Set the painted count and slide the window so ``_index`` is in it."""
+        self._visible = self._visible_count()
+        if self._visible <= 0:
+            self._top = 0
+            return
+        top = min(self._top, max(0, len(self._rows) - self._visible))
+        if self._index < top:
+            top = self._index
+        elif self._index >= top + self._visible:
+            top = self._index - self._visible + 1
+        self._top = max(0, top)
+
     def _repaint(self) -> None:
+        self._sync_window()
         body = self.query_one("#projects-send-rows", Static)
         note = self.query_one("#projects-send-note", Static)
+        rule = self.query_one("#projects-send-rule", Static)
+        # The rows block is exactly as tall as the window: the card's height is
+        # chrome + painted rows and NOTHING else (the deterministic geometry
+        # the page asserts against its ground).
+        body.styles.height = self._visible
         if not self._rows:
             body.update(Text(""))
             # The empty state IS the footer line (spec §7.5.1): a card with no
@@ -266,11 +400,19 @@ class SendTargetCard(Container):
             note.update(Text(NO_TARGET_FOOTER, style=self._ink("muted")))
         else:
             lines: list[str] = []
-            for position, row in enumerate(self._rows):
+            for position, row in enumerate(self.window_rows(), start=self._top):
                 marker = "▸" if position == self._index else " "
                 lines.append(f"{marker} {row.row_text}")
-            body.update(Text("\n".join(lines)))
-            note.update(Text(NO_TARGET_FOOTER, style=self._ink("dim")))
+            body.update(Text("\n".join(lines), no_wrap=True))
+            # A window with rows off its edge says so, so a scrolled list never
+            # reads as the whole list.
+            hidden = len(self._rows) - self._visible
+            note.update(Text(f"+{hidden} more" if hidden > 0 else "", style=self._ink("dim")))
+        # The rule is cut to the card's own measured width; before the first
+        # layout there is no measurement and this paints nothing (the next
+        # repaint cuts it — `on_resize` guarantees one).
+        width = self.content_size.width
+        rule.update(Text("─" * width if width > 0 else "", style=self._ink("dim")))
 
     def _ink(self, key: str) -> Any:
         """A resolved style, or ``None`` when the host supplied no resolver."""
@@ -297,24 +439,33 @@ class SendTargetCard(Container):
 
     def action_choose(self) -> None:
         target = self.selected()
-        if target is not None:
-            self.post_message(self.Chosen(self, target))
+        # "No unpainted selection" (design D1): `enter` can only pick a row that
+        # is on screen. The guard is real, not defensive — a ground too short
+        # for even one row leaves the list unselectable rather than answering
+        # "who am I sending to" with nobody on screen (the 80x24 blind enter).
+        if target is None or self._index not in self.painted_range():
+            return
+        self.post_message(self.Chosen(self, target))
 
     def action_close(self) -> None:
         self.post_message(self.Closed(self))
 
     def on_click(self, event: Any) -> None:  # noqa: ANN001 — Textual event type
-        """A click selects a row; a second click on it chooses (spec §10.4)."""
+        """A click selects a row; a second click on it chooses (spec §10.4).
+
+        Positions are WINDOW-relative: the rows block paints the window, so a
+        click maps to ``_top + row`` and a click on the note or legend hits no
+        row (the old index arithmetic treated them as rows — D1's class).
+        """
         offset = getattr(event, "y", None)
         if offset is None:
             return
-        # The rows block starts two rows down (title, filter); the marker column
-        # is 1 cell, so a click anywhere on a row's line lands on that row.
         body_y = self._row_block_top()
-        position = offset - body_y
-        if position < 0 or position >= len(self._rows):
+        row = offset - body_y
+        if row < 0 or row >= self._visible:
             return
         event.stop()
+        position = self._top + row
         if position == self._index:
             self.action_choose()
             return
@@ -327,4 +478,5 @@ class SendTargetCard(Container):
             block = self.query_one("#projects-send-rows", Static)
             return block.region.y - self.region.y
         except Exception:  # noqa: BLE001 — before layout there is no region
-            return 2
+            # padding row + title + rule + filter
+            return 3

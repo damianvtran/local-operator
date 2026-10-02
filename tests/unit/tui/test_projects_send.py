@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from local_operator.tui.widgets.projects_send import (
     NO_TARGET_FOOTER,
+    SEND_CARD_CHROME_ROWS,
+    SEND_CARD_ROW_CAP,
     SendTarget,
     compose_band,
     filter_targets,
+    pending_line,
+    refusal_line,
+    send_error_line,
     send_targets,
+    sent_line,
 )
 
 MANAGER = SendTarget(
@@ -104,8 +110,14 @@ def test_the_band_names_the_target_and_the_way_out() -> None:
 # sends straight to it, anything else asks), and the composer hand-over is a
 # message the app answers.
 
-import pytest  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
+import pytest  # noqa: E402
+from textual.widgets import Static  # noqa: E402
+
+from local_operator.mobile.peer_send import DeliveryOutcome  # noqa: E402
 from local_operator.tui.widgets.projects_send import SendTargetCard  # noqa: E402
 from local_operator.tui.widgets.projects_view import (  # noqa: E402
     ProjectsViewComposeChanged,
@@ -198,3 +210,326 @@ def test_the_compose_surface_reports_its_target_and_esc() -> None:
     # A card that has not been mounted still answers its own grammar.
     assert card.selected() == target
     assert isinstance(ProjectsViewComposeChanged(target=target), ProjectsViewComposeChanged)
+
+
+# -- the floating card (design review round 1, D1/D2) ------------------------
+# The card rides the overlay layer with a row budget handed to it by the page.
+# These pins are D1's acceptance: the page does not move under the card, the
+# card's whole geometry sits inside the ground it floats over, and it cannot
+# select a row it did not paint.
+
+
+def _page_rows(view) -> tuple[tuple[int, int, int, int], ...]:  # type: ignore[no-untyped-def]
+    """The page's own rows, in the coordinates a reflow would change."""
+    widgets = (view._title, view._rule, view._body, view._detail, view._hints)
+    return tuple(
+        (widget.region.x, widget.region.y, widget.region.width, widget.region.height)
+        for widget in widgets
+    )
+
+
+async def _settle(pilot, predicate, passes: int = 80) -> bool:  # type: ignore[no-untyped-def]
+    """Pump until ``predicate`` holds (a worker's receipt, usually)."""
+    for _ in range(passes):
+        await pilot.pause()
+        if predicate():
+            return True
+    return False
+
+
+@pytest.mark.parametrize("size", [(60, 24), (80, 24), (100, 30)])
+@pytest.mark.asyncio
+async def test_the_card_floats_without_reflowing_or_clipping(
+    size: tuple[int, int], tmp_path: Path
+) -> None:
+    """D1/D2 acceptance at 60x24, 80x24 and 100x30.
+
+    Opening the card moves nothing under it; the card's height is EXACTLY
+    chrome + painted rows; every row it reports is on screen (60x24 used to
+    clip the tail, and 80x24 painted zero rows while `enter` picked one); the
+    floating card grows neither the scroll range nor a scrollbar.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        targets = [
+            SendTarget(
+                kind="session",
+                session_id=f"session{i}",
+                label=f'"work {i}"',
+                state="live",
+                live=True,
+            )
+            for i in range(3)
+        ]
+        view._send_targets = lambda: list(targets)  # type: ignore[method-assign]
+        before = _page_rows(view)
+        await pilot.press("m")
+        await pilot.pause()
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        assert _page_rows(view) == before, f"{size}: opening the card reflowed the page"
+        body = view._body
+        top = body.region.y + body.styles.padding.top
+        ground = view.content_region.y + view.content_region.height - top
+        assert ground - SEND_CARD_CHROME_ROWS >= len(
+            targets
+        ), f"{size}: the acceptance sizes must fit the whole three-target list"
+        expected = min(len(targets), SEND_CARD_ROW_CAP)
+        assert len(card.window_rows()) == expected
+        assert [row.session_id for row in card.window_rows()] == [
+            target.session_id for target in targets[:expected]
+        ]
+        assert card.region.height == SEND_CARD_CHROME_ROWS + expected
+        assert card.region.y == top
+        assert card.region.y + card.region.height <= (
+            view.content_region.y + view.content_region.height
+        )
+        assert card.region.x >= body.region.x
+        assert card.region.x + card.region.width <= body.region.x + body.region.width
+        assert 0 in card.painted_range()  # the selection is painted
+        painted = card.query_one("#projects-send-rows", Static).render().plain
+        for row in card.window_rows():
+            assert row.row_text in painted
+        assert painted.count("▸") == 1  # exactly one marker: the selected row
+        # Nothing about the card grew the screen: no scrollbar, no scroll range.
+        assert app.screen.virtual_size == app.screen.size
+
+
+@pytest.mark.asyncio
+async def test_the_window_follows_the_selection(tmp_path: Path) -> None:
+    """Nine targets behind a three-row window: the cursor walks past the edge
+    and the painted slice follows, so the selection is never off screen."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        targets = [
+            SendTarget(kind="session", session_id=f"session{i}", label=f"work {i}", state="stale")
+            for i in range(9)
+        ]
+        view._send_targets = lambda: list(targets)  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.set_available(SEND_CARD_CHROME_ROWS + 3)
+        await pilot.pause()
+        assert len(card.window_rows()) == 3
+        for _ in range(7):
+            await pilot.press("down")
+            await pilot.pause()
+            assert card.index in card.painted_range(), (card.index, card.painted_range())
+        assert card.index == 7
+        assert [row.session_id for row in card.window_rows()] == [
+            "session5",
+            "session6",
+            "session7",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_enter_cannot_pick_a_row_the_card_did_not_paint(tmp_path: Path) -> None:
+    """The 80x24 blind enter (D1): with zero painted rows, `enter` starts
+    nothing — the card answers only for rows the reader can see."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="stale")
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.set_available(SEND_CARD_CHROME_ROWS)  # chrome only: not one row fits
+        await pilot.pause()
+        assert card.window_rows() == []
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._mode == "send"
+        assert not view.composing
+
+
+# -- receipts: the band and the draft (agent review F4 / UX U2-U3 / QA Q5) ---
+
+
+def test_receipts_speak_the_apps_human_vocabulary() -> None:
+    """F4/U3: `state_word` words, the label the band showed, no model stdout —
+    no `→` prefix and no raw message uuid standing in for an outcome."""
+    target = SendTarget(
+        kind="session", session_id="dd44ee55ff66", label='"older review"', state="stale"
+    )
+    assert pending_line(target) == 'sending to "older review"…'
+    assert sent_line(target, "delivered") == 'sent to "older review" · delivered'
+    assert sent_line(target, "wake unconfirmed") == 'sent to "older review" · wake unconfirmed'
+    assert refusal_line(target, "the target said no") == (
+        'could not deliver to "older review": the target said no'
+    )
+    assert send_error_line(target, "no session found") == (
+        'could not send to "older review": no session found'
+    )
+    assert "→" not in sent_line(target, "delivered")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_send_keeps_the_draft_and_names_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q5/F4: the submit clears the composer, the refusal puts the draft back,
+    and the sentence names the row the reader picked rather than the id."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(
+            kind="session", session_id="s1", label='"older review"', state="live", live=True
+        )
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        assert view.composing
+        # The in-flight statement (U2) before anything resolves.
+        view.compose_pending(view.compose_target)
+        assert view._notice == 'sending to "older review"…'
+
+        editor = app._editor()
+        editor.load_text("retry me")
+        await pilot.pause()
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (None, [], None),
+        )
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: view._notice.startswith("could not send"))
+        assert editor.text == "retry me"
+        assert view._notice == (
+            'could not send to "older review": the session is no longer available'
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4's routing: an acknowledged send answers in the composer's band (the
+    editor is empty then) and restores nothing over the cleared composer."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(
+            kind="session", session_id="s1", label='"older review"', state="live", live=True
+        )
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+
+        async def _delivered(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return DeliveryOutcome(
+                "delivered", "the receiver acknowledged it", "mid-1", "acked", 1, "", "live", "s1"
+            )
+
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.deliver_peer_message_outcome", _delivered
+        )
+        editor = app._editor()
+        editor.load_text("hello there")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(
+            pilot, lambda: editor.placeholder == 'sent to "older review" · delivered'
+        )
+        assert editor.text == ""
+
+
+@pytest.mark.asyncio
+async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4: mailbox/unconfirmed are amber receipts on the notice row in the
+    app's own words, and the draft survives so the reader decides what next."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(
+            kind="session", session_id="s1", label='"older review"', state="live", live=True
+        )
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+
+        async def _mailbox(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return DeliveryOutcome(
+                "mailbox",
+                "delivered to its mailbox (id mid-2) — the wake was not acknowledged",
+                "mid-2",
+                "unconfirmed",
+                2,
+                "no_answer",
+                "live",
+                "s1",
+            )
+
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.deliver_peer_message_outcome", _mailbox
+        )
+        editor = app._editor()
+        editor.load_text("keep me please")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(
+            pilot, lambda: view._notice == 'sent to "older review" · wake unconfirmed'
+        )
+        assert editor.text == "keep me please"

@@ -396,7 +396,13 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
-from local_operator.tui.widgets.projects_send import SendTarget, compose_band
+from local_operator.tui.widgets.projects_send import (
+    SendTarget,
+    compose_band,
+    refusal_line,
+    send_error_line,
+    sent_line,
+)
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewAttachmentOpened,
@@ -33934,12 +33940,16 @@ class OperatorApp(App[None]):
 
         The SAME core the `send` tool uses — resolution, the body validator and
         `deliver_peer_message_outcome` — and no second send path, which is what
-        keeps the two from disagreeing about what "sent" means.
+        keeps the two from disagreeing about what "sent" means. The in-flight
+        statement is painted HERE, before the worker's first await: the draft
+        vanished on submit, and without this the surface said nothing at all
+        while a delivery took its seconds (UX U2).
         """
         message.stop()
         view = self._projects_view
         if view is None:
             return
+        view.compose_pending(message.target)
         self.run_worker(
             self._quick_send_worker(view, message.target, message.text),
             exclusive=False,
@@ -33953,6 +33963,15 @@ class OperatorApp(App[None]):
         receipt is read off `DeliveryOutcome` rather than derived from an
         exception type; only `RuntimeError` means the peer REFUSED before
         anything was minted, and only `is_error` is painted as a refusal.
+
+        The receipt's ROUTE follows the outcome class (agent review F4): a
+        DELIVERED send acknowledges in the composer's band (the submit cleared
+        the editor, so the strip is what the reader is looking at), while every
+        other outcome — amber, refused, resolver failure — keeps the DRAFT and
+        speaks on the page's notice row, so the reader can fix and retry
+        without retyping (Q5). Sentences are built from the app's human words
+        (`state_word`) with the target named the way the band named it, never
+        a lone session id (U3).
         """
         from local_operator.mobile import peer_send
 
@@ -33966,7 +33985,8 @@ class OperatorApp(App[None]):
             sender = {"session_id": self._own_session_id()}
         body_error = peer_send.validate_peer_body(text)
         if body_error:
-            view.compose_receipt(body_error, ok=False)
+            view.compose_receipt(body_error)
+            self._keep_quick_send_draft(text)
             return
         try:
             record, _candidates, error = await asyncio.to_thread(
@@ -33980,16 +34000,18 @@ class OperatorApp(App[None]):
                 require_started=True,
             )
         except Exception as exc:  # noqa: BLE001 — the resolver owns its refusal
-            view.compose_receipt(f"could not send: {exc}", ok=False)
+            view.compose_receipt(send_error_line(target, str(exc)))
+            self._keep_quick_send_draft(text)
             return
         if record is None:
             view.compose_receipt(
-                f"could not send: {error or f'{target.label} is no longer available'}",
-                ok=False,
+                send_error_line(target, error or "the session is no longer available")
             )
+            self._keep_quick_send_draft(text)
             return
         if record.pid == os.getpid():
-            view.compose_receipt("that target is this session", ok=False)
+            view.compose_receipt(send_error_line(target, "that target is this session"))
+            self._keep_quick_send_draft(text)
             return
         try:
             outcome = await peer_send.deliver_peer_message_outcome(
@@ -34002,13 +34024,77 @@ class OperatorApp(App[None]):
             )
         except RuntimeError as exc:
             # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
-            view.compose_receipt(f"could not send: {exc}", ok=False)
+            view.compose_receipt(send_error_line(target, str(exc)))
+            self._keep_quick_send_draft(text)
             return
         except (ConnectionError, OSError, ValueError) as exc:
             # Unclassifiable transport fault: honest, and never the confident arm.
-            view.compose_receipt(f"delivery unconfirmed — the send faulted ({exc})", ok=False)
+            view.compose_receipt(
+                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted ({exc})"
+            )
+            self._keep_quick_send_draft(text)
             return
-        view.compose_receipt(outcome.text, ok=not outcome.is_error)
+        if outcome.is_error:
+            # NOT DELIVERED (design note A.1): a refusal, named the way the
+            # band named the target, with the draft kept.
+            view.compose_receipt(refusal_line(target, outcome.detail))
+            self._keep_quick_send_draft(text)
+            return
+        sentence = sent_line(target, outcome.state_word)
+        if outcome.partial:
+            # Amber: honest but incomplete — the draft stays so the reader can
+            # decide whether to resend, and the notice row carries the word.
+            view.compose_receipt(sentence)
+            self._keep_quick_send_draft(text)
+            return
+        # DELIVERED: the band acknowledges (F4); the editor was cleared by the
+        # submit, so the strip is visible and the reader is still in compose.
+        self._paint_band_receipt(sentence)
+
+    def _paint_band_receipt(self, sentence: str) -> None:
+        """Paint a delivered receipt in the composer's band (agent review F4).
+
+        The band IS the editor's placeholder while the composer is empty, and
+        an acknowledged send is exactly that state: the submit cleared the
+        buffer. A reader who already left compose gets the line on the page's
+        notice row instead — the composer is read-only again and its
+        placeholder is not this surface's to overwrite.
+        """
+        view = self._projects_view
+        if view is not None and view.composing:
+            try:
+                editor = self._editor()
+            except Exception:  # noqa: BLE001 — a stripped harness has no composer
+                return
+            # The in-flight line on the notice row is replaced by the band
+            # statement: leaving `sending to …` up while the band already says
+            # `sent to …` would contradict itself a row apart.
+            view.show_notice("")
+            editor.placeholder = sentence
+            return
+        if view is not None:
+            view.compose_receipt(sentence)
+
+    def _keep_quick_send_draft(self, text: str) -> None:
+        """Give an unsent draft back to the composer (the F4 draft rule / Q5).
+
+        `Editor._submit` records the body into history and clears the buffer
+        before anything resolves, so an amber or refused outcome would leave
+        the reader with an empty composer and their message only in `↑`
+        recall. This mirrors the app's existing refused-submission shape: the
+        history entry is withdrawn (the submit did not leave as a prompt) and
+        the text is loaded back INTO the buffer — unless the reader has typed
+        new text there in the meantime, in which case their newer words win
+        and the draft stays recallable from history.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        if editor.text:
+            return
+        editor.forget_last_prompt(text)
+        editor.load_text(text)
 
     def on_projects_view_form_submitted(self, message: ProjectsViewFormSubmitted) -> None:
         """`ctrl+s` on the create form: write through the SAME core the tool uses.
