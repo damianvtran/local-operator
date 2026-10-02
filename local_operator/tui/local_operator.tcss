@@ -2396,7 +2396,10 @@ Screen.settings #input-dock #prompt-chevron {
     padding: 1 0 0 0;
 }
 
-/* The quick-send card (S6d parity P5a). It FLOATS, and that is the geometry
+/* The projects overlay card (S6d parity P5a quick-send; P5b's start-session
+ * picker shares this class and every rule below it — one card family, one
+ * ground, one geometry, and a second set of selectors is how the two would
+ * come to disagree about where a card sits). It FLOATS, and that is the geometry
  * fix rather than decoration (design review round 1, D1/D2): as a flow child
  * the card competed with the canvas for rows and lost its own tail at 60x24,
  * and at 80x24 painted zero target rows while `enter` still picked one. The
