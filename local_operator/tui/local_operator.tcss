@@ -563,6 +563,21 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
     padding: 1 1 0 0;
 }
 
+/* The projects compose strip (P5a, design review round 1, D6): the recipient
+ * band — and then the delivered receipt — as a REAL one-row surface above the
+ * prompt. It replaced the editor-placeholder incarnation, which vanished on
+ * the first keystroke, exactly when the reader needs to see who the message is
+ * addressed to. `display: none` everywhere except while the projects page
+ * composes, so the dock keeps its height in every other mode; `$lo-dim` is
+ * the ink the placeholder it replaced used, so the strip is the same voice
+ * about the same composer. */
+.projects-compose-strip {
+    display: none;
+    width: 1fr;
+    height: 1;
+    color: $lo-dim;
+}
+
 /* Input panel: two widgets for one panel, and the split is load-bearing.
  *
  * `#input-dock` is a POSITIONER — docked to the bottom, full width, no fill of
@@ -2379,6 +2394,96 @@ Screen.settings #input-dock #prompt-chevron {
     height: 2;
     width: 1fr;
     padding: 1 0 0 0;
+}
+
+/* The quick-send card (S6d parity P5a). It FLOATS, and that is the geometry
+ * fix rather than decoration (design review round 1, D1/D2): as a flow child
+ * the card competed with the canvas for rows and lost its own tail at 60x24,
+ * and at 80x24 painted zero target rows while `enter` still picked one. The
+ * page sets a Python offset against the canvas's content box and hands the
+ * card its row budget; the layer keeps it out of the page's flow entirely, so
+ * opening it reflows nothing and the height it was given is the height it
+ * paints. The ground and inset are the family card's (`CopyPickerScreen
+ * .copy-picker`): one elevation step up, content inset 2 cells, no frame —
+ * this sheet has no box glyphs, so D2's "one rule or box" lands as the
+ * title's own rule row, the app's separator vocabulary. */
+.projects-send-card {
+    layer: toast;
+    /* FULL WIDTH, and the cap is gone deliberately (design round 2, D9). At
+     * `max-width: 60` an 80-cell terminal left 20 cells of page beside the card
+     * on its own rows — the frame painted the canvas fragment `essions` level
+     * with the card's last row, so two surfaces shared a row and the page's text
+     * read as part of the card's edge. The `/resume` family answers the same
+     * question by taking the width it can hold, and this card does the same: it
+     * fills the page's content box, so no page row is visible beside it at any
+     * width. Its height and its floating position are unchanged — the layer
+     * keeps it out of the layout, so the page still does not reflow (D2). */
+    width: 1fr;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 2;
+    overflow: hidden;
+}
+
+.projects-send-title {
+    width: 1fr;
+    height: 1;
+}
+
+.projects-send-rule {
+    width: 1fr;
+    height: 1;
+    color: $lo-edge;
+}
+
+/* The form's input treatment, scoped to the card for the form's own recorded
+ * reason (`local_operator.tcss:2199-2203`): stock `Input` is a 3-row box with
+ * a tall border — a near-black slab in this sheet's vocabulary AND three rows
+ * where the card's deterministic height budgets one. */
+.projects-send-card Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-send-card Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The caret and the selection band, the composer's pair (`Editor`): the
+ * surface colour on the foreground step for the caret, the ramp's selected
+ * ground with `fg` ink for a selection. */
+.projects-send-card .input--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+.projects-send-card .input--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+/* The rows block is sized in Python to the painted window (chrome + rows is
+ * the card's whole height, D1's deterministic geometry); the pin here is the
+ * pre-placement default, and `overflow: hidden` keeps a stale frame from
+ * bleeding past the budget. */
+.projects-send-rows {
+    width: 1fr;
+    height: 1;
+    overflow: hidden;
+}
+
+.projects-send-note,
+.projects-send-hints {
+    width: 1fr;
+    height: 1;
+    /* The legend is a hint row, and every hint row in this sheet is `muted`
+     * (cf. `.projects-form-hint`): at card ink it competed with the rows it
+     * describes. */
+    color: $lo-muted;
 }
 
 /* The dock in projects mode: PRESENT and RECEDED, never removed — the exact

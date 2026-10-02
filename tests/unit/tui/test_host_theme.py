@@ -28,6 +28,13 @@ _NOT_PER_PALETTE_CHECKS = frozenset(
     {
         "test_default_theme_is_operator_dark",
         "test_warning_ink_clears_aa_on_the_card_ground",
+        # The `[missing]` chip pin is the same shape as the `warning` one: it
+        # names the two BRAND ramps rather than taking a theme, because it pins
+        # the card's mapping (`missing` -> `muted`) as well as the pair, and
+        # `muted` is the ramp's own secondary ink — re-sourcing a curated
+        # palette's quiet chip for this ground is the design stream's call.
+        # The `[live]` chip pin DOES take a theme (its ink is derived per ramp).
+        "test_the_missing_chip_ink_clears_aa_on_the_card_ground",
     }
 )
 _PALETTE_CHECKS = [
