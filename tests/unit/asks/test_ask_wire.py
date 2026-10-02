@@ -179,20 +179,51 @@ def test_ask_wire_is_absence_without_a_queue(
     assert ask_wire(session) == (None, None)
 
 
-def test_ask_wire_reports_the_fold_and_the_open_count(
+def test_ask_wire_reports_the_fold_and_the_outstanding_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     session, queue = _live_session(tmp_path)
     queue.enqueue(_questions(), 600)
     queue.enqueue(_questions(text="Another?"), 600)
-    rows, opens = ask_wire(session)
-    assert rows is not None and opens == 2
+    rows, outstanding = ask_wire(session)
+    assert rows is not None and outstanding == 2
     assert [row["status"] for row in rows] == ["open", "open"]
     assert all("ask_id" in row for row in rows)
     # The full question rides (options and flags included), because a surface
     # that can only see an id cannot draw a picker.
     assert rows[0]["questions"][0]["options"][0]["label"] == "yes"
+
+
+def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The flip precondition: ``asks_open`` counts OUTSTANDING asks.
+
+    An ask that timed out and was never answered used to drop out of the tally
+    (0, and with no other row present the queue read as absent everywhere but
+    the live bar) while the bar still offered it and a late answer still reached
+    the agent (design §2.2, the spec's item 3). It is outstanding while the user
+    can still act on it; answering it late settles it and the tally falls.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    clock = {"now": BASE}
+    session = FakeSession(None)
+    queue = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: clock["now"])
+    session._queue = queue
+    ask_id = queue.enqueue(_questions(), 600)["details"]["ask_id"]
+
+    clock["now"] += 600_001  # past the deadline, inside the 7-day late window
+    rows, outstanding = ask_wire(session)
+    assert rows is not None
+    assert [row["status"] for row in rows] == ["timed_out"]
+    assert outstanding == 1, "a timed-out ask the user can still answer is outstanding"
+
+    assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
+    rows, outstanding = ask_wire(session)
+    assert rows is not None
+    assert outstanding == 0, "an answered-late ask is settled"
+    assert [row["status"] for row in rows] == ["late"]
 
 
 def test_the_queue_publishes_through_the_session_on_every_change(

@@ -25627,9 +25627,7 @@ class OperatorApp(App[None]):
             # Nothing left to answer at all: a list of zero rows is dead chrome
             # holding the composer hostage.
             self._collapse_asks()
-        self._sync_sidebar_asks(
-            len([row for row in self._open_ask_rows() if row.status == STATUS_OPEN])
-        )
+        self._sync_sidebar_asks(len(self._open_ask_rows()))
 
     @staticmethod
     def _ask_now_ms() -> int:
@@ -25651,10 +25649,14 @@ class OperatorApp(App[None]):
         had to be made: a late answer is an ANSWER (the agent was told, one
         deadline too late), so offering it an answer box can only be refused —
         and the bar counted it as an owed question for as long as it stayed in
-        this list. ``ask_rows`` drops it for the same reason; both gates read
-        the same two statuses.
+        this list.
+
+        The rule is ``AskRow.answerable``, which reads the fold's own
+        ``OUTSTANDING_STATUSES`` — the same set the wire's tally and the index
+        use, so a timed-out-but-answerable ask can never be counted by one
+        surface and dropped by another.
         """
-        return [row for row in self._ask_rows if row.status in (STATUS_OPEN, STATUS_TIMED_OUT)]
+        return [row for row in self._ask_rows if row.answerable]
 
     @staticmethod
     def _ask_head_text(rows: list[AskRow]) -> str:
