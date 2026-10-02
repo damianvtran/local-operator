@@ -664,6 +664,61 @@ def _fresh_default_config() -> Config:
 CONFIG_FILE_NAME = "config.yml"
 
 
+def _dotted_write_refusal(key: str) -> "str | None":
+    """Why ``key`` must not be written through :meth:`ConfigManager.set_config_value`.
+
+    ``None`` means the write is fine. That is every non-dotted key, plus the
+    declared FLAT-dotted ones (``display.shimmer``, ``keymap.*``), where the dot
+    is part of the literal top-level name rather than a level of nesting.
+
+    Everything else is a write that would land where no reader looks (#1920):
+    a dotted key naming a declared NESTED setting (``subagents.models.hi``,
+    whose real home is ``values.subagents.models.hi``), or naming nothing
+    declared at all. ``Config.set_value`` is a plain ``dict.__setitem__``, so
+    both were stored as a literal top-level key — the call returned, the file
+    grew a line, and every reader (``get_nested_value``,
+    ``settings_io.read_setting``, ``read_effort_tier_selectors``) walked right
+    past it.
+
+    The registry is asked, rather than the string being split, because the two
+    cases are indistinguishable from the key alone and the registry is the
+    authority on which is which (``Setting.path`` exists precisely because
+    ``key`` and ``path`` differ for the flat-dotted flags). Splitting every
+    dotted key would turn ``display.shimmer`` into a ``display:`` mapping that
+    ``tui/settings.py`` does not read — one silent failure traded for another,
+    which is ``settings_io``'s "THE ``display.*`` FLAT-KEY TRAP".
+
+    ``settings_io`` is imported function-locally: it imports this module, so a
+    module-level import here would be a cycle. ``read_effort_tier_selectors``
+    in ``harness/subagent.py`` is the precedent for the same move.
+    """
+    if "." not in key:
+        return None
+
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY.get(key)
+    if setting is not None and setting.is_flat_dotted and key == setting.path[0]:
+        return None
+
+    if setting is not None:
+        return (
+            f"{key!r} is a nested setting, not a top-level key: its value lives "
+            f"inside the nested {setting.path[0]!r} mapping, so a literal write "
+            f"would store the dotted name as a separate top-level key that no "
+            f"reader looks at and report a success that changed nothing. Use "
+            f"`lop config edit {key} <value>` (or `settings_io.write_setting`), "
+            f"which merges into that mapping and tells the running app the value "
+            f"changed."
+        )
+    return (
+        f"{key!r} is not a declared setting, and a dotted key is stored literally "
+        f"at the top level — where no reader looks, so the write would be inert."
+        f" Run `lop config list` for the real name, then `lop config edit <key> "
+        f"<value>`."
+    )
+
+
 class ConfigManager:
     """Manages configuration settings for Local Operator.
 
@@ -1015,9 +1070,45 @@ class ConfigManager:
     def set_config_value(self, key: str, value: Any) -> None:
         """Set a specific configuration variable.
 
+        ``key`` is a TOP-LEVEL key of ``values``. A key containing a dot is
+        accepted only when the dot is part of the literal name — the declared
+        flat-dotted settings, ``display.shimmer`` and friends. Any other dotted
+        key raises :class:`ValueError` BEFORE anything is mutated, naming the
+        route that does work; see :func:`_dotted_write_refusal` for why the
+        refusal rather than a split-and-recurse, and why it is not routed
+        through ``settings_io`` from here.
+
         Args:
             key (str): The configuration key to set
             value (Any): The value to set for the key
+
+        Raises:
+            ValueError: ``key`` is dotted and is not a declared flat-dotted
+                setting, so a write here could only be inert.
+            settings_io.ConfigUnreadableError: ``config.yml`` cannot be parsed,
+                so no write may be based on it.
         """
+        refusal = _dotted_write_refusal(key)
+        if refusal is not None:
+            raise ValueError(refusal)
+
+        # Merge into what is on DISK, not into whatever snapshot this manager
+        # happens to be holding. The write below dumps the whole in-memory
+        # mapping, so a manager built before another writer's change silently
+        # reverts it: three consecutive field writes through different managers,
+        # with one of them stale, lose the other two (#1920's vanished sibling).
+        #
+        # The rule and its guard live in `settings_io`, where the facade's two
+        # write primitives have carried them since review round 1 ("THE reason
+        # this exists": a reload at the primitive cannot be forgotten by the
+        # next entry point added, unlike one repeated at each facade method).
+        # Imported rather than re-derived — a second spelling of "never degrade
+        # to defaults as the base of a write" is exactly the drift that guard
+        # exists to prevent — and function-locally, because `settings_io`
+        # imports this module.
+        from local_operator import settings_io
+
+        settings_io._reload_before_write(self)
+
         self.config.set_value(key, value)
         self._write_config(vars(self.config))
