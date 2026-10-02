@@ -1390,15 +1390,17 @@ cd ~/local-operator-ui-worktrees/mesh-network
 pnpm storybook                       # or the repo's own dev command
 node scripts/capture-evidence.mjs --only=chat-sidebar-peers --themes=dark,light
 node scripts/check-evidence.mjs      # asserts every captured frame paints
-pnpm evidence:fold                   # re-derives the manifest's stamps for this tree
+pnpm evidence:fold                   # AFTER the commit/merge: re-derives the manifest's stamps
 ```
 
 * The re-stamp is `pnpm evidence:fold` (UI repo, `scripts/evidence-fold.mjs`): it
   derives `srcTree`/`scriptsTree` and the counts from the tree the commit names, runs
   these same guards and stages the result. Run it after any commit here that moves
-  `src/` or `scripts/`, and run it after a fold instead of resolving
+  `src/` or `scripts/`, and after a fold instead of resolving
   `docs/evidence/manifest.json` by hand - with `pnpm evidence:fold:install` once per
-  clone the fold does not even stop on the manifest.
+  clone a `git merge` does not stop on the manifest (a rebase or cherry-pick still does:
+  the driver resolves merges only, because outside a merge git hands it the upstream
+  side as this branch).
 
 * One story per state S1-S7 (`chat-sidebar-peers*`), plus the `Peers` group and
   the move-refusal notice.
