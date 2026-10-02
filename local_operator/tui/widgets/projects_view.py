@@ -1028,6 +1028,8 @@ class ProjectsView(Vertical):
             rungs = self._detail_hint_rungs()
         elif self._mode == "form":
             rungs = self._form_hint_rungs()
+        elif self._mode == "compose":
+            rungs = self._compose_hint_rungs()
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
         for leads, esc_label in rungs:
@@ -1109,6 +1111,26 @@ class ProjectsView(Vertical):
         save = (self._save_hint, " save", True)
         return [rung([tab, save], "cancel")]
 
+    def _compose_hint_rungs(self) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The compose mode's ONE rung: ``esc cancel``, and nothing else (U5).
+
+        While the composer holds the caret, every other key the canvas ladder
+        advertises — ``1 list``, ``v next``, ``c create``, ``m message``,
+        ``d detail`` — TYPES into the message. A hinted key that does nothing
+        is the defect the page's own hints rules name; a hinted key that types
+        your sentence is worse (UX round 1, U5). ``esc`` is the one page key
+        that still means something here, and it means cancel.
+        """
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]], esc_label: str
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            return (row, esc_label)
+
+        return [rung([], "cancel")]
+
     def _sync_form_hints(self) -> None:
         """Arm the form's hints against what they would act on just now.
 
@@ -1177,9 +1199,14 @@ class ProjectsView(Vertical):
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
         create_hint = (self._create_hint, " create", True)
-        # `m message`: the one affordance a reader cannot guess, and per spec
-        # §3.3 the FIRST of the new keys to shed — so it rides the rungs that
-        # still carry `c create`, and the narrowest of those drops it first.
+        # `m message`: the one affordance a reader cannot guess. The invariant
+        # this ladder enforces is measured, not aspirational (agent review
+        # round 1, F3): `m message` is advertised on EVERY rung that still
+        # carries `c create`. The rung at the scroll/refresh rank used to omit
+        # it while an equal-width rung below carried it, so widening the
+        # terminal made the hint VANISH (absent at 110-130 view columns where
+        # `c create` still painted). `r refresh` sheds first; the pair falls
+        # together.
         msg_hint = (self._msg_hint, " message", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
@@ -1234,6 +1261,7 @@ class ProjectsView(Vertical):
                     nxt,
                     refresh,
                     create_hint,
+                    msg_hint,
                     detail_hint,
                 ),
                 "back",
@@ -2286,6 +2314,16 @@ class ProjectsView(Vertical):
             return
         self._send_target = None
         self._mode = "detail" if self._detail_page.display else "canvas"
+        # Focus lands HERE, before the app answers the message: the composer is
+        # about to go read-only, and `_set_composer_read_only` blurs a caret it
+        # can no longer honour — with nothing taking the focus, `app.focused`
+        # was None and the next `m` was a silent no-op until a Tab (QA round 1,
+        # Q4). Taking it first also means the blur finds the editor already
+        # unfocused, so it does not clear the focus a second time.
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 — an unmounted page has nothing to focus
+            pass
         self.post_message(ProjectsViewComposeChanged(target=None))
         self._paint_chrome()
 
