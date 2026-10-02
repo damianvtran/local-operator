@@ -83,6 +83,20 @@ def write_tiers(config_dir, **tiers: object) -> None:
     )
 
 
+def write_model_choice_config(config_dir, models: object, *, choice: str = "model") -> None:
+    """``write_tiers`` plus the policy key, for the arms that need the field advertised.
+
+    ``write_tiers`` omits ``model_choice``, which takes the shipped ``operator``
+    default — the arm where no tier is offered to the delegating model at all,
+    so the ``effort`` property is DELETED from both schemas. Any test that reads
+    that property has to say so explicitly.
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yml").write_text(
+        yaml.safe_dump({"values": {"subagents": {"model_choice": choice, "models": models}}})
+    )
+
+
 async def wait_for(predicate, timeout: float = 5.0) -> None:
     import asyncio
 
@@ -353,6 +367,61 @@ def test_absent_and_empty_still_remove_the_tier_not_inherit_it(tmp_path, monkeyp
         with pytest.raises(SubagentModelUnavailable) as caught:
             session._launch_subagent(label="review", prompt="review it", effort="hi")
         assert caught.value.tier == "hi"
+
+
+@pytest.mark.asyncio
+async def test_switching_the_session_model_re_renders_the_tier_descriptions(tmp_path, monkeypatch):
+    """M1: the schema bakes the resolved label at BUILD, so ``/model`` must re-render it.
+
+    The tier description is the one surface this feature exists to make honest,
+    and the re-point is its motivating case: after ``/model B`` the enum still
+    advertised A as the model a ``default`` tier runs on while the launch
+    resolved B — routing correct, disclosure stale, until an unrelated config
+    edit happened to rebuild. Rebuilt in place, so the provider-visible tool
+    order (part of the prompt-cache prefix) is untouched.
+    """
+    from local_operator.tools.registry import create_tools
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(tmp_path / "config", {"hi": "default"})
+    session = make_session(tmp_path)
+    session.refresh_tools(create_tools(session._build_tool_context(), enabled=["task"]))
+
+    def description() -> str:
+        (task_tool,) = [tool for tool in session._tools if tool.name == "task"]
+        return task_tool.parameters["properties"]["effort"]["description"]
+
+    assert f"{MODEL.provider}/{MODEL.model_id}" in description()
+    session.set_model(
+        ModelSpec(
+            provider="anthropic",
+            model_id="claude-sonnet-5-5",
+            context_window=200_000,
+            max_output_tokens=8_192,
+        )
+    )
+    assert "anthropic/claude-sonnet-5-5" in description()
+    assert f"{MODEL.provider}/{MODEL.model_id}" not in description()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_cased_sentinel_still_resolves_at_launch(tmp_path, monkeypatch):
+    """Q2 from the launch side: ``DEFAULT`` is the sentinel, not an unset tier.
+
+    The refusal path is pinned in the schema tests; this is the half that
+    actually routes — the whole failure mode the change corrects is a spelling
+    that looked like a decision and behaved like a deletion.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(tmp_path / "config", {"hi": "DEFAULT"})
+    session = make_session(tmp_path)
+
+    job = session.jobs.get(session._launch_subagent(label="review", prompt="p", effort="hi"))
+    assert job is not None
+    assert job.model_label == f"{MODEL.provider}/{MODEL.model_id}"
+    assert job.owns_model is True
+    await session.dispose()
 
 
 @pytest.mark.asyncio

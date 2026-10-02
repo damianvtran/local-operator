@@ -2197,7 +2197,7 @@ class TestTheSubagentModelChoiceRow:
         assert setting is not None
         assert "Bills at that model's rates" in setting.help
         # The explicit opt-in, named by the word the config stores.
-        assert "'default'=session" in setting.help
+        assert "'default': session" in setting.help
         # The correction: empty removes the tier. The false sentence this
         # replaced is asserted ABSENT so a future edit cannot restore it.
         assert "empty removes the tier" in setting.help
