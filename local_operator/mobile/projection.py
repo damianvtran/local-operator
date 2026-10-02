@@ -2970,7 +2970,7 @@ class ProjectionFold:
         self.projection.pending_count = len(self._pending_queue)
         self._bump()
 
-    def set_asks(self, rows: list[dict[str, Any]] | None, open_count: int | None) -> None:
+    def set_asks(self, rows: list[dict[str, Any]] | None, outstanding_count: int | None) -> None:
         """Install the runtime's ask fold and re-front the legacy mirror.
 
         ``None`` is ABSENCE, not "no asks": it is what a runtime that does not
@@ -2978,6 +2978,13 @@ class ProjectionFold:
         the distinction because the whole client-side capability proxy rests on
         it — an old/new client deciding whether to render the ask surfaces reads
         presence, never the length.
+
+        ``outstanding_count`` is the runtime's own tally of asks still wanting
+        the user (open + timed-out-and-answerable), passed through verbatim
+        rather than re-counted from the rows: the rows are a CAP-20 prefix, so
+        re-counting them here would under-report a queue longer than the cap —
+        the exact disagreement (``asks_open: 20`` beside 9 drawn rows) QA found
+        in round 1.
 
         Ends in ``_sync_pending`` so the mirrored card is refreshed from the
         SAME call that changed the ask list: a host that forgot the second step
@@ -2992,7 +2999,7 @@ class ProjectionFold:
             self.projection.asks = [
                 PendingAskWire(**{k: v for k, v in row.items() if k in known}) for row in rows
             ]
-            self.projection.asks_open = int(open_count or 0)
+            self.projection.asks_open = int(outstanding_count or 0)
         self._sync_pending()
 
     def _mirror_pending(self) -> PendingRequest | None:

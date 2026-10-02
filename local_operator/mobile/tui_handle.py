@@ -1595,16 +1595,17 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self._on_projection()
 
-    def _ask_state_changed(self, rows: Any, open_count: Any) -> None:
+    def _ask_state_changed(self, rows: Any, outstanding_count: Any) -> None:
         """The session's ask fold moved: re-front the mirror and repaint.
 
         The session-side twin of the runtime handle's sink. Installing the fold
         ends in ``_sync_pending``, so the mirrored card (design §4) is refreshed
         by the same call that changed the ask list, and the repaint the phone
-        sees is the one carrying it.
+        sees is the one carrying it. The count is the runtime's outstanding tally
+        (open + timed-out-and-answerable), passed through verbatim.
         """
         try:
-            self._fold.set_asks(list(rows) if rows is not None else None, open_count)
+            self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
         self._publish_pending_gate(self._fold.projection.pending)
