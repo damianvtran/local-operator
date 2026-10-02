@@ -45,6 +45,9 @@ REASONS: dict[str, str] = {
     ),
     "history_rewriting": "history is being rewritten; retry /fork when compaction finishes",
     "compaction_pending": "Wait for compaction to finish before forking",
+    "fork_pending": "A fork is already waiting for a safe boundary",
+    "unmatched_tool_result": "history has an unmatched tool result; cannot fork safely",
+    "incomplete_tool_calls": "history has incomplete tool calls before later messages",
 }
 
 

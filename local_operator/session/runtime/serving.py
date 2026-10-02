@@ -6472,13 +6472,31 @@ class ServingSessionHandle(SessionHandle):
             store = _fork_store(session)
             if getattr(session, "is_streaming", False):
                 if session.has_pending_fork():
-                    raise ValueError("A fork is already waiting for a safe boundary")
+                    # A SECOND boundary fork during a turn is an ordinary gesture
+                    # (a double-click, or two windows), and its refusal used to
+                    # cross as a bare ``ValueError`` — arriving as the owner-outage
+                    # 503, which is exactly the wrong answer this seam exists to
+                    # stop giving. Its own sentence, unchanged.
+                    raise ForkRefused(reason="fork_pending")
                 settled: asyncio.Future[str] = self._loop.create_future()
 
                 def complete(fork_id: str, error: str) -> None:
                     if not settled.done():
                         if error:
-                            settled.set_exception(RuntimeError("The fork could not be created"))
+                            # THE CAUSE, not a fabricated constant. ``error`` is what
+                            # ``Session._drain_pending_fork`` handed back — a
+                            # ``ForkError``'s own sentence, or an unexpected
+                            # failure's — and replacing it with one vetted line
+                            # threw away the only diagnosis the operator had.
+                            # Still a ``RuntimeError`` rather than ``ForkRefused``:
+                            # a clone that FAILED is not a refusal of the gesture
+                            # (nothing about this conversation's state said no), so
+                            # it must not claim to be one; the route's owner-outage
+                            # answer is unchanged either way, because the ladder's
+                            # ``RuntimeError`` arm carries the vetted sentence.
+                            settled.set_exception(
+                                RuntimeError(f"The fork could not be created: {error}")
+                            )
                         else:
                             settled.set_result(fork_id)
 

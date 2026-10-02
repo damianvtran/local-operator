@@ -245,7 +245,11 @@ class RefusingRemote(FakeRemote):
         ForkRefused(reason="entry_unknown"),
         ForkRefused(reason="before_anchor"),
         ForkRefused(reason="unfinished_batch"),
+        ForkRefused(reason="history_rewriting"),
         ForkRefused(reason="compaction_pending"),
+        ForkRefused(reason="fork_pending"),
+        ForkRefused(reason="unmatched_tool_result"),
+        ForkRefused(reason="incomplete_tool_calls"),
         # A bare raise names no cause; the generic sentence is the answer, and
         # the reason key is present-but-empty so the shape never varies.
         ForkRefused(),

@@ -693,6 +693,18 @@ class SessionStoreUnavailable(OSError):
 #: them must not re-word either surface's copy, so each keeps its own reason;
 #: unifying the two sentences is a copy decision that belongs with the UI half
 #: (damianvtran/local-operator-ui#772), not with this seam.
+#:
+#: ``fork_pending`` IS THE ONE THE FIRST ROUND DECLARED OUT AND SHOULD NOT HAVE. A
+#: second boundary fork during a turn is an ordinary user gesture (a double-click,
+#: or two windows), and its refusal reached the operator as the owner-outage 503 —
+#: the exact defect this table exists to remove, one raise site away. Its sentence
+#: is the one its site published, unchanged.
+#:
+#: THE TWO PAIRING ENTRIES come from ``session._paired_prefix``'s STRICT arm, which
+#: is the snapshot/cut validation rather than a general strictness (its only strict
+#: caller is ``Transcript.fork_snapshot``). A malformed interior — a tool result
+#: with no call, or an unanswered call with rows after it — means the cut cannot be
+#: taken safely, and each arm keeps its own sentence.
 _FORK_REFUSAL_SENTENCES: dict[str, str] = {
     "entry_unknown": (
         "that message is not part of this conversation; "
@@ -708,6 +720,9 @@ _FORK_REFUSAL_SENTENCES: dict[str, str] = {
     ),
     "history_rewriting": "history is being rewritten; retry /fork when compaction finishes",
     "compaction_pending": "Wait for compaction to finish before forking",
+    "fork_pending": "A fork is already waiting for a safe boundary",
+    "unmatched_tool_result": "history has an unmatched tool result; cannot fork safely",
+    "incomplete_tool_calls": "history has incomplete tool calls before later messages",
 }
 
 
@@ -718,9 +733,10 @@ class ForkRefused(ValueError):
     token from the closed set in :data:`_FORK_REFUSAL_SENTENCES`, never prose.
     The cut-point refusals (``Transcript.fork_snapshot``: an id this conversation
     does not hold, a point before the newest summary's anchor, an anchor the
-    unpaired-tail trim would drop, a compaction in flight) and the routed
-    ``/fork`` word's own compaction pre-check are ONE condition to a client —
-    *this fork cannot be taken* — and the two things a surface needs from them
+    unpaired-tail trim would drop, a compaction in flight, a malformed interior the
+    strict pairing check rejects), the routed ``/fork`` word's own compaction
+    pre-check and its already-pending-fork refusal are ONE condition to a client
+    — *this fork cannot be taken* — and the two things a surface needs from them
     are which sentence to show and which way forward to offer, which the reason
     names.
 
