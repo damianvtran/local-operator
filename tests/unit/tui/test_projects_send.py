@@ -13,13 +13,15 @@ from local_operator.tui.widgets.projects_send import (
     NO_TARGET_FOOTER,
     SEND_CARD_CHROME_ROWS,
     SEND_CARD_ROW_CAP,
+    SEND_FAULT_NOTICE,
     SHORT_ID_CELLS,
     SendTarget,
+    amber_notice,
     compose_band,
+    error_notice,
     filter_targets,
     pending_line,
-    refusal_line,
-    send_error_line,
+    refusal_notice,
     send_targets,
     sent_line,
 )
@@ -505,12 +507,8 @@ def test_receipts_speak_the_apps_human_vocabulary() -> None:
     assert pending_line(target) == "sending to ◆ dd44ee55ff66…"
     assert sent_line(target, "delivered") == "sent to ◆ dd44ee55ff66 · delivered"
     assert sent_line(target, "wake unconfirmed") == "sent to ◆ dd44ee55ff66 · wake unconfirmed"
-    assert refusal_line(target, "the target said no") == (
-        "could not deliver to ◆ dd44ee55ff66: the target said no"
-    )
-    assert send_error_line(target, "no session found") == (
-        "could not send to ◆ dd44ee55ff66: no session found"
-    )
+    assert refusal_notice("the target said no") == "could not deliver: the target said no"
+    assert error_notice("no session found") == "could not send: no session found"
     assert "→" not in sent_line(target, "delivered")
     # The handle is the thing the strip shows (D6) — not the title.
     assert '"older review"' not in sent_line(target, "delivered")
@@ -562,7 +560,7 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
         await pilot.press("enter")
         assert await _settle(pilot, lambda: (view._notice or "").startswith("could not send"))
         assert editor.text == "retry me"
-        assert view._notice == ("could not send to ◆ s1: the session is no longer available")
+        assert view._notice == ("could not send: the session is no longer available")
         # F6: the send path resolves like every other send — `include_wedged`
         # is the KILL SWITCH's flag; the picker must not dial wedged targets
         # hopefully.
@@ -646,6 +644,7 @@ async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
 async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     state: str,
     wake: str,
     word: str,
@@ -692,12 +691,30 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
         editor.load_text("keep me please")
         await pilot.pause()
         await pilot.press("enter")
-        # U2: the notice carries the word AND the caution the core wrote for
-        # exactly this state — the restored draft is the strongest available cue
-        # to press enter again, so "do not send it again" must be on screen with
-        # it rather than dropped.
-        assert await _settle(pilot, lambda: view._notice == f"sent to ◆ s1 · {word} — {caution}")
+        # U2 (round 2): the notice carries the word AND the caution the core wrote
+        # for exactly this state — the restored draft is the strongest available
+        # cue to press enter again, so "do not send it again" must be on screen
+        # with it rather than dropped.
+        #
+        # U2 (round 3): and the caution must SURVIVE the row. The notice is one
+        # `no_wrap` line fitted to its measured box, so the receipt-plus-advisory
+        # shape this replaces ellipsised the instruction away at 100x30, 80x24 and
+        # 60x24 alike — so the pin reads the composited row at all three sizes,
+        # not the sentence the widget holds.
+        listed = amber_notice(word)
+        assert await _settle(pilot, lambda: view._notice == listed)
         assert editor.text == "keep me please"
+        for size in ((100, 30), (80, 24), (60, 24)):
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            await pilot.pause()
+            shown = " ".join(painted_rows(app, view._detail))
+            assert listed in shown, (size, shown)
+        # The half the row cannot hold is not dropped: the core's own advisory is
+        # on the log, at the level this app's logger actually emits at (N1).
+        assert any(caution in record.getMessage() for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
 
 
 # -- the key model (agent review round 1, Q2/Q3/Q4/U5) -----------------------
@@ -967,9 +984,7 @@ async def test_a_failed_outcome_refuses_with_the_reason_and_keeps_the_draft(
         editor.load_text("try me")
         await pilot.pause()
         await pilot.press("enter")
-        assert await _settle(
-            pilot, lambda: view._notice == "could not deliver to ◆ s1: the target said no"
-        )
+        assert await _settle(pilot, lambda: view._notice == "could not deliver: the target said no")
         assert editor.text == "try me"
 
 
@@ -1012,7 +1027,7 @@ async def test_a_refused_dial_and_a_faulted_send_keep_the_draft(
         await pilot.pause()
         await pilot.press("enter")
         assert await _settle(
-            pilot, lambda: view._notice == "could not send to ◆ s1: the peer refused the dial"
+            pilot, lambda: view._notice == "could not send: the peer refused the dial"
         )
         assert editor.text == "try me"
 
@@ -1022,21 +1037,25 @@ async def test_a_refused_dial_and_a_faulted_send_keep_the_draft(
         monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _fault)
         await pilot.press("enter")
         # U3: the notice is a SENTENCE, never interpreter text — the exception is
-        # logged, not painted. U2: and it carries the caution for a state that may
-        # already have landed.
-        assert await _settle(
-            pilot,
-            lambda: (view._notice or "").startswith("sent to ◆ s1 · delivery unconfirmed"),
-        )
+        # logged, not painted. U2 (round 3): and the caution has to FIT the row,
+        # so the notice is the amber state the send ends in rather than a
+        # 150-cell sentence whose caution sat past the ellipsis at every size.
+        assert await _settle(pilot, lambda: view._notice == amber_notice("delivery unconfirmed"))
         assert view._notice is not None
         assert "connection reset" not in view._notice
-        assert "sending again may deliver it twice" in view._notice
+        assert "check its transcript" in view._notice
         assert editor.text == "try me"
+        for size in ((80, 24), (60, 24)):
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            await pilot.pause()
+            shown = " ".join(painted_rows(app, view._detail))
+            assert amber_notice("delivery unconfirmed") in shown, (size, shown)
 
 
 @pytest.mark.asyncio
 async def test_an_internal_fault_reaches_the_reader_as_a_sentence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """U3: a fault on the RESOLVE path must not paint interpreter text.
 
@@ -1070,9 +1089,23 @@ async def test_an_internal_fault_reaches_the_reader_as_a_sentence(
         await pilot.press("enter")
         assert await _settle(pilot, lambda: view._notice is not None)
         assert view._notice is not None
-        assert view._notice == ("could not send to ◆ s1: something went wrong on this end — retry")
+        assert view._notice == SEND_FAULT_NOTICE
         assert "coroutine" not in view._notice and "AttributeError" not in view._notice
         assert editor.text == "try me"
+        # N1 (UX round 3): the diagnostic half must actually reach the log — the
+        # app's logger is at WARNING, so the `debug(..., exc_info=True)` this
+        # replaces never created a record at all (`records_with_exc_info=0`).
+        assert any(record.exc_info for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
+        # U2 (UX round 3): and the instruction survives the narrowest row — the
+        # sentence this replaces measured 74 cells, so at 60x24 the `retry` was
+        # the part that clipped.
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+        await pilot.pause()
+        shown = " ".join(painted_rows(app, view._detail))
+        assert SEND_FAULT_NOTICE in shown, shown
 
 
 @pytest.mark.asyncio
@@ -1208,7 +1241,7 @@ async def test_a_second_send_resets_the_strip_and_a_refusal_restores_the_band(
         await pilot.press("enter")
         assert await _settle(
             pilot,
-            lambda: view._notice == "could not send to ◆ s1: the peer refused the dial",
+            lambda: view._notice == "could not send: the peer refused the dial",
         )
         # The band hands itself back to the compose state: the kept draft is
         # addressed to somebody again, and the first send's receipt is gone.
