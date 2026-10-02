@@ -295,23 +295,68 @@ def subject_line(project: str) -> str:
     return f"starts a turn · links to {project} · you go there"
 
 
-def _fit_detail(detail: str, room: int, match_at: int | None) -> str:
-    """``detail`` cropped to ``room`` cells, keeping a match visible (D2).
+def visible_match(needle: str, painted: str) -> list[tuple[int, int]]:
+    """The spans of the longest PREFIX of ``needle`` that ``painted`` carries.
 
-    A plain left crop was the D2 complaint read literally: the filter matched a
-    subsequence over the WHOLE description, so a row could be admitted for
-    something the paint had already thrown away. With a match past the crop the
-    window slides to it and a LEADING ellipsis says the text was entered in the
-    middle — a trailing one alone would claim the clause starts there.
+    The mark is what says WHY a row survived the filter, so it has to be derived
+    from what the reader can actually see: a crop that cuts the match leaves the
+    re-derived subsequence with nothing to find, and the row paints unmarked
+    (QA round 2, Q4 — 10 of 51 admitted rows at 144 cells, 25 of 51 at 92, 35 of
+    51 at 66). Matching the longest painted prefix keeps the mark honest about a
+    partial match: the cells that did survive are marked, the trailing ellipsis
+    already says the rest is cropped, and the caller's crop is what puts the
+    match's first cell on screen in the first place (:func:`_fit_detail`).
+
+    It still goes through :func:`match_spans`, so the admission and the mark
+    keep one matcher's rules — order, case-folding, merged runs — and the only
+    difference between them is the text they are handed.
+    """
+    wanted = needle.strip().casefold()
+    if not wanted:
+        return []
+    haystack = painted.casefold()
+    position = 0
+    kept = 0
+    for character in wanted:
+        found = haystack.find(character, position)
+        if found < 0:
+            break
+        kept += 1
+        position = found + 1
+    return match_spans(wanted[:kept], painted) if kept else []
+
+
+def _fit_detail(detail: str, room: int, match: tuple[int, int] | None) -> str:
+    """``detail`` cropped to ``room`` cells with the admitted match PAINTED.
+
+    A plain left crop was design round 1's D2 complaint read literally, and the
+    slide it introduced looked only at the match's START — so a match that began
+    just inside the crop and ended past it was painted in half and marked not at
+    all (QA round 2, Q4: `trade-offs` on the Architect row painted
+    `…with trade-o…`, and `severity` on the Reviewer row painted nothing at
+    all). The rule reads the match's whole RUN now: a window that can hold it is
+    slid to COVER it, and one that cannot still paints its FIRST matched cell,
+    so a row the filter admitted never paints unmarked.
+
+    ``match`` is that run in ``detail`` coordinates — ``(first, last)`` — or
+    ``None`` for a row admitted on its label alone, where the label is painted
+    whole and needs no slide.
     """
     if room <= 1:
         return ""
-    if len(detail) <= room:
-        return detail
-    if match_at is None or match_at < room - 2:
+    if len(detail) <= room or match is None:
         return detail[: room - 1] + "…"
-    start = max(0, min(match_at - 2, len(detail) - (room - 2)))
-    return "…" + detail[start : start + room - 2] + "…"
+    first, last = match
+    # A window that can hold the whole run pays for the ellipsis on each side of
+    # it; one that cannot still has to carry the run's first cell.
+    covering = last - first + 2 <= room
+    body = room - 2 if covering else room - 1
+    start = max(0, min(first - 2, len(detail) - body))
+    if covering:
+        start = max(start, min(last - body, len(detail) - body))
+    head = "…" if start > 0 else ""
+    tail = "…" if start + body < len(detail) else ""
+    return (head + detail[start : start + body] + tail)[:room]
 
 
 def fit_row(label: str, detail: str, width: int, *, query: str = "") -> tuple[str, str]:
@@ -326,6 +371,10 @@ def fit_row(label: str, detail: str, width: int, *, query: str = "") -> tuple[st
     round 1, D1: a fixed 28-cell cap cropped it at every width, leaving 104 of
     142 cells empty at 150×40). The label is cropped only when even a bare name
     cannot fit, which is the last resort rather than the rule.
+
+    The crop is told the filter's whole RUN over the detail, not just where the
+    match starts: that is what lets it COVER the match rather than cut it in
+    half (QA round 2, Q4).
     """
     if width <= 0:
         return "", ""
@@ -335,11 +384,12 @@ def fit_row(label: str, detail: str, width: int, *, query: str = "") -> tuple[st
     room = width - len(label) - len(separator)
     if not detail or room < _MIN_DETAIL_CELLS:
         return label, ""
-    match_at: int | None = None
+    run: tuple[int, int] | None = None
     if query:
         spans = match_spans(query, detail)
-        match_at = spans[0][0] if spans else None
-    return label, separator + _fit_detail(detail, room, match_at)
+        if spans:
+            run = (spans[0][0], spans[-1][1])
+    return label, separator + _fit_detail(detail, room, run)
 
 
 @dataclass(frozen=True)
@@ -452,7 +502,10 @@ class StartPickerCard(Container):
         # WHAT THIS IS ABOUT TO DO, AND FOR WHICH PROJECT (UX U2). The desktop
         # parity dialog says it in a sentence; this card said none of it, so `s`
         # then `enter` started a paid turn for a named project the reader was
-        # never told about.
+        # never told about. The `id` is a semantic hook rather than a selector:
+        # the line wears the family note's ink through `projects-send-note`, the
+        # way `projects-start-title` wears `projects-send-title` (agent review
+        # round 2, N5).
         yield Static(
             subject_line(self._project),
             id="projects-start-subject",
@@ -782,17 +835,19 @@ class StartPickerCard(Container):
             text.pad_right(width - len(text))
         if selected:
             text.stylize(self._ink("row_selected") or Style(), 0, len(text))
-        # The match is re-derived over what is PAINTED, not over the row's full
-        # text: a highlight on a cell the crop removed would be a claim about
-        # something the reader cannot see. It is COMPOSED with the row's own
-        # style (`+` gives the left side precedence, and the two set different
-        # attributes), so a matched cell on the SELECTED row keeps the selection
-        # band under the mark rather than punching a hole in it.
+        # The mark is derived over what is PAINTED, and only as much of the
+        # needle as the paint actually carries: a highlight on a cell the crop
+        # removed would be a claim about something the reader cannot see, and
+        # re-deriving the FULL needle over a cropped row finds nothing at all
+        # (QA round 2, Q4). It is COMPOSED with the row's own style (`+` gives
+        # the left side precedence, and the two set different attributes), so a
+        # matched cell on the SELECTED row keeps the selection band under the
+        # mark rather than punching a hole in it.
         query = self._query()
         if query:
             ink = self._ink("match") or Style()
             under = (self._ink("row_selected") or Style()) if selected else Style()
-            for start, end in match_spans(query, text.plain):
+            for start, end in visible_match(query, text.plain):
                 text.stylize(under + ink, start, end)
         return text
 
@@ -929,5 +984,7 @@ class StartPickerCard(Container):
             block = self.query_one("#projects-start-rows", Static)
             return block.region.y - self.region.y
         except Exception:  # noqa: BLE001 — before layout there is no region
-            # padding row + title + rule + filter
-            return 3
+            # padding row + title + SUBJECT + rule + filter (agent review round
+            # 2, N4: the subject line is new chrome, and a stale constant here is
+            # what a later reader would trust).
+            return 5

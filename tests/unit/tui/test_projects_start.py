@@ -17,6 +17,7 @@ Three layers, split the way the rest of the projects surfaces split them:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ from local_operator.tui.widgets.projects_start import (
     match_spans,
     start_targets,
     subject_line,
+    visible_match,
 )
 from local_operator.tui.widgets.projects_view import (
     ProjectsViewStartRequested,
@@ -324,18 +326,32 @@ def test_a_create_in_flight_refuses_a_second_pick() -> None:
 
 
 def test_a_refusal_does_not_look_like_a_progress_note() -> None:
-    """UX U3: three sentences shared one slot and one ink."""
-    card = StartPickerCard(start_targets(teams=[_team("core")], agents=[]))
+    """UX U3: three sentences shared one slot and one ink.
+
+    The card is built WITH the resolver the page hands it, and the resolver's
+    `refusal` key is asserted to be the measured `warning` token — otherwise
+    this test compares `None` to `None` and ties nothing to the palette pin
+    (agent review round 2, N1).
+    """
+    from rich.color import Color
+
+    from local_operator.tui import theme as theme_mod
+
+    card = StartPickerCard(
+        start_targets(teams=[_team("core")], agents=[]), style_for=_style_resolver()
+    )
     card.set_pending()
     pending = card._note_text()
     card.show_refusal("could not start a session: no runtime")
     refusal = card._note_text()
     assert pending.plain != refusal.plain
     assert refusal.plain.startswith(REFUSAL_MARK)
-    # The refusal takes the app's own refusal ink (`warning`, the pair the
-    # palette pin measures at 7.09:1 dark / 4.78:1 light on this ground) —
-    # not the muted ink the counter and the pending sentence wear.
+    # The refusal takes the app's own refusal ink, and that ink IS the pinned
+    # `warning` pair (7.09:1 dark / 4.78:1 light on this ground) — not the
+    # muted ink the counter and the pending sentence wear.
     assert refusal.style == card._ink("refusal")
+    refusal_ink = _style_resolver()("refusal")
+    assert refusal_ink.color == Color.parse(theme_mod.semantic_color("warning"))
     assert pending.style == card._ink("muted")
 
 
@@ -397,6 +413,115 @@ def test_the_painted_row_marks_the_cells_the_filter_matched() -> None:
     for span in selected_row.spans:
         if isinstance(span.style, Style) and span.style.underline:
             assert span.style.bgcolor is not None, "the mark dropped the selection band"
+
+
+def _real_catalogue_rows() -> list[StartTarget]:
+    """The PACKAGED catalogue, read from the manifest this repo ships.
+
+    Not a fixture of made-up rows: the widths that break a crop are the ones the
+    real descriptions reach, so the sweep has to run over the real text.
+    """
+    from importlib.resources import files
+
+    manifest = json.loads(
+        (files("local_operator") / "agent_seeds" / "manifest.json").read_text(encoding="utf-8")
+    )
+    return start_targets(
+        teams=[
+            {
+                "name": "lopdev",
+                "label": "Lopdev",
+                "manager": "manager",
+                "members": [{"role": "coder", "count": 1}],
+            }
+        ],
+        agents=[
+            {
+                "name": seed["name"],
+                "label": seed["label"],
+                "description": seed.get("description", ""),
+            }
+            for seed in manifest["seeds"]
+        ],
+    )
+
+
+def test_the_crop_covers_the_match_rather_than_halving_it() -> None:
+    """QA round 2, Q4's two repros, as the crop rule they pin.
+
+    The slide used to read only where the match STARTED, so a match that began
+    inside the crop and ended past it was painted in half and marked not at all:
+    `trade-offs` painted `…with trade-o…` and `severity` painted nothing.
+    """
+    architect = (
+        "Explores a codebase and produces a design or technical proposal with trade-offs; "
+        "may draft documents but never modifies existing source."
+    )
+    label, tail = fit_row("Architect", architect, 144, query="trade-offs")
+    assert "trade-offs" in tail, tail
+    assert len(label) + len(tail) <= 144
+    reviewer = (
+        "Independent code review of a diff, MR, or PR: finds defects, classifies them by "
+        "severity, and never edits the code it reviews."
+    )
+    label, tail = fit_row("Reviewer", reviewer, 92, query="severity")
+    assert "severity" in tail, tail
+    assert len(label) + len(tail) <= 92
+    # A match too long for the window cannot be covered, so the rule keeps its
+    # FIRST matched cell painted — which is what the mark is derived from.
+    _label, tail = fit_row(
+        "Scout",
+        "Read-only research: investigates a question across the workspace and on the web",
+        34,
+        query="workspace",
+    )
+    assert visible_match("workspace", tail), f"the first matched cell is not painted: {tail!r}"
+
+
+def test_every_admitted_row_paints_a_mark() -> None:
+    """QA round 2, Q4: an admission the reader cannot see a reason for.
+
+    The filter admits a row on a subsequence over its FULL text while the card
+    paints a CROP of it, so the crop must cover the match and the mark must be
+    derived from the cropped text: otherwise a row paints with no mark at all
+    (measured before this fix: 10 of 51 admitted rows at 144 cells, 25 of 51 at
+    92, 35 of 51 at 66). The property is swept over the real catalogue at those
+    three widths, with QA's needles plus the shipped names.
+    """
+    needles = (
+        "trade-offs",
+        "severity",
+        "reviewer",
+        "defects",
+        "core",
+        "workspace",
+        "research",
+        "tui",
+        "adversarial",
+        "milestones",
+        "sessions",
+        "ai-isms",
+        "aida",
+    )
+    rows = _real_catalogue_rows()
+    admitted = 0
+    for width in (144, 92, 66):
+        for needle in needles:
+            card = StartPickerCard(rows, style_for=_style_resolver())
+            _filter(card, needle)
+            for line in card.painted_lines():
+                if line.row < 0:
+                    continue
+                text = card._row_text(line, False, width)
+                admitted += 1
+                assert len(text.plain) <= width, f"{needle!r} at {width}: {text.plain!r} overflows"
+                marked = [
+                    span
+                    for span in text.spans
+                    if isinstance(span.style, Style) and span.style.underline
+                ]
+                assert marked, f"{needle!r} at {width}: {text.plain!r} paints no mark"
+    assert admitted > 100, f"the sweep stopped admitting rows ({admitted})"
 
 
 def test_a_click_on_a_section_header_selects_nothing() -> None:
@@ -596,15 +721,27 @@ async def test_s_does_nothing_with_nothing_selected(tmp_path: Path) -> None:
         assert view._start_card is None
 
 
+def _key_flags(view: Any, rungs: list[Any]) -> list[bool]:
+    """Which rungs carry `s start`, in ladder order."""
+    return [any(hint is view._start_hint for hint, _label, _lead in plan) for plan, _esc in rungs]
+
+
 def test_the_start_key_never_displaces_a_shipped_hint() -> None:
     """Agent review F4: the ladder must not move a shipped row.
 
-    The key rides a one-rung-wider VARIANT of the rows that carry `c create`,
-    never an extra element inside them: the ladder stops at the first rung that
-    fits, so a variant in front of its own base row can only ADD the key. This
-    sweeps every budget from 3 cells to 220 and asserts that whatever the base
-    ladder (the same rungs minus the variants) would paint is still painted,
-    and that no variant is unreachable — a rung behind a wider one is dead.
+    The key rides a one-rung-wider VARIANT of a shipped row, never an extra
+    element inside one: the ladder stops at the first rung that fits, so a
+    variant in front of its own base row can only ADD the key. This sweeps every
+    budget from 3 cells to 220 and asserts that whatever the base ladder (the
+    same rungs minus the variants) would paint is still painted, and that no
+    variant is unreachable — a rung behind a wider one is dead.
+
+    THE ONE RECORDED EXCEPTION is asserted below rather than left invisible
+    (agent review round 2, N2): the timeline's own rung gives up `d detail` where
+    the shipped ladder kept it, because `+/-` acts on THIS view and `d` acts on
+    the page. The base here is "this PR's rungs minus the variants", so it cannot
+    see a trade made by a rung this PR itself added — which is exactly why the
+    trade is named and pinned instead of being covered by the sweep.
     """
     from local_operator.tui.widgets.projects_view import ProjectsView
 
@@ -638,6 +775,55 @@ def test_the_start_key_never_displaces_a_shipped_hint() -> None:
                     displaced.append(budget)
                     break
         assert not displaced, f"{view_name}: budgets losing a shipped hint: {displaced[:8]}"
+
+        if view_name == "timeline":
+            # The pinned trade: somewhere in the sweep the zoom rung replaces
+            # `d detail`, and the row still carries `+/- zoom`.
+            traded = [
+                (width, plan)
+                for width, plan, _e in head
+                if any(label.strip() == "zoom" for _h, label, _l in plan)
+                and not any(label.strip() == "detail" for _h, label, _l in plan)
+            ]
+            assert traded, "the timeline's zoom-over-detail rung is gone"
+            assert any(
+                any(label.strip() == "detail" for _h, label, _l in plan)
+                for width, plan, _e in base
+                if width >= max(w for w, _p in traded)
+            ), "the trade is no longer a trade: the base row had it too"
+
+
+def test_the_start_hint_is_advertised_monotonically() -> None:
+    """QA round 2, Q3: a hint that vanishes as the terminal WIDENS is a defect.
+
+    The ladder takes the first rung that fits, so a key-less rung in front of a
+    narrower key-carrying one un-advertises the key exactly when the reader has
+    more room — measured on the previous revision as absent at 160/150/140/130…
+    and present at 145 and 120. Both ladders must therefore carry the key on a
+    PREFIX of themselves, and the shipped rows below it are untouched.
+    """
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    for view_name in ("list", "board", "timeline"):
+        view = ProjectsView()
+        view._view = view_name
+        flags = _key_flags(view, view._canvas_hint_rungs())
+        seen_off = False
+        for index, carried in enumerate(flags):
+            if not carried:
+                seen_off = True
+            else:
+                assert (
+                    not seen_off
+                ), f"{view_name}: the key returns at rung {index} after a rung without it"
+    detail_view = ProjectsView()
+    detail_flags = _key_flags(detail_view, detail_view._detail_hint_rungs())
+    seen_off = False
+    for index, carried in enumerate(detail_flags):
+        if not carried:
+            seen_off = True
+        else:
+            assert not seen_off, f"detail: the key returns at rung {index}"
 
 
 def test_the_start_hint_carries_the_specs_own_label() -> None:

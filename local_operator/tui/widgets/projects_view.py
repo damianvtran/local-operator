@@ -1303,23 +1303,29 @@ class ProjectsView(Vertical):
         # together.
         msg_hint = (self._msg_hint, " message", True)
         # `s start` (P5b) — the spec's own label for the key that sets a session
-        # going (§3.3). It rides the rungs that carry `c create`, the same
-        # neighbourhood `m message` lives in, but as a SEPARATE, one-rung-wider
-        # VARIANT of each of them rather than as an extra element inside them.
+        # going (§3.3). It rides the ladder's WIDEST rung as a SEPARATE,
+        # one-rung-wider variant of it rather than as an extra element inside it.
         #
-        # WHY A VARIANT AND NOT AN EXTRA ELEMENT, and the arithmetic that
-        # decided it (agent review round 1, F3/F4). The canvas budget is
-        # `size.width - 2`, and the page's `size.width` is terminal − 4 (144 at
-        # a 150-column terminal, 94 at 100) — so the earlier comment here that
-        # said "149 against the 148 a 150-column terminal offers" was measuring
-        # the wrong budget; `s start` fits the row the ladder actually chooses
-        # at 150 columns. What the label DOES move is a shipped row: adding 11
-        # cells to the rungs in place pushed every budget in 103–111 past them
-        # onto the next rung, and `↔↕ scroll` — which the base row carried —
-        # vanished at terminals 109–117. The ladder picks the FIRST rung that
-        # fits, so a wider variant placed in FRONT of its own base row can only
-        # ever ADD the new key: where the variant does not fit, the base row is
-        # chosen unchanged, byte for byte.
+        # THE ARITHMETIC, re-derived twice (agent review round 1, F3/F4; QA
+        # round 2, Q3). The canvas budget is `size.width - 2`, and the page's
+        # `size.width` is terminal − 4 — 144 at a 150-column terminal, 94 at 100
+        # — so the withdrawn "149 against the 148 a 150-column terminal offers"
+        # was measuring the wrong budget. Two things follow, both measured:
+        #
+        #   * `s start` cannot be spliced into a SHIPPED rung in place: adding
+        #     its 11 cells pushed every budget in 103–111 past those rungs onto
+        #     the next one, and `↔↕ scroll` — which the shipped row carried —
+        #     vanished at terminals 109–117 (F4).
+        #   * nor can a variant ride a rung that is not the WIDEST: the ladder
+        #     takes the FIRST rung that fits, so the key-less shipped rung that
+        #     follows each variant pushed the next variant out of reach and the
+        #     key BLINKED — absent at 160/150/140/130/125/118…, present at 145
+        #     and 120 (Q3). A hint that vanishes as the terminal grows is the
+        #     same defect the `m message` comment below records.
+        #
+        # What is left is what the detail ladder already does: the key rides the
+        # rung that has room for it, and every shipped row below is untouched.
+        # `s` itself works at every width whether or not it is advertised.
         start_hint = (self._start_hint, " start", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
@@ -1347,26 +1353,44 @@ class ProjectsView(Vertical):
 
         rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = []
 
+        #: The key may only ride a PREFIX of the ladder, and that is a measured
+        #: property rather than a preference. The ladder takes the FIRST rung
+        #: that fits, so a key-less rung sitting in front of a narrower
+        #: key-carrying one makes the key VANISH as the terminal grows — the
+        #: shape QA round 2 (Q3) measured on the previous revision: `s start`
+        #: absent at 160/150/140/130/125/118…, present at 145 and 120. This flag
+        #: closes for good as soon as a rung lands that the key cannot join.
+        key_prefix = True
+
         def add(
             *hints: tuple[HintButton, str, bool] | None,
             esc_label: str,
             state: bool = False,
-            variant: bool = True,
+            variant: bool = False,
         ) -> None:
-            """Append the shipped rung, and — when it can be reached — its variant.
+            """Append a shipped rung, and — while the key's prefix is open — its variant.
 
-            A variant is reachable only when it is NARROWER than the rung before
-            it, because the ladder stops at the first rung that fits: one that
-            is not would sit behind its predecessor forever, which is a dead
-            rung rather than an advertised key. The gate is measured, not
-            tabulated, so it cannot drift when a label or a rung changes.
+            The variant is the same row with `s start` spliced in after
+            `m message`, so it can only ever ADD the key; it goes in front of its
+            own shipped rung, which is where the first-fit ladder reaches it.
+            Two gates keep the result honest, both measured rather than
+            tabulated: the variant must be strictly NARROWER than the rung before
+            it (a wider one would sit behind its predecessor forever — a dead
+            rung), and `key_prefix` must still be open. In practice that leaves
+            the key on the ladder's WIDEST rung — the one with room for it —
+            which is also the shape the detail ladder takes, so the two agree.
             """
+            nonlocal key_prefix
             base = rung(leads_of(*hints), esc_label, state=state)
-            if variant:
+            if variant and key_prefix:
                 candidate = rung(with_start(leads_of(*hints)), esc_label, state=state)
                 if not rungs or self._measure_hints(*candidate) < self._measure_hints(*rungs[-1]):
                     rungs.append(candidate)
             rungs.append(base)
+            # A SHIPPED rung never carries the key, so the prefix ends here:
+            # every rung below it is narrower, and a key there would vanish as
+            # the terminal widens (QA round 2, Q3).
+            key_prefix = False
 
         add(
             scroll,
@@ -1382,6 +1406,7 @@ class ProjectsView(Vertical):
             zoom,
             esc_label="back to conversation",
             state=True,
+            variant=True,
         )
         add(
             scroll,
@@ -1478,19 +1503,8 @@ class ProjectsView(Vertical):
             detail_hint,
             esc_label="back",
         )
-        # Everything below sheds the page's older keys; none of them carries
-        # `c create` any more, so none of them offers a variant.
-        add(
-            list_hint,
-            board_hint,
-            timeline_hint,
-            nxt,
-            create_hint,
-            msg_hint,
-            detail_hint,
-            esc_label="back",
-            variant=False,
-        )
+        # Everything below sheds the page's older keys; the key's prefix is long
+        # closed, and the flag means none of them can reopen it.
         add(list_hint, board_hint, timeline_hint, nxt, esc_label="back", variant=False)
         for tail in (
             (list_hint, board_hint, timeline_hint, nxt),
