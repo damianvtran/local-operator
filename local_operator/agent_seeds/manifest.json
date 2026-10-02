@@ -6,6 +6,7 @@
   "seeds": [
     {
       "name": "aida",
+      "label": "Aida",
       "description": "Your chief of staff: orchestrates agents and teams on your behalf, keeps an eye on everything in flight, and reports back.",
       "when_to_use": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
       "version": "1.3.1",
@@ -26,6 +27,7 @@
     },
     {
       "name": "architect",
+      "label": "Architect",
       "description": "Explores a codebase and produces a design or technical proposal with trade-offs; may draft documents but never modifies existing source.",
       "when_to_use": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
       "version": "1.1.0",
@@ -57,6 +59,7 @@
     },
     {
       "name": "coder",
+      "label": "Coder",
       "description": "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified.",
       "when_to_use": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
       "version": "1.1.0",
@@ -76,6 +79,7 @@
     },
     {
       "name": "copy-reviewer",
+      "label": "Copy Reviewer",
       "description": "Review of written copy before it ships: user-visible product copy and prose for a general reader, on comprehension, tone, claim support and AI-isms; reports C-prefixed findings.",
       "when_to_use": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
       "version": "1.1.0",
@@ -95,6 +99,7 @@
     },
     {
       "name": "designer",
+      "label": "Designer",
       "description": "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings.",
       "when_to_use": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
       "version": "1.3.0",
@@ -114,6 +119,7 @@
     },
     {
       "name": "manager",
+      "label": "Manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
       "version": "1.5.0",
@@ -146,6 +152,7 @@
     },
     {
       "name": "reviewer",
+      "label": "Reviewer",
       "description": "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews.",
       "when_to_use": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
       "version": "1.1.0",
@@ -176,6 +183,7 @@
     },
     {
       "name": "scout",
+      "label": "Scout",
       "description": "Read-only research: investigates a question across the workspace and on the web, and reports findings with evidence. Changes nothing.",
       "when_to_use": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
       "version": "1.1.0",
@@ -204,6 +212,7 @@
     },
     {
       "name": "tui-designer",
+      "label": "TUI Designer",
       "description": "Designing and reviewing terminal interfaces: keyboard-first flows, density in small fixed viewports, colour and unicode fallbacks, measured geometry; reports T-prefixed findings.",
       "when_to_use": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
       "version": "1.1.0",
@@ -223,6 +232,7 @@
     },
     {
       "name": "ux-reviewer",
+      "label": "UX Reviewer",
       "description": "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings.",
       "when_to_use": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
       "version": "1.2.0",

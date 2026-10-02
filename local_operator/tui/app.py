@@ -427,6 +427,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
+from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -441,6 +442,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    ROLE_CEILING,
     Density,
     JobStats,
     SubagentPanel,
@@ -19781,8 +19783,8 @@ class OperatorApp(App[None]):
         self._open_org_chart_view(team.name)
 
     # -- /agent -------------------------------------------------------------
-    def _agent_profile_rows(self) -> list[tuple[str, str, str]]:
-        """(name, kind-facts, summary) per role/specialist, roles first.
+    def _agent_profile_rows(self) -> list[tuple[str, str, str, str]]:
+        """(name, label, kind-facts, summary) per role/specialist, roles first.
 
         ONE enumeration feeding both the listing block and the argument
         picker, so the two can never disagree about which names ``/agent``
@@ -19801,11 +19803,25 @@ class OperatorApp(App[None]):
         return agent_listing_rows(registry)
 
     def _agent_choices(self) -> list[ArgumentChoice]:
-        """Roles/specialists the ``/agent`` argument list offers."""
-        return [
-            ArgumentChoice(name, summary or "no description", detail=facts)
-            for name, facts, summary in self._agent_profile_rows()
-        ]
+        """Roles/specialists the ``/agent`` argument list offers.
+
+        The NAME column stays the raw key -- it is the value completing a row
+        puts in the buffer, and a label is display-only, so completion must
+        never leave the key. The display refinement rides the DESCRIPTION
+        instead, mirroring ``/team``'s picker (D2): only a CHOSEN-and-different
+        label earns the prefix (``enrichment_label``), and a derived default
+        the name column already says stays out.
+        """
+        from local_operator.display_labels import enrichment_label
+
+        choices: list[ArgumentChoice] = []
+        for name, label, facts, summary in self._agent_profile_rows():
+            description = summary or "no description"
+            prefix = enrichment_label(name, label)
+            if prefix:
+                description = f"{prefix} · {description}"
+            choices.append(ArgumentChoice(name, description, detail=facts))
+        return choices
 
     def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
@@ -19888,12 +19904,108 @@ class OperatorApp(App[None]):
             for choice in names
         ]
 
-    def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
+    @classmethod
+    def _agent_display_form(cls, name: str, label: str) -> str:
+        """The shared display rule's form for an agent name/label pair (D2).
+
+        ONE reader for every surface in this app, so two of them cannot
+        disagree about how a profile reads -- the rule itself, and why each of
+        its cases exists, lives in
+        :func:`local_operator.display_labels.display_form`.
+        """
+        from local_operator.display_labels import display_form
+
+        return display_form(name, label)
+
+    @classmethod
+    def _agent_listing_form(cls, name: str, label: str) -> str:
+        """The BOUNDED display form the listing family paints (N1).
+
+        ``display_labels.bounded_display_form`` caps the composed form so an
+        over-long custom label ellipsizes instead of wrapping the key onto a
+        second line; the local block and the wire's first slot both call it
+        here, so both terminals paint the same bytes.
+        """
+        from local_operator.display_labels import bounded_display_form
+
+        return bounded_display_form(name, label)
+
+    def _agent_label_for(self, name: str) -> str:
+        """The RAW stored label for an agent name, or "" when none is known.
+
+        Best-effort and cheap: the session's own registry first, then the
+        packaged seed's canonical frontmatter label (an attached but
+        un-materialised starter is a supported flow). Never raises -- a broken
+        registry or an unreadable seed must not take a display-only segment
+        down -- so every caller pairs it with ``display_labels.display_form``,
+        which falls back to the raw name when this returns nothing.
+        """
+        if not name:
+            return ""
+        session = self._session
+        registry = getattr(session, "agent_registry", None) if session is not None else None
+        if registry is not None and hasattr(registry, "get_agent_by_name"):
+            try:
+                row = registry.get_agent_by_name(name)
+                if row is not None:
+                    return str(getattr(row, "label", "") or "")
+            except Exception:  # noqa: BLE001 — a display lookup must not raise
+                logger.debug("agent label: registry lookup failed", exc_info=True)
+        try:
+            from local_operator.agent_profiles import load_seed
+
+            seed = load_seed(name)
+            if seed is not None:
+                return seed.label
+        except Exception:  # noqa: BLE001 — a missing seed must not raise
+            logger.debug("agent label: seed lookup failed", exc_info=True)
+        return ""
+
+    def _agent_band_text(self, name: str) -> str:
+        """The band's active-agent text, through the shared display rule (U2).
+
+        The segment's value is whatever the SESSION carries -- a key -- while
+        the band is a display, so it paints the shared form: ``UX Reviewer``
+        for a canonical label, the raw key when nothing adds information.
+        """
+        if not name:
+            return ""
+        from local_operator.display_labels import capped_display_form
+
+        # The band's cell is FIXED (:data:`AGENT_PROFILE_CELLS`) and the band
+        # truncates rather than wraps, so a composed form past the cap falls
+        # back to the key it addresses by (design round 1, D2).
+        return capped_display_form(name, self._agent_label_for(name), cap=AGENT_PROFILE_CELLS)
+
+    def _agent_role_display(self, role: str) -> str:
+        """A subagent's role KEY as the display form a dock row may paint.
+
+        Handed to the subagent dock and view as their role resolver so the
+        role column reads ``UX Reviewer`` beside a label rather than the raw
+        slug, with ONE rule shared with the listings (``display_form``). A
+        non-role spelling (``""``, the ``task`` default, a ``team:<name>``
+        launch prefix) has no registry or seed row and returns unchanged, so
+        the resolver is safe on every value the job carries.
+        """
+        if not role:
+            return role
+        from local_operator.display_labels import capped_display_form
+
+        # Same rule as the band, at the dock's narrower :data:`ROLE_CEILING`: a
+        # form that does not fit the cell falls back to the key rather than
+        # truncating the label mid-word and losing the addressable string.
+        return capped_display_form(role, self._agent_label_for(role), cap=ROLE_CEILING)
+
+    def _agent_list_block(self, rows: list[tuple[str, str, str, str]]) -> RichBlock:
         """A structured profile list for bare ``/agent``.
 
         Same row-per-field shape as `_team_list_block`, for the same reason:
         separate rows keep a narrow terminal from wrapping the facts or the
         description into a position that reads as a child of the next entry.
+        The name row paints the shared, BOUNDED display form (the ``/team``
+        listing's N1 rule): a long custom label ellipsizes so the KEY keeps its
+        place on the line -- ``/agent <name>`` addresses by the key, so the row
+        must show what to type.
         """
         # D1: the SECTION header must outrank its entries. Entry names take the
         # muted body-ish `heading` weight; the section header takes bright `fg`
@@ -19905,8 +20017,10 @@ class OperatorApp(App[None]):
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
         out: list[Any] = [Text("agents", style=section)]
-        for name, facts, summary in rows:
-            out.append(Padding(Text(name, style=heading), (0, 0, 0, 2)))
+        for name, label, facts, summary in rows:
+            out.append(
+                Padding(Text(self._agent_listing_form(name, label), style=heading), (0, 0, 0, 2))
+            )
             out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))
             if summary:
                 out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
@@ -19938,11 +20052,15 @@ class OperatorApp(App[None]):
         ``clear_agent_profile`` runs, the resolved name after an attach), so the
         band is synced FROM it rather than handed a string by each call site —
         the two cannot then drift, and a future attach path gets the segment for
-        free. No-op before the band or session exists (early boot).
+        free. The name is resolved through :meth:`_agent_band_text` -- the
+        segment is a display, so an attached slug reads as its label, exactly as
+        the team segment does. No-op before the band or session exists (early
+        boot).
         """
         if self._status is None or self._session is None:
             return
-        self._status.update(agent_profile=str(getattr(self._session, "active_agent", "") or ""))
+        agent_name = str(getattr(self._session, "active_agent", "") or "")
+        self._status.update(agent_profile=self._agent_band_text(agent_name))
 
     def _sync_team_band(self) -> None:
         """Repaint the band's active-team segment from the session (U2).
@@ -32852,6 +32970,7 @@ class OperatorApp(App[None]):
                     jobs=jobs,
                     selected_job=selected_job,
                     children_counts=children_counts,
+                    role_display=self._agent_role_display,
                 )
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
@@ -33198,6 +33317,7 @@ class OperatorApp(App[None]):
                 self._session,
                 jobs=scoped_jobs,
                 children_counts=self._subagent_child_counts(scoped_jobs),
+                role_display=self._agent_role_display,
             )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
@@ -33392,7 +33512,7 @@ class OperatorApp(App[None]):
         # pane that fills in a tick later (a visible reflow).
         view.load(
             teams=self._settings_team_rows(),
-            agents=self._agent_profile_rows(),
+            agents=self._settings_agent_rows(),
             providers=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
@@ -33444,6 +33564,26 @@ class OperatorApp(App[None]):
                 rows.append((display, facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: team rows unavailable", exc_info=True)
+        return rows
+
+    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+        """Agents as ``(display, facts, summary)`` for the settings pane.
+
+        The SAME shape ``_settings_team_rows`` returns, so the pane renders
+        both listings through one row renderer rather than carrying a second
+        layout for a second registry. The display form is UNBOUNDED here
+        (mirroring the team pane): the pane truncates cells itself and the
+        composed form is what a reader compares against the picker. Never
+        raises: a broken registry renders as an empty list, and a settings
+        page that crashed on a bad row would be unreachable exactly when it is
+        needed.
+        """
+        rows: list[tuple[str, str, str]] = []
+        try:
+            for name, label, facts, summary in self._agent_profile_rows():
+                rows.append((self._agent_display_form(name, label), facts, summary))
+        except Exception:  # noqa: BLE001 — a bad registry must not break the page
+            logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
     def _settings_provider_rows(self) -> list[tuple[str, str]]:
@@ -34075,8 +34215,8 @@ class OperatorApp(App[None]):
             # title names them so the page says WHAT kind of child this is; the
             # band below gets the effort by a separate path (`_point_band_at`)
             # because it belongs to the model segment there.
-            agent_role=str(
-                getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or ""
+            agent_role=self._agent_role_display(
+                str(getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or "")
             ),
             effort=str(getattr(job, "effort", None) or getattr(node, "effort", "") or ""),
             # Every deterministic launch identity this lineage owns mapped to
@@ -34103,6 +34243,7 @@ class OperatorApp(App[None]):
                 jobs=scoped_jobs,
                 selected_job=selected_job,
                 children_counts=self._subagent_child_counts(scoped_jobs),
+                role_display=self._agent_role_display,
             )
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
@@ -35626,7 +35767,7 @@ class OperatorApp(App[None]):
                 self._append_block(self._team_listing_block(data.get("items") or []))
                 return
             if block_type == "agent_list":
-                self._append_block(self._agent_list_block(data.get("items") or []))
+                self._append_block(self._agent_listing_block(data.get("items") or []))
                 return
             if block_type == "forked":
                 # The OWNER did the fork, so the viewer cannot narrate it the way
@@ -35742,6 +35883,33 @@ class OperatorApp(App[None]):
         # FOLLOWER's routed listing, which is exactly the case that cannot run
         # a team, so the unconditional "Send:" line was wrong most often here.
         rows.append(Text(self._team_listing_footer(), style=body))
+        return RichBlock(Group(*rows))
+
+    def _agent_listing_block(self, items: list[Any]) -> RichBlock:
+        """Rebuild the bare ``/agent`` listing block from wire rows.
+
+        The owner-side producers return ``(display, facts, summary)`` tuples
+        whose first slot is ALREADY the composed bounded form (no live agent
+        objects cross the socket), so this half paints it verbatim -- the same
+        split ``_team_listing_block`` documents, for the same reason. The
+        footer repeats the local block's session-aware guard, spacer included:
+        a follower cannot attach, so the "Send:" line stays off a viewer.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("agents", style=section)]
+        for item in items:
+            name, facts, summary = (list(item) + ["", "", ""])[:3]
+            rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+            if summary:
+                rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
+        if callable(getattr(self._session, "attach_agent_profile", None)):
+            rows.append(Text())
+            rows.append(Text("Send: /agent <name> <message>", style=body))
+            rows.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
@@ -48017,7 +48185,16 @@ class OperatorApp(App[None]):
                     text="no agents yet. Ask the agent to create one.",
                     style="info",
                 )
-            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+            # The first slot is painted VERBATIM by ``_agent_listing_block`` on
+            # the viewer, so it carries the same BOUNDED display form the
+            # local listing paints (``_agent_listing_form``): one rule, one
+            # cap, or the two terminals would disagree about how one profile
+            # reads.
+            items = [
+                (self._agent_listing_form(name, label), facts, summary)
+                for name, label, facts, summary in rows
+            ]
+            return SlashResult(kind="block", data={"type": "agent_list", "items": items})
         # The reserved word, for the same reason the runtime's handler has it:
         # a session hosted by THIS app answers a follower out of here, and the
         # switch must be reachable from that seam too (review/UX round 1, U1).

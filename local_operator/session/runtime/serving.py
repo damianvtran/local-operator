@@ -7458,6 +7458,22 @@ class ServingSessionHandle(SessionHandle):
             },
         )
 
+    @staticmethod
+    def _agent_row_display(name: str, label: str) -> str:
+        """The ``agent_list`` row's first slot: the shared, BOUNDED display form.
+
+        The same rule and cap the local listing paints (N1), so a follower and
+        an owner read one profile the same way; a reduced double degrades to
+        its plain name rather than failing the listing. The slot is painted
+        VERBATIM by the viewer, so both producers must agree byte for byte.
+        """
+        from local_operator.display_labels import bounded_display_form
+
+        try:
+            return bounded_display_form(str(name or ""), str(label or ""))
+        except Exception:  # noqa: BLE001 — a listing is never worth an error
+            return str(name or "")
+
     async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """The routed ``/agent``: list, ATTACH and CLASS all happen HERE.
 
@@ -7493,7 +7509,17 @@ class ServingSessionHandle(SessionHandle):
                 return SlashResult(
                     kind="notice", text="no agents yet. Ask the agent to create one.", style="info"
                 )
-            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+            # ``agent_listing_rows`` carries ``(name, label, facts, summary)``
+            # -- the RAW label, so each surface composes for its own geometry.
+            # The viewer paints this block's first slot VERBATIM, so it must
+            # arrive already composed through the shared bounded form (the
+            # ``team_list`` shape): emitting the raw four-tuple left the viewer
+            # slicing a label into the facts slot and dropping the summary.
+            items = [
+                (self._agent_row_display(name, label), facts, summary)
+                for name, label, facts, summary in rows
+            ]
+            return SlashResult(kind="block", data={"type": "agent_list", "items": items})
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() == "class":
             return await self._agent_class_slash(session, rest.strip(), SlashResult)

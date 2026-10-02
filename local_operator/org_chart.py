@@ -78,13 +78,57 @@ class OrgNode:
     team_id: str | None = None  # set on team/manager nodes, for cycle tracking
 
 
-def _team_detail(team: Team) -> str:
-    """A one-line fact for a team boundary node: who leads it, how many slots."""
+def _team_detail(team: Team, agents: Any = None) -> str:
+    """A one-line fact for a team boundary node: who leads it, how many slots.
+
+    The manager is painted through :func:`_agent_display` like the manager NODE
+    it introduces, so the boundary line and its first child cannot name the
+    same person two ways (review round 1, R1-5). ``agents`` is optional only so
+    a caller that has no registry still renders the raw key.
+    """
     slots = team.member_count()
     if slots == 0:
         return "no members"
     word = "member" if slots == 1 else "members"
-    return f"led by {team.manager} · {slots} {word}"
+    return f"led by {_agent_display(team.manager, agents)} · {slots} {word}"
+
+
+def _agent_display(name: str, agents: Any) -> str:
+    """The shared display form for an agent leaf, or the raw name.
+
+    Read off the registry the caller already handed the classifier (so no
+    second registry is opened): a role row carries its label, and a packaged
+    seed falls back to its frontmatter's canonical label -- the same rule the
+    band and the listings use (``display_labels.display_form``). Never raises:
+    a chart must not fail because one profile could not be read, so a lookup
+    failure degrades to the raw key (which is still what the leaf ADDRESSES
+    by, so the chart stays usable).
+    """
+    from local_operator.display_labels import display_form
+
+    label = ""
+    try:
+        row = None
+        if agents is not None and hasattr(agents, "get_agent_by_name"):
+            row = agents.get_agent_by_name(name)
+        if row is not None:
+            # A ROW WINS, even when its stored label is empty: an existing row
+            # with no label paints its raw name -- exactly what the listings
+            # paint -- and falling through to the packaged seed here would make
+            # the chart and the listing disagree about one profile, the very
+            # disagreement the shared rule exists to prevent (review round 1,
+            # R1-4). The seed fallback is for an ATTACHED-BUT-UNMATERIALISED
+            # starter, which has no row at all.
+            label = str(getattr(row, "label", "") or "")
+        else:
+            from local_operator.agent_profiles import load_seed
+
+            seed = load_seed(name)
+            if seed is not None:
+                label = seed.label
+    except Exception:  # noqa: BLE001 — a chart must not fail on one unreadable profile
+        label = ""
+    return display_form(name, label)
 
 
 def _agent_node(
@@ -120,8 +164,8 @@ def _agent_node(
         # records the resolved kind in detail so a missing manager still shows
         # as a gap and the detailed tier can name role/specialist/seed.
         detail = "manager" if kind != "unresolved" else "manager · unresolved"
-        return OrgNode(name, "manager", count=count, detail=detail)
-    return OrgNode(name, kind, count=count)
+        return OrgNode(_agent_display(name, agents), "manager", count=count, detail=detail)
+    return OrgNode(_agent_display(name, agents), kind, count=count)
 
 
 def _team_node(
@@ -191,7 +235,7 @@ def _team_node(
     return OrgNode(
         display_form(team.name, team.label),
         "team",
-        detail=_team_detail(team),
+        detail=_team_detail(team, agents),
         children=tuple(children),
         team_id=team.id,
     )

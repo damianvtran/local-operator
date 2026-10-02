@@ -145,8 +145,17 @@ _WALK_DEPTH_CAP = 2
 #: the ``properties`` field copy widened to name underscores (R1-2, ``_`` is
 #: a legal ident character), and this doc's parameters panel quotes the field
 #: copy, so the +11 chars are the panel's, counted rather than assumed.
+#:
+#: RE-MEASURED 2026-10-02 by the agent display labels
+#: (``feat/agent-labels-1001``): ``agent`` alone moved, 826 -> 849, for the new
+#: ``label`` parameter on ``AgentParams`` (create/update; ``team``'s label param
+#: has the same shape). The name stays the addressing key and the label is
+#: display-only, so the wire carries the field and nothing else — the how/why
+#: lives in ``guide://agents`` and ``tool://agent``, which is where the rest of
+#: the label vocabulary already is. Measured through this file's own renderer on
+#: the remediation head; every other entry is byte-identical.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 826,
+    "agent": 849,
     "ask": 948,
     "bash": 313,
     "browser": 1365,
@@ -189,7 +198,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: 716 -> 855 and 585 -> 668, the same moved-here-on-purpose growth the clean
 #: arm documents (the per-op tables and notes now carry what the wire used
 #: to).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 855, "task": 668}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 878, "task": 668}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

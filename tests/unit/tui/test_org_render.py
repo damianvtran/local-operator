@@ -103,7 +103,17 @@ def test_one_agent_team_fits_small(tmp_path: Path) -> None:
     # A two-node column is narrow — comfortably inside an 80-col terminal.
     assert result.width < 80
     assert "boss" in result.text.plain
-    assert "coder" in result.text.plain
+    # The member is the PACKAGED ``coder`` seed, which the chart paints by its
+    # canonical label through the shared display rule (design round 1, D1) — so
+    # the expectation is DERIVED from that rule rather than hardcoded to the raw
+    # key. The width bound above is this test's actual contract; this line is the
+    # identity check that the member row is the one rendered.
+    from local_operator.agent_profiles import load_seed
+    from local_operator.display_labels import display_form
+
+    seed = load_seed("coder")
+    assert seed is not None
+    assert display_form("coder", seed.label) in result.text.plain
 
 
 def test_ghost_and_cycle_markers(tmp_path: Path) -> None:
