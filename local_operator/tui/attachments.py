@@ -17,12 +17,22 @@ not a bare ``subprocess`` call:
 
 Nothing here raises: a platform with no opener, a missing binary and a failing
 opener are all ``False``, which the host answers with the honest sentence.
+
+The module also owns the READ half of the inline preview (spec §7.4's staged
+enhancement): :func:`read_for_preview` turns a stored copy into the base64 the
+transcript's own :class:`~local_operator.tui.widgets.image_block.ImageBlock`
+takes. Keeping it here rather than in the app is the same boundary the opener
+respects — the widget layer never touches the filesystem, and the app never
+re-implements how an attachment is addressed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
 import sys
+from pathlib import Path
 
 from local_operator.logger import get_logger
 
@@ -94,3 +104,54 @@ async def open_path_quietly(path: str) -> bool:
     except Exception:  # noqa: BLE001 — a drain failure must not mask the exit code
         logger.debug("attachment opener failed", exc_info=True)
         return False
+
+
+#: How long a preview read may take before it is abandoned. A stored attachment
+#: is at most 5 MB (``projects.ATTACHMENT_MAX_BYTES``) on a local disk, so this
+#: bound exists for the pathological case — a copy on a stalled network mount —
+#: and its expiry is a plain ``None`` the caller turns into a sentence.
+PREVIEW_READ_TIMEOUT_S = 5.0
+
+
+def read_attachment_for_preview(path: str) -> tuple[str, str] | None:
+    """The base64 payload and MIME type for one stored copy, or ``None``.
+
+        ``None`` covers every way there is nothing to show — the path is gone, it
+        is a directory, or the read failed — because the caller states ONE honest
+        sentence for all three ("could not read"). The MIME type falls back to
+        ``image/png`` only when the suffix is unknown: the block decodes the bytes
+        itself, so a wrong guess shows the ``could not be decoded`` receipt rather
+        than a wrong picture (and an ``.svg``, which PIL cannot rasterise, lands
+    there on purpose).
+
+        Synchronous on purpose: the caller runs it off the UI loop, and a plain
+        function is what makes that a ``to_thread`` hop rather than an event-loop
+        read that blocks the frame.
+    """
+    try:
+        source = Path(path)
+        if not source.is_file():
+            return None
+        data = source.read_bytes()
+    except Exception:  # noqa: BLE001 — an unreadable copy is a degraded row, not a crash
+        logger.debug("attachment preview read failed: %s", path, exc_info=True)
+        return None
+    mime_type = mimetypes.guess_type(path)[0] or "image/png"
+    return base64.b64encode(data).decode("ascii"), mime_type
+
+
+async def read_for_preview(path: str) -> tuple[str, str] | None:
+    """Off-loop wrapper around :func:`read_attachment_for_preview`.
+
+    The read happens on a worker thread so a slow or stalled mount cannot hold
+    a Textual frame, and the whole thing is bounded so it cannot hold one
+    forever either.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(read_attachment_for_preview, path),
+            timeout=PREVIEW_READ_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.debug("attachment preview read timed out: %s", path)
+        return None

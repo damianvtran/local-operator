@@ -320,6 +320,39 @@ class ProjectsViewAttachmentOpened(Message):
         self.project_name = project_name
 
 
+class ProjectsViewAttachmentCopied(Message):
+    """`y` on an attachment row: put its stored path on the clipboard (§7.4).
+
+    Carries the row's path and display name so the host can write the
+    clipboard and say what it did. The PATH is the payload, not the file's
+    contents: the row is an affordance for the copy under the project store,
+    and that is what a reader pastes into a shell, an editor or a bug report.
+    """
+
+    def __init__(self, *, path: str, name: str, project_name: str) -> None:
+        super().__init__()
+        self.path = path
+        self.name = name
+        self.project_name = project_name
+
+
+class ProjectsViewAttachmentPreviewRequested(Message):
+    """`space` on an image attachment: read the file so the page can show it.
+
+    The page is I/O-free, so it cannot read the copy itself; this asks the
+    host for the bytes and the host answers through
+    :meth:`ProjectsView.show_attachment_preview`. The message carries the
+    display name so a read that FAILS can name the file in its sentence — a
+    refusal is never a silent no-op (the opener's own rule).
+    """
+
+    def __init__(self, *, path: str, name: str, project_name: str) -> None:
+        super().__init__()
+        self.path = path
+        self.name = name
+        self.project_name = project_name
+
+
 class ProjectsView(Vertical):
     """The page: a title, a rule, the scrollable canvas, the detail footer, hints.
 
@@ -395,6 +428,16 @@ class ProjectsView(Vertical):
         # focused chain. It opens the team/agent picker; the boot itself is the
         # APP's (the registries and the creation core are not the page's).
         Binding("s", "start", "Start session", show=False),
+        # `y` puts the selected attachment's STORED path on the clipboard (spec
+        # §3.2/§7.4) — the one thing a reader can act on when the file is gone
+        # or when the opener is what they want to avoid. Row-scoped like `m` on
+        # a session row: it acts where it applies and is inert elsewhere.
+        Binding("y", "copy_attachment", "Copy path", show=False),
+        # `space` shows an image attachment's pixels inline and hides them
+        # again (spec §7.4's deliberately staged half, using the image stack the
+        # transcript already ships). Unbound in this mode and in the app's
+        # focused chain; the row-scoped rule above applies.
+        Binding("space", "preview_attachment", "Preview", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
         # of detail" rule); in the other views it is inert and the footer sheds
@@ -549,6 +592,12 @@ class ProjectsView(Vertical):
         # that list is what the painter hides, and a button absent from it stays
         # visible at its DOM slot, ahead of the rung it belongs to.
         self._start_hint = HintButton("s", lambda: self.action_start())
+        # `y` copy path / `space` preview (P6, spec §7.4). Row-scoped: the rungs
+        # carry them only while an attachment row is selected, and they are in
+        # `_hint_buttons()` so a state change HIDES them rather than leaving
+        # them parked at their DOM slot ahead of the rung they belong to.
+        self._copy_hint = HintButton("y", lambda: self.action_copy_attachment())
+        self._preview_hint = HintButton("space", lambda: self.action_preview_attachment())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
         self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._tab_hint = HintButton("tab", self._form_focus_next)
@@ -1147,6 +1196,8 @@ class ProjectsView(Vertical):
             self._create_hint,
             self._msg_hint,
             self._start_hint,
+            self._copy_hint,
+            self._preview_hint,
             self._open_hint,
             self._move_hint,
             self._page_hint,
@@ -1565,8 +1616,38 @@ class ProjectsView(Vertical):
         # `s` is advertised from 101 columns up and every shipped row holds.
         # `s` still WORKS wherever it is not advertised.
         start = (self._start_hint, " start", True)
+        # `y copy` / `space preview` (P6, spec §7.4): the two ROW-SCOPED keys,
+        # advertised only while an attachment row has the cursor. They follow
+        # the `s start` variant rule exactly — each rides a one-extra-wider
+        # VARIANT of the shipped row rather than an extra element inside it, so
+        # a variant can only ADD a key and no shipped label is ever displaced
+        # at any budget (the F4 sweep). The chain is a strict prefix, so
+        # widening the terminal only ever ADDS a key (QA Q3's monotonicity).
+        # `y` is offered wherever a path exists — a gone copy still has a path
+        # worth pasting — and `space` only where there are pixels to read.
+        extras: list[tuple[HintButton, str, bool]] = []
+        if self._detail_page.selected_can_preview():
+            extras.append(
+                (
+                    self._preview_hint,
+                    " hide" if self._detail_page.selected_preview_open() else " preview",
+                    True,
+                )
+            )
+        if self._detail_page.selected_can_copy():
+            extras.append((self._copy_hint, " copy", True))
+        head = [move, page] if named is None else [move, page, open_hint]
+        # Shedding among the extras goes WIDEST LABEL FIRST, so a narrower
+        # terminal keeps the cheaper key: the reader reaches `↵ open · y copy`
+        # — the pair spec §3.3 names — before `space preview` (17 cells to
+        # `y copy`'s 10), and a rung that carries both is strictly wider than
+        # the one that follows (the variants are never shadowed).
+        variants: list[list[tuple[HintButton, str, bool]]] = [extras]
+        if len(extras) > 1:
+            variants.append(extras[1:])
         if named is None:
             return [
+                *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
                 rung([move, page, msg, start, refresh], "back"),
                 rung([move, page, msg, refresh], "back"),
                 rung([move, page, msg], "back"),
@@ -1575,6 +1656,7 @@ class ProjectsView(Vertical):
                 rung([], ""),
             ]
         return [
+            *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
             rung([move, page, open_hint, msg, start, refresh], "back"),
             rung([move, page, open_hint, msg, refresh], "back"),
             rung([move, page, open_hint, msg], "back"),
@@ -1597,6 +1679,12 @@ class ProjectsView(Vertical):
         self._move_hint.set_actionable(self._detail_page.selectable_count > 0)
         self._page_hint.set_actionable(self._detail_page.max_scroll_y > 0)
         self._open_hint.set_actionable(self._detail_page.selected_action_label() is not None)
+        # The two row-scoped keys are armed against the SELECTED row's own
+        # facts, not against the page's: there is nothing to copy off a
+        # description row, and a lit `y copy` there is the same wrong promise
+        # `↵ open` was on a verb-less row (UX round 2, U6).
+        self._copy_hint.set_actionable(self._detail_page.selected_can_copy())
+        self._preview_hint.set_actionable(self._detail_page.selected_can_preview())
 
     def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
         """Cell width of a candidate hint row, measured before it is painted."""
@@ -1627,6 +1715,8 @@ class ProjectsView(Vertical):
             yield self._msg_hint
             yield self._start_hint
             yield self._open_hint
+            yield self._copy_hint
+            yield self._preview_hint
             yield self._move_hint
             yield self._page_hint
             yield self._zoom_hint
@@ -2554,6 +2644,84 @@ class ProjectsView(Vertical):
             body.region.x + padding.left - content.x,
             top - content.y,
         )
+
+    # -- attachment row keys (P6, spec §7.4) --------------------------------
+    def action_copy_attachment(self) -> None:
+        """`y` — copy the selected attachment's stored path (spec §3.2/§7.4).
+
+        Row-scoped: it acts only while an attachment row has the cursor, and is
+        inert anywhere else (the ``action_zoom_in`` rule — a key that applies
+        in one place no-ops everywhere it does not). A path is the payload on
+        purpose: the copy under the store is what a reader pastes into a shell
+        or a bug report, and it is the only handle they still have once the
+        file itself is gone.
+
+        The one refusal that is NOT a no-op is a pathless record: the reader
+        pressed a key and the row cannot answer it, so the page says why — the
+        path line already reads ``(no path recorded)`` and the sentence names
+        the file that has none.
+        """
+        if self._mode != "detail":
+            return
+        attachment = self._detail_page.selected_attachment()
+        if attachment is None:
+            return
+        name = str(attachment.get("name") or "(unnamed)")
+        path = str(attachment.get("path") or "")
+        if not path:
+            self.show_notice(f"'{name}' has no stored path to copy")
+            return
+        self.post_message(
+            ProjectsViewAttachmentCopied(
+                path=path, name=name, project_name=self._detail_page.project_name
+            )
+        )
+
+    def action_preview_attachment(self) -> None:
+        """`space` — show or hide the selected image attachment (spec §7.4).
+
+        The open/close half is pure VIEW state the page holds, so a re-press
+        costs no read: only the FIRST press asks the host for bytes. A row
+        that cannot be previewed answers with its reason rather than nothing,
+        because the reader pressed the key expecting the picture — a data file
+        has no pixels, and a copy that is gone has no bytes to read.
+        """
+        if self._mode != "detail":
+            return
+        attachment = self._detail_page.selected_attachment()
+        if attachment is None:
+            return
+        path = str(attachment.get("path") or "")
+        name = str(attachment.get("name") or "(unnamed)")
+        if self._detail_page.selected_preview_open():
+            self._detail_page.close_preview(path)
+            return
+        if not self._detail_page.selected_can_preview():
+            if not path:
+                self.show_notice(f"'{name}' has no stored path to preview")
+            elif attachment.get("missing"):
+                self.show_notice(
+                    f"{name} is missing on disk — its stored copy was moved or deleted"
+                )
+            else:
+                # A data file: the honest sentence names the verb that DOES
+                # work for it instead of leaving the press unanswered.
+                self.show_notice(f"{name} is not an image — ↵ opens it instead")
+            return
+        self.post_message(
+            ProjectsViewAttachmentPreviewRequested(
+                path=path, name=name, project_name=self._detail_page.project_name
+            )
+        )
+
+    def show_attachment_preview(self, *, path: str, data_b64: str, mime_type: str) -> None:
+        """Hand the page the bytes the app just read for ``path`` (spec §7.4).
+
+        The app-side reader's answer, and the ONLY way a picture reaches the
+        page: the file was read off the UI loop by the host, and this relays
+        it without the page ever touching the filesystem.
+        """
+        self._detail_page.apply_preview(path, data_b64=data_b64, mime_type=mime_type)
 
     # -- start session (P5b, spec §7.6) -------------------------------------
     def set_start_rows(self, rows: list[StartTarget] | None) -> None:
