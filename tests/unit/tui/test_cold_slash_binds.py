@@ -440,7 +440,12 @@ async def test_an_agent_attached_receipt_syncs_the_agent_segment(tmp_path, monke
                 "data": {"type": "agent_attached", "agent": "reviewer", "request": ""},
             },
         )
-        assert app._status._agent_profile == "reviewer", "the agent segment was not synced"
+        # The sync happened; the VALUE follows the shipped display rule --
+        # the session's ``reviewer`` resolves to its canonical label, which
+        # the band paints (design round 1, D1). The point of this cell is
+        # WHICH segment got synced, so it asserts that value rather than the
+        # raw key.
+        assert app._status._agent_profile == "Reviewer", "the agent segment was not synced"
         assert app._status._team == "", "the team segment must not have been what was synced"
 
 
