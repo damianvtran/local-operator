@@ -6112,6 +6112,7 @@ class RuntimeServer:
                 AsideUnanswered,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
+                ForkRefused,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
@@ -6124,6 +6125,7 @@ class RuntimeServer:
                     AsideUnanswered,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
+                    ForkRefused,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
                     RuntimeRetiring,
@@ -6156,6 +6158,14 @@ class RuntimeServer:
                 # path, host or identity, so it does not widen what
                 # ``session/errors.py`` admits across this boundary.
                 frame["error_count"] = exc.count
+            if isinstance(exc, ForkRefused) and exc.reason:
+                # WHICH CAUSE of the one ``fork_refused`` code, as one token from
+                # a closed set — the exact shape ``error_trigger`` uses above and
+                # for the same reason: the far side rebuilds the sentence locally,
+                # so the only thing that may ride along is a value the class
+                # enumerates. Absent, the far side composes the generic sentence,
+                # which is what an older peer's frame reads as anyway.
+                frame["error_reason"] = exc.reason
             if isinstance(exc, AudioInputUnsupported):
                 # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose
                 # (agent review round 1, m2): the far side rebuilds the SAME

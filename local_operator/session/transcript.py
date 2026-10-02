@@ -1831,21 +1831,19 @@ class Transcript:
           back past its own cut.
         """
         from local_operator.fork import fork_session
+        from local_operator.session.errors import ForkRefused
         from local_operator.session.session import _paired_prefix
 
         async with self._lock:
             if is_compacting():
-                raise ValueError("history is being rewritten; retry /fork when compaction finishes")
+                raise ForkRefused(reason="history_rewriting")
             if through_entry_id is not None and not self.has_entry(through_entry_id):
                 # An UNKNOWN id must refuse rather than fall through: replay's
                 # own ``through_id`` leaves the journal untouched when it finds
                 # no such row, so an id from another session (or a stale view)
                 # would fork the WHOLE conversation — the one failure here that
                 # produces extra content instead of an error.
-                raise ValueError(
-                    "that message is not part of this conversation; "
-                    "pick a message from this session to fork from"
-                )
+                raise ForkRefused(reason="entry_unknown")
 
             def copy_snapshot() -> tuple[str, bool, str | None]:
                 # Replay resolves attachments and can traverse a long history.
@@ -1874,10 +1872,7 @@ class Transcript:
                     # Only reachable WITH a cut point: no anchor is at-or-before
                     # it, so the child's whole history would be rows the parent
                     # had summarized away. Refuse BEFORE allocating a fork.
-                    raise ValueError(
-                        "that message sits before the conversation's last summary; "
-                        "fork from a message after the summary instead"
-                    )
+                    raise ForkRefused(reason="before_anchor")
                 if governing is not None:
                     anchor = str(governing.payload.get("first_kept_entry_id", ""))
                     if anchor in excluded:
@@ -1887,10 +1882,7 @@ class Transcript:
                         # summarized context resurrected. The anchor gets dropped
                         # here only by the unpaired-tail trim: an anchor at-or-.
                         # before the cut is retained by construction.
-                        raise ValueError(
-                            "compaction boundary is in an unfinished tool batch; "
-                            "retry /fork after the original finishes that batch"
-                        )
+                        raise ForkRefused(reason="unfinished_batch")
                     # The governing marker is the boundary record of the retained
                     # prefix, and every LATER marker must go so replay cannot
                     # outrank it (see the docstring's rule).

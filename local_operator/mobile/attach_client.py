@@ -1524,6 +1524,12 @@ class AttachClient:
             model=reply.get("error_model"),
             report=reply.get("error_report"),
             format_unsupported=reply.get("error_format"),
+            # WHICH FORK REFUSAL, as one token from a closed set (the shape
+            # ``error_trigger`` established one argument up). The sentence is
+            # rebuilt from it rather than read off ``message``: an owner's prose
+            # is untrusted input here, and a reason outside the enumerated set
+            # degrades to the generic sentence instead of rendering.
+            reason=reply.get("error_reason"),
         )
         if known is not None:
             raise known

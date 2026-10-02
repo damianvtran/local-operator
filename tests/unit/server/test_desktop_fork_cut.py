@@ -26,6 +26,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.server.routes import desktop_lifecycle
+from local_operator.server.routes.desktop_sessions import (
+    RUNTIME_UNREACHABLE,
+    RUNTIME_UNREACHABLE_MESSAGE,
+)
+from local_operator.session.errors import ForkRefused
 
 pytestmark = pytest.mark.asyncio
 
@@ -220,3 +225,87 @@ async def test_a_malformed_boundary_is_a_422_and_runs_nothing(tmp_path: Path, bo
     assert response.status_code == 422, response.text
     assert remote.slashes == []
     assert remote.bound == 0
+
+
+class RefusingRemote(FakeRemote):
+    """A remote whose routed slash fails the way the owner's own does."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def route_shared_slash(self, command: str, args: str) -> Any:
+        self.slashes.append((command, args))
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ForkRefused(reason="entry_unknown"),
+        ForkRefused(reason="before_anchor"),
+        ForkRefused(reason="unfinished_batch"),
+        ForkRefused(reason="compaction_pending"),
+        # A bare raise names no cause; the generic sentence is the answer, and
+        # the reason key is present-but-empty so the shape never varies.
+        ForkRefused(),
+    ],
+)
+async def test_a_refused_fork_is_the_refusal_not_an_owner_outage(
+    tmp_path: Path, refusal: ForkRefused
+) -> None:
+    """The conversation's state refused this, so the ladder must not say 503.
+
+    Unclassified, this arrived at the schema's ``RuntimeError`` arm and answered
+    ``runtime_unreachable`` — "Session owner is unavailable. Reconnect and
+    reconcile before retrying." — for a request the owner answered promptly and
+    deliberately (measured on PR #1917). Every cause answers the same 409 shape
+    the other named-condition refusals use, with the CAUSE as a machine token so
+    a renderer can offer the right way forward without parsing the sentence.
+    """
+    remote = RefusingRemote(refusal)
+    async with _client(_app(tmp_path, remote)) as client:
+        response = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={
+                "request_id": REQUEST_ID,
+                "boundary": "at_entry",
+                "entry_id": "ffffffffffffffffffffffffffffffff",
+            },
+        )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "fork_refused",
+        "message": str(refusal),
+        "reason": refusal.reason,
+    }
+    # The owner was reached and answered: the refusal ran the routed slash, and
+    # the receipt's replay machinery is what the route still rounds through.
+    assert remote.slashes == [("fork", json.dumps({"entry_id": "f" * 32}))]
+
+
+async def test_a_failure_this_seam_does_not_know_keeps_the_owner_outage_path(
+    tmp_path: Path,
+) -> None:
+    """Fail-safe: an un-enumerated failure is exactly what it was before.
+
+    The classification narrows nothing. An owner that raises something the seam
+    does not enumerate still reaches the client as the owner's own sentence, and
+    the ladder still reads it as an unreachable owner — so a genuinely unreachable
+    owner is untouched by this change and this cell is what proves it.
+    """
+    remote = RefusingRemote(RuntimeError("the owner's own words"))
+    async with _client(_app(tmp_path, remote)) as client:
+        response = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={"request_id": REQUEST_ID, "boundary": "next_safe"},
+        )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == {
+        "code": RUNTIME_UNREACHABLE,
+        "message": RUNTIME_UNREACHABLE_MESSAGE,
+    }
+    # The owner's own words are never echoed: the vetted sentence stands in.
+    assert "the owner's own words" not in response.text
