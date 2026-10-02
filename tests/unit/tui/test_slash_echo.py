@@ -1168,7 +1168,10 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
         painted = _painted(app)
     assert rows == [], rows
     assert "auditor" in painted, painted
-    assert "dashboard-sme" in painted, painted
+    # A derived label paints ALONE (the display rule's refinement), so the
+    # listing shows the human spelling rather than the slug: /agent is typed by
+    # the KEY the picker still completes, and the band below confirms it.
+    assert "Dashboard Sme" in painted, painted
     assert "specialist" in painted, painted
     assert "private-chat" not in painted, painted
     assert "Send: /agent <name> <message>" in painted, painted
@@ -1411,7 +1414,7 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
         assert _colour(entry_style) == muted, entry_style
 
     _assert_header_outranks(
-        app._agent_list_block([("auditor", "role", "Audit changes")]), "agents", "auditor"
+        app._agent_list_block([("auditor", "", "role", "Audit changes")]), "agents", "auditor"
     )
 
     # /team gets the identical treatment (needs a real team object).

@@ -147,6 +147,12 @@ class Agent(BaseModel):
 
     id: str = Field(..., description="Unique identifier for the agent")
     name: str = Field(..., description="Agent's name")
+    label: str = Field(
+        "",
+        description="The display label (free text, spaces allowed) that listings "
+        "paint through the shared display rule; 'name' remains the addressing "
+        "key. Empty derives from the name on the next write.",
+    )
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -300,6 +306,11 @@ class AgentCreate(BaseModel):
     """Data required to create a new agent."""
 
     name: str = Field(..., description="Agent's name")
+    label: str | None = Field(
+        None,
+        description="The display label (free text, spaces allowed); 'name' remains "
+        "the addressing key. Omitted (or '') derives from the name.",
+    )
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "
@@ -377,6 +388,11 @@ class AgentUpdate(BaseModel):
     """Data for updating an existing agent."""
 
     name: str | None = Field(None, description="Agent's name")
+    label: str | None = Field(
+        None,
+        description="The display label (free text, spaces allowed); 'name' remains "
+        "the addressing key. Omit to leave it alone; '' resets to the derived default.",
+    )
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "

@@ -75,6 +75,14 @@ class ProfileEdit(Input):
     #: optional: an older client simply never sends it, and an omitted field
     #: never clears a class (the merge rule ``write_profile`` documents).
     action_class: Literal["reactive", "proactive"] | None = None
+    #: Display metadata (see ``local_operator.agents.AgentData.label``): the
+    #: label every listing paints while ``name`` stays the addressing key.
+    #: Deliberately no ``max_length``: the registry validates the stored shape
+    #: (whitespace collapsed, 80 characters, no controls) and a route cap
+    #: stricter than the registry would refuse values the other write paths
+    #: accept. A label of "" resets to the derived default; ``None``/absent
+    #: leaves it alone.
+    label: str | None = None
 
 
 class ProfileCreate(Input):
@@ -89,6 +97,9 @@ class ProfileCreate(Input):
     #: See ProfileEdit. Creation defaults to reactive downstream when absent
     #: (R37); naming ``proactive`` here is the explicit spare-use act.
     action_class: Literal["reactive", "proactive"] | None = None
+    #: See ProfileEdit. Creation just carries it through; an absent label means
+    #: the derived default.
+    label: str | None = None
 
 
 class TeamEdit(Input):
