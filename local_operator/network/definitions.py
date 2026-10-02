@@ -181,6 +181,14 @@ INDEX_NAME = "definitions.json"
 #: absent and why is in the module docstring; ``security_prompt`` in particular.
 AGENT_DEFINITION_FIELDS: tuple[str, ...] = (
     "name",
+    # The display label rides so a peer installs and paints the same spelling.
+    # Version skew is benign in BOTH directions: an OLDER peer receiving it
+    # simply drops the unknown key (pydantic ignores extras), and a NEWER peer
+    # receiving a row without it reads "" and re-derives locally in
+    # ``save_agent`` -- which is also why the reconstruction below must pass
+    # the carried value through rather than rebuilding a fresh row without it
+    # (a rebuild that omitted it wiped any stored label).
+    "label",
     "description",
     "tags",
     "categories",
@@ -445,7 +453,7 @@ def _agent_row_from_bundle(payload: Mapping[str, Any]) -> dict[str, Any]:
         value = fields_in.get(name)
         if name == "name":
             value = str(payload.get("name") or value or "")
-        elif name == "description":
+        elif name in ("description", "label"):
             value = str(value or "")
         elif name in ("tags", "categories"):
             value = [str(item) for item in (value or [])] if isinstance(value, list) else []
@@ -1139,6 +1147,9 @@ def _apply_agent_locked(
             AgentData(
                 id=agent_id,
                 name=name,
+                # The display label rides the row (see AGENT_DEFINITION_FIELDS);
+                # "" (an older peer, or a legacy row) re-derives in save_agent.
+                label=str(fields.get("label") or ""),
                 created_date=_parse_iso(row.get("created_date")),
                 version=str(getattr(local, "version", "") or _local_version()),
                 hosting=str(fields.get("hosting") or ""),
@@ -1171,6 +1182,9 @@ def _apply_agent_locked(
         created = registry.create_agent(
             AgentEditFields(
                 name=name,
+                # See the reconstruction above: "" reads as "derive" on the
+                # create path (AgentEditFields.label's reset spelling).
+                label=str(fields.get("label") or ""),
                 hosting=str(fields.get("hosting") or ""),
                 model=str(fields.get("model") or ""),
                 description=str(fields.get("description") or ""),

@@ -87,6 +87,37 @@ def _team_detail(team: Team) -> str:
     return f"led by {team.manager} · {slots} {word}"
 
 
+def _agent_display(name: str, agents: Any) -> str:
+    """The shared display form for an agent leaf, or the raw name.
+
+    Read off the registry the caller already handed the classifier (so no
+    second registry is opened): a role row carries its label, and a packaged
+    seed falls back to its frontmatter's canonical label -- the same rule the
+    band and the listings use (``display_labels.display_form``). Never raises:
+    a chart must not fail because one profile could not be read, so a lookup
+    failure degrades to the raw key (which is still what the leaf ADDRESSES
+    by, so the chart stays usable).
+    """
+    from local_operator.display_labels import display_form
+
+    label = ""
+    try:
+        row = None
+        if agents is not None and hasattr(agents, "get_agent_by_name"):
+            row = agents.get_agent_by_name(name)
+        if row is not None:
+            label = str(getattr(row, "label", "") or "")
+        if not label:
+            from local_operator.agent_profiles import load_seed
+
+            seed = load_seed(name)
+            if seed is not None:
+                label = seed.label
+    except Exception:  # noqa: BLE001 — a chart must not fail on one unreadable profile
+        label = ""
+    return display_form(name, label)
+
+
 def _agent_node(
     name: str,
     agents: Any,
@@ -120,8 +151,8 @@ def _agent_node(
         # records the resolved kind in detail so a missing manager still shows
         # as a gap and the detailed tier can name role/specialist/seed.
         detail = "manager" if kind != "unresolved" else "manager · unresolved"
-        return OrgNode(name, "manager", count=count, detail=detail)
-    return OrgNode(name, kind, count=count)
+        return OrgNode(_agent_display(name, agents), "manager", count=count, detail=detail)
+    return OrgNode(_agent_display(name, agents), kind, count=count)
 
 
 def _team_node(

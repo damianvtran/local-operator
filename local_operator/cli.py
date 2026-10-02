@@ -8961,13 +8961,22 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     # nothing, and this must not become a second spelling of "hub_sha256:".
     from local_operator.agents import HUB_SHA256_PREFIX
 
+    # The one shared display rule (``label`` is display-only, so the row shows
+    # what a reader recognises while the key that addresses the row stays on
+    # the line: ``Label (key)`` for a chosen label, the label alone for a
+    # canonical one, the raw key when nothing adds information).
+    from local_operator.display_labels import display_form
+
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
         branch = "└──" if is_last else "├──"
         print(f"\033[1;32m│ {branch} Agent {start_idx + i + 1}\033[0m")
         left_bar = "│ │" if not is_last else "│  "
-        print(f"\033[1;32m{left_bar}   • Name: {agent.name}\033[0m")
+        print(
+            f"\033[1;32m{left_bar}   • Name: "
+            f"{display_form(str(agent.name), str(getattr(agent, 'label', '') or ''))}\033[0m"
+        )
         print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
         print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
         print(f"\033[1;32m{left_bar}   • Version: {agent.version}\033[0m")

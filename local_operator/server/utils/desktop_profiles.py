@@ -45,6 +45,10 @@ def profile_detail(
     origin = seed_origin(row) if row is not None else None
     result: dict[str, Any] = {
         "name": resolved,
+        # The RAW display label (never a composed form -- the desktop lane
+        # computes that per surface, exactly as the TUI does); it rides the
+        # same projection the catalogue and GET responses share.
+        "label": metadata.label,
         "kind": "specialist" if kind == "specialist" else "role",
         "source": "builtin" if kind == "seed" else "installed" if origin else "custom",
         "agent_id": str(row.id) if kind != "seed" and row is not None else None,
