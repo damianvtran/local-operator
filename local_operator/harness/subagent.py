@@ -245,6 +245,32 @@ CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
 INHERIT_TIER_SENTINEL = "default"
 
 
+def is_inherit_tier_sentinel(selector: object) -> bool:
+    """Is ``selector`` the inherit sentinel, however it was typed?
+
+    Case-insensitive and whitespace-tolerant, and BOTH tolerances are safe for
+    one reason: every real selector is a ``provider/model`` string and so
+    contains a ``/``, which no casing of ``default`` has. So there is no
+    ``provider/model`` this can misread as the sentinel, and no ``DEFAULT``
+    that can be a model.
+
+    Why it exists at all: :func:`read_model_choice` — the neighbouring
+    operator-facing reader on the same config block — already accepts
+    ``"MODEL"`` and ``" model "``, so matching the sentinel exactly made the
+    two sentinel-ish surfaces disagree, and a single typo'd tier (``hi:
+    DEFAULT``) fell out of the advertised set and drew "no tiers are
+    configured", which reads as "you configured nothing" to an operator who
+    did write a value. The failure direction was safe (it refuses, it never
+    silently inherits) but the reason was wrong, and a wrong reason is what
+    this whole change is about.
+
+    A non-string is not the sentinel: the reader keeps such values precisely so
+    the launch path can name them (``lo: 0`` must draw "lacks provider/model",
+    not "not configured").
+    """
+    return isinstance(selector, str) and selector.strip().lower() == INHERIT_TIER_SENTINEL
+
+
 def read_effort_tier_selectors() -> dict[str, Any]:
     """``values.subagents.models``, narrowed to the tiers the harness supports.
 
@@ -443,7 +469,7 @@ def configured_effort_tiers() -> dict[str, str]:
             # A non-string VALUE is kept by the read so the launch path can
             # name it; it is simply not a tier the schema may advertise.
             continue
-        if selector == INHERIT_TIER_SENTINEL:
+        if is_inherit_tier_sentinel(selector):
             # Advertised by its sentinel, NOT by the model it currently
             # resolves to: the value is read at every build and every spawn,
             # so a session that switches model mid-flight must not be shown a
@@ -452,7 +478,13 @@ def configured_effort_tiers() -> dict[str, str]:
             # :func:`describe_effort_tiers`), which is the honest form of the
             # same fact: the sentinel is what is stored, and the label says
             # what it runs right now.
-            tiers[tier] = selector
+            #
+            # Stored CANONICAL (not as typed) so every downstream exact
+            # comparison -- the schema description, the launch path's own
+            # check -- sees one spelling for one state. The raw value is kept
+            # by the shared reader for the "lacks provider/model" refusal;
+            # this is the advertised view, and it has one spelling.
+            tiers[tier] = INHERIT_TIER_SENTINEL
             continue
         provider, _, model_id = selector.partition("/")
         if not provider or not model_id:
@@ -526,16 +558,33 @@ def describe_effort_tiers(tiers: dict[str, str], *, session_model_label: str | N
     ``ToolContext`` (which carries the label the session itself paints) while
     pure callers — a launch refusal, a test — may not. Absence degrades to
     the generic phrase, never to silence about the sentinel.
+
+    Sentinels are grouped into ONE clause rather than repeated per tier: a
+    session with all three tiers on the sentinel otherwise spends 176 cells of
+    a description that is billed on every turn naming the same model three
+    times. Grouping cannot hide a tier (every tier name is still listed) and it
+    cannot drop the model (the group carries the one label they all resolve
+    to), which is the constraint the per-tier form was introduced to satisfy.
+    The output for a config with NO sentinel tier — and for the common single
+    sentinel tier — is byte-identical to the previous shape, so the
+    prompt-cache stability of every existing config is untouched.
     """
-
-    def render(tier: str, selector: str) -> str:
-        if selector != INHERIT_TIER_SENTINEL:
-            return f"{tier} → {selector}"
+    parts: list[str] = []
+    sentinel_tiers: list[str] = []
+    for tier, selector in tiers.items():
+        if is_inherit_tier_sentinel(selector):
+            sentinel_tiers.append(tier)
+            continue
+        parts.append(f"{tier} → {selector}")
+    if sentinel_tiers:
+        names = ", ".join(sentinel_tiers)
         if session_model_label:
-            return f"{tier} → {INHERIT_TIER_SENTINEL} (session model: {session_model_label})"
-        return f"{tier} → {INHERIT_TIER_SENTINEL} (this session's model)"
-
-    return ", ".join(render(tier, selector) for tier, selector in tiers.items())
+            parts.append(
+                f"{names} → {INHERIT_TIER_SENTINEL} (session model: {session_model_label})"
+            )
+        else:
+            parts.append(f"{names} → {INHERIT_TIER_SENTINEL} (this session's model)")
+    return ", ".join(parts)
 
 
 if TYPE_CHECKING:

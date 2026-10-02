@@ -33,6 +33,7 @@ from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    is_inherit_tier_sentinel,
     read_effort_tier_selectors,
     read_model_choice,
 )
@@ -335,6 +336,49 @@ def test_the_sentinel_is_advertised_as_a_configured_tier(config_dir) -> None:
     assert "lacks provider/model" not in message
 
 
+def test_sentinel_tiers_are_named_once_as_a_group() -> None:
+    """D6: a description billed every turn must not repeat one model per tier.
+
+    With all three tiers on the sentinel the per-tier form spent 176 cells
+    naming the same model three times. Grouping cannot hide a tier (every name
+    is still listed) and cannot drop the model (the group carries the one
+    label they all resolve to). The single-sentinel and no-sentinel forms are
+    byte-identical to the previous shape, so no existing config's schema text
+    moves — which is what keeps the prompt-cache prefix stable.
+    """
+    grouped = describe_effort_tiers(
+        {"lo": "default", "med": "default", "hi": "default"}, session_model_label="a/b"
+    )
+    assert grouped == "lo, med, hi → default (session model: a/b)"
+    assert describe_effort_tiers({"hi": "default"}, session_model_label="a/b") == (
+        "hi → default (session model: a/b)"
+    )
+    assert describe_effort_tiers({"lo": "a/b", "hi": "c/d"}) == "lo → a/b, hi → c/d"
+
+
+def test_the_sentinel_is_matched_case_insensitively(config_dir) -> None:
+    """Q2: ``hi: DEFAULT`` is the sentinel, not an unconfigured tier.
+
+    ``read_model_choice`` — the neighbouring operator-facing reader on the same
+    config block — already accepts ``"MODEL"`` and ``" model "``, so matching
+    exactly made the two sentinel-ish surfaces disagree and made a single
+    typo'd tier draw "no tiers are configured", which reads as "you configured
+    nothing" to the operator who did write a value. Safe because every real
+    selector is a ``provider/model`` string and so contains a ``/``, which no
+    casing of ``default`` has.
+    """
+    write_tiers(config_dir, {"hi": "DEFAULT"})
+    assert configured_effort_tiers() == {"hi": "default"}
+    assert effort_tier_rejection("hi") is None
+    write_tiers(config_dir, {"hi": "  Default  "})
+    assert configured_effort_tiers() == {"hi": "default"}
+    # ...and the tolerance cannot swallow a real selector or a non-string.
+    assert not is_inherit_tier_sentinel("openai/default")
+    assert not is_inherit_tier_sentinel("default/x")
+    assert not is_inherit_tier_sentinel(0)
+    assert is_inherit_tier_sentinel("  DEFAULT ")
+
+
 def test_a_sentinel_tier_is_described_by_what_it_resolves_to() -> None:
     """A schema must never advertise a tier without saying what it runs.
 
@@ -464,6 +508,19 @@ def test_a_malformed_tier_is_not_advertised(config_dir, tmp_path) -> None:
 
 async def _call(tmp_path, name: str, args: dict[str, Any]):
     context = _context(tmp_path)
+    (tool,) = create_tools(context, enabled=[name])
+    return await tool.execute("call-1", args, None, None, context)
+
+
+async def _call_labelled(tmp_path, name: str, args: dict[str, Any], label: str):
+    """``_call`` with a session model label, which the sentinel arms name.
+
+    A separate helper rather than a parameter on ``_call``: the default
+    (``""``) is a state under test in its own right — the builders must degrade
+    to the generic phrase rather than to a bare sentinel — and threading it
+    through every existing call site would blur that.
+    """
+    context = _context(tmp_path).model_copy(update={"session_model_label": label})
     (tool,) = create_tools(context, enabled=[name])
     return await tool.execute("call-1", args, None, None, context)
 
@@ -845,6 +902,69 @@ async def test_operator_mode_omits_the_model_name_for_an_unconfigured_tier(
     assert result.is_error
     assert "it is the operator's to choose" in result.text
     assert "would run it on" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_operator_mode_names_the_resolved_model_for_a_sentinel_tier(
+    config_dir, tmp_path
+) -> None:
+    """M2/D1: the sentinel arm of BOTH operator-choice refusals.
+
+    Unpinned before this: the ``is_inherit_tier_sentinel`` branches in
+    ``_tier_runs_on`` and the two refusals could regress to a bare ``default``
+    — or, worse, back to claiming a MODEL SWAP — under a fully green suite. The
+    delegating model is this message's first reader, and ``hi: default``
+    resolves to the model the child would have run on anyway, so a lead
+    asserting a swap is the exact misreading the tier vocabulary exists to
+    prevent.
+    """
+    write_tiers(config_dir, {"hi": "default"}, model_choice=MODEL_CHOICE_OPERATOR)
+    label = "anthropic/claude-sonnet-5-5"
+
+    task = await _call_labelled(
+        tmp_path, "task", {"label": "r", "prompt": "p", "effort": "hi"}, label
+    )
+    assert task.is_error
+    assert f"'hi' runs on this session's model ({label}) — no model swap" in task.text
+    assert "it swaps the child's MODEL" not in task.text
+    assert "instead of this session's model" not in task.text
+
+    pin = await _call_labelled(
+        tmp_path,
+        "agent",
+        {"op": "create", "name": "r1", "description": "d", "instructions": "i", "effort": "hi"},
+        label,
+    )
+    assert pin.is_error
+    assert f"A pin on 'hi' runs that role on this session's model ({label})" in pin.text
+    assert "A pin runs that role on a different MODEL" not in pin.text
+    # The operator's route survives on both arms.
+    assert "role's own profile" in pin.text
+
+    # With no label known, both arms degrade to the generic phrase — never to a
+    # bare sentinel, which is the gap #635 closed.
+    bare = await _call(tmp_path, "task", {"label": "r", "prompt": "p", "effort": "hi"})
+    assert bare.is_error
+    assert "runs on this session's model — no model swap" in bare.text
+    assert "(this session's model)" not in bare.text
+
+
+@pytest.mark.asyncio
+async def test_the_agent_description_names_the_sentinel_model(config_dir, tmp_path) -> None:
+    """M2's other arm: the ``agent`` tool's own description, not just the field.
+
+    ``_effort_pin_description`` renders the same ``describe_effort_tiers``
+    output into the tool DESCRIPTION, which is prompt text billed every turn
+    and is a separate call site from the field's description.
+    """
+    label = "anthropic/claude-sonnet-5-5"
+    write_tiers(config_dir, {"hi": "default"})
+    context = _context(tmp_path).model_copy(update={"session_model_label": label})
+    (tool,) = create_tools(context, enabled=["agent"])
+    # The sentence rides the effort FIELD's description (``_effort_pin_description``
+    # is passed to ``_advertise_effort_tiers``), not the tool's roster blurb.
+    effort = tool.parameters["properties"]["effort"]
+    assert f"default model tier (hi → default (session model: {label}))" in effort["description"]
 
 
 @pytest.mark.asyncio

@@ -125,8 +125,8 @@ from local_operator.harness.render import (
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
-    INHERIT_TIER_SENTINEL,
     SubagentModelUnavailable,
+    is_inherit_tier_sentinel,
     read_effort_tier_selectors,
     resolve_launch_target,
     run_subagent,
@@ -5675,6 +5675,13 @@ class Session:
                     withdraw()
                 self._journal_effort_if_selection_in_force(previous, model)
                 self.refresh_frontend_state()
+                # The label moved even though the pair did not (the pin came
+                # off), so the baked tier descriptions are stale for the same
+                # reason they are on a genuine switch — see the call on that
+                # path below. Reached only on an EXPLICIT re-selection, never
+                # on an ``/effort`` knob change, so it adds nothing to that
+                # hot path.
+                self._rebuild_effort_tier_tools()
                 return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -5767,6 +5774,21 @@ class Session:
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
         self.refresh_frontend_state()
+        # The tier tools bake the session's model label into their schema text
+        # at BUILD time (``describe_effort_tiers``), while a sentinel tier
+        # resolves to ``self.model`` at LAUNCH. Without this the two drift the
+        # moment the operator follows the command that motivated the sentinel:
+        # after ``/model B`` the enum still advertises A as the model a
+        # ``default`` tier runs on, and only an unrelated config edit happens
+        # to re-render it. Routing was never wrong — the disclosure was, which
+        # is the one surface this feature exists to make honest.
+        #
+        # Placed after the fallback withdrawal above so the label it renders is
+        # the settled one, and only on this path: the same-pair early returns
+        # above cover ``/effort`` and the server's per-request sampling
+        # overrides, which run on every call and must not each pay a tool
+        # rebuild for a label that did not move.
+        self._rebuild_effort_tier_tools()
         if not announced:
             # Every host keys its model display off this event, and a genuine
             # switch used to emit NONE: the runtime's projection (and so the
@@ -13301,8 +13323,10 @@ class Session:
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
 
-        A tier whose VALUE is :data:`INHERIT_TIER_SENTINEL` resolves to the
-        session's own model (``self.model``) instead of being refused. It is
+        A tier whose VALUE is the inherit sentinel (``default``, matched by
+        :func:`~local_operator.harness.subagent.is_inherit_tier_sentinel`)
+        resolves to the session's own model (``self.model``) instead of being
+        refused. It is
         the explicit opt-in to "this tier runs on whatever this session is on":
         absent and empty still remove the tier and still refuse under
         ``strict``, so nothing an operator already has configured changes
@@ -13407,7 +13431,7 @@ class Session:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
-        if selector == INHERIT_TIER_SENTINEL:
+        if is_inherit_tier_sentinel(selector):
             # The explicit opt-in, resolved at LAUNCH and not at write time:
             # ``self.model`` is the accessor the rest of the session uses to
             # name the model every provider call is built from, and the SAME

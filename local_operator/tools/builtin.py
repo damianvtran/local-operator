@@ -99,10 +99,10 @@ from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
-    INHERIT_TIER_SENTINEL,
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    is_inherit_tier_sentinel,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -22774,7 +22774,8 @@ def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
 
     The operator-choice refusals below exist to say that ``effort`` buys a
     different MODEL, so they have to name one. A tier set to
-    :data:`INHERIT_TIER_SENTINEL` stores no model of its own — it follows the
+    :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL` stores no
+    model of its own — it follows the
     launching session — so what it runs on is the SESSION's model, rendered
     beside the sentinel rather than as a bare ``default``. ``None`` is the
     unconfigured case: nothing resolves, and inventing a selector there would
@@ -22783,7 +22784,7 @@ def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
     selector = configured_effort_tiers().get(tier)
     if not selector:
         return None
-    if selector == INHERIT_TIER_SENTINEL:
+    if is_inherit_tier_sentinel(selector):
         return session_model_label or "this session's model"
     return selector
 
@@ -22814,23 +22815,40 @@ def _operator_choice_task_rejection(tier: str, session_model_label: str | None =
     way. Two earlier orders were measured and rejected: fact first put the
     remedy at cell 73 (one word past the cut), and remedy-first with the key
     inline cut the key mid-token.
+
+    The SWAP CLAIM is conditional, for the reason the ``where`` clause is: a
+    tier on :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`
+    resolves to the model the child would
+    have run on anyway, so "it swaps the child's MODEL" is false there. The
+    reader of this message is the delegating model as much as the operator, and
+    a lead asserting a swap beside a clause denying one is exactly the
+    misreading ("`effort: hi` buys a stronger reviewer") the tier vocabulary
+    exists to prevent.
     """
     selector = configured_effort_tiers().get(tier)
     runs_on = _tier_runs_on(tier, session_model_label)
     if runs_on is None:
-        where = ""
-    elif selector == INHERIT_TIER_SENTINEL:
-        # No swap to announce when the tier tracks the session model, so the
-        # clause says what it resolves to instead of claiming a move it does
-        # not make.
-        where = f": '{tier}' = {INHERIT_TIER_SENTINEL}, i.e. it runs on {runs_on}"
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+            "child's MODEL, not its reasoning level"
+        )
+    elif is_inherit_tier_sentinel(selector):
+        # No swap to announce: say what is true instead of claiming a move this
+        # tier does not make. The label is parenthesised only when one is known,
+        # so the unlabelled case does not read "...this session's model (this
+        # session's model)".
+        named = f" ({runs_on})" if session_model_label else ""
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and "
+            f"'{tier}' runs on this session's model{named} — no model swap"
+        )
     else:
-        where = f": '{tier}' would run it on {runs_on} instead of this session's model"
-    return (
-        "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
-        f"child's MODEL, not its reasoning level{where}. That switch is "
-        "subagents.model_choice."
-    )
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+            f"child's MODEL, not its reasoning level: '{tier}' would run it on {runs_on} "
+            "instead of this session's model"
+        )
+    return f"{claim}. That switch is subagents.model_choice."
 
 
 def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = None) -> str:
@@ -22856,21 +22874,33 @@ def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = 
     ``subagents.model_choice`` — a half-drawn key is the one rendering a reader
     can mis-transcribe (R-9), and ``=model``, which reads better, measured 70 and
     would have put the ellipsis inside it.
+
+    The swap sentence is conditional for the same reason as the ``task`` arm's
+    lead, and the same principle the ``where`` clause already followed: a tier
+    on :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL` moves
+    nothing, so the sentence must not say
+    a role is pinned to a different model — it is pinned to the session's own.
     """
     selector = configured_effort_tiers().get(tier)
     runs_on = _tier_runs_on(tier, session_model_label)
     if runs_on is None:
-        where = ""
-    elif selector == INHERIT_TIER_SENTINEL:
-        where = f" ('{tier}' = {INHERIT_TIER_SENTINEL}, i.e. {runs_on})"
+        swap = "A pin runs that role on a different MODEL, not at a different reasoning level."
+    elif is_inherit_tier_sentinel(selector):
+        named = f" ({runs_on})" if session_model_label else ""
+        swap = (
+            f"A pin on '{tier}' runs that role on this session's model{named} — "
+            "the same model, not a different one, and not a different reasoning level."
+        )
     else:
-        where = f" ('{tier}' → {runs_on})"
+        swap = (
+            f"A pin runs that role on a different MODEL ('{tier}' → {runs_on}), "
+            "not at a different reasoning level."
+        )
     return (
         "effort is the operator's; pin a role via subagents.model_choice. "
         f"Setting it to 'model' hands the choice over, and a role's own profile can "
-        f"carry the pin instead. A pin runs that role on a different MODEL{where}, "
-        "not at a different reasoning level. Omit 'effort', or pass 'inherit' to "
-        "clear a pin."
+        f"carry the pin instead. {swap} "
+        "Omit 'effort', or pass 'inherit' to clear a pin."
     )
 
 
