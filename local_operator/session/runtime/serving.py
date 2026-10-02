@@ -533,13 +533,20 @@ def _fork_entry_target(args: str) -> str | None:
     The desktop fork route carries its cut point in the slash ARGS, because the
     routed-slash seam transports only strings — the same convention
     ``/checkpoints_warm``, ``/wake``, ``/monitor`` and ``/desktop_mcp`` already
-    use for their own payloads. The payload is a JSON object, and the SHAPE is
-    deliberately strict: anything that is not exactly ``{"entry_id": <str>}``
-    with a non-empty string means "no cut point", so a typed ``/fork <text>``
-    (whose trailing text is a boot prompt, and which reaches the TUI's own
-    local handler rather than this seam) can never be mistaken for a cut, and a
-    payload a future client widens without this function being updated refuses
-    instead of cutting somewhere unintended.
+    use for their own payloads.
+
+    Two outcomes, and the split is the point:
+
+    * ``None`` means "this caller is not naming a cut point" — the legacy call,
+      and a typed ``/fork <text>``'s trailing text, which is not a JSON object;
+    * a payload that IS a JSON object and is not EXACTLY ``{"entry_id":
+      <non-blank string>}`` RAISES. It is a caller that meant to cut and got the
+      shape wrong (or a newer client this runtime does not know), and falling
+      through to "no cut point" would fork the WHOLE conversation — more history
+      than it asked for, which is the one failure shape worth refusing loudly.
+      Fail-closed is also what makes version skew safe in the direction that
+      matters: an older runtime ignores the args entirely, a newer one refuses a
+      payload it cannot read.
     """
     if not args.strip():
         return None
@@ -547,10 +554,39 @@ def _fork_entry_target(args: str) -> str | None:
         payload = json.loads(args)
     except ValueError:
         return None
-    if not isinstance(payload, dict) or set(payload) != {"entry_id"}:
+    if not isinstance(payload, dict):
         return None
-    entry_id = payload["entry_id"]
-    return entry_id if isinstance(entry_id, str) and entry_id else None
+    entry_id = payload.get("entry_id")
+    if set(payload) != {"entry_id"} or not isinstance(entry_id, str) or not entry_id.strip():
+        raise ValueError(
+            "the message to fork from was not understood; " "pick a message in this conversation"
+        )
+    return entry_id.strip()
+
+
+def _fork_store(session: Any) -> Path:
+    """Where a fork of ``session`` must land: the session's OWN store root.
+
+    ONE placement rule for the whole fork branch, and it is the one
+    ``Session.fork_snapshot`` already uses (and the TUI's ``/fork`` with it): a
+    clone lands beside its parent. Resolving it here is what lets both arms
+    agree — the arm that forks at the next safe boundary used to read
+    ``config_dir()`` instead, which is the same directory whenever the session
+    was opened from this process's own store (always, in production) and a
+    DIFFERENT one for a session served out of another store, where a clone would
+    otherwise be scattered somewhere the catalogue that listed its parent is not
+    looking.
+
+    ``config_dir()`` remains the fallback for a handle whose session exposes no
+    transcript at all: that is the one case where the two answers used to
+    disagree, and it is not a session any catalogue could have listed.
+    """
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    if directory is None:
+        from local_operator.paths import config_dir
+
+        return config_dir()
+    return Path(directory).parent.parent
 
 
 class ServingSessionHandle(SessionHandle):
@@ -6347,7 +6383,6 @@ class ServingSessionHandle(SessionHandle):
             )
         if command == "fork":
             from local_operator.fork import fork_session
-            from local_operator.paths import config_dir
 
             if getattr(session, "_compacting", False):
                 raise ValueError("Wait for compaction to finish before forking")
@@ -6361,11 +6396,31 @@ class ServingSessionHandle(SessionHandle):
                 # FUTURE). The transcript's own writer lock is what keeps the
                 # copy from racing an append or a compaction, exactly as the
                 # TUI's /fork relies on mid-turn.
+                #
+                # It is INDEPENDENT of a pending ``next_safe`` request, and
+                # deliberately does not test ``has_pending_fork()``: that check
+                # below exists because a second boundary request would REPLACE
+                # the first and silently drop a request the user made, while a
+                # cut touches neither — the pending fork still fires at its turn
+                # boundary and the user gets the two forks they asked for. A
+                # named cut is also the one gesture a user makes WHILE a fork is
+                # already waiting, so refusing it would put a "try again later"
+                # in front of the common case.
                 snapshot = await session.fork_snapshot(through_entry_id=through_entry_id)
                 return SlashResult(
                     kind="block",
-                    data={"type": "forked", "session_id": snapshot["fork_id"]},
+                    data={
+                        "type": "forked",
+                        "session_id": snapshot["fork_id"],
+                        # The row the copy ACTUALLY stopped at: equal to the named
+                        # entry unless the cut landed at-or-before an unfinished
+                        # tool batch. The desktop route passes it on so a UI can
+                        # say "started one message earlier" instead of silently
+                        # cutting somewhere the user did not point at.
+                        "cut_entry_id": snapshot["cut_entry_id"],
+                    },
                 )
+            store = _fork_store(session)
             if getattr(session, "is_streaming", False):
                 if session.has_pending_fork():
                     raise ValueError("A fork is already waiting for a safe boundary")
@@ -6378,14 +6433,14 @@ class ServingSessionHandle(SessionHandle):
                         else:
                             settled.set_result(fork_id)
 
-                session.request_fork(config_dir(), on_complete=complete)
+                session.request_fork(store, on_complete=complete)
                 try:
                     fork_id = await settled
                 except BaseException:
                     session.cancel_fork()
                     raise
             else:
-                fork_id = await asyncio.to_thread(fork_session, config_dir(), session.session_id)
+                fork_id = await asyncio.to_thread(fork_session, store, session.session_id)
             return SlashResult(kind="block", data={"type": "forked", "session_id": fork_id})
         if command == "context":
             return self._context_slash(session, SlashResult)

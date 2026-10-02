@@ -31,8 +31,11 @@ pytestmark = pytest.mark.asyncio
 
 TOKEN = "desktop-fork-cut-route-token"
 CHILD_ID = "child000001"
+LANDED = "u1"
 
 REQUEST_ID = "3f2a1c40-0000-4000-8000-000000000001"
+#: A receipt is keyed by request id AND payload, so a second body needs its own id.
+BLANK_REQUEST_ID = "3f2a1c40-0000-4000-8000-000000000002"
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +66,13 @@ class FakeRemote:
 
     async def route_shared_slash(self, command: str, args: str) -> Any:
         self.slashes.append((command, args))
-        return {"kind": "block", "data": {"type": "forked", "session_id": CHILD_ID}}
+        data: dict[str, Any] = {"type": "forked", "session_id": CHILD_ID}
+        if args:
+            # The runtime answers a cut with the row its copy actually stopped
+            # at; the bare arm has none to report. Mirrored here so the route's
+            # pass-through (and its absence) is what this file pins.
+            data["cut_entry_id"] = LANDED
+        return {"kind": "block", "data": data}
 
     async def admit_prompt(self, text: str, *, command_id: str, images: Any) -> tuple[str, bool]:
         self.admitted.append((text, command_id))
@@ -126,7 +135,14 @@ async def test_a_named_cut_point_rides_the_args_and_keeps_the_response_shape(
     # ``result.data``, exactly as the desktop client reads it today.
     assert response.json()["result"] == {
         "replayed": False,
-        "data": {"session_id": CHILD_ID, "parent_id": "s1", "boundary": "at_entry"},
+        "data": {
+            "session_id": CHILD_ID,
+            "parent_id": "s1",
+            "boundary": "at_entry",
+            # The landed row rides the response, so a client can say the fork
+            # started one message earlier than it pointed at.
+            "cut_entry_id": LANDED,
+        },
     }
     # The owner's wire, byte-for-byte: the module on the other side parses this.
     assert remote.slashes == [("fork", json.dumps({"entry_id": "u1"}))]
@@ -141,6 +157,13 @@ async def test_the_absent_target_sends_the_call_this_route_has_always_sent(
         response = await client.post(
             "/v1/desktop/sessions/s1/fork", json={"request_id": REQUEST_ID}
         )
+        # A BLANK id names nothing, so with ``next_safe`` it is the absent target
+        # — the same call, not a 422 and not a cut. Its own request id, because a
+        # receipt is keyed by id AND payload.
+        blank = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={"request_id": BLANK_REQUEST_ID, "entry_id": "   "},
+        )
 
     assert response.status_code == 200, response.text
     assert response.json()["result"]["data"] == {
@@ -148,8 +171,10 @@ async def test_the_absent_target_sends_the_call_this_route_has_always_sent(
         "parent_id": "s1",
         "boundary": "next_safe",
     }
-    assert remote.slashes == [("fork", "")]
+    assert blank.status_code == 200, blank.text
+    assert remote.slashes == [("fork", ""), ("fork", "")]
     assert "admission" not in response.json()["result"]["data"]
+    assert "cut_entry_id" not in response.json()["result"]["data"], "no cut, no landed row"
 
 
 async def test_an_opening_message_still_rides_the_child_admission(tmp_path: Path) -> None:
@@ -179,6 +204,7 @@ async def test_an_opening_message_still_rides_the_child_admission(tmp_path: Path
     [
         {"request_id": REQUEST_ID, "boundary": "at_entry"},  # no target named
         {"request_id": REQUEST_ID, "boundary": "at_entry", "entry_id": ""},
+        {"request_id": REQUEST_ID, "boundary": "at_entry", "entry_id": "   "},
         {"request_id": REQUEST_ID, "boundary": "next_safe", "entry_id": "u1"},  # a cut denied
         {"request_id": REQUEST_ID, "boundary": "at_message", "entry_id": "u1"},  # not a boundary
         {"request_id": REQUEST_ID, "boundary": "at_entry", "entry_id": "u1", "extra": 1},

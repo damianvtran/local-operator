@@ -931,6 +931,9 @@ async def test_a_fork_cut_through_a_named_entry(
             )
             assert cut_fork.status_code == 200, cut_fork.text
             assert cut_fork.json()["result"]["data"]["boundary"] == "at_entry"
+            # The landed row rides the answer: a client can tell the fork started
+            # where it pointed rather than having to diff the child's rows.
+            assert cut_fork.json()["result"]["data"]["cut_entry_id"] == parent_ids[cut_index]
             cut_child = cut_fork.json()["result"]["data"]["session_id"]
             assert cut_child != sid
             # EQUALITY, not "contains": the child's conversation rows are exactly

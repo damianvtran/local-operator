@@ -1748,13 +1748,46 @@ class Transcript:
                 raise asyncio.CancelledError
             return rows
 
+    def _fork_governing_compaction(self, through_entry_id: str | None) -> TranscriptEntry | None:
+        """The compaction whose summary a fork's child replays, if any.
+
+        THE ONE PLACE THE CUT/COMPACTION RULE LIVES; ``fork_snapshot``'s
+        docstring states it. The governing compaction is the NEWEST compaction
+        whose ANCHOR (``first_kept_entry_id``) sits at-or-before the cut — not
+        the newest compaction ROW at-or-before it, which is the distinction that
+        makes a cut inside the kept window legal: a compaction is written after
+        the window it preserves, so its row usually sits AFTER any point in that
+        window while its anchor sits before it.
+
+        ``None`` while compactions EXIST therefore means "this cut is before
+        every anchor", which ``fork_snapshot`` refuses; ``None`` with no
+        compactions means the conversation has none.
+        """
+        compactions = [row for row in self._entries if row.type == ENTRY_COMPACTION]
+        if not compactions:
+            return None
+        if through_entry_id is None:
+            return compactions[-1]
+        index_of = {row.id: position for position, row in enumerate(self._entries)}
+        cut_index = index_of.get(through_entry_id)
+        if cut_index is None:
+            return None
+        for row in reversed(compactions):
+            # An unresolvable anchor (a row this journal no longer holds) is read
+            # as "after the cut": the conservative side, and the only one that
+            # cannot produce a child replaying summarized-away rows.
+            anchor = index_of.get(str(row.payload.get("first_kept_entry_id", "")))
+            if anchor is not None and anchor <= cut_index:
+                return row
+        return None
+
     async def fork_snapshot(
         self,
         *,
         message: str = "",
         is_compacting: Callable[[], bool] = lambda: False,
         through_entry_id: str | None = None,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, str | None]:
         """Copy a committed transcript without racing append or file compaction.
 
         The runtime, not a viewer's cache, defines this boundary. Cancellation of
@@ -1767,6 +1800,35 @@ class Transcript:
         loses every conversation row after it — "fork the conversation from that
         point on". It is the same copy either way, so the parent is untouched
         whether or not a cut point is named.
+
+        Returns ``(fork_id, omitted, landed_entry_id)``. ``landed_entry_id`` is
+        the conversation row the child's copy ACTUALLY stops at, which is the
+        named entry unless the cut landed at-or-before an unfinished tool batch;
+        it is ``None`` when nothing was retained, and it is what lets a caller
+        tell the user the fork started one message earlier than they pointed.
+
+        **THE COMPACTION RULE — the one place it is stated.** A cut is legal
+        at-or-after the ANCHOR (``first_kept_entry_id``) of the newest
+        compaction whose anchor is at-or-before it, and the child then replays
+        the parent's compacted view truncated there: that summary, then the rows
+        from its anchor. A cut BEFORE every anchor is REFUSED, because the child
+        could only replay history the parent had already summarized away — the
+        context the compaction exists to drop.
+
+        What the child keeps, precisely:
+
+        * every conversation row up to the cut, minus whatever the unpaired-tail
+          trim drops (a cut never splits a call from its results);
+        * the GOVERNING compaction's marker row, retained even when its own row
+          sits after the cut — which is the ordinary case, because a compaction
+          is written after the kept window it preserves. It is the boundary
+          record of the retained prefix, not a conversation row, so "everything
+          after the cut is not copied" is a rule about the CONVERSATION;
+        * every other journal row (prune, custom) wholesale, and every compaction
+          row BEFORE the governing one, which replay cannot reach;
+        * and NOT any compaction row AFTER the governing one: replay reads the
+          LAST marker it finds, so a later one would take the child's history
+          back past its own cut.
         """
         from local_operator.fork import fork_session
         from local_operator.session.session import _paired_prefix
@@ -1785,7 +1847,7 @@ class Transcript:
                     "pick a message from this session to fork from"
                 )
 
-            def copy_snapshot() -> tuple[str, bool]:
+            def copy_snapshot() -> tuple[str, bool, str | None]:
                 # Replay resolves attachments and can traverse a long history.
                 # It belongs off-loop with the copy, under the same writer lock,
                 # or /fork would freeze the UI and the original tool it preserves.
@@ -1804,45 +1866,50 @@ class Transcript:
                 retained = {item.id for item in paired}
                 # Measured against the FULL history, never against ``cut``: every
                 # conversation row after the cut point is excluded, together with
-                # the rows the cut itself dropped. Journal rows the clone keeps
-                # wholesale (compaction, prune, custom) are not message ids, so
-                # they are not dropped here — ``fork_session`` keeps their bytes,
-                # which is what preserves the prune and attachment metadata.
-                excluded = frozenset(item.id for item in history if item.id not in retained)
-                compaction = next(
-                    (row for row in reversed(self._entries) if row.type == ENTRY_COMPACTION), None
-                )
-                if (
-                    compaction is not None
-                    and compaction.payload.get("first_kept_entry_id") in excluded
-                ):
-                    # Canonical replay falls back to full history if its latest
-                    # anchor disappears. Refuse BEFORE allocating a fork rather
-                    # than resurrect summarized context or rewrite marker bytes.
-                    #
-                    # A named cut reaches this from two directions with two
-                    # different remedies, and the marker row's own presence is
-                    # what tells them apart: if the MARKER is gone too, the cut
-                    # landed before the summary, so a later message is the fix;
-                    # if the marker is retained, its anchor was trimmed with the
-                    # unpaired tail, so the fix is the original finishing that
-                    # batch — today's sentence, unchanged.
-                    if through_entry_id is not None and compaction.id in excluded:
-                        raise ValueError(
-                            "that message sits before the conversation's last summary; "
-                            "fork from a message after the summary instead"
-                        )
+                # the rows the cut itself dropped.
+                excluded = {item.id for item in history if item.id not in retained}
+                compactions = [row for row in self._entries if row.type == ENTRY_COMPACTION]
+                governing = self._fork_governing_compaction(through_entry_id)
+                if compactions and governing is None:
+                    # Only reachable WITH a cut point: no anchor is at-or-before
+                    # it, so the child's whole history would be rows the parent
+                    # had summarized away. Refuse BEFORE allocating a fork.
                     raise ValueError(
-                        "compaction boundary is in an unfinished tool batch; "
-                        "retry /fork after the original finishes that batch"
+                        "that message sits before the conversation's last summary; "
+                        "fork from a message after the summary instead"
                     )
+                if governing is not None:
+                    anchor = str(governing.payload.get("first_kept_entry_id", ""))
+                    if anchor in excluded:
+                        # Canonical replay falls back to full history if its
+                        # latest anchor disappears, so a child that kept this
+                        # marker without the anchor would replay from row 0 — the
+                        # summarized context resurrected. The anchor gets dropped
+                        # here only by the unpaired-tail trim: an anchor at-or-.
+                        # before the cut is retained by construction.
+                        raise ValueError(
+                            "compaction boundary is in an unfinished tool batch; "
+                            "retry /fork after the original finishes that batch"
+                        )
+                    # The governing marker is the boundary record of the retained
+                    # prefix, and every LATER marker must go so replay cannot
+                    # outrank it (see the docstring's rule).
+                    excluded.discard(governing.id)
+                    later = False
+                    for row in compactions:
+                        if row is governing:
+                            later = True
+                            continue
+                        if later:
+                            excluded.add(row.id)
                 fork_id = fork_session(
                     self.directory.parent.parent,
                     self.directory.name,
                     message=message,
-                    exclude_entry_ids=excluded,
+                    exclude_entry_ids=frozenset(excluded),
                 )
-                return fork_id, bool(excluded)
+                landed = paired[-1].id if paired else None
+                return fork_id, bool(excluded), landed
 
             worker = asyncio.create_task(asyncio.to_thread(copy_snapshot))
             cancelled = False
