@@ -75,6 +75,11 @@ from local_operator.tui.widgets.projects_send import (
     SendTargetCard,
     send_targets,
 )
+from local_operator.tui.widgets.projects_start import (
+    PLAIN_LABEL,
+    StartPickerCard,
+    StartTarget,
+)
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
@@ -235,6 +240,22 @@ def _style_resolver() -> Callable[[str], Style]:
     return resolve
 
 
+class ProjectsViewStartRequested(Message):
+    """The start picker chose a row: boot a session for this project (P5b).
+
+    ONE message for one outcome, and it names BOTH things the create needs:
+    the project the session is auto-linked to (and whose snapshot the kickoff
+    prompt quotes) and the target the row picked. The page cannot answer
+    either on its own — the registries and the creation core are the app's —
+    so it hands the whole question over rather than half of it.
+    """
+
+    def __init__(self, *, project_id: str, target: StartTarget) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.target = target
+
+
 class ProjectsViewMilestoneToggled(Message):
     """``↵`` on a milestone row: flip its completion through the store.
 
@@ -362,6 +383,11 @@ class ProjectsView(Vertical):
         # straight to it, anywhere else it opens the target picker (spec
         # §7.5.1). Free in the mode and in the app's focused chain.
         Binding("m", "message", "Message", show=False),
+        # `s` starts a session for the selected/current project (P5b) — the
+        # spec's own key for it (§3.2), free in the mode and in the app's
+        # focused chain. It opens the team/agent picker; the boot itself is the
+        # APP's (the registries and the creation core are not the page's).
+        Binding("s", "start", "Start session", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
         # of detail" rule); in the other views it is inert and the footer sheds
@@ -440,6 +466,16 @@ class ProjectsView(Vertical):
         # than derived: only the app can read the registry, and a page that
         # guessed would paint a row nobody answers to.
         self._manager_target: SendTarget | None = None
+        # Start-session state (P5b): the open picker card, and the ROWS it
+        # offers — injected by the app from the same team/agent catalogues the
+        # desktop pane's new-chat picker reads, because no registry is
+        # reachable from here. The seed is the honest one for a host that never
+        # injects: the plain row, which is the whole feature on an install with
+        # no registries at all (spec D7).
+        self._start_card: StartPickerCard | None = None
+        self._start_rows: list[StartTarget] = [
+            StartTarget(kind="plain", name="", label=PLAIN_LABEL)
+        ]
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
         self._title = Static(classes="projects-view-title")
@@ -498,6 +534,10 @@ class ProjectsView(Vertical):
         # rung: that list is what the painter hides, and a button absent from
         # it stays visible at its DOM slot, ahead of the rung it belongs to.
         self._msg_hint = HintButton("m", lambda: self.action_message())
+        # `s` start (P5b). In `_hint_buttons()` for the same reason `m` is:
+        # that list is what the painter hides, and a button absent from it stays
+        # visible at its DOM slot, ahead of the rung it belongs to.
+        self._start_hint = HintButton("s", lambda: self.action_start())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
         self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._tab_hint = HintButton("tab", self._form_focus_next)
@@ -731,6 +771,9 @@ class ProjectsView(Vertical):
             return True
         if self._mode == "send":
             self._close_send_picker()
+            return True
+        if self._mode == "start":
+            self._close_start_picker()
             return True
         return False
 
@@ -1045,6 +1088,8 @@ class ProjectsView(Vertical):
             rungs = self._compose_hint_rungs()
         elif self._mode == "send":
             rungs = self._send_hint_rungs()
+        elif self._mode == "start":
+            rungs = self._start_hint_rungs()
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
         for leads, esc_label in rungs:
@@ -1090,6 +1135,7 @@ class ProjectsView(Vertical):
             self._refresh_hint,
             self._create_hint,
             self._msg_hint,
+            self._start_hint,
             self._open_hint,
             self._move_hint,
             self._page_hint,
@@ -1157,7 +1203,15 @@ class ProjectsView(Vertical):
         stated one instruction twice in two inks (design round 2, D10). An empty
         rung hides every button — the row is blank while the card owns the keys,
         and the canvas ladder returns when it closes.
+
+        P5b's start picker takes the same rung for the same reasons; it is a
+        separate mode (``start``) because its card is a separate surface, and
+        the two must never both be up.
         """
+        return [([], "")]
+
+    def _start_hint_rungs(self) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The start picker's rung: EMPTY, exactly the send card's (D10)."""
         return [([], "")]
 
     def _sync_form_hints(self) -> None:
@@ -1237,6 +1291,25 @@ class ProjectsView(Vertical):
         # `c create` still painted). `r refresh` sheds first; the pair falls
         # together.
         msg_hint = (self._msg_hint, " message", True)
+        # `s start` (P5b): the second of the new page keys, and the one that
+        # sets a session going. It rides EVERY rung that carries `c create`,
+        # exactly as `m message` does — P5a's measured invariant, pinned by
+        # `test_the_msg_hint_never_vanishes_while_create_is_advertised`. The
+        # spec's finer shed order (`m` before `s` before `c`) would need a rung
+        # that drops `m` while keeping `c`, which that invariant forbids, and
+        # re-ranking P5a's shipped rungs is a change to P5a's measured ladder
+        # rather than to this one.
+        #
+        # THE LABEL IS `new`, NOT THE SPEC'S `start`, AND ONE CELL DECIDED IT.
+        # Measured with this app's own `_measure_hints`: the timeline's full row
+        # costs 149 cells with " start" against the 148 a 150-column terminal
+        # offers, so the zoom hint — which `+ `/`-` owns and
+        # `test_zoom_hint_is_advertised_only_on_the_timeline` pins at exactly
+        # this width — fell off the row. " new" is two cells cheaper, keeps the
+        # full row at 146 (the spec §3.3 arithmetic for 150 columns), and is the
+        # app's OWN noun for the thing: the hotkey this key stands beside is
+        # already called "the new session hotkey".
+        start_hint = (self._start_hint, " new", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
         nxt = (self._next_hint, " next", True)
@@ -1257,6 +1330,7 @@ class ProjectsView(Vertical):
             refresh,
             create_hint,
             msg_hint,
+            start_hint,
             open_hint,
             detail_hint,
             zoom,
@@ -1265,6 +1339,43 @@ class ProjectsView(Vertical):
             rung(all_leads, "back to conversation", state=True),
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
+            # THE TIMELINE'S FULL ROW GIVES UP `d detail` BEFORE IT GIVES UP
+            # ZOOM, and that is arithmetic again. `+`/`-` is the timeline's own
+            # key, so the timeline's row carries one element the other views'
+            # rows do not; measured with `_measure_hints`, the full timeline row
+            # costs 147 cells (with the `s new` label) against the 144 a
+            # 150-column terminal offers, so the row the ladder falls back to
+            # was losing `+/- zoom` — the one hint
+            # `test_zoom_hint_is_advertised_only_on_the_timeline` pins at exactly
+            # this width. This rung is inserted ONLY when `zoom` is present
+            # (i.e. on the timeline; `zoom` is None everywhere else), so the
+            # list and board rows are untouched and keep `d detail` at every
+            # width they have it today. `d` still opens the detail here — the
+            # shed-not-removed rule — and the hint the row gives up is the one
+            # the parity spec's own row never carried.
+            *(
+                [
+                    rung(
+                        leads_of(
+                            scroll,
+                            list_hint,
+                            board_hint,
+                            timeline_hint,
+                            nxt,
+                            refresh,
+                            create_hint,
+                            msg_hint,
+                            start_hint,
+                            open_hint,
+                            zoom,
+                        ),
+                        "back",
+                        state=False,
+                    )
+                ]
+                if zoom is not None
+                else []
+            ),
             rung(
                 leads_of(
                     scroll,
@@ -1275,6 +1386,7 @@ class ProjectsView(Vertical):
                     refresh,
                     create_hint,
                     msg_hint,
+                    start_hint,
                     open_hint,
                     detail_hint,
                 ),
@@ -1291,6 +1403,7 @@ class ProjectsView(Vertical):
                     refresh,
                     create_hint,
                     msg_hint,
+                    start_hint,
                     detail_hint,
                 ),
                 "back",
@@ -1305,6 +1418,7 @@ class ProjectsView(Vertical):
                     nxt,
                     create_hint,
                     msg_hint,
+                    start_hint,
                     detail_hint,
                 ),
                 "back",
@@ -1312,7 +1426,42 @@ class ProjectsView(Vertical):
             ),
             rung(
                 leads_of(
-                    list_hint, board_hint, timeline_hint, nxt, create_hint, msg_hint, detail_hint
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    create_hint,
+                    msg_hint,
+                    start_hint,
+                    detail_hint,
+                ),
+                "back",
+                state=False,
+            ),
+            # THE P5a ROW ITSELF, and `s start` sheds HERE — one rung before
+            # `m message`, which is the opposite of the spec's §3.3 shed order
+            # and is arithmetic rather than taste. Measured with this app's own
+            # `_measure_hints`: the rung above costs 101 cells against the 98 a
+            # 100-column terminal offers, and the four ways to pay for the last
+            # three cells all cost more than they look — drop `d detail` (this
+            # rung, -10) takes the ONLY hint for the detail page off the row P2
+            # pinned it to, drop `v next` (-9) sheds a view key before its
+            # siblings, and shortening the `esc back` label would move P5a's
+            # own measured 100-column row. This rung keeps that row BYTE-
+            # IDENTICAL (`1 list · 2 board · 3 timeline · v next · c create ·
+            # m message · d detail · esc back`, P5a's QA L1), so the new key
+            # joins the ladder only where the ladder has room for it: at 100
+            # columns `s` still WORKS (the shed-not-removed rule) and is simply
+            # not advertised, exactly as `m` is not at 60.
+            rung(
+                leads_of(
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    create_hint,
+                    msg_hint,
+                    detail_hint,
                 ),
                 "back",
                 state=False,
@@ -1364,8 +1513,23 @@ class ProjectsView(Vertical):
         # is the first of the new keys to shed (spec §3.3), so it rides only
         # the two widest rungs of each branch.
         msg = (self._msg_hint, " message", True)
+        # `s new` (P5b). THE ORDER HERE IS THE CANVAS'S, NOT THE SPEC'S, and the
+        # arithmetic is why: with this app's own `_measure_hints`, the widest
+        # detail row on a row reading `↵ toggle groundwork` costs 95 cells
+        # against the 94 a 100-column terminal offers — one cell over, which
+        # would have pushed `r refresh` off the row P5a measured at exactly this
+        # width (`↑↓ move · pgup/pgdn page · ↵ toggle groundwork · m message ·
+        # r refresh · esc back`, 87 cells). So the new key is also the FIRST to
+        # shed here, exactly as on the canvases, and the shipped rows are
+        # preserved BYTE-IDENTICALLY at every width they are chosen today.
+        # The sequence stays monotone — each narrower rung is a SUBSET of the
+        # wider one, so widening a terminal never takes a hint away (P5a's F3
+        # class): the ladder gives up `s`, then `r`, then `m`, then the page
+        # keys. `s` still WORKS wherever it is not advertised.
+        start = (self._start_hint, " new", True)
         if named is None:
             return [
+                rung([move, page, msg, start, refresh], "back"),
                 rung([move, page, msg, refresh], "back"),
                 rung([move, page, msg], "back"),
                 rung([move, page], "back"),
@@ -1373,6 +1537,7 @@ class ProjectsView(Vertical):
                 rung([], ""),
             ]
         return [
+            rung([move, page, open_hint, msg, start, refresh], "back"),
             rung([move, page, open_hint, msg, refresh], "back"),
             rung([move, page, open_hint, msg], "back"),
             rung([move, page, open_hint], "back"),
@@ -1422,6 +1587,7 @@ class ProjectsView(Vertical):
             yield self._refresh_hint
             yield self._create_hint
             yield self._msg_hint
+            yield self._start_hint
             yield self._open_hint
             yield self._move_hint
             yield self._page_hint
@@ -1461,6 +1627,8 @@ class ProjectsView(Vertical):
         self.call_after_refresh(self._sync_scroll_hint)
         if self._send_card is not None:
             self.call_after_refresh(self._place_send_card)
+        if self._start_card is not None:
+            self.call_after_refresh(self._place_start_card)
 
     def _sync_scroll_hint(self) -> None:
         """Arm ``↔↕ scroll`` only while the body has somewhere to scroll.
@@ -1992,9 +2160,9 @@ class ProjectsView(Vertical):
             # answer that question, so it asks the page.
             self._form_page.action_cancel_request()
             return
-        if self._mode in ("compose", "send"):
-            # The send surfaces pop one level, exactly like the detail (P5a):
-            # `esc cancel` on the band, `esc close` on the card.
+        if self._mode in ("compose", "send", "start"):
+            # The send and start surfaces pop one level, exactly like the detail
+            # (P5a/P5b): `esc cancel` on the band, `esc close` on either card.
             self.escape_surface()
             return
         if self._mode == "detail":
@@ -2199,7 +2367,7 @@ class ProjectsView(Vertical):
         NOT in the set — it is the form's own way out — and neither is `c`,
         which is inert in form mode by its own guard.
         """
-        if self._mode in ("form", "send", "compose") and action in self._CANVAS_ACTIONS:
+        if self._mode in ("form", "send", "compose", "start") and action in self._CANVAS_ACTIONS:
             return False
         return super().check_action(action, parameters)
 
@@ -2217,7 +2385,7 @@ class ProjectsView(Vertical):
             # `m` again re-targets rather than stacking a second card.
             self.close_send_picker()
             return
-        if self._mode in ("form", "compose"):
+        if self._mode in ("form", "compose", "start"):
             return
         direct = self._detail_session_target()
         if direct is not None:
@@ -2276,7 +2444,21 @@ class ProjectsView(Vertical):
         self.call_after_refresh(self._paint_chrome)
 
     def _place_send_card(self) -> None:
-        """Float the send card over the canvas (design review round 1, D1/D2).
+        """Float the send card over the canvas (design review round 1, D1/D2)."""
+        self._place_card(self._send_card)
+
+    def _place_start_card(self) -> None:
+        """Float the start card over the same ground, by the same arithmetic.
+
+        One placement rule for both cards on purpose: the two surfaces are the
+        same family, the geometry is the part a reader notices when it drifts,
+        and a second copy of this arithmetic is how the two would come to
+        disagree about where a card sits (spec §5.6 draws them side by side).
+        """
+        self._place_card(self._start_card)
+
+    def _place_card(self, card: Any | None) -> None:
+        """Float ``card`` over the canvas (design review round 1, D1/D2).
 
         The anchor is the canvas's first painted row, and the row budget is
         everything from there to the page's own content bottom — so the card
@@ -2285,7 +2467,6 @@ class ProjectsView(Vertical):
         moves nothing else: no reflow, no scroll-region growth, no row taken
         from the canvas.
         """
-        card = self._send_card
         if card is None:
             return
         body = self._body
@@ -2294,9 +2475,10 @@ class ProjectsView(Vertical):
         # The ground runs from the canvas's first row to the page's own content
         # bottom: while the card is up it may cover the footer strip and the
         # hint row below the canvas (its own legend then carries the grammar,
-        # and the page keys are inert anyway with mode='send'), but it can
-        # never reach the dock. Budgeting only the body clipped the list to a
-        # single row at 60x24 and 80x24 — still inside the page, still useless.
+        # and the page keys are inert anyway with mode='send'/'start'), but it
+        # can never reach the dock. Budgeting only the body clipped the list to
+        # a single row at 60x24 and 80x24 — still inside the page, still
+        # useless.
         ground = self.content_region.y + self.content_region.height - top
         card.set_available(ground)
         # D9 (design round 2): the card takes the width it can hold — the body's
@@ -2312,6 +2494,95 @@ class ProjectsView(Vertical):
             body.region.x + padding.left - content.x,
             top - content.y,
         )
+
+    # -- start session (P5b, spec §7.6) -------------------------------------
+    def set_start_rows(self, rows: list[StartTarget] | None) -> None:
+        """Hand the page the picker's rows — the host's job, not the page's.
+
+        The catalogues live behind the agent/team registries, which this widget
+        has no business reaching; the app injects them (the same two
+        projections the desktop pane's new-chat picker reads). ``None``
+        restores the seeded plain row, which is what a host with no registry
+        can honestly offer.
+        """
+        self._start_rows = (
+            list(rows) if rows else [StartTarget(kind="plain", name="", label=PLAIN_LABEL)]
+        )
+
+    def action_start(self) -> None:
+        """`s` — start a session for the selected/current project (spec §3.2).
+
+        Off the canvas the cursor's project is the one being worked on, and off
+        the detail page it is the project the page is showing; both are
+        ``current_project_id``, so one guard covers both.
+        """
+        if self._mode not in ("canvas", "detail"):
+            return
+        if self.current_project_id() is None:
+            # Nothing selected (an empty store): there is no project to link a
+            # session to and no snapshot to quote, so there is nothing to ask.
+            return
+        self.open_start_card()
+
+    def open_start_card(self) -> None:
+        """Float the start card over the page and let it take the keys."""
+        if self._start_card is not None:
+            return
+        card = StartPickerCard(self._start_rows, style_for=_style_resolver())
+        self._start_card = card
+        self._mode = "start"
+        self.mount(card, before=self._title)
+        self._place_start_card()
+        self.call_after_refresh(self._place_start_card)
+        self.call_after_refresh(self._paint_chrome)
+
+    def close_start_picker(self) -> None:
+        self._close_start_picker()
+
+    def _close_start_picker(self) -> None:
+        card = self._start_card
+        self._start_card = None
+        if card is not None:
+            card.remove()
+        if self._mode == "start":
+            self._mode = "detail" if self._detail_page.display else "canvas"
+        self._paint_chrome()
+
+    def start_pending(self) -> None:
+        """The create is running off the loop (spec §7.6.2's pending state)."""
+        if self._start_card is not None:
+            self._start_card.set_pending()
+
+    def start_refusal(self, sentence: str) -> None:
+        """A refusal, said where the reader asked (in the card, not a toast).
+
+        If the reader closed the card while the create was running the sentence
+        goes to the page's own notice row instead: the outcome still has to
+        land somewhere, and a receipt painted into a removed widget is a
+        receipt nobody reads.
+        """
+        if self._start_card is not None:
+            self._start_card.show_refusal(sentence)
+            return
+        self.show_notice(sentence)
+
+    def on_start_picker_card_chosen(self, message: StartPickerCard.Chosen) -> None:
+        """A row was picked: hand the whole question to the app (P5b).
+
+        The page cannot boot a session — the registries, the creation core and
+        the hand-off machinery are all the app's — so it re-posts one message
+        naming what it knows: WHICH project and WHICH target.
+        """
+        message.stop()
+        project_id = self.current_project_id()
+        if project_id is None:
+            return
+        self.post_message(ProjectsViewStartRequested(project_id=project_id, target=message.target))
+
+    def on_start_picker_card_closed(self, message: StartPickerCard.Closed) -> None:
+        message.stop()
+        self._close_start_picker()
+        self._focus_canvas()
 
     def close_send_picker(self) -> None:
         self._close_send_picker()
