@@ -78,12 +78,15 @@ SEND_CARD_MAX_WIDTH = 60
 def compose_band(target: SendTarget) -> str:
     """The composer's recipient strip while the page is composing (spec §7.5.2).
 
-    ONE function because the band is painted in two places — the editor's
-    placeholder when compose opens, and again after a refusal — and a second
-    spelling of the strip is how the two end up disagreeing about the target or
-    the way out.
+    ONE function so the strip cannot be spelled two ways: the app paints it
+    when compose opens, and the receipt paths repaint the same surface. It
+    names the target and the ONE key that still reaches the page while the
+    composer holds the caret (``esc``); it does NOT advertise ``m target`` —
+    ``m`` types a letter into the message, and a hinted key that types your
+    sentence is the worst version of the hinted-key-that-does-nothing defect
+    (UX round 1, Q3/U5).
     """
-    return f"send to: {target.label} · m target · esc cancel"
+    return f"send to: {target.label} · esc cancel"
 
 
 def pending_line(target: SendTarget) -> str:
@@ -314,8 +317,14 @@ class SendTargetCard(Container):
 
     def on_mount(self) -> None:
         self._repaint()
+        # The INPUT takes focus, not the card: the card's grammar is "type to
+        # filter", and with the card itself focused every printable key died
+        # on it (QA round 1, Q2 — typing did nothing until a Tab, and nothing
+        # advertised the Tab). ↑/↓/enter/escape still reach the card from the
+        # Input — it does not consume them (probed) — so the old dance is
+        # gone and typing filters on the first keystroke.
         try:
-            self.focus()
+            self.query_one("#projects-send-filter", Input).focus()
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 
@@ -424,6 +433,16 @@ class SendTargetCard(Container):
             return None
 
     # -- the grammar --------------------------------------------------------
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """``enter`` from the filter — the card's common choose path (Q2).
+
+        With the Input focused, Enter never reaches the card's own `enter`
+        binding; the Input posts this instead, and both paths converge on
+        :meth:`action_choose` so "choose" cannot mean two things.
+        """
+        event.stop()
+        self.action_choose()
+
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
         self._rows = filter_targets(self._all, event.value)

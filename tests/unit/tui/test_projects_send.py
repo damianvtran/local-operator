@@ -99,8 +99,9 @@ def test_filtering_is_a_subsequence_over_the_row_text() -> None:
 
 
 def test_the_band_names_the_target_and_the_way_out() -> None:
+    """Q3: `m target` is gone from the band — while composing, `m` types."""
     target = SendTarget(kind="session", session_id="s1", label="projects review", state="live")
-    assert compose_band(target) == "send to: projects review · m target · esc cancel"
+    assert compose_band(target) == "send to: projects review · esc cancel"
     assert "esc closes" in NO_TARGET_FOOTER and " s " not in NO_TARGET_FOOTER
 
 
@@ -115,7 +116,7 @@ from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import pytest  # noqa: E402
-from textual.widgets import Static  # noqa: E402
+from textual.widgets import Input, Static  # noqa: E402
 
 from local_operator.mobile.peer_send import DeliveryOutcome  # noqa: E402
 from local_operator.tui.widgets.projects_send import SendTargetCard  # noqa: E402
@@ -533,3 +534,131 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
             pilot, lambda: view._notice == 'sent to "older review" · wake unconfirmed'
         )
         assert editor.text == "keep me please"
+
+
+# -- the key model (agent review round 1, Q2/Q3/Q4/U5) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_typing_reaches_the_filter_and_enter_chooses(tmp_path: Path) -> None:
+    """QA round 1, Q2: the card says `type to filter` — the keys must LAND in
+    the filter with no Tab dance, and `enter` from the same state chooses."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        targets = [
+            SendTarget(
+                kind="session", session_id=f"session{i}", label=f"work {i}", state="live", live=True
+            )
+            for i in range(3)
+        ]
+        view._send_targets = lambda: list(targets)  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        filt = card.query_one("#projects-send-filter", Input)
+        assert app.focused is filt  # the Input starts focused (Q2)
+        # ↑/↓ still move the list from the Input…
+        await pilot.press("down")
+        await pilot.pause()
+        assert card.index == 1
+        # …and typing FILTERS on the first keystroke, resetting the cursor.
+        await pilot.press("2")
+        await pilot.pause()
+        assert filt.value == "2"
+        assert [row.session_id for row in card.rows] == ["session2"]
+        assert card.index == 0
+        # `enter` posts Input.Submitted (the Input holds focus) → choose.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.composing
+        target = view.compose_target
+        assert target is not None and target.session_id == "session2"
+
+
+@pytest.mark.asyncio
+async def test_composing_keeps_only_the_escape_key_advertised(tmp_path: Path) -> None:
+    """Q3/U5: the band and the page row must not advertise keys that type.
+
+    `m target` is gone from the band, and the page's canvas ladder — which
+    advertised `1 list · v next · c create · m message · d detail` — now
+    paints exactly the one page key that still reaches the page: `esc cancel`.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(
+            kind="session", session_id="s1", label='"older review"', state="live", live=True
+        )
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        assert view.composing
+        editor = app._editor()
+        assert await _settle(
+            pilot, lambda: editor.placeholder == 'send to: "older review" · esc cancel'
+        )  # no `m target`
+        editor.load_text("keep me")
+        await pilot.pause()
+        await pilot.press("end")  # the caret sits where typing left it: the end
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        assert editor.text == "keep mem"  # `m` types; the band promised nothing else
+        # The page's own row, while composing: esc cancel, and nothing live.
+        live = [hint for hint in view._hints.children if hint.display]
+        assert live == [view._exit_hint]
+        assert "cancel" in view._exit_hint.rendered()
+
+
+@pytest.mark.asyncio
+async def test_esc_out_of_compose_returns_focus_and_the_page_still_answers(
+    tmp_path: Path,
+) -> None:
+    """QA round 1, Q4: after `esc cancel` the focus was None and every key a
+    silent no-op until a Tab; the page takes the focus back."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        editor = app._editor()
+        editor.load_text("draft to keep")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert not view.composing
+        assert app.focused is not None  # Q4: no stranded focus
+        assert view.has_focus
+        assert editor.text == "draft to keep"  # esc cancel keeps the draft
+        # And the next `m` reaches the page instead of dying: the picker opens.
+        await pilot.press("m")
+        await pilot.pause()
+        assert view._mode == "send" and view._send_card is not None

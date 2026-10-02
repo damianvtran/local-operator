@@ -540,6 +540,36 @@ async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) ->
         assert painted[0].startswith("↔↕")
 
 
+@pytest.mark.asyncio
+async def test_the_msg_hint_never_vanishes_while_create_is_advertised(
+    tmp_path: Path,
+) -> None:
+    """F3: `m message` rides EVERY rung that still carries `c create`.
+
+    The reviewer measured `m message` disappearing at canvas widths 109-131
+    while `c create`/`r refresh` painted: a rung without `msg_hint` sat in
+    front of an equal-width rung that had it, so the later rung was
+    unreachable and widening the terminal made the hint vanish. This sweep is
+    the invariant the fix restores, checked at every width.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(96, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        saw_create = False
+        for width in range(96, 141):
+            await pilot.resize_terminal(width, 24)
+            await pilot.pause()
+            if view._create_hint.display:
+                saw_create = True
+                assert (
+                    view._msg_hint.display
+                ), f"width {width}: `c create` is advertised without `m message`"
+        assert saw_create, "the sweep never saw a rung carrying `c create`"
+
+
 # -- S3b: the selection's jump, in the view that owns the cursor --------------
 
 
