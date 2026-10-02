@@ -1459,7 +1459,7 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
-def _effort_pin_description(model_choice: bool) -> str:
+def _effort_pin_description(model_choice: bool, session_model_label: str | None = None) -> str:
     """The ``effort`` description for create/update, matching the live schema.
 
     With model choice ON and tiers configured it names what each resolves to so
@@ -1492,7 +1492,8 @@ def _effort_pin_description(model_choice: bool) -> str:
             "'inherit' clears a pin and every role inherits the launching session's model."
         )
     return (
-        f"create/update: default model tier ({describe_effort_tiers(tiers)}). "
+        "create/update: default model tier ("
+        f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}). "
         "'inherit' clears it."
     )
 
@@ -1513,7 +1514,7 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
     model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         AgentParams.model_json_schema(),
-        description=_effort_pin_description(model_choice),
+        description=_effort_pin_description(model_choice, context.session_model_label),
         extra=(INHERIT_EFFORT,),
         model_choice=model_choice,
     )
@@ -1543,5 +1544,10 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_agent, parameters, model_choice=model_choice),
+        execute=_with_advertised_effort(
+            execute_agent,
+            parameters,
+            model_choice=model_choice,
+            session_model_label=context.session_model_label,
+        ),
     )

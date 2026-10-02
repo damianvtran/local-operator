@@ -125,6 +125,7 @@ from local_operator.harness.render import (
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
+    INHERIT_TIER_SENTINEL,
     SubagentModelUnavailable,
     read_effort_tier_selectors,
     resolve_launch_target,
@@ -13300,6 +13301,24 @@ class Session:
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
 
+        A tier whose VALUE is :data:`INHERIT_TIER_SENTINEL` resolves to the
+        session's own model (``self.model``) instead of being refused. It is
+        the explicit opt-in to "this tier runs on whatever this session is on":
+        absent and empty still remove the tier and still refuse under
+        ``strict``, so nothing an operator already has configured changes
+        behaviour, while a tier they deliberately set to the sentinel is
+        honoured rather than read as an unset one. ``None`` keeps its separate
+        meaning ("no tier was asked for") — the two used to be the same
+        spelling and are now distinguishable, which is the point of the
+        sentinel.
+
+        The resolved SPEC is what makes the sentinel cheap to disclose: every
+        surface downstream (:attr:`AsyncJob.model_label`,
+        ``requested_model_label``, the child stream's launch pin,
+        :class:`SubagentStartEvent`, :func:`_describe_child_failure`) is fed
+        the model this method returned, so all of them name a real
+        ``provider/model`` without a single edit of their own.
+
         ``strict`` (the launch path) turns "tier named but unresolvable" from a
         warning-and-inherit into :class:`SubagentModelUnavailable`. The
         lenient default stays for callers that merely PREFER a tier and have
@@ -13388,6 +13407,25 @@ class Session:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
+        if selector == INHERIT_TIER_SENTINEL:
+            # The explicit opt-in, resolved at LAUNCH and not at write time:
+            # ``self.model`` is the accessor the rest of the session uses to
+            # name the model every provider call is built from, and the SAME
+            # one ``run_subagent`` reaches for when a child owns no model
+            # (``model=model_spec if model_spec is not None else
+            # parent_session.model``). Reading it here rather than recording
+            # the model into the config is what makes a later default move
+            # every pin on this tier — the requirement the sentinel exists to
+            # satisfy, and the pinned test in
+            # ``tests/unit/session/test_pinned_subagent_model.py`` holds it.
+            #
+            # Because this returns a SPEC and not ``None``, ``owns_model`` is
+            # stamped True and the child's routing is pinned to it: an
+            # operator-configured tier is a deliberate pin even when it points
+            # at the session's own model, and the disclosure code already
+            # anticipates exactly that (a pin whose label equals the parent's
+            # is why ``owns_model`` is a separate field).
+            return self.model
         provider, _, model_id = selector.partition("/")
         # BOTH halves, to the same standard ``configured_effort_tiers`` applies
         # (review R3-F11). Checking only the model let a leading-slash selector

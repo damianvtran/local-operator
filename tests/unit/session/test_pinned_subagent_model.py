@@ -269,6 +269,93 @@ def test_a_padded_selector_resolves_to_a_clean_provider(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_strict_launch_resolves_the_sentinel_to_the_session_model(tmp_path, monkeypatch):
+    """``hi: default`` is HONOURED, not refused.
+
+    The other half of the pre-fix repro: before the sentinel existed, the only
+    ways to say "run this tier on the session model" were an absent key or an
+    empty one, and both of those draw ``lacks provider/model`` / ``not
+    configured`` from this very path and raise. The sentinel is a tier the
+    operator CONFIGURED, so it resolves — and because resolution returns a
+    spec rather than ``None``, the row is stamped ``owns_model`` and names the
+    model on both label fields the panel and the cost accounting read.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="default")
+    session = make_session(tmp_path)
+
+    job_id = session._launch_subagent(label="review", prompt="review it", effort="hi")
+    job = session.jobs.get(job_id)
+    assert job is not None
+    resolved = f"{MODEL.provider}/{MODEL.model_id}"
+    assert job.model_label == resolved
+    assert job.requested_model_label == resolved
+    assert job.owns_model is True
+    assert job.effort == "hi"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_repointing_the_session_model_moves_every_pin_on_a_sentinel_tier(
+    tmp_path, monkeypatch
+):
+    """The sentinel resolves at LAUNCH, so it follows the session.
+
+    Recording the model into the config at write time would freeze whichever
+    model happened to be current then; resolving per launch is what makes a
+    later default change move every pin on the tier. Two sessions with
+    different models, one config, two different answers.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="default")
+    other = ModelSpec(
+        provider="anthropic",
+        model_id="claude-sonnet-5-5",
+        context_window=200_000,
+        max_output_tokens=8_192,
+    )
+
+    first = make_session(tmp_path)
+    first_job = first.jobs.get(first._launch_subagent(label="a", prompt="go", effort="hi"))
+    assert first_job is not None
+    assert first_job.model_label == f"{MODEL.provider}/{MODEL.model_id}"
+
+    second = Session(
+        model=other,
+        stream_fn=OneShotStream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess2"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    second_job = second.jobs.get(second._launch_subagent(label="b", prompt="go", effort="hi"))
+    assert second_job is not None
+    assert second_job.model_label == "anthropic/claude-sonnet-5-5"
+    await first.dispose()
+    await second.dispose()
+
+
+def test_absent_and_empty_still_remove_the_tier_not_inherit_it(tmp_path, monkeypatch):
+    """The distinction the sentinel exists to draw, pinned from both sides.
+
+    Nothing already configured changes behaviour: an absent key and an empty
+    one keep refusing a named tier at the launch, which is the loud failure
+    #635 installed. Only the explicit sentinel resolves.
+
+    Synchronous ON PURPOSE, unlike its two neighbours above: the refusal it
+    exercises is raised by ``_resolve_subagent_model`` BEFORE the job manager
+    is reached, so no event loop is required — and that ordering is itself the
+    property under test (a refused tier must not leave a job row behind).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    session = make_session(tmp_path)
+    for tiers in ({}, {"hi": ""}):
+        write_tiers(tmp_path / "config", **tiers)
+        with pytest.raises(SubagentModelUnavailable) as caught:
+            session._launch_subagent(label="review", prompt="review it", effort="hi")
+        assert caught.value.tier == "hi"
+
+
+@pytest.mark.asyncio
 async def test_no_effort_still_inherits_the_parent(tmp_path, monkeypatch):
     """The ordinary case must be untouched: a plain child with no tier and no
     config at all launches on the parent's model."""

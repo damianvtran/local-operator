@@ -2552,31 +2552,37 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: lo",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
         # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # the comment beside it wrongly claimed it did not; the current string
+        # is 70 and was re-measured on a rendered frame at 80/100/140 rather
+        # than estimated. Re-measured on BOTH sides of this change in the
+        # `subagents` state: at 80 columns the help still paints WHOLE and the
+        # key path is shed, and at 100 both the help and `subagents.models.hi`
+        # fit. The frame is the only thing that settles it, which is why the
+        # bounds below are measured rather than derived.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model".
+        help="Bills at that model's rates; 'default'=session; empty removes the tier",
         empty_unsets=True,
     ),
     Setting(
@@ -2586,31 +2592,37 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: med",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
         # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # the comment beside it wrongly claimed it did not; the current string
+        # is 70 and was re-measured on a rendered frame at 80/100/140 rather
+        # than estimated. Re-measured on BOTH sides of this change in the
+        # `subagents` state: at 80 columns the help still paints WHOLE and the
+        # key path is shed, and at 100 both the help and `subagents.models.hi`
+        # fit. The frame is the only thing that settles it, which is why the
+        # bounds below are measured rather than derived.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model".
+        help="Bills at that model's rates; 'default'=session; empty removes the tier",
         empty_unsets=True,
     ),
     Setting(
@@ -2620,31 +2632,37 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: hi",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
         # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # the comment beside it wrongly claimed it did not; the current string
+        # is 70 and was re-measured on a rendered frame at 80/100/140 rather
+        # than estimated. Re-measured on BOTH sides of this change in the
+        # `subagents` state: at 80 columns the help still paints WHOLE and the
+        # key path is shed, and at 100 both the help and `subagents.models.hi`
+        # fit. The frame is the only thing that settles it, which is why the
+        # bounds below are measured rather than derived.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model".
+        help="Bills at that model's rates; 'default'=session; empty removes the tier",
         empty_unsets=True,
     ),
     # -- resource classification --------------------------------------------
