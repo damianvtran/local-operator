@@ -2825,6 +2825,26 @@ def test_write_source_marker_keeps_lop_updates_two_token_shape(tmp_path: Path) -
     assert update_mod.is_git_snapshot(tmp_path) is True
 
 
+def test_write_source_marker_appends_the_fallback_note_as_a_third_token(
+    tmp_path: Path,
+) -> None:
+    """A source build that asked for a release must record WHY it is not one.
+
+    The ``--from-snapshot`` classifier's fallback reason rides into the marker
+    as a third token, so "why is a released-looking version not the wheel?" is
+    answerable from the installed tree alone. It is an ANNOTATION: readers take
+    the commit out of the first token (``source_ref``) and must never read the
+    note as part of it.
+    """
+    sha = "4d3ce1d1a48f4f3b799efdfabb014979e70e0630"
+    assert update_mod.write_source_marker(
+        tmp_path, version="0.66.0", commit=sha, ref="main", note="unreleased-ref"
+    )
+    assert (tmp_path / ".lop-source").read_text(encoding="utf-8") == f"{sha} main unreleased-ref\n"
+    assert update_mod.source_ref(tmp_path) == sha
+    assert update_mod.is_git_snapshot(tmp_path) is True
+
+
 def test_write_source_marker_replaces_a_stale_marker(tmp_path: Path) -> None:
     """The reported state: a marker naming the build the upgrade DISPLACED."""
     stale = "f1cd77900182616a683c4e7e58f0b0e01be580b3"
@@ -3390,3 +3410,521 @@ def test_from_snapshot_without_web_sources_still_installs(
         "lop-update: mobile web bundle: skipped (no web sources in snapshot)"
         in capsys.readouterr().out
     )
+
+
+# ---------------------------------------------------------------------------
+# The --from-snapshot ROUTE: a ref that IS a published release installs the
+# published macOS wheel — the only artifact carrying lop-keyagent.app — and
+# every other ref, and every inability to CONFIRM, keeps the source build and
+# says so. See ``update.classify_snapshot_install``.
+# ---------------------------------------------------------------------------
+
+
+def _git_run(repo: Path, *args: str) -> str:
+    """Run git in a throwaway repository; identity/signing are pinned per call
+    so a developer's global config cannot change the result."""
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=route@example.invalid",
+            "-c",
+            "user.name=route",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout
+
+
+def _release_repo(
+    tmp_path: Path, *, tag: str | None = "v1.2.3", version: str = "1.2.3"
+) -> tuple[Path, str]:
+    """A one-commit repository whose ``pyproject.toml`` names ``version``.
+
+    Real git, not a double: the classifier's whole point is the EXACT
+    tag-at-commit question, and a fake for ``git tag --points-at`` would be a
+    second implementation of the thing under test.
+    """
+    repo = tmp_path / "checkout"
+    repo.mkdir(parents=True)
+    _git_run(repo, "init", "-q")
+    (repo / "pyproject.toml").write_text(
+        f'[project]\nname = "local-operator"\nversion = "{version}"\n', encoding="utf-8"
+    )
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", "one")
+    commit = _git_run(repo, "rev-parse", "HEAD").strip()
+    if tag:
+        _git_run(repo, "tag", tag)
+    return repo, commit
+
+
+def _ref_snapshot(path: Path, *, commit: str, version: str, ref: str = "main") -> SnapshotSource:
+    return SnapshotSource(path=path, commit=commit, ref=ref, version=version, temporary=True)
+
+
+def _snapshot_dir(tmp_path: Path) -> Path:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    return snapshot
+
+
+def _wheel_entry(filename: str, *, yanked: bool = False) -> dict[str, Any]:
+    return {"filename": filename, "packagetype": "bdist_wheel", "yanked": yanked}
+
+
+def _release_document(version: str, *entries: dict[str, Any]) -> dict[str, Any]:
+    return {"info": {"version": version, "yanked": False}, "urls": list(entries)}
+
+
+def test_classify_routes_a_released_ref_to_the_published_macos_wheel(tmp_path: Path) -> None:
+    """The exact YES: tag at the commit, matching version, universal2 wheel on
+    PyPI. The artifact named must be the one the release pipeline injected the
+    signed key agent into (``make_macos_wheel.py``) — not the
+    ``py3-none-any`` wheel, which has no bundle, and not the sdist."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+    document = _release_document(
+        "1.2.3",
+        _wheel_entry("local_operator-1.2.3-py3-none-any.whl"),
+        _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl"),
+        {"filename": "local_operator-1.2.3.tar.gz", "packagetype": "sdist", "yanked": False},
+    )
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.install_from_wheel is True
+    assert route.version == "1.2.3"
+    assert route.artifact == "local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl"
+
+
+def test_classify_an_unreleased_commit_falls_back_without_asking_pypi(tmp_path: Path) -> None:
+    """The common fleet case (``main`` the day after a release): no tag at the
+    commit. The route must be the source build AND must not even ask PyPI — a
+    tree's version string still names the LAST release, so "is this version on
+    PyPI" would answer yes for the wrong reason."""
+    repo, commit = _release_repo(tmp_path, tag=None)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.install_from_wheel is False
+    assert route.reason == update_mod.FALLBACK_UNRELEASED
+    assert route.detail == f"no release tag points at main @ {commit[:12]}"
+    pypi.assert_not_called()
+
+
+def test_classify_a_commit_merely_reachable_from_a_release_is_not_released(
+    tmp_path: Path,
+) -> None:
+    """THE discriminator the classifier turns on: ``git describe`` would answer
+    ``v1.2.3-1-g<sha>`` for this commit, and a describe-based route would
+    install the release wheel for a tree the tag does NOT name. The commit must
+    carry the tag ITSELF."""
+    repo = tmp_path / "checkout"
+    repo.mkdir(parents=True)
+    _git_run(repo, "init", "-q")
+    (repo / "a.txt").write_text("one\n", encoding="utf-8")
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", "one")
+    _git_run(repo, "tag", "v1.2.3")
+    (repo / "a.txt").write_text("two\n", encoding="utf-8")
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", "two")
+    tip = _git_run(repo, "rev-parse", "HEAD").strip()
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=tip, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.reason == update_mod.FALLBACK_UNRELEASED
+    assert route.detail == f"no release tag points at main @ {tip[:12]}"
+    pypi.assert_not_called()
+
+
+def test_classify_a_tag_naming_another_version_falls_back(tmp_path: Path) -> None:
+    """A tag AT the commit is not enough: if it does not name the tree's own
+    version, two releases claim one commit and the honest answer is "cannot
+    confirm" — fail toward source, and say what WAS found."""
+    repo, commit = _release_repo(tmp_path, tag="v9.9.9")
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.reason == update_mod.FALLBACK_UNRELEASED
+    assert route.detail == f"main @ {commit[:12]} is tagged 9.9.9, not version 1.2.3"
+    pypi.assert_not_called()
+
+
+def test_classify_off_macos_falls_back_before_any_release_check(tmp_path: Path) -> None:
+    """Presence is a macOS capability; the platform check is the DECISIVE one
+    elsewhere, so neither git nor PyPI is consulted — and the recorded reason
+    is the platform, not a missing release (which would be untrue)."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", False),
+        patch.object(update_mod, "_release_versions_at") as tags,
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.install_from_wheel is False
+    assert route.reason == update_mod.FALLBACK_PLATFORM
+    tags.assert_not_called()
+    pypi.assert_not_called()
+
+
+def test_classify_a_release_without_its_macos_wheel_falls_back(tmp_path: Path) -> None:
+    """The v0.62.39 shape and every pre-keyagent release: a tag the repo knows,
+    but PyPI serves no universal2 wheel for it. Installing anything here would
+    be a presence-less build wearing the wheel's promise."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+    document = _release_document("1.2.3", _wheel_entry("local_operator-1.2.3-py3-none-any.whl"))
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.reason == update_mod.FALLBACK_WHEEL
+    assert route.version == "1.2.3"
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "PyPI serves no macOS universal2 wheel for it"
+    )
+
+
+def test_classify_a_yanked_macos_wheel_falls_back(tmp_path: Path) -> None:
+    """PyPI keeps serving a yanked release; yanking is how a broken one is
+    retired. The promise this route makes is presence, so a yanked file is not
+    evidence."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+    document = _release_document(
+        "1.2.3",
+        _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl", yanked=True),
+    )
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.reason == update_mod.FALLBACK_WHEEL
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "its macOS universal2 wheel is yanked on PyPI"
+    )
+
+
+def test_classify_an_unreachable_pypi_falls_back_with_the_complaint(tmp_path: Path) -> None:
+    """A check that cannot be MADE is a check that was not passed. The
+    complaint the fetch returned is what the notice and the marker carry."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = _ref_snapshot(_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "_pypi_release_document",
+            return_value=(None, "PyPI could not be reached to check it"),
+        ),
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route.reason == update_mod.FALLBACK_WHEEL
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "PyPI could not be reached to check it"
+    )
+
+
+def test_classify_never_touches_a_directory_snapshot(tmp_path: Path) -> None:
+    """A directory is installed AS IT STANDS — its working tree may differ from
+    its HEAD — so even a HEAD that IS a release commit is not evidence about
+    the bytes. No reason is recorded because nothing was declined: the shape
+    was never a candidate."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = SnapshotSource(path=_snapshot_dir(tmp_path), commit=commit, version="1.2.3")
+
+    with (
+        patch.object(update_mod, "_release_versions_at") as tags,
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+    ):
+        route = update_mod.classify_snapshot_install(snapshot, repo=repo)
+
+    assert route == update_mod.SnapshotRoute()
+    tags.assert_not_called()
+    pypi.assert_not_called()
+
+
+class _StubResponse:
+    """A minimal httpx.Response double: status, raise-for-status, payload."""
+
+    def __init__(self, status_code: int, payload: Any = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=httpx.Request("GET", "https://pypi.org/"),
+                response=httpx.Response(self.status_code),
+            )
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _StubClient:
+    """A minimal httpx.Client double: one queued item per call — a response to
+    return, or an exception to raise."""
+
+    def __init__(self, *items: Any) -> None:
+        self._queue = list(items)
+
+    def get(self, url: str, timeout: Any = None) -> Any:
+        item = self._queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def test_pypi_release_document_separates_missing_from_unreachable() -> None:
+    """``why-not`` strings reach the fallback notice AND the marker, so "the
+    release was never published" and "the check could not be made" must not
+    collapse into one sentence."""
+    document = _release_document("1.2.3")
+    found, complaint = update_mod._pypi_release_document(
+        "1.2.3", client=_StubClient(_StubResponse(200, document))
+    )
+    assert found == document
+    assert complaint == ""
+
+    missing, complaint = update_mod._pypi_release_document(
+        "1.2.3", client=_StubClient(_StubResponse(404))
+    )
+    assert missing is None
+    assert complaint == "PyPI does not serve it"
+
+    dead, complaint = update_mod._pypi_release_document(
+        "1.2.3", client=_StubClient(httpx.ConnectError("no route to host"))
+    )
+    assert dead is None
+    assert complaint == "PyPI could not be reached to check it"
+
+
+def test_pypi_release_document_refuses_a_document_that_is_not_this_release() -> None:
+    """Belt and braces for the POSITIVE-confirmation rule: a 200 whose payload
+    is some other release's document (a proxy, a mirror, a double) is not
+    confirmation of THIS release, and must answer no."""
+    wrong = _release_document("9.9.9")
+    found, complaint = update_mod._pypi_release_document(
+        "1.2.3", client=_StubClient(_StubResponse(200, wrong))
+    )
+    assert found is None
+    assert complaint == "PyPI's answer did not match the release"
+
+
+def test_macos_universal2_wheel_ignores_any_wheels_yanked_files_and_other_names() -> None:
+    """The picker must find exactly the presence-bearing shape and nothing
+    else: not the platform-independent wheel (no bundle), not a yanked file,
+    not a differently-versioned wheel sharing the index entry."""
+    universal2 = "local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl"
+    document = _release_document(
+        "1.2.3",
+        _wheel_entry("local_operator-1.2.3-py3-none-any.whl"),
+        _wheel_entry(universal2, yanked=True),
+        _wheel_entry("local_operator-1.2.4-py3-none-macosx_11_0_universal2.whl"),
+        {"filename": "local_operator-1.2.3.tar.gz", "packagetype": "sdist", "yanked": False},
+    )
+    assert update_mod._macos_universal2_wheel(document, "1.2.3") == ""
+
+    document["urls"].append(_wheel_entry(universal2))
+    assert update_mod._macos_universal2_wheel(document, "1.2.3") == universal2
+
+    document["info"]["yanked"] = True
+    assert update_mod._macos_universal2_wheel(document, "1.2.3") == ""
+
+
+def test_route_lines_promise_presence_only_where_it_can_be_delivered() -> None:
+    """One owner for both texts, and the review-round-1 rule (design D2/D4):
+    a fallback NAMES the route and the reason and never a capability, while
+    the wheel announcement — the one route where presence is certain — may say
+    the key agent rides the wheel. The adversarial property is asserted, not
+    assumed: no fallback line may read as presence being present, likely or
+    restorable."""
+    snapshot = SnapshotSource(
+        path=Path("unused-snapshot"),
+        commit="a" * 40,
+        ref="v1.2.3",
+        version="1.2.3",
+        temporary=True,
+    )
+    wheel_route = update_mod.SnapshotRoute(
+        install_from_wheel=True,
+        version="1.2.3",
+        artifact="local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl",
+    )
+    wheel_lines = update_mod.snapshot_route_lines(snapshot, wheel_route)
+    assert wheel_lines[0] == (
+        "lop-update: v1.2.3 matches published release 1.2.3; installing the "
+        "published macOS wheel instead of building this tree"
+    )
+    assert wheel_lines[1] == (
+        "lop-update: wheel: local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl "
+        "— carries the macOS key agent (lop-keyagent.app)"
+    )
+
+    fallback = update_mod.SnapshotRoute(
+        reason=update_mod.FALLBACK_UNRELEASED,
+        detail="no release tag points at v1.2.3 @ aaaaaaaaaaaa",
+    )
+    fallback_lines = update_mod.snapshot_route_lines(snapshot, fallback)
+    assert fallback_lines[0] == (
+        "warning: building from source — no release tag points at v1.2.3 @ aaaaaaaaaaaa"
+    )
+    assert fallback_lines[1] == (
+        "warning: this build does not carry the macOS key agent (lop-keyagent.app); "
+        "only the published macOS wheel does"
+    )
+
+    platform = update_mod.SnapshotRoute(
+        reason=update_mod.FALLBACK_PLATFORM, detail="this host is not macOS"
+    )
+    platform_lines = update_mod.snapshot_route_lines(snapshot, platform)
+    assert platform_lines[0] == (
+        "warning: building from source — this host is not macOS; the key agent "
+        "(lop-keyagent.app) exists only on macOS"
+    )
+    assert platform_lines[1] == "warning: the macOS key agent is not available on this platform"
+    assert "does not carry" not in platform_lines[1], "off macOS nothing is 'missing' to repair"
+
+    # The adversarial check: nothing in a fallback may be readable as "presence
+    # is fine here" or "presence will come back" — the only affirmative claim
+    # lives on the wheel route, which this loop deliberately excludes.
+    for lines in (fallback_lines, platform_lines):
+        joined = " ".join(lines)
+        assert "carries the macOS key agent" not in joined
+        assert "will" not in joined and "restore" not in joined
+
+    assert update_mod.snapshot_route_lines(snapshot, update_mod.SnapshotRoute()) == ()
+
+
+def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The wheel route through the command, with the REAL classifier: the tag
+    check runs against the repository the classifier resolves from cwd, the
+    install takes the PyPI path (no source), no mobile-bundle work happens at
+    all (the wheel ships the built bundle), the announcement is printed, and
+    the temporary extract is still reclaimed."""
+    repo, commit = _release_repo(tmp_path)
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "1.2.3", _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)  # ``resolve_snapshot`` archived the ref out of here
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="1.2.3", ref="v1.2.3"),
+        ),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(install_mod, "snapshot_bundle") as bundle,
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
+    ):
+        assert update_mod._snapshot_command("v1.2.3") == 0
+
+    assert calls == [(None, {"version": "1.2.3"})]
+    bundle.assert_not_called()
+    assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
+    out = capsys.readouterr().out
+    assert "v1.2.3 matches published release 1.2.3" in out
+    assert "installing the published macOS wheel" in out
+    assert "carries the macOS key agent" in out
+    assert "warning:" not in out, "the wheel route is progress, not a warning"
+    tail.assert_called_once_with(0, services=True, install_version="1.2.3", target="1.2.3")
+
+
+def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The required loud fallback, with the REAL classifier: the reason is
+    printed BEFORE any install work and the same token rides into the marker
+    through ``note``."""
+    repo, commit = _release_repo(tmp_path, tag=None)
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="1.2.3"),
+        ),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert len(calls) == 1
+    assert calls[0][0] == snapshot
+    assert calls[0][1]["note"] == "unreleased-ref"
+    assert not snapshot.exists(), "the fallback still reclaims the ref extract"
+    captured = capsys.readouterr()
+    assert (
+        f"warning: building from source — no release tag points at main @ {commit[:12]}"
+        in captured.err
+    )
+    assert (
+        "warning: this build does not carry the macOS key agent (lop-keyagent.app)" in captured.err
+    )
+    assert "building from source" not in captured.out, "the fallback is a warning, not progress"
