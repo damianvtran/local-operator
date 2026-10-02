@@ -101,6 +101,27 @@ def test_a_hand_edited_pace_is_clamped_to_the_accepted_window(
     assert descriptor_from_config(manager).pace == MIN_PACE
 
 
+def test_a_non_finite_pace_falls_back_to_the_default(
+    manager: ConfigManager,
+) -> None:
+    """S-5: `.nan` survives a min/max clamp, and then puts bare `NaN` on the wire.
+
+    A hand-edited ``config.yml`` can carry ``.nan`` (valid YAML). ``min(max(nan,
+    …), …)`` is ``nan``, and ``json.dumps`` defaults to ``allow_nan=True``, so
+    the hub's Go decoder would reject EVERY spoken message with a 400 while the
+    settings API (which validates) was bypassed. ``.inf`` is the same class.
+    """
+    import math
+
+    manager.config.values.setdefault("speech", {}).setdefault("voice", {})["pace"] = float("nan")
+    built = descriptor_from_config(manager)
+    assert built.pace is not None and math.isfinite(built.pace)
+    assert built.pace == voicing.DEFAULT_PACE
+
+    manager.config.values["speech"]["voice"]["pace"] = float("inf")
+    assert descriptor_from_config(manager).pace == voicing.DEFAULT_PACE
+
+
 def test_an_invalid_language_falls_back_to_auto(manager: ConfigManager) -> None:
     manager.config.values.setdefault("speech", {}).setdefault("voice", {})["language"] = "english"
     assert descriptor_from_config(manager).language == "auto"

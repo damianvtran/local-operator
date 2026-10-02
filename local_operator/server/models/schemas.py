@@ -1047,6 +1047,18 @@ def _validate_language_code(value: Any) -> Any:
     return value
 
 
+#: The cap on text a speech request may carry. It equals the HUB's own cap
+#: (``docs/SPEECH.md``: input is capped at 10,000 characters), so the daemon
+#: refuses at the same boundary instead of forwarding a body the hub will reject.
+#: On the agent route it is also the only bound on what one call can cost: the
+#: request carries no agent identity, so a standalone daemon's admitted origins
+#: can make it synthesize at most this much of the operator's own vendor key
+#: (voicing S2 security round 1, S-1). The direct ``/v1/tools/speech`` route is a
+#: pure hub pass-through and is deliberately NOT capped here: the hub owns that
+#: refusal and its own error shape.
+MAX_SPEECH_INPUT_CHARS = 10_000
+
+
 class SpeechRequest(BaseModel):
     """Request body for speech generation endpoint.
 
@@ -1098,7 +1110,11 @@ class AgentSpeechRequest(BaseModel):
         language_code: Optional ISO 639-1 language code for the synthesis.
     """
 
-    input_text: str = Field(..., description="The text to generate speech from.")
+    input_text: str = Field(
+        ...,
+        max_length=MAX_SPEECH_INPUT_CHARS,
+        description="The text to generate speech from.",
+    )
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
     )

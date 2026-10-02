@@ -319,6 +319,92 @@ async def test_a_vendor_refusal_falls_forward_to_the_next_rung() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_path_header_names_the_daemon_rung_not_the_hubs_leg(monkeypatch) -> None:
+    """M1: Path is the RUNG; the hub's own Provider header is the leg.
+
+    Filling Path from the hub's Provider made "the hub used the platform's
+    ElevenLabs" and "my own ElevenLabs key ran" the same string. The two facts
+    now travel separately, and Path stays inside the closed ``VoicePath``
+    vocabulary even when the hub names something unexpected (O2).
+    """
+    from pydantic import SecretStr
+
+    async def credential(_config_dir, _base_url, *, store=None):
+        return SecretStr("radient-key")
+
+    async def probe(_config_dir, _base_url, *, store):
+        return True
+
+    monkeypatch.setattr(cascade, "resolve_radient_credential", credential)
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", probe)
+
+    hub = MagicMock()
+    hub.create_speech_response.return_value = (
+        b"AUDIO",
+        {
+            **{name: "v" for name in cascade.HUB_SPEECH_HEADERS},
+            "X-Radient-Speech-Provider": "elevenlabs",
+            # A header the hub does NOT send today, inside the family namespace:
+            # the relay is a fixed set, so it must not cross (security S-3).
+            "X-Radient-Speech-Tenant": "tenant-42",
+            # ...and neither does anything outside the family.
+            "X-Internal-Trace": "secret",
+            "Set-Cookie": "session=abc",
+        },
+    )
+    store = FakeStore({"radient": "radient-key"})
+    outcome = await _run(store, radient_client=hub)
+
+    headers = dict(outcome.speech_headers)
+    assert headers["X-Radient-Speech-Path"] == "provider_tts_radient"
+    assert headers["X-Radient-Speech-Provider"] == "elevenlabs"
+    assert "X-Radient-Speech-Tenant" not in headers
+    assert "X-Internal-Trace" not in headers
+    assert "Set-Cookie" not in headers
+    # Only the named hub headers plus the daemon's own Path.
+    assert len(headers) == len(cascade.HUB_SPEECH_HEADERS) + 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rung_travels_with_the_refusal(monkeypatch) -> None:
+    """The route's vocabulary selector: WHICH rung refused is part of the report."""
+    from pydantic import SecretStr
+
+    from local_operator.clients._http import APIError
+
+    async def credential(_config_dir, _base_url, *, store=None):
+        return SecretStr("radient-key")
+
+    async def probe(_config_dir, _base_url, *, store):
+        return True
+
+    monkeypatch.setattr(cascade, "resolve_radient_credential", credential)
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", probe)
+
+    # A BYO-only failure reports the BYO rung...
+    failing = Recorder(status=401)
+    el = httpx.AsyncClient(transport=httpx.MockTransport(failing.handler))
+    from local_operator.tts.clients import ElevenLabsTtsClient
+
+    try:
+        with pytest.raises(cascade.TtsUnavailable) as exc_info:
+            await _run(
+                FakeStore({"elevenlabs": "el-user"}),
+                elevenlabs_client=ElevenLabsTtsClient("el-user", client=el),
+            )
+    finally:
+        await el.aclose()
+    assert exc_info.value.failed_path is VoicePath.PROVIDER_TTS_ELEVENLABS
+
+    # ...and a hub failure reports the hub rung.
+    hub = MagicMock()
+    hub.create_speech_response.side_effect = APIError("no credit", status_code=402)
+    with pytest.raises(cascade.TtsUnavailable) as hub_exc:
+        await _run(FakeStore({"radient": "radient-key"}), radient_client=hub)
+    assert hub_exc.value.failed_path is VoicePath.PROVIDER_TTS_RADIENT
+
+
+@pytest.mark.asyncio
 async def test_no_rung_at_all_raises_without_attempting_anything() -> None:
     """The refusal the route turns into the sign-in sentence, and no vendor call."""
     store = FakeStore()

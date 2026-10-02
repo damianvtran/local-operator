@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,8 +17,10 @@ from local_operator.server.routes.speech import create_agent_speech, create_spee
 from local_operator.tts.descriptor import DEFAULT_SPEECH_INSTRUCTIONS
 
 
-def _speech_store(tmp_path: Path, *, radient: bool = True) -> AuthStore:
-    """A REAL store on an isolated root, optionally holding a Radient login.
+def _speech_store(
+    tmp_path: Path, *, radient: bool = True, elevenlabs: Optional[str] = None
+) -> AuthStore:
+    """A REAL store on an isolated root, optionally holding logins.
 
     The route's rung decision comes from the store's PERSISTED rows, so a mock
     here would answer a question the resolver never asks. A real store is also
@@ -35,6 +37,10 @@ def _speech_store(tmp_path: Path, *, radient: bool = True) -> AuthStore:
                 "access": "a",
                 "expires": int(datetime.now().timestamp() * 1000) + 3_600_000,
             },
+        )
+    if elevenlabs:
+        store.upsert_credential(
+            "elevenlabs", {"type": "api_key", "source": "login", "key": elevenlabs}
         )
     return store
 
@@ -425,8 +431,125 @@ async def test_create_agent_speech_relays_the_hubs_own_voicing_headers(tmp_path)
     assert response.headers["x-radient-speech-provider"] == "openai"
     assert response.headers["x-radient-speech-map"] == "1.0"
     assert response.headers["x-radient-speech-degraded"] == "tone:emulated=instructions"
-    assert response.headers["x-radient-speech-path"] == "provider_tts_openai"
+    # TWO DIFFERENT FACTS, deliberately kept apart (voicing S2 review round 1,
+    # M1): Path is the DAEMON RUNG that executed (the closed VoicePath
+    # vocabulary), while Provider is the leg the HUB says it used. Filling Path
+    # from the hub's header made "the hub used the platform's ElevenLabs" and
+    # "my own ElevenLabs key ran" the same string.
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
     assert "x-internal-trace" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
+    """Q1: a vendor refusal must not be reported with Radient's words.
+
+    On a BYO-only machine there is no Radient account in the exchange, so
+    "your Radient sign-in has stopped working" and "add credits in the Radient
+    Console" both name the wrong system and send the user to the wrong place.
+    The rung that raised the failure selects the vocabulary.
+    """
+    from local_operator.clients._http import APIError
+    from local_operator.tts import clients as tts_clients
+
+    class _Refusing:
+        #: Set per case below; declared so the type checker sees it as a class
+        #: attribute rather than an assignment to an unknown name.
+        status: int = 401
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def synthesize(self, *_args, **_kwargs):
+            raise APIError("vendor said no", status_code=_Refusing.status)
+
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _Refusing)
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+
+    for status, expected in (
+        (401, "Your ElevenLabs API key was refused. Replace it in Settings."),
+        (
+            402,
+            "Your ElevenLabs account has no speech credit left. "
+            "Add credit with ElevenLabs to continue.",
+        ),
+    ):
+        _Refusing.status = status
+        with (
+            patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+            patch(
+                "local_operator.server.routes.speech.determine_voice",
+                new_callable=AsyncMock,
+                return_value="female",
+            ),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await create_agent_speech(
+                    "test-agent",
+                    _agent_speech_request(),
+                    _credentialed_client(),
+                    agent_registry,
+                    _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+                    _voiced_config(tmp_path),
+                    _env_config(),
+                )
+        assert exc_info.value.status_code == status
+        assert exc_info.value.detail == expected
+        assert "Radient" not in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_generic_vendor_refusal_keeps_the_provider_neutral_sentence(tmp_path, monkeypatch):
+    """429 has no vendor sentence: the generic one already names nobody."""
+    from local_operator.clients._http import APIError
+    from local_operator.tts import clients as tts_clients
+
+    class _Refusing:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def synthesize(self, *_args, **_kwargs):
+            raise APIError("slow down", status_code=429)
+
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _Refusing)
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="female",
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await create_agent_speech(
+                "test-agent",
+                _agent_speech_request(),
+                _credentialed_client(),
+                agent_registry,
+                _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+                _voiced_config(tmp_path),
+                _env_config(),
+            )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "Speech is unavailable right now. Try again in a moment."
+
+
+def test_an_over_long_speak_aloud_input_is_refused_at_the_schema():
+    """S-1: the agent route carries no identity, so the cap IS the bound.
+
+    It matches the hub's own 10,000-character cap, so the daemon refuses at the
+    same boundary rather than forwarding a body the hub would reject — and on a
+    BYO leg nothing else bounds what one call can spend of the operator's key.
+    """
+    from local_operator.server.models.schemas import MAX_SPEECH_INPUT_CHARS
+
+    assert _agent_speech_request(input_text="x" * MAX_SPEECH_INPUT_CHARS).input_text
+    with pytest.raises(ValidationError):
+        _agent_speech_request(input_text="x" * (MAX_SPEECH_INPUT_CHARS + 1))
 
 
 @pytest.mark.asyncio

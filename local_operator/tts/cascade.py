@@ -23,6 +23,15 @@ slice fixed for STT.
 The credential probes are ``read_only=True`` everywhere: a probe must not
 rotate account stickiness (or decide routing) for what is only a question.
 
+**There is deliberately no cache.** The design note's "same TTL (30 s) as STT"
+is WITHDRAWN here: the STT resolver never had one either, and a TTL would make
+advertising rung availability a stale answer about a credential the user may
+have just removed. The consequence is worth stating rather than hiding:
+``GET /v1/tts/paths`` is a poll surface and every call re-probes the store —
+and :func:`has_persisted_radient_credential` on the canonical destination can
+attempt (and persist) an OAuth refresh, i.e. one network round trip per poll
+(voicing S2 review round 1, M2).
+
 **Availability caveat, deliberately loud:** these rungs answer "a credential
 exists", NOT "the call will succeed". A refused key, an empty balance or a
 model the account cannot reach all surface at call time — that is what the
@@ -90,6 +99,20 @@ TTS_RUNG_PATHS = (
     VoicePath.PROVIDER_TTS_OPENAI,
 )
 
+#: The hub's voicing headers this daemon will relay, as a FIXED SET rather than
+#: a ``X-Radient-Speech-`` prefix filter (voicing S2 security round 1, S-3). The
+#: prefix admits whatever the hub adds later, into a browser-readable response,
+#: with no change here and no test able to notice — so widening this list is a
+#: deliberate decision on this side too. `docs/SPEECH.md` is the family's
+#: written source; a new hub header lands here by name or not at all.
+HUB_SPEECH_HEADERS = (
+    "X-Radient-Speech-Provider",
+    "X-Radient-Speech-Voice",
+    "X-Radient-Speech-Map",
+    "X-Radient-Speech-Applied",
+    "X-Radient-Speech-Degraded",
+)
+
 #: The credential namespace rung 3 reads: the ``openai-key`` login's own,
 #: holding a platform API key. NOT ``openai`` — that provider's only logins are
 #: ChatGPT OAuth grants, and a ChatGPT token is not valid at the audio endpoint.
@@ -111,10 +134,13 @@ class TtsUnavailable(RuntimeError):
       nothing configured" case.
     * ``attempts`` — one entry per rung the walk actually spent.
     * ``error`` — the chosen failure among the attempts, or ``None`` when no
-      rung was attempted. The route classifies it with its own refusal
-      sentences, so a Radient 402 and an ElevenLabs 402 are described the same
-      way they are described today (they are the same class of thing to the
-      user: top up, or use another provider).
+      rung was attempted.
+    * ``failed_path`` — the rung that produced ``error``, or ``None``. The route
+      needs it to pick the right refusal VOCABULARY: a hub refusal is described
+      with Radient's words and Radient's remedy, while a BYO vendor refusal has
+      to name the user's own provider (voicing S2 QA round 1, Q1) — on a
+      BYO-only machine, telling the user their "Radient sign-in" stopped working
+      names a system that is not in the exchange at all.
     """
 
     def __init__(
@@ -124,6 +150,7 @@ class TtsUnavailable(RuntimeError):
         resolution: VoicePathResolution,
         attempts: tuple[TtsAttempt, ...] = (),
         error: Optional[BaseException] = None,
+        failed_path: Optional[VoicePath] = None,
     ) -> None:
         super().__init__(message)
         self.resolution = resolution
@@ -133,6 +160,8 @@ class TtsUnavailable(RuntimeError):
         #: other exception is a defect and surfaces as a 500 with its message,
         #: never as a misleading sign-in refusal.
         self.error = error
+        #: Which rung raised ``error`` — the route's vocabulary selector.
+        self.failed_path = failed_path
 
 
 def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[AuthStore, bool]:
@@ -258,7 +287,7 @@ def _failed_attempt(path: VoicePath, exc: BaseException) -> TtsAttempt:
 
 def _choose_final_failure(
     failures: list[tuple[VoicePath, BaseException]],
-) -> Optional[BaseException]:
+) -> Optional[tuple[VoicePath, BaseException]]:
     """Which rung's failure the all-failed report should carry.
 
     A payment refusal (402) wins over everything: it is the one failure whose
@@ -266,13 +295,15 @@ def _choose_final_failure(
     heals — so surfacing a per-rung key problem instead would send them to fix
     the wrong thing. With no payment refusal, the LAST failure is reported: the
     freshest rung is the one closest to "what happened when we tried". The STT
-    cascade chooses by the same rule (``stt.cascade._choose_final_failure``).
+    cascade chooses by the same rule (``stt.cascade._choose_final_failure``);
+    it returns the rung too, because the ROUTE's refusal vocabulary is
+    per-rung.
     """
-    for _path, error in failures:
+    for path, error in failures:
         if isinstance(error, APIError) and error.status_code == 402:
-            return error
-    for _path, error in reversed(failures):
-        return error
+            return path, error
+    for path, error in reversed(failures):
+        return path, error
     return None
 
 
@@ -292,11 +323,25 @@ async def _run_radient_rung(
     Returns ``(audio, serving provider, relayed headers)``. The client is sync
     ``requests``; ``asyncio.to_thread`` keeps it off the loop.
     ``X-Radient-Speech-Provider`` is the hub's own receipt for which leg
-    actually served, which is what the echoed-actual-path rule reports: a
-    descriptor-bearing call names no leg, so the hub's header is the only place
-    that fact exists — and the rest of the ``X-Radient-Speech-*`` family (the
-    map version, what was applied, what degraded) is relayed verbatim for the
-    same reason.
+    actually served: a descriptor-bearing call names no leg, so the hub's header
+    is the only place that fact exists — and the rest of the family (the map
+    version, what was applied, what degraded) is relayed for the same reason.
+
+    ONLY :data:`HUB_SPEECH_HEADERS` is relayed, by NAME. A prefix filter would
+    admit whatever the hub adds later into a browser-readable response with no
+    change on this side and no test able to notice (voicing S2 security round 1,
+    S-3).
+
+    THIS RUNG REQUIRES A HUB THAT UNDERSTANDS ``voice_descriptor`` (agent-server
+    PR #84, merged to main as ``c817d5b``). No pre-#84 fallback is implemented,
+    deliberately: against such a hub the descriptor field is ignored and the
+    call is SERVED at the hub's own default voice, so "detect the missing
+    ``X-Radient-Speech-Map`` and map locally instead" can only mean either
+    billing a second synthesis for audio nobody hears, or caching the hub's
+    capability (state this slice does not own). The design note's promise of a
+    first-call detection is WITHDRAWN here rather than half-built (voicing S2
+    security round 1, S-4); the deployment order the wave already states — hub
+    before daemon — is what makes that safe.
     """
     if client is None:
         credential = await resolve_radient_credential(config_dir, base_url, store=store)
@@ -317,10 +362,11 @@ async def _run_radient_rung(
         voice_descriptor=payload,
     )
     serving = headers.get("X-Radient-Speech-Provider") or headers.get("x-radient-speech-provider")
+    by_lower_name = {name.lower(): value for name, value in headers.items()}
     relayed = [
-        (name, value)
-        for name, value in headers.items()
-        if name.lower().startswith("x-radient-speech-")
+        (name, by_lower_name[name.lower()])
+        for name in HUB_SPEECH_HEADERS
+        if name.lower() in by_lower_name
     ]
     return audio, (serving or "radient"), relayed
 
@@ -533,20 +579,27 @@ async def synthesize_speech(
                 provider=provider,
                 speech_headers=(
                     *mapped_headers,
-                    # The daemon's own receipt, ALWAYS last and always present:
-                    # it names the rung that executed, which on a hub-served
-                    # call is not the same thing as the provider the hub's own
-                    # header names for a non-descriptor request.
-                    ("X-Radient-Speech-Path", f"provider_tts_{provider}"),
+                    # The daemon's own receipt, ALWAYS last and always present.
+                    # Its value is the DAEMON RUNG (the closed ``VoicePath``
+                    # vocabulary), NOT the provider the hub says it used: on a
+                    # hub-served call the hub's own relayed
+                    # ``X-Radient-Speech-Provider`` names the leg, and this
+                    # header has to keep the two cases distinguishable (voicing
+                    # S2 review round 1, M1). Built from ``path`` rather than
+                    # from a hub-supplied string, so an unknown leg can never
+                    # mint a value outside the enum (QA round 1, O2).
+                    ("X-Radient-Speech-Path", path.value),
                 ),
             )
 
         # Every available rung failed (or was skipped for lack of a descriptor).
+        chosen = _choose_final_failure(failures)
         raise TtsUnavailable(
             "The text-to-speech cascade could not produce audio.",
             resolution=resolution,
             attempts=tuple(attempts),
-            error=_choose_final_failure(failures),
+            error=chosen[1] if chosen else None,
+            failed_path=chosen[0] if chosen else None,
         )
     finally:
         if owned:

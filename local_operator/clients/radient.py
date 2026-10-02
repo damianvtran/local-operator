@@ -1722,7 +1722,7 @@ class RadientClient:
         provider: Optional[str] = "openai",
         language_code: Optional[str] = None,
         voice_descriptor: Optional[Dict[str, Any]] = None,
-    ) -> "Tuple[bytes, Dict[str, str]]":
+    ) -> Tuple[bytes, Dict[str, str]]:
         """As :meth:`create_speech`, also returning the hub's response headers.
 
         Split out rather than made a flag on ``create_speech`` because the two
