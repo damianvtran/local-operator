@@ -265,13 +265,18 @@ the one the desktop client reads): nothing is rolled back, the
   `before_anchor`, `unfinished_batch`, `history_rewriting`, `compaction_pending`,
   `fork_pending`, `unmatched_tool_result`, `incomplete_tool_calls`, and it is empty
   (with `message` the generic sentence) when the owner names a cause this build does
-  not know. `message` is character-for-character the sentence the terminal's `/fork`
-  renders. The one fork-branch refusal that does NOT carry the code is the routed
-  payload decoder's fail-closed shape check (`_fork_entry_target`), which this route
-  cannot produce — it always composes the exact payload — so only a raw or newer
-  runtime client can meet it, and it keeps the generic answer. An owner that could
-  not be DIALLED at all is likewise still `503 runtime_unreachable`, and a clone
-  that failed carries the owner's cause on the same owner-outage answer.
+  not know. For a refusal, `message` is character-for-character the sentence the
+  terminal's `/fork` renders. The one fork-branch refusal that does NOT carry the
+  code is the routed payload decoder's fail-closed shape check
+  (`_fork_entry_target`), which this route cannot produce — it always composes the
+  exact payload — so only a raw or newer runtime client can meet it, and it keeps
+  the generic answer. An owner that could not be DIALLED at all is likewise still
+  `503 runtime_unreachable`, whose body is the vetted outage sentence and never any
+  cause's. A clone that FAILED is not a refusal — nothing about the conversation's
+  state said no — so it keeps that same owner-outage answer, body included; the
+  cause the owner reported rides the runtime frame's own `message`, which is what a
+  client that renders it (the terminal) shows, and it deliberately does not reach
+  that 503 body.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
 - `POST /asides`: request_id, text, optional previous aside_id, optional

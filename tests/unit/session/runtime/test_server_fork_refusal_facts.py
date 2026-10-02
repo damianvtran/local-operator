@@ -23,7 +23,11 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.session.errors import ForkRefused, admission_error
+from local_operator.session.errors import (
+    _FORK_REFUSAL_SENTENCES,
+    ForkRefused,
+    admission_error,
+)
 from local_operator.session.runtime.server import RuntimeServer, _ClientConn
 from tests.unit.session.runtime.test_server import FakeHandle
 
@@ -151,3 +155,44 @@ async def test_other_categories_carry_no_fork_reason() -> None:
     frame = await _error_frame(AttachmentUnavailable())
     assert frame["error_code"] == AttachmentUnavailable.code
     assert "error_reason" not in frame, "only ForkRefused names a reason"
+
+
+def test_the_evidence_table_and_the_closed_set_cannot_drift() -> None:
+    """A token added to one side without the other must fail HERE, loudly.
+
+    ``REASONS`` is deliberately an independent copy of the table — that is what
+    makes this file evidence rather than a restatement of the decoder — so
+    nothing else keeps the two in step: a cause added to
+    ``_FORK_REFUSAL_SENTENCES`` with no entry above would leave the new token
+    unproven, and one added above with no table entry would prove a sentence
+    nothing can build. One assertion covers both directions, and comparing the
+    mappings also catches a token renamed or re-worded on one side only.
+    """
+    assert REASONS == _FORK_REFUSAL_SENTENCES
+
+
+def test_every_raise_site_names_a_token_the_closed_set_has() -> None:
+    """A misspelt ``reason=`` literal must fail here, not silently degrade.
+
+    ``ForkRefused`` accepts an unknown reason BY DESIGN — that is how a newer
+    owner's unknown token degrades to the generic sentence on the far side — so
+    a raise site with a typo is not an error anywhere: it simply publishes the
+    generic sentence for a cause that has its own, and the closed set quietly
+    grows an entry nothing raises. The literals are scanned where they are
+    written, which is the only place the two can disagree without a symptom.
+    """
+    import re
+    from pathlib import Path
+
+    import local_operator
+
+    package = Path(local_operator.__file__).resolve().parent
+    named = {
+        match[1]
+        for path in package.rglob("*.py")
+        for match in re.findall(
+            r'ForkRefused\(\s*reason=(["\'])([a-z_]+)\1', path.read_text(encoding="utf-8")
+        )
+    }
+    assert named, "the raise sites are what this scans; none found means the scan broke"
+    assert named <= set(_FORK_REFUSAL_SENTENCES), sorted(named - set(_FORK_REFUSAL_SENTENCES))
