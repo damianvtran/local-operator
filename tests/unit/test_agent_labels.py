@@ -405,3 +405,45 @@ def test_mesh_install_re_derives_the_label_from_the_name(tmp_path: Path) -> None
     installed = AgentRegistry(bare).get_agent(agent.id)
     assert installed is not None
     assert installed.label == "UX Reviewer"
+
+
+def test_the_apply_rebuild_carries_a_chosen_local_label_through_an_update(
+    tmp_path: Path,
+) -> None:
+    """R1-1, the PRESERVE half: a CONTENT update must not drop the local label.
+
+    The re-apply test above short-circuits to ``unchanged`` -- a retitle is
+    invisible to the digest, which is the point of keeping the label off the wire
+    -- so it never enters the branch that rebuilds a fresh ``AgentData``. This one
+    FORCES that branch: the author's row changes while the mirror holds a chosen
+    label, so the apply is an ``updated`` and the rebuild must carry
+    ``local_label`` instead of a fresh row's derived one.
+    """
+    author = tmp_path / "author"
+    bare = tmp_path / "bare"
+    author.mkdir()
+    bare.mkdir()
+
+    reg = AgentRegistry(author)
+    agent = reg.create_agent(_fields(name="ops", description="first"))
+
+    bundle = definitions.local_bundle(author)
+    assert definitions.apply_bundle(bare, bundle, origin_device=bundle["origin_device"])
+
+    # The mirror picks its OWN label (a retitle the origin knows nothing about).
+    mirror = AgentRegistry(bare)
+    mirror.update_agent(agent.id, _fields(label="Platform Reliability"))
+
+    # The author changes CONTENT, so the bundle differs and the rebuild runs.
+    reg.update_agent(agent.id, _fields(description="second"))
+    changed = definitions.local_bundle(author)
+    outcome = definitions.apply_bundle(bare, changed, origin_device=changed["origin_device"])
+
+    assert [row["name"] for row in outcome["updated"]] == ["ops"], outcome
+    assert outcome["conflicts"] == [], outcome
+
+    after = AgentRegistry(bare).get_agent(agent.id)
+    assert after is not None
+    # The content moved AND the mirror's chosen label survived the rebuild.
+    assert after.description == "second"
+    assert after.label == "Platform Reliability"
