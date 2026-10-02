@@ -4591,9 +4591,38 @@ class SnapshotRoute:
     #: One of the ``FALLBACK_*`` tokens, or ``""`` for a route that was never a
     #: wheel candidate (a directory snapshot).
     reason: str = ""
-    #: A clause completing "building from source: ..." in the notice — the
-    #: specific fact that stopped the wheel route.
+    #: A clause completing "building from source — ..." in the notice — the
+    #: specific fact that stopped the wheel route, NAMING the ref (design
+    #: review D4) so a branch never degrades to a bare commit SHA.
     detail: str = ""
+
+
+def _snapshot_ref_at(snapshot: SnapshotSource) -> str:
+    """``main @ c63efc1fe9e6`` — the ref the caller named, and where it resolved.
+
+    Both halves earn their place in a warning: a branch moves, and a bare SHA
+    cannot be read against the ref list. When the caller passed the commit
+    itself (a raw SHA), the pair collapses to that one string rather than
+    repeating it.
+    """
+    label = snapshot.label
+    if not label or snapshot.commit.startswith(label):
+        return label or snapshot.commit[:12]
+    return f"{label} @ {snapshot.commit[:12]}"
+
+
+def _wheel_unavailable_detail(snapshot: SnapshotSource, complaint: str) -> str:
+    """One sentence for a wheel-unavailable fallback: ref first, complaint last.
+
+    The version is stated ONCE — as part of the ref when the ref's own name
+    carries it (``v0.62.39 @ 50111337…``), otherwise as a parenthetical for the
+    branch that merely points at the release's commit — so the line cannot
+    repeat itself the way "release X … version X" did (design review D7).
+    """
+    claim = _snapshot_ref_at(snapshot)
+    if snapshot.version not in snapshot.label:
+        claim = f"{claim} (release {snapshot.version})"
+    return f"{claim} is release-tagged, but {complaint}"
 
 
 def classify_snapshot_install(
@@ -4647,32 +4676,40 @@ def classify_snapshot_install(
         # so no wheel.
         return SnapshotRoute(
             reason=FALLBACK_UNRELEASED,
-            detail="the snapshot carries no commit and version to check against a release",
+            detail="the snapshot carries no commit or version to check against a release",
         )
     tags = _release_versions_at(repo if repo is not None else Path.cwd(), snapshot.commit)
     if tags != {snapshot.version}:
-        # The detail LISTS what was found: a tag naming a different version is a
-        # different condition from no tag at all, and the reader has to be able
-        # to tell them apart — this string reaches the notice and the marker.
+        # The detail NAMES the ref and LISTS what was found: "a tag at the
+        # commit names a different version" and "no tag at all" are different
+        # conditions the reader has to be able to tell apart, and a bare
+        # 12-char SHA is not the name anyone typed (design review D4).
+        ref_at = _snapshot_ref_at(snapshot)
         if tags:
             found = ", ".join(sorted(tags))
-            detail = (
-                f"the release tags at {snapshot.commit[:12]} ({found}) do not "
-                f"name version {snapshot.version}"
-            )
+            detail = f"{ref_at} is tagged {found}, not version {snapshot.version}"
         else:
-            detail = f"no release tag points at {snapshot.commit[:12]}"
+            detail = f"no release tag points at {ref_at}"
         return SnapshotRoute(reason=FALLBACK_UNRELEASED, detail=detail)
     document, complaint = _pypi_release_document(snapshot.version)
     if document is None:
-        return SnapshotRoute(reason=FALLBACK_WHEEL, version=snapshot.version, detail=complaint)
+        return SnapshotRoute(
+            reason=FALLBACK_WHEEL,
+            version=snapshot.version,
+            detail=_wheel_unavailable_detail(snapshot, complaint),
+        )
     artifact = _macos_universal2_wheel(document, snapshot.version)
     if not artifact:
-        if _macos_universal2_wheel_is_yanked(document, snapshot.version):
-            detail = f"the macOS universal2 wheel for {snapshot.version} is yanked on PyPI"
-        else:
-            detail = f"PyPI serves {snapshot.version} without a macOS universal2 wheel"
-        return SnapshotRoute(reason=FALLBACK_WHEEL, version=snapshot.version, detail=detail)
+        complaint = (
+            "its macOS universal2 wheel is yanked on PyPI"
+            if _macos_universal2_wheel_is_yanked(document, snapshot.version)
+            else "PyPI serves no macOS universal2 wheel for it"
+        )
+        return SnapshotRoute(
+            reason=FALLBACK_WHEEL,
+            version=snapshot.version,
+            detail=_wheel_unavailable_detail(snapshot, complaint),
+        )
     return SnapshotRoute(install_from_wheel=True, version=snapshot.version, artifact=artifact)
 
 
@@ -4700,10 +4737,11 @@ def _pypi_release_document(
 ) -> tuple[dict[str, Any] | None, str]:
     """PyPI's per-version document, as ``(document, why-not)``.
 
-    Exactly one of the pair is non-empty. The complaint is a clause the caller
-    splices into the fallback notice, so it names WHAT could not be confirmed —
-    "not published" and "not reachable" are different facts about different
-    parties, and an audit of a fallback has to be able to tell them apart.
+    Exactly one of the pair is non-empty. The complaint is the clause the
+    caller splices into the fallback notice after ``but``, so it says WHAT
+    could not be confirmed — "not published", "unreachable" and "the answer
+    did not match" are different facts about different parties, and a reader
+    has to be able to tell them apart (design review D7/D8).
 
     httpx is imported here rather than at module scope for the same reason
     :func:`_fetch_pypi_version` imports it there: the updater sits on ``lop``'s
@@ -4719,14 +4757,14 @@ def _pypi_release_document(
         else:
             response = client.get(url, timeout=_FETCH_TIMEOUT_S)
         if response.status_code == 404:
-            return None, f"PyPI does not serve version {version}"
+            return None, "PyPI does not serve it"
         response.raise_for_status()
         document = response.json()
     except Exception:  # noqa: BLE001 — any failure is "not confirmed"
-        return None, f"PyPI could not be reached to confirm {version}"
+        return None, "PyPI could not be reached to check it"
     info = document.get("info") if isinstance(document, dict) else None
     if not isinstance(info, dict) or info.get("version") != version:
-        return None, f"PyPI's answer for {version} was not this release's document"
+        return None, "PyPI's answer did not match the release"
     return document, ""
 
 
@@ -4798,37 +4836,41 @@ def snapshot_route_lines(snapshot: SnapshotSource, route: SnapshotRoute) -> tupl
 
     ONE owner for both directions, so the wheel announcement and the fallback
     marker cannot drift apart. The wheel lines promise the key agent only where
-    the confirmation above proved it can be delivered; every fallback states
-    plainly that this build does NOT carry it, with the reason the classifier
-    recorded. The platform case deliberately does not talk about a missing
-    thing to repair: off macOS, presence is not a capability this platform has,
-    and the wording must not imply otherwise.
+    the confirmation above proved it can be delivered — the macOS universal2
+    wheel, on macOS — and every fallback NAMES THE ROUTE AND THE REASON, never
+    a capability: it states plainly that this build does not carry the key
+    agent, so nothing here can be misread as presence being present, likely or
+    restorable (design review D2/D4). The platform case does not talk about a
+    missing thing to repair: off macOS the key agent is not a capability this
+    platform has, and the wording says exactly that.
+
+    Channel discipline is deliberate, and visible at the call site: the wheel
+    lines are ordinary progress under the command's own prefix (stdout), while
+    every fallback line leads with ``warning:`` and belongs on stderr — this is
+    warning output, and it must not read like the routine ``lop-update:``
+    progress printed beside it.
     """
     if route.install_from_wheel:
         return (
             f"lop-update: {snapshot.label} matches published release {route.version}; "
-            f"installing the macOS wheel ({route.artifact}) instead of building this tree",
-            "lop-update: that wheel carries the macOS key agent (lop-keyagent.app)",
+            "installing the published macOS wheel instead of building this tree",
+            f"lop-update: wheel: {route.artifact} — carries the macOS key agent "
+            "(lop-keyagent.app)",
         )
     if not route.reason:
         return ()
     if route.reason == FALLBACK_PLATFORM:
         head = (
-            "lop-update: building from source: this host is not macOS — the "
-            "macOS key agent (lop-keyagent.app) exists only on macOS"
-        )
-    elif route.reason == FALLBACK_WHEEL:
-        head = (
-            f"lop-update: building from source: release {route.version} is tagged at "
-            f"{snapshot.commit[:12]}, but {route.detail}"
+            "warning: building from source — this host is not macOS; the "
+            "key agent (lop-keyagent.app) exists only on macOS"
         )
     else:
-        head = f"lop-update: building from source: {route.detail}"
+        head = f"warning: building from source — {route.detail}"
     if route.reason == FALLBACK_PLATFORM:
-        tail = "lop-update: operator-key presence is not available on this platform"
+        tail = "warning: the macOS key agent is not available on this platform"
     else:
         tail = (
-            "lop-update: this build does not carry the macOS key agent "
+            "warning: this build does not carry the macOS key agent "
             "(lop-keyagent.app); only the published macOS wheel does"
         )
     return (head, tail)
@@ -6692,8 +6734,13 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
         else snapshot.install_shape
     )
     try:
+        # The channel is part of the message: every fallback line leads with
+        # ``warning:`` on stderr (a build the operator must not mistake for
+        # presence-bearing is a warning), while the wheel announcement is
+        # ordinary progress on stdout. ``route.reason`` is non-empty exactly
+        # when the route is a fallback.
         for line in snapshot_route_lines(snapshot, route):
-            print(line, flush=True)
+            print(line, file=sys.stderr if route.reason else sys.stdout, flush=True)
         if route.install_from_wheel:
             # THE PyPI PATH: no source tree and no mobile-bundle step (the
             # wheel ships the built bundle), and the marker records
