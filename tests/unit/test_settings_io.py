@@ -381,6 +381,21 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.mobile.peer_send import JOURNAL_UNCONFIRMED_DEFAULT
 
     consumers["send.journal_unconfirmed"] = JOURNAL_UNCONFIRMED_DEFAULT
+
+    # The speech voicing descriptor, asked of the package that BUILDS it
+    # (``local_operator.tts.descriptor``). The registry rows carry literals
+    # because ``settings_io`` never imports the tts package; this block is the
+    # half that turns a drifted literal into a red test rather than a settings
+    # page advertising a default the synthesizer does not send.
+    from local_operator.tts import descriptor as voicing_descriptor
+
+    consumers["speech.voice.gender"] = voicing_descriptor.DEFAULT_GENDER
+    consumers["speech.voice.tone"] = voicing_descriptor.DEFAULT_TONE
+    consumers["speech.voice.expressiveness"] = voicing_descriptor.DEFAULT_EXPRESSIVENESS
+    consumers["speech.voice.pace"] = voicing_descriptor.DEFAULT_PACE
+    consumers["speech.voice.language"] = voicing_descriptor.DEFAULT_LANGUAGE
+    consumers["speech.voice.accent"] = voicing_descriptor.DEFAULT_ACCENT
+    consumers["speech.voice.instructions"] = voicing_descriptor.DEFAULT_SPEECH_INSTRUCTIONS
     return consumers
 
 

@@ -68,6 +68,7 @@ from local_operator.server.routes import (
     static,
     stt,
     transcription,
+    tts,
 )
 from local_operator.server.utils.event_broker import EventBroker
 
@@ -559,6 +560,7 @@ _LEGACY_CONTROL_PATHS = frozenset(
         "/v1/stt/transcriptions",
         "/v1/tools/speech",
         "/v1/transcriptions",
+        "/v1/tts/paths",
     }
 )
 
@@ -937,4 +939,10 @@ app.include_router(
 # /v1/speech
 app.include_router(
     speech.router,
+)
+
+# /v1/tts — the synthesis availability report beside /v1/speech; the path is
+# gated in managed mode above.
+app.include_router(
+    tts.router,
 )
