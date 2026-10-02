@@ -132,24 +132,64 @@ def sent_line(target: SendTarget, state_word: str) -> str:
     send tool's card paints (``delivered`` / ``wake unconfirmed`` /
     ``delivery unconfirmed``) — rather than the model-facing stdout sentence
     (``→ <id>: …`` with a raw message uuid) this surface used to echo.
+
+    This is the BAND's receipt (the strip under the composer), which has room
+    for the handle; the amber NOTICE row uses :func:`amber_notice` instead.
     """
     return f"sent to {target_handle(target)} · {state_word}"
 
 
-def refusal_line(target: SendTarget, reason: str) -> str:
-    """A refusal that names the row the reader picked, in the strip's own words.
+#: The notice row is ONE ``no_wrap`` line, fitted to its MEASURED box
+#: (``ProjectsView._notice_text``) — 56 cells at 60x24, the narrowest the page
+#: is read at — and the band two rows down already names the target
+#: (``send to: ◆ <handle> · esc cancel``). So the notice-row forms carry the
+#: instruction and the reason, never the handle: naming it spends ~31 of those
+#: cells on a repetition, and the core's own amber advisory
+#: (:attr:`DeliveryOutcome.advisory`) alone runs 125-217 cells, so appended to a
+#: handle-bearing receipt the ONE clause to act on landed past the ellipsis —
+#: the reader got the draft back, the state word, and no "don't resend", which
+#: is exactly the double-send the caution exists to prevent (UX round 3, U2:
+#: measured invisible at 100x30, 80x24 and 60x24).
+AMBER_NOTICE: dict[str, str] = {
+    "wake unconfirmed": "wake unconfirmed — don't resend; it may have landed",
+    "delivery unconfirmed": "delivery unconfirmed — check its transcript first",
+}
 
-    The strip showed ``target_handle(target)``; the refusal repeats it (F4/U3:
-    the old sentence named only a bare session id, so the sentence the reader
-    had to recover from named neither the row nor the person) and never stands
-    as a lone id — it carries what went wrong.
+#: The fault sentence as the notice row carries it, same budget: the rung it
+#: replaces (``could not send to ◆ <id>: something went wrong on this end —
+#: retry``) measures 74 cells, so at 60x24 the ``retry`` — the one thing to DO —
+#: was the part that clipped.
+SEND_FAULT_NOTICE = "send faulted on this end — retry"
+
+
+def amber_notice(state_word: str) -> str:
+    """The amber receipt as the notice row carries it — caution INCLUDED.
+
+    Unknown state words fall back to the word itself rather than inventing a
+    caution for a state this module has not learned.
     """
-    return f"could not deliver to {target_handle(target)}: {reason}"
+    return AMBER_NOTICE.get(state_word, state_word)
 
 
-def send_error_line(target: SendTarget, reason: str) -> str:
-    """A send that never reached delivery: resolution or validation failed."""
-    return f"could not send to {target_handle(target)}: {reason}"
+def refusal_notice(reason: str) -> str:
+    """A refusal as the notice row carries it: what happened, then the reason.
+
+    Handle-free for the same budget reason as :data:`AMBER_NOTICE`; the reason
+    is the half worth the row, and at 60x24 the handle used to eat most of it
+    (UX round 3: the refusal measured 84 cells, so its tail — the resolver's
+    own reason — clipped at 80x24 and 60x24 alike).
+    """
+    return f"could not deliver: {reason}"
+
+
+def error_notice(reason: str) -> str:
+    """A send that never reached delivery as the notice row carries it.
+
+    Resolution, validation and pre-delivery failures all report here; see
+    :data:`AMBER_NOTICE` for why the target's handle is the band's job, not
+    this row's.
+    """
+    return f"could not send: {reason}"
 
 
 #: How a row's state chip inks itself (design review round 1, D4): the page's

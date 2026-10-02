@@ -397,11 +397,13 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartViewDismissed,
 )
 from local_operator.tui.widgets.projects_send import (
+    SEND_FAULT_NOTICE,
     SendTarget,
+    amber_notice,
     compose_band,
+    error_notice,
     pending_line,
-    refusal_line,
-    send_error_line,
+    refusal_notice,
     sent_line,
 )
 from local_operator.tui.widgets.projects_view import (
@@ -34045,11 +34047,11 @@ class OperatorApp(App[None]):
             # app (UX round 2, U3 — measured: "cannot unpack non-iterable
             # coroutine object"). The sentence is human; the exception goes to
             # the log.
-            logger.debug("quick-send resolve failed", exc_info=True)
+            logger.warning("quick-send resolve failed", exc_info=True)
             self._quick_send_settled(
                 view,
                 target,
-                send_error_line(target, "something went wrong on this end — retry"),
+                SEND_FAULT_NOTICE,
                 text,
             )
             return
@@ -34057,13 +34059,13 @@ class OperatorApp(App[None]):
             self._quick_send_settled(
                 view,
                 target,
-                send_error_line(target, error or "the session is no longer available"),
+                error_notice(error or "the session is no longer available"),
                 text,
             )
             return
         if record.pid == os.getpid():
             self._quick_send_settled(
-                view, target, send_error_line(target, "that target is this session"), text
+                view, target, error_notice("that target is this session"), text
             )
             return
         try:
@@ -34077,41 +34079,44 @@ class OperatorApp(App[None]):
             )
         except RuntimeError as exc:
             # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
-            self._quick_send_settled(view, target, send_error_line(target, str(exc)), text)
+            self._quick_send_settled(view, target, error_notice(str(exc)), text)
             return
         except (ConnectionError, OSError, ValueError):
             # Unclassifiable transport fault: honest, never the confident arm —
             # and the reader gets a sentence, not interpreter text (UX round 2,
             # U3: the exception is logged, `str(exc)` never painted). The
-            # caution is the core's own for this state — the message may have
-            # landed, so sending again may deliver it twice (UX round 2, U2).
-            logger.debug("quick-send transport fault", exc_info=True)
+            # notice is the amber state this ends in: `delivery unconfirmed`,
+            # whose caution is the core's own (the message may have landed, so
+            # check the transcript before resending). The 150-cell sentence
+            # that used to ride the one-row notice clipped its own caution at
+            # every size (UX round 3, U2).
+            logger.warning("quick-send transport fault", exc_info=True)
             self._quick_send_settled(
                 view,
                 target,
-                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted on "
-                "this end; check the target's transcript before resending, sending "
-                "again may deliver it twice",
+                amber_notice("delivery unconfirmed"),
                 text,
             )
             return
         if outcome.is_error:
-            # NOT DELIVERED (design note A.1): a refusal, named the way the
-            # band named the target, with the draft kept.
-            self._quick_send_settled(view, target, refusal_line(target, outcome.detail), text)
+            # NOT DELIVERED (design note A.1): a refusal, with the draft kept.
+            self._quick_send_settled(view, target, refusal_notice(outcome.detail), text)
             return
         sentence = sent_line(target, outcome.state_word)
         if outcome.partial:
             # Amber: honest but incomplete. The core's own sentence for exactly
             # these states warns against resending (`do not send it again` /
             # `sending again may deliver it twice`), and the restored draft is
-            # the strongest available cue to press enter again — so the caution
-            # rides the notice too, in the core's words (UX round 2, U2;
-            # `advisory` is the half of the detail after its ` — ` separator).
+            # the strongest available cue to press enter again — so the notice
+            # leads with the caution in the core's own words (round 2, U2) and
+            # keeps it INSIDE the row (round 3, U2: the advisory is 125-217
+            # cells, so it cannot ride the one-line notice behind a receipt).
             caution = outcome.advisory
-            self._quick_send_settled(
-                view, target, f"{sentence} — {caution}" if caution else sentence, text
-            )
+            self._quick_send_settled(view, target, amber_notice(outcome.state_word), text)
+            # Nothing is lost: the sentence the notice cannot hold is the log's,
+            # at the level this app's logger actually emits at (WARNING).
+            if caution:
+                logger.warning("quick-send amber (%s): %s", outcome.state_word, caution)
             return
         # DELIVERED: the band acknowledges (F4); the editor was cleared by the
         # submit, so the strip is visible and the reader is still in compose.
