@@ -1502,13 +1502,27 @@ def _paired_prefix(messages: Sequence[AgentMessage], *, strict: bool = False) ->
         if item.role == "tool":
             if item.tool_call_id not in pending:
                 if strict:
-                    raise ValueError("history has an unmatched tool result; cannot fork safely")
+                    # THE STRICT ARM IS THE SNAPSHOT/CUT VALIDATION, not a general
+                    # strictness: its only caller is ``Transcript.fork_snapshot``
+                    # (the persist path passes ``strict=False``, where this shape
+                    # is trimmed instead of refused). So it raises the TYPED
+                    # refusal the cut needs rather than a bare ``ValueError``,
+                    # which crossed the attach transport with no state and left the
+                    # owner answering a malformed interior as an unreachable
+                    # runtime. A future NON-fork caller that wants strictness has
+                    # to move the typing up to itself rather than inherit a fork
+                    # refusal.
+                    from local_operator.session.errors import ForkRefused
+
+                    raise ForkRefused(reason="unmatched_tool_result")
             else:
                 pending.remove(item.tool_call_id)
             continue
         if pending:
             if strict:
-                raise ValueError("history has incomplete tool calls before later messages")
+                from local_operator.session.errors import ForkRefused
+
+                raise ForkRefused(reason="incomplete_tool_calls")
             break
         if item.role == "assistant" and item.tool_calls:
             start = index

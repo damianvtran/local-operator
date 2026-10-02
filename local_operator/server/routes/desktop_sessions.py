@@ -1768,12 +1768,16 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # or the unfinished batch the other three name are transients the
             # reader retries.
             #
-            # THE CONTRACT SAYS BOTH HALVES OUT LOUD (``docs/DESKTOP_API.md``):
-            # "An ordinary refusal is a 409 carrying the session's own sentence",
-            # while ``runtime_unreachable`` "keeps its meaning — nothing could be
-            # dialled". Answering 503 here was never merely unhelpful copy; it
-            # said something FALSE about the transport, which is why the
-            # distinction is drawn by status and not by the sentence alone.
+            # THE CONTRACT SAYS BOTH HALVES OUT LOUD (``docs/DESKTOP_API.md``,
+            # the control routes' refusal/status section): a session-scoped 503
+            # ``runtime_unreachable`` is the answer for an owner that could not be
+            # reached and "keeps its meaning — nothing could be dialled", with the
+            # vetted sentence and no retry fields. So the status is what separates
+            # a refusal from an outage here, and answering 503 for a fork the owner
+            # answered was never merely unhelpful copy: it said something FALSE
+            # about the transport. (The 422/409 split above is this file's own
+            # convention; the contract quote is the general one, not a
+            # route-specific rule.)
             #
             # ``code`` is the machine contract the renderer keys on; ``reason``
             # narrows it to WHICH of the family's causes fired (one token from the

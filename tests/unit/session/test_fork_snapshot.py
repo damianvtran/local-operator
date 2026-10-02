@@ -133,11 +133,36 @@ async def test_snapshot_refuses_malformed_interior_and_active_compaction(tmp_pat
             message("user", "interleaved input"),
         ]
     )
-    with pytest.raises(ValueError, match="incomplete tool calls before later"):
+    # THE STRICT PAIRING REFUSAL IS A FORK REFUSAL, deliberately re-pinned here:
+    # it comes from ``session._paired_prefix``'s strict arm, whose only caller is
+    # this snapshot. Left bare it crossed the attach transport with no state, so a
+    # malformed interior reached the operator as the 503 owner-outage sentence
+    # ("reconnect and reconcile") — advice that cannot change a broken pairing,
+    # under a status that claimed the owner was never reached. It is a
+    # ``ValueError`` subclass, so the previous assertion would still pass; pinning
+    # the type is what makes the classification the contract.
+    with pytest.raises(ForkRefused, match="incomplete tool calls before later") as malformed:
         await parent.fork_snapshot()
+    assert malformed.value.reason == "incomplete_tool_calls"
     with pytest.raises(ForkRefused, match="history is being rewritten") as refused:
         await parent.fork_snapshot(is_compacting=lambda: True)
     assert refused.value.reason == "history_rewriting"
+    assert len(list((tmp_path / "sessions").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refuses_an_unmatched_tool_result(tmp_path: Path) -> None:
+    """The pairing check's OTHER arm, and its own token and sentence.
+
+    A result with no call is the mirror of the arm above, so it must not be
+    folded into it: the two publish different sentences, and a surface that
+    showed the wrong one would describe the opposite fault.
+    """
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    await parent.append_messages([message("tool", "orphan result", tool_call_id="ghost")])
+    with pytest.raises(ForkRefused, match="unmatched tool result") as refused:
+        await parent.fork_snapshot()
+    assert refused.value.reason == "unmatched_tool_result"
     assert len(list((tmp_path / "sessions").iterdir())) == 1
 
 

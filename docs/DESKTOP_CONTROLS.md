@@ -252,20 +252,26 @@ the one the desktop client reads): nothing is rolled back, the
   transcript entry). The runtime refuses compaction and uses `Session.request_fork`
   during a turn; otherwise it uses `fork_session`. This is the canonical
   complete-history fork at a safe boundary, not an arbitrary transcript rewrite.
-  The parent is unchanged. **A refused fork is a `409`, never an owner outage**: the
-  conversation's own state can refuse the cut — an `entry_id` this conversation does
-  not hold, a point before the newest summary's anchor, an anchor the unpaired-tail
-  trim would drop, or a compaction in flight (the last of these on BOTH arms) — and
-  each arrives as `409 {"detail": {"code": "fork_refused", "message": <that
-  cause's sentence>, "reason": <one token>}}`. `reason` is the machine half a
-  surface keys on to offer
+  The parent is unchanged. **Every fork refusal the desktop route can produce is a
+  `409`, not an owner outage**: the conversation's own state can refuse the cut —
+  an `entry_id` this conversation does not hold, a point before the newest
+  summary's anchor, an anchor the unpaired-tail trim would drop, a malformed
+  interior the strict pairing check rejects (a tool result with no call, or an
+  unanswered call with rows after it), a compaction in flight, and a second
+  boundary fork while one is already pending — and each arrives as
+  `409 {"detail": {"code": "fork_refused", "message": <that cause's sentence>,
+  "reason": <one token>}}`. `reason` is the machine half a surface keys on to offer
   the right way forward without parsing prose; it is one of `entry_unknown`,
   `before_anchor`, `unfinished_batch`, `history_rewriting`, `compaction_pending`,
-  and it is empty (with `message` the generic sentence) when the owner names a cause
-  this build does not know. `message` is character-for-character the sentence the
-  terminal's `/fork` renders. An owner that could not be DIALLED at all is still
-  `503 runtime_unreachable`, and an un-enumerated runtime failure keeps that answer
-  unchanged — the classification narrows nothing outside the enumerated causes.
+  `fork_pending`, `unmatched_tool_result`, `incomplete_tool_calls`, and it is empty
+  (with `message` the generic sentence) when the owner names a cause this build does
+  not know. `message` is character-for-character the sentence the terminal's `/fork`
+  renders. The one fork-branch refusal that does NOT carry the code is the routed
+  payload decoder's fail-closed shape check (`_fork_entry_target`), which this route
+  cannot produce — it always composes the exact payload — so only a raw or newer
+  runtime client can meet it, and it keeps the generic answer. An owner that could
+  not be DIALLED at all is likewise still `503 runtime_unreachable`, and a clone
+  that failed carries the owner's cause on the same owner-outage answer.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
 - `POST /asides`: request_id, text, optional previous aside_id, optional

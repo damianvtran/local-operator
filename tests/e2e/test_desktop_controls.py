@@ -13,6 +13,7 @@ import httpx
 import pytest
 import uvicorn
 
+from local_operator.harness.types import Message, ToolCall
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
 from local_operator.session.aside import ASIDE_PROMPT
@@ -899,7 +900,7 @@ async def test_a_fork_cut_through_a_named_entry(
             # of its own through this same stream (see the interrupt test below):
             # pinning answers to exact indices lets the harness's bookkeeping,
             # rather than the contract under test, decide whether this passes.
-            stream = ScriptedStream(
+            stream = ControlledStream(
                 [text_turn(f"Answer {n}") for n in range(1, 4)] + [text_turn("Spare")] * 4
             )
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
@@ -1033,6 +1034,75 @@ async def test_a_fork_cut_through_a_named_entry(
                 f"A cut before the newest anchor: 409 {anchor_detail['code']}/"
                 f"{anchor_detail['reason']} — {anchor_detail['message']}"
             )
+
+            # A MALFORMED INTERIOR refuses the cut too, with its own cause. The
+            # strict pairing check (``session._paired_prefix``'s strict arm, the
+            # only strict caller being this snapshot) used to raise a bare
+            # ``ValueError``, so a broken tool pairing reached the operator as the
+            # same owner-outage 503 — advice that cannot change a pairing, under a
+            # status claiming the owner was never reached. Built on the live
+            # transcript: an assistant row whose call never gets its result,
+            # followed by another row, then a cut past them.
+            malformed_call = Message.assistant(
+                "",
+                tool_calls=[ToolCall(id="parked-call", name="bash", arguments={"command": "true"})],
+            )
+            await session._transcript.append_messages(
+                [malformed_call, Message.user("a row after the unanswered call")]
+            )
+            malformed_ids = _message_row_ids(parent_transcript)
+            broken_bytes = parent_transcript.read_bytes()
+            broken = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": malformed_ids[-1],
+                },
+            )
+            assert broken.status_code == 409, broken.text
+            broken_detail = broken.json()["detail"]
+            assert broken_detail["code"] == "fork_refused", broken_detail
+            assert broken_detail["reason"] == "incomplete_tool_calls", broken_detail
+            assert broken_detail["message"] == (
+                "history has incomplete tool calls before later messages"
+            ), broken_detail
+            assert parent_transcript.read_bytes() == broken_bytes
+            print(
+                f"A malformed interior: 409 {broken_detail['code']}/"
+                f"{broken_detail['reason']} — {broken_detail['message']}"
+            )
+
+            # A SECOND BOUNDARY FORK WHILE ONE IS ALREADY WAITING refuses with its
+            # own cause — the ordinary gesture (a double-click, or two windows),
+            # which used to arrive as the same owner-outage 503. A PARKED real turn
+            # is what makes the state reachable at all: the refusal lives inside
+            # the runtime's streaming arm, and ``request_fork`` is the very call
+            # the first request makes before it waits.
+            stream.block = True
+            parked = await client.post(
+                target + "/messages", json={"request_id": request_id(), "text": "park me"}
+            )
+            assert parked.status_code == 200, parked.text
+            await asyncio.wait_for(stream.started.wait(), 15)
+            assert session.is_streaming, "the turn must be in flight for this refusal"
+            assert session.request_fork(root, on_complete=lambda *_: None) is False
+            assert session.has_pending_fork()
+            second = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert second.status_code == 409, second.text
+            pending_detail = second.json()["detail"]
+            assert pending_detail["code"] == "fork_refused", pending_detail
+            assert pending_detail["reason"] == "fork_pending", pending_detail
+            assert pending_detail["message"] == "A fork is already waiting for a safe boundary"
+            print(
+                f"A second boundary fork: 409 {pending_detail['code']}/"
+                f"{pending_detail['reason']} — {pending_detail['message']}"
+            )
+            # Release the parked turn before teardown: the pending fork then lands
+            # at its boundary, which is exactly what the refusal protected.
+            await client.post(target + "/interrupt", json={"request_id": request_id()})
+            await until(lambda: not session.is_streaming)
+            stream.block = False
 
             # A GENUINELY UNREACHABLE OWNER STILL READS AS ONE, and this is the
             # cell that says the classification did not swallow that answer: with

@@ -275,3 +275,35 @@ async def test_a_named_cut_leaves_a_pending_next_safe_request_alone(
     assert completed == [], "the cut ran no deferred clone of its own"
     assert (store / "sessions" / result["data"]["session_id"]).is_dir()
     assert session.cancel_fork()
+
+
+async def test_a_second_boundary_fork_refuses_as_a_fork_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The already-pending check is a REFUSAL, not an owner outage.
+
+    It used to raise a bare ``ValueError``, which crosses the attach transport
+    with no state: the client re-raised it as a plain ``RuntimeError`` and the
+    control plane could only read that as an owner that was never dialled — the
+    503 "Session owner is unavailable. Reconnect and reconcile before retrying."
+    for a request the owner answered promptly. The gesture is ordinary (a
+    double-click on Fork, or two windows on one conversation), so the wrong
+    answer was reachable by accident rather than by protocol abuse.
+    """
+    from local_operator.session.errors import ForkRefused
+
+    session, handle, store = _handle(tmp_path, monkeypatch)
+    await _seed(session)
+    # The shape a streaming session with a boundary fork already registered
+    # presents. ``request_fork`` sets the pending flag synchronously, which is
+    # exactly what the first of the two requests does before it waits.
+    session._is_streaming = True
+    assert session.request_fork(store, on_complete=lambda *_: None) is False
+    assert session.has_pending_fork()
+
+    with pytest.raises(ForkRefused) as refused:
+        await handle.run_slash_authoritative("fork", "")
+
+    assert refused.value.reason == "fork_pending"
+    assert str(refused.value) == "A fork is already waiting for a safe boundary"
+    assert session.has_pending_fork(), "the refusal left the first request alone"
