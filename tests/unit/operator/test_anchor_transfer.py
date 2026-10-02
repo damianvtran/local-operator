@@ -218,17 +218,18 @@ def _setup_fakes(
     # store answers ``load() -> None`` while nothing has been created, so the real
     # ``_existing_key`` runs and reports the fresh-key state.
     _stub_store(monkeypatch, _StubPresenceStore())
+    # A REAL KeyHandle, not a SimpleNamespace: ``create_key`` returns a handle and a
+    # handle has no ``close``, so a fake carrying one would keep the same chimera the
+    # probe seam just lost — and any future ``handle.close()`` on the create path would
+    # raise in the product while every cell here stayed green.
     monkeypatch.setattr(
         handlers,
         "create_key",
-        lambda *, config_root, preference="auto": SimpleNamespace(
+        lambda *, config_root, preference="auto": keychain.KeyHandle(
+            backend=keychain.FILE_ONLY,
             key_id=anchor.key_id,
             spki=anchor.spki,
-            backend="file-only",
             presence=False,
-            rung=None,
-            reused=False,
-            close=lambda: None,
         ),
     )
     monkeypatch.setattr(handlers, "anchor_for_handle", lambda handle, *, label="": anchor)
