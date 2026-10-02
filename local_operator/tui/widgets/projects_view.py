@@ -71,8 +71,10 @@ from local_operator.tui.projects_render import (
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
 from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
 from local_operator.tui.widgets.projects_send import (
+    SEND_CARD_MAX_WIDTH,
     SendTarget,
     SendTargetCard,
+    pending_line,
     send_targets,
 )
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
@@ -1395,9 +1397,13 @@ class ProjectsView(Vertical):
     def on_resize(self) -> None:
         # The rule spans the page and the hints shed against a width only the
         # layout knows, so both repaint on resize. The canvas is
-        # width-independent (it scrolls), so only the chrome moves.
+        # width-independent (it scrolls), so only the chrome moves. A floating
+        # send card re-reads its anchor and budget from the same settled
+        # layout, deferred like every geometry read here.
         self._paint_chrome()
         self.call_after_refresh(self._sync_scroll_hint)
+        if self._send_card is not None:
+            self.call_after_refresh(self._place_send_card)
 
     def _sync_scroll_hint(self) -> None:
         """Arm ``↔↕ scroll`` only while the body has somewhere to scroll.
@@ -2197,7 +2203,7 @@ class ProjectsView(Vertical):
         return None
 
     def open_send_picker(self) -> None:
-        """Mount the target card over the page and let it take the keys."""
+        """Float the target card over the page and let it take the keys."""
         if self._send_card is not None:
             return
         rows = self._send_targets()
@@ -2205,7 +2211,46 @@ class ProjectsView(Vertical):
         self._send_card = card
         self._mode = "send"
         self.mount(card, before=self._title)
+        # Placement is idempotent and cheap: once now (the regions it reads are
+        # settled), once after the mount's first layout, and on every resize
+        # through `on_resize` — one computation, recomputed, never accumulated.
+        self._place_send_card()
+        self.call_after_refresh(self._place_send_card)
         self.call_after_refresh(self._paint_chrome)
+
+    def _place_send_card(self) -> None:
+        """Float the send card over the canvas (design review round 1, D1/D2).
+
+        The anchor is the canvas's first painted row, and the row budget is
+        everything from there to the page's own content bottom — so the card
+        is always inside the page and never clipped (the failures D1 measured
+        at 60x24 and 80x24). The card lives on the overlay layer, so moving it
+        moves nothing else: no reflow, no scroll-region growth, no row taken
+        from the canvas.
+        """
+        card = self._send_card
+        if card is None:
+            return
+        body = self._body
+        padding = body.styles.padding
+        top = body.region.y + padding.top
+        # The ground runs from the canvas's first row to the page's own content
+        # bottom: while the card is up it may cover the footer strip and the
+        # hint row below the canvas (its own legend then carries the grammar,
+        # and the page keys are inert anyway with mode='send'), but it can
+        # never reach the dock. Budgeting only the body clipped the list to a
+        # single row at 60x24 and 80x24 — still inside the page, still useless.
+        ground = self.content_region.y + self.content_region.height - top
+        card.set_available(ground)
+        card.styles.width = min(
+            SEND_CARD_MAX_WIDTH,
+            max(20, body.region.width - padding.left - padding.right),
+        )
+        content = self.content_region
+        card.styles.offset = (
+            body.region.x + padding.left - content.x,
+            top - content.y,
+        )
 
     def close_send_picker(self) -> None:
         self._close_send_picker()
@@ -2267,19 +2312,24 @@ class ProjectsView(Vertical):
         self.post_message(ProjectsViewSendRequested(target=self._send_target, text=body))
         return True
 
-    def compose_receipt(self, sentence: str, *, ok: bool) -> None:
+    def compose_pending(self, target: SendTarget) -> None:
+        """The in-flight statement (UX U2): the submit's next visible fact.
+
+        Painted in the page's own notice line — the surface the reader is
+        looking at while the send resolves — and replaced by the receipt.
+        """
+        self.show_notice(pending_line(target))
+
+    def compose_receipt(self, sentence: str) -> None:
         """Report a send's outcome in the surface the reader is looking at.
 
-        Acknowledged: the recipient strip stays and the sentence rides the
-        page's own notice line (the composer's band is a PLACEHOLDER — it only
-        paints while the editor is empty, so a refusal with the draft kept
-        could not be seen there; recorded in the PR beside the card deviation).
+        ONE branch (agent review F7 dropped the dead ``ok`` flag two identical
+        calls used to take; agent review F4 moved the DELIVERED receipt to the
+        composer's band, so what lands here is amber and refused outcomes).
+        The page's notice line is right for both: the reader is still on the
+        page, and a late receipt for a compose they already left still has to
+        be said somewhere the page can see.
         """
-        if self._mode != "compose":
-            # A late receipt for a compose the reader already left: the
-            # transcript is hidden by this page, so say it here.
-            self.show_notice(sentence)
-            return
         self.show_notice(sentence)
 
     def on_send_target_card_chosen(self, message: SendTargetCard.Chosen) -> None:
