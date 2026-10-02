@@ -425,6 +425,51 @@ def spool_owes_turn(session_dir: Path) -> bool:
     return False
 
 
+def spooled_wake_fires(session_dir: Path) -> tuple[int, float | None]:
+    """How many wake rows this spool holds undelivered, and the oldest write.
+
+    The count ``lop wake status`` renders. A runtime that drains for a replaced
+    build SPOOLS the wakes that fire meanwhile (``Session.retire_wakes_to_inbox``)
+    and nothing reports them until a successor boots and drains — the
+    2026-10-01/02 incident read as a live, freshly-fired session on every
+    surface while ~14 h of fires sat here. This is the read that makes them
+    visible; :func:`spool_owes_turn` beside it answers the coarser question the
+    supervisor needs ("does anything here owe a turn?").
+
+    Same read and same never-raises contract as the predicates above: a row
+    counts when ``wake`` is true, and ``written_at`` (epoch seconds) is tracked
+    as the OLDEST among the counted rows — ``None`` when no counted row carries
+    a usable one. A missing file is zero rows; a torn or unparseable line is
+    skipped, because the writer may be appending while this reads and a status
+    surface must render the rest of the picture rather than die on the line
+    being written.
+    """
+    path = Path(session_dir) / INBOX_NAME
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return (0, None)
+    fires = 0
+    oldest: float | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not row.get(WAKE_FIELD):
+            continue
+        fires += 1
+        written = row.get("written_at")
+        if isinstance(written, (int, float)) and not isinstance(written, bool):
+            value = float(written)
+            if oldest is None or value < oldest:
+                oldest = value
+    return (fires, oldest)
+
+
 def _write(config_dir: Path, session_id: str, record: Mapping[str, Any]) -> bool:
     """Stage and replace one record. Never raises.
 

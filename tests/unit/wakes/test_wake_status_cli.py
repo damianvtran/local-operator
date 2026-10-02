@@ -490,6 +490,104 @@ def test_status_says_an_undelivered_fire_is_still_owed(
     assert payload["deliveries"][0]["next_attempt_in_s"] is not None
 
 
+def test_status_reports_spooled_wake_fires_awaiting_delivery(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The surface the spooled fires never had.
+
+    A runtime that drains for a replaced build spools the wakes that fire
+    meanwhile (``Session.retire_wakes_to_inbox``); if the move is then
+    abandoned with the hook still installed, every later fire lands there too.
+    Nothing reported it — measured 2026-10-01/02: ~14 h of fires on one desk
+    session while every other line read as a healthy, freshly-fired wake.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    _arm(
+        tmp_path,
+        "statussess07",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "standup", "next_due_at": NOW_MS + 3_600_000}],
+    )
+    session = tmp_path / "sessions" / "statussess07"
+    written = time.time() - (13 * 3600 + 600)
+    for index in range(5):
+        assert append_inbox(
+            session,
+            InboxLine(
+                text=f"fire {index}",
+                sender={},
+                wake=True,
+                written_at=written + index,
+                wake_id="w1",
+            ),
+        )
+    # A quiet note OLDER than every fire, and a torn line: neither is a spooled
+    # fire, so neither may be counted — the note asks for no turn ("read this
+    # on your next turn" is its whole contract), and the torn line is a writer
+    # mid-append, which a status read must skip rather than die on.
+    assert append_inbox(
+        session, InboxLine(text="a quiet note", sender={}, written_at=written - 10_000)
+    )
+    with (session / "inbox.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"text": "torn", "wake": true\n')
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "spooled:" in out, f"the spooled fires were not reported: {out}"
+    line = _status_block(out, "spooled:")
+    assert "5 fire(s) in 1 session(s)" in line, line
+    assert "awaiting delivery" in line, line
+    assert "(oldest 13h — statussess07)" in line, line
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["spooled"]["fires"] == 5
+    assert payload["spooled"]["sessions"] == 1
+    assert payload["spooled"]["oldest_session_id"] == "statussess07"
+    assert payload["spooled"]["oldest_age_s"] >= 13 * 3600
+
+
+def test_status_does_not_report_spooled_wakes_when_there_are_none(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only wake rows count, and a missing inbox is none.
+
+    The clause is ABSENT rather than "0 fire(s)": this surface prints a line
+    only for a state that EXISTS, and a zero line is the reassurance shape that
+    kept the incident invisible. The guard matters as much as the positive
+    test — "spooled:" appearing for a quiet note would page an operator about
+    mail that is working as designed.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    _arm(
+        tmp_path,
+        "statussess08",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "standup", "next_due_at": NOW_MS + 3_600_000}],
+    )
+    assert append_inbox(
+        tmp_path / "sessions" / "statussess08",
+        InboxLine(text="a quiet note", sender={}, written_at=time.time()),
+    )
+    # A second wake-carrying session with no inbox file at all: the missing
+    # file is zero rows, not an error.
+    _arm(
+        tmp_path,
+        "statussess09",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w2", "message": "later", "next_due_at": NOW_MS + 7_200_000}],
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "spooled:" not in out, out
+
+
 def test_list_marks_an_owed_fire_as_retrying(
     tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
 ) -> None:

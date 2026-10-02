@@ -6318,6 +6318,49 @@ def _wake_rows() -> "list[dict[str, Any]]":
     return rows
 
 
+def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
+    """Wake rows spooled to session inboxes and not yet delivered, aggregated.
+
+    The held-delivery state this surface never had. A runtime leaving for a
+    replaced build SPOOLS the wakes that fire meanwhile
+    (``Session.retire_wakes_to_inbox``), and if that move is then abandoned
+    with the hook still installed, every later fire lands there too: measured
+    2026-10-01/02, one desk session lost ~14 h of fires while ``wake list``
+    showed a fresh "last fired" and every other line on this screen read as
+    healthy. The rows are counted per session against the wake INDEX's own
+    keys — a session with no wakes owes no spooled FIRE — and the oldest write
+    is tracked so the line can say how long the delivery has been dark.
+
+    Never raises: a count is a status nicety, and one unreadable session
+    directory must not take the whole screen down (``spooled_wake_fires``
+    itself already skips torn rows and missing files).
+    """
+    import time as _time
+
+    from local_operator.wakes.spooled import spooled_wake_fires
+    from local_operator.wakes.store import read_index
+
+    fires = 0
+    sessions = 0
+    oldest_at: float | None = None
+    oldest_session = ""
+    for session_id in read_index(root):
+        count, written = spooled_wake_fires(root / "sessions" / session_id)
+        if count <= 0:
+            continue
+        fires += count
+        sessions += 1
+        if written is not None and (oldest_at is None or written < oldest_at):
+            oldest_at = written
+            oldest_session = session_id
+    return {
+        "fires": fires,
+        "sessions": sessions,
+        "oldest_age_s": None if oldest_at is None else max(_time.time() - oldest_at, 0.0),
+        "oldest_session_id": oldest_session or None,
+    }
+
+
 def _supervisor_parentheticals() -> tuple[str, str]:
     """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
 
@@ -6805,6 +6848,15 @@ def wake_command(args: argparse.Namespace) -> int:
     stalled = _delivery_rows(STATE_UNDELIVERED)
     retrying = _delivery_rows(STATE_RETRYING)
 
+    # SPOOLED WAKES — the other held-delivery state, and until now the invisible
+    # one: a runtime that spools its wakes for a replaced build and then
+    # ABANDONS the move keeps the hook, so every fire for the rest of its life
+    # lands in a session inbox nothing drains until a successor boots (measured
+    # 2026-10-01/02: ~14 h of fires on one desk session, reported on no
+    # surface). Read per wake-carrying session — the INDEX's own keys — so a
+    # session with no wakes is never opened.
+    spooled = _spooled_wake_summary(config_dir())
+
     def _attempts_label(row: dict[str, Any]) -> str:
         """``"4 attempt(s) since <time>"`` for one owed fire.
 
@@ -6931,6 +6983,16 @@ def wake_command(args: argparse.Namespace) -> int:
             "total": len(owed),
             "retrying": len(retrying),
             "undelivered": len(stalled),
+        },
+        # THE SPOOLED FIRES, additive like the blocks above (a consumer that
+        # predates this block keeps parsing every key it knew). `fires` counts
+        # wake ROWS awaiting delivery; `oldest_age_s` is None when no counted
+        # row carried a usable `written_at`.
+        "spooled": {
+            "fires": spooled["fires"],
+            "sessions": spooled["sessions"],
+            "oldest_age_s": spooled["oldest_age_s"],
+            "oldest_session_id": spooled["oldest_session_id"],
         },
         "deliveries": [
             {
@@ -7072,6 +7134,20 @@ def wake_command(args: argparse.Namespace) -> int:
                 "retrying:",
             )
         )
+    if spooled["fires"]:
+        # SPOOLED FIRES, and only when there are any: the count and the age are
+        # what separate "a drain just happened" from "delivery has been dark
+        # for half a day" (the incident's shape — a fresh `last fired` and no
+        # line anywhere saying the fire never ran).
+        summary = (
+            f"{spooled['fires']} fire(s) in {spooled['sessions']} session(s) awaiting delivery"
+        )
+        if spooled["oldest_age_s"] is not None:
+            summary += (
+                f" (oldest {_format_duration(spooled['oldest_age_s'])} — "
+                f"{spooled['oldest_session_id']})"
+            )
+        print(_wrap_status(summary, "spooled:"))
     if stale:
         print(
             _wrap_status(
