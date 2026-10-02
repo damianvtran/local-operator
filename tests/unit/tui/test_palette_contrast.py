@@ -226,6 +226,13 @@ def test_warning_ink_clears_aa_on_the_card_ground() -> None:
     ground too; this pins the pair with its number. The BRAND ramps only: the
     registered-palette gate is the calibrated one above, and re-flooring every
     palette for one pair is not this pin's job.
+
+    IT ALSO PINS THE PROJECTS PICKER'S REFUSAL (P5b, UX review round 1, U3):
+    ``projects_view._style_resolver``'s ``refusal`` key is this same ``warning``
+    token, and the start-session card paints its refusal sentence on
+    ``overlay`` with it — the reason that card did not follow the web's
+    ``text-danger``, which measures 3.9:1 in the light ramp. One pair, two
+    cards, one number.
     """
     for name in ("light", "dark"):
         ink = theme.semantic_color("warning", name)

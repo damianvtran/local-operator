@@ -176,6 +176,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual SendTargetCard.remove unmounts the widget; no filesystem path",
     ),
     (
+        # The start-session card (P5b), one mode over: `card.remove()` tears down
+        # a Textual widget, and `_close_start_picker` holds no path at all — the
+        # session the create mints lives under a directory this method never
+        # names (the create core writes it, and the reader's own `esc` is what
+        # runs this).
+        "local_operator/tui/widgets/projects_view.py::ProjectsView._close_start_picker",
+        "<path>.remove",
+        "Textual StartPickerCard.remove unmounts the widget; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._on_steer_undeliverable",
         "<path>.remove",
         "THREE list removals on the app's own bookkeeping — `_held_steer_blocks`, "
