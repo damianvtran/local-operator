@@ -206,6 +206,20 @@ def fork_session(
     to the parent, and it is what makes a fork safe to take from a conversation
     the user is still working in.
 
+    ``exclude_entry_ids`` drops exactly those journal rows from the clone: how a
+    fork taken mid-turn leaves the unpaired live suffix behind, and how a fork
+    aimed at a named cut point drops everything after it. Truncating the file
+    instead would either rewrite the bytes the retained prefix replays from or
+    take a torn row.
+
+    The parameter is a filter and the caller owns its correctness: rows NOT in
+    the set are copied verbatim. That is a rule about ROWS, not about kinds —
+    the caller decides which bookkeeping rows a child must not carry (a
+    compaction written after the cut that would take the child's replay back
+    past its own cut is excluded like any conversation row), and every row it
+    leaves in is preserved byte-for-byte, including the compaction, prune and
+    custom rows whose metadata a replay needs.
+
     Raises :class:`ForkError` when the clone cannot be made (a read-only volume,
     ENOSPC, a parent that does not exist). Nothing is created in that case.
     """
@@ -251,8 +265,10 @@ def fork_session(
             # re-serialisation would reorder JSON keys — changing nothing
             # semantically while changing every byte the replay derives from.
             if name == TRANSCRIPT_NAME and exclude_entry_ids:
-                # Only the owner's validated incomplete suffix may be omitted.
-                # Keep every retained byte and journal row, rather than rebuilding
+                # Only rows the owner has already validated as omissible may be
+                # omitted: the live suffix that is not yet durably committed, or
+                # every conversation row after a named cut point. Keep every
+                # OTHER retained byte and journal row, rather than rebuilding
                 # history and losing compaction/prune metadata or attachment refs.
                 with source.open("rb") as incoming, (fork_dir / name).open("wb") as outgoing:
                     for line in incoming:
