@@ -219,7 +219,7 @@ describe("AsksSheet", () => {
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
 	});
 
-	it("stays silent on a row with no durable transcript, and the card states it", async () => {
+	it("stays silent on a DEAD row, and the card states it", async () => {
 		/* Design round 2, D6: on this row `runtime_live` is false for the OTHER
 		   reason — nothing can ever read the answer — so a strip promising a ~30 s
 		   bring-up would contradict the card's own sentence one element below it. */
@@ -229,9 +229,28 @@ describe("AsksSheet", () => {
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() =>
-			expect(screen.getByText(/the ask can never be read\./)).toBeTruthy(),
+			expect(screen.getByText(/the ask can never be read/)).toBeTruthy(),
 		);
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("keeps the affordances on a LIVE conversation with no transcript", async () => {
+		/* Design round 3, D7: the strip, the card and `open` all key on
+		   `isDeadConversation` — the CONJUNCTION — so a live row with no transcript
+		   answers as normal and its conversation can still be opened. Gating on
+		   durability alone silenced the sheet one element above a card that then
+		   refused a working answer. */
+		rows = [];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ session_id: "gone", runtime_live: true, durable: false })],
+		});
+		render(
+			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
+		);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "open" })).toBeTruthy();
 	});
 
 	it("withholds `open` for a conversation that cannot be opened", async () => {

@@ -53,21 +53,9 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	};
 }
 
-function renderCard(
-	row: PendingAsk,
-	onSettled?: () => void,
-	runtimeLive?: boolean,
-	durable?: boolean,
-) {
+function renderCard(row: PendingAsk, onSettled?: () => void) {
 	return render(
-		<AskCard
-			row={row}
-			sessionId="s1"
-			nowMs={Date.now()}
-			runtimeLive={runtimeLive}
-			durable={durable}
-			onSettled={onSettled}
-		/>,
+		<AskCard row={row} sessionId="s1" nowMs={Date.now()} onSettled={onSettled} />,
 	);
 }
 
@@ -274,7 +262,7 @@ describe("AskCard", () => {
 					release = () => resolve({ ok: true, detail: "answered" });
 				}),
 		);
-		renderCard(ask(), undefined, false);
+		renderCard(ask({ runtime_live: false }));
 		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
 		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
 		expect(await screen.findByText(/this can take up to ~30 s/)).toBeTruthy();
@@ -311,7 +299,7 @@ describe("AskCard", () => {
 				"ask_session_gone",
 			),
 		);
-		renderCard(ask({ status: "timed_out" }), undefined, false);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() => expect(screen.getByText(/nothing was sent/)).toBeTruthy());
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
@@ -355,7 +343,7 @@ describe("AskCard", () => {
 		/* U3: the label promises "send no reply" and that stays true, but on a cold
 		   conversation the relay also brings it up to RECORD the dismissal — the
 		   conversation surfaces as active, which the copy owed the reader. */
-		const cold = renderCard(ask({ status: "timed_out" }), undefined, false);
+		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
 		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
 		cold.unmount();
 		renderCard(ask({ status: "timed_out" }));
@@ -367,7 +355,7 @@ describe("AskCard", () => {
 		   answer left the card asserting `bringing the session up — this can take up
 		   to ~30 s` over a dead `…` until the sheet's re-read landed — and if that
 		   read failed or hung, indefinitely. */
-		renderCard(ask(), undefined, false);
+		renderCard(ask({ runtime_live: false }));
 		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
 		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
@@ -376,24 +364,40 @@ describe("AskCard", () => {
 	});
 
 	it("states a dead conversation before the tap, and withholds every control", () => {
-		/* Design round 2, D6 = UX U7: `durable: false` is the same predicate the
-		   route refuses on, so the sentence a 409 would have returned is known in
-		   advance — showing it pre-emptively keeps the guarantee without buying the
-		   refused request, and no control invites a tap that cannot work. */
-		renderCard(ask(), undefined, false, false);
+		/* Design round 2, D6 = UX U7: a dead conversation — no durable transcript
+		   AND nothing live to deliver to — is the state the route refuses on, so
+		   the sentence a 409 would have returned is known in advance. Showing it
+		   pre-emptively keeps the guarantee without buying the refused request, and
+		   no control invites a tap that cannot work. */
+		renderCard(ask({ runtime_live: false, durable: false }));
 		expect(
-			screen.getByText(/this conversation no longer exists — the ask can never be read\./),
+			screen.getByText(/this conversation no longer exists — the ask can never be read; start a new conversation and ask again\./),
 		).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
 		expect(screen.queryByRole("status")).toBeNull();
 	});
 
+	it("keeps the controls on a LIVE conversation that has no transcript", () => {
+		/* Design round 3, D7: `durable: false` alone is NOT a dead conversation.
+		   The route's cold arm is scoped `not _session_is_live(...)`, so a live row
+		   never reaches the refusal — and gating the card on durability alone made
+		   it refuse an answer the server returned `200 {"ok": true}` for. The
+		   mirror of the bug this lane was opened to fix, pinned before it can
+		   come back. */
+		renderCard(ask({ runtime_live: true, durable: false }));
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^decline$/ })).toBeTruthy();
+		/* And no wait is promised either: the relay can deliver right now. */
+		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+	});
+
 	it("keeps a settled receipt in a dead conversation", () => {
 		/* The other side of the same gate: `durable: false` must not turn a receipt
 		   into a dead end — a row already answered in a conversation that has since
 		   gone still has its own record to show. */
-		renderCard(ask({ status: "answered", delivered: true }), undefined, false, false);
+		renderCard(ask({ status: "answered", delivered: true, runtime_live: false, durable: false }));
 		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("status")).toBeTruthy();
 	});
