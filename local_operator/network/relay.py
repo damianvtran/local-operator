@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import math
 import os
 import plistlib
 import queue
@@ -254,6 +255,22 @@ MEMBERSHIP_PULL_PASS_S = 5.0
 #: loopback proof converged instantly (QA round 3, Q-R2-1). Bounded, that peer costs
 #: one pass and the next pass asks it again.
 MEMBERSHIP_PULL_TIMEOUT_S = 4.0
+
+#: How long a READ that asked for a fresh table pass waits for one to complete.
+#:
+#: WHY A READ ASKS AT ALL: ``lop network status`` reports the member count, and a
+#: count whose table nobody just read is the shape that let a four-second pull
+#: timeout read as a verdict (``status`` saying "no peer answered" beside ``peers``
+#: saying a peer is reachable — different questions at different instants, which
+#: the surface could not be seen to be answering). So the read triggers a pass of
+#: its own (:meth:`RelayServer._fresh_membership_read`) and waits — briefly.
+#:
+#: SHORT ON PURPOSE: a peer that accepts the connection and then does not answer
+#: costs its own four-second pull (:data:`MEMBERSHIP_PULL_TIMEOUT_S`), and a status
+#: command must not hang behind it. A pass that does not land inside this bound is
+#: not dressed up as fresh: the read reports the last completed pass, whose age its
+#: sentence and marker print.
+MEMBERSHIP_READ_WAIT_S = 1.5
 
 #: How long a link waits for its own writer before closing anyway.
 #:
@@ -522,6 +539,15 @@ LISTING_PROBE_BUDGET_S = 12.0
 #: 10, Q-R10-1). Three deadlines for one fan-out is how a surface comes to
 #: disagree with the CLI about whether a peer answered.
 LISTING_CLIENT_TIMEOUT_S = LISTING_PROBE_BUDGET_S + 8.0
+
+#: The client-side deadline for the control read that ASKS for a fresh table pass
+#: (``relay.status(refresh=True)``, which is what ``lop network status`` issues):
+#: the relay's own bounded wait (:data:`MEMBERSHIP_READ_WAIT_S`) plus the work of
+#: measuring and building the answer, under the same rule as
+#: :data:`LISTING_CLIENT_TIMEOUT_S` — a client must OUTWAIT the server it asked,
+#: or a loaded relay's answer arrives after the client stopped listening and a
+#: relay that answered reports as one that did not.
+MEMBERSHIP_READ_CLIENT_TIMEOUT_S = 5.0
 
 #: How long ONE candidate address may take to ACCEPT a connection before it is
 #: written off. Sized for the question a probe asks — "does anything answer at
@@ -1852,6 +1878,35 @@ def apply_epoch(
     return ApplyOutcome(True, "applied")
 
 
+def _age_words(age_s: float | None) -> str:
+    """One age, in the words every membership line uses (``"12s ago"`` / ``"just now"``).
+
+    ``None`` renders as "just now" because that is what the sentences have always
+    said when an age is absent and what it means where they say it (a report that
+    was just assembled). A caller that must OMIT an unknown age — the row marker,
+    which can be handed a table from an older relay — gates on the value before
+    calling rather than leaning on this fallback.
+
+    A NON-FINITE age is treated as an absent one rather than raised out of a line
+    renderer: ``inf``/``NaN`` are not times, nothing here produces them, and a
+    crafted row must not turn a listing into an ``OverflowError``/``ValueError``
+    traceback (agent review round 1, MINOR).
+
+    COARSE ABOVE A MINUTE, because the age exists for exactly the stale cases: a
+    table an hour old matters ("1h ago") and its seconds do not.
+    """
+    if age_s is None or not math.isfinite(age_s) or age_s < 1.5:
+        return "just now"
+    seconds = int(age_s)
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 @dataclass
 class MembershipReport:
     """What a claim about a member table rests on, per network, per report.
@@ -1900,6 +1955,24 @@ class MembershipReport:
     def oldest_answer_age_s(self) -> float | None:
         return max(self.answer_ages) if self.answer_ages else None
 
+    @property
+    def read_age_s(self) -> float | None:
+        """How long ago this report's table read ran, or ``None`` when not known.
+
+        MEASURED WHEN THE LINE IS RENDERED, never when the report was assembled: a
+        report a surface prints later must carry the age it HAS, not the freshness
+        it had when it was built — that substitution is exactly what let "no peer
+        answered" read as a permanent verdict (see :meth:`sentence`).
+
+        A ``refreshed_at`` of zero (the shape a hand-built report has) is "no
+        stamp" and stays unknown rather than becoming 1970; a NON-FINITE stamp is
+        the same "no stamp" (agent review round 1, MINOR — the guard lives here,
+        where the age is produced, rather than at any one renderer).
+        """
+        if not self.refreshed_at or not math.isfinite(self.refreshed_at) or self.refreshed_at <= 0:
+            return None
+        return max(0.0, time.time() - self.refreshed_at)
+
     def to_json(self) -> dict[str, Any]:
         return {
             "network_id": self.network_id,
@@ -1908,12 +1981,38 @@ class MembershipReport:
             "not_due": [dict(row) for row in self.not_due],
             "not_answered": [dict(row) for row in self.silent],
             "oldest_answer_age_s": self.oldest_answer_age_s,
+            # THE STAMP IS WHY A ROW CAN SAY WHEN ITS READ RAN. The marker is
+            # rendered from this dict alone (the CLI's `ls` and the agent tool's
+            # digest both do), so an age the report holds but the row does not is
+            # an age no reader ever sees; additive, so an adjacent build reading
+            # the old keys is unaffected.
+            "refreshed_at": self.refreshed_at,
             "learned": list(self.learned),
             "sentence": self.sentence(),
         }
 
     def sentence(self) -> str:
         """One sentence a person reads, and the honest one in every case.
+
+        EVERY "NOT VERIFIED" NAMES ITS AGE AND SAYS IT IS RETRIED. This branch read
+        "no peer answered a table read this time" — no date, no next step — so a
+        reader who ran `lop network ls` in the same minute as `lop network peers`
+        read two lines that looked contradictory: this read's failure (a peer that
+        accepted the connection and did not answer its table within four seconds —
+        :data:`MEMBERSHIP_PULL_TIMEOUT_S`) against `peers`' fresh reachability
+        probe. They answer different questions at different instants; the missing
+        age and the missing retry are what made a transient read as a verdict. The
+        age is measured WHEN THE LINE IS RENDERED (:attr:`read_age_s`), so a report
+        read late reports its age rather than the freshness it had when assembled,
+        and "— retrying" is the documented behaviour: the next pass asks again.
+
+        THE FAILURE HEADLINE CLAIMS NO ASK (design round 1, D1) and uses ONE
+        punctuation on both surfaces (N1). The old "no peer answered" said a peer
+        was asked and did not answer, while a member with no live link
+        (``no_live_link``) was never asked — the clause right after it said so.
+        What every covered case shares is that no table came back
+        (:data:`_NO_TABLE_CAME_BACK`), and the silent peers follow it after a
+        colon, exactly as the row marker prints them.
 
         THE SILENT MEMBERS ARE NAMED IN WORDS (round 11, Step 1's enumeration). This
         line goes to `lop network show`'s screen AND into the ``--json`` payload, and
@@ -1924,7 +2023,7 @@ class MembershipReport:
         abbreviated; ``not_answered`` in ``to_json`` keeps both raw.
         """
         age = self.oldest_answer_age_s
-        age_text = "just now" if age is None or age < 1.5 else f"{int(age)}s ago"
+        age_text = _age_words(age)
         if self.complete:
             return f"members verified with all {len(self.answered)} peer(s) ({age_text})"
         from local_operator.resume import short_device_id, table_reason_words
@@ -1934,9 +2033,22 @@ class MembershipReport:
             f"({table_reason_words(str(item.get('reason') or ''))})"
             for item in self.silent
         )
+        if not self.answered and not self.silent:
+            # A NETWORK WITH NOBODY ELSE IN IT: the pass asked nobody because there
+            # was nobody, and the sentence says that rather than implying a failed
+            # ask — the "contradiction" class's sibling arm, found in the
+            # `status --json` of a freshly-created single-member network (a
+            # non-empty `silent` here would mean a peer, so this arm is solo-only:
+            # see `refresh_membership`'s loop, where every other member lands in
+            # `answered` or `silent`).
+            return "members verified: no other members to ask"
         if not self.answered:
-            return "members NOT verified: no peer answered a table read this time" + (
-                f" — {detail}" if detail else ""
+            read_age = self.read_age_s
+            return (
+                f"members NOT verified: {_NO_TABLE_CAME_BACK}"
+                + (f" ({_age_words(read_age)})" if read_age is not None else "")
+                + " — retrying"
+                + (f": {detail}" if detail else "")
             )
         return (
             f"members verified with {len(self.answered)} of "
@@ -2135,6 +2247,52 @@ def leave(
     return member
 
 
+def _known_age_words(value: Any) -> str:
+    """An age a row carries IN SECONDS, in words — or ``""`` when it carries none.
+
+    The row JSON is a boundary an older build's dict (or a hand-built fixture) can
+    cross without these keys, so a missing, non-numeric or NON-FINITE value (agent
+    review round 1, MINOR: a crafted ``inf``/``NaN`` crossed the numeric guard)
+    renders as NOTHING, never as "just now", which would be a claim the row cannot
+    support.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return ""
+    return _age_words(max(0.0, float(value)))
+
+
+def _stamp_age_words(stamp: Any) -> str:
+    """How long ago a timestamp a row carries was taken — or ``""`` when it has none.
+
+    Same boundary as :func:`_known_age_words`, but the value here is a wall-clock
+    stamp (``refreshed_at``), so the age is measured at RENDER time: the moment the
+    reader looks is the moment the claim is about. A non-finite stamp (agent review
+    round 1, MINOR) is "no stamp": it rendered as "just now" before, which is a
+    freshness claim a ``NaN`` cannot support.
+    """
+    if (
+        isinstance(stamp, bool)
+        or not isinstance(stamp, (int, float))
+        or not math.isfinite(stamp)
+        or stamp <= 0
+    ):
+        return ""
+    return _age_words(max(0.0, time.time() - float(stamp)))
+
+
+#: The failure headline for a read that brought nothing back — ONE home, because
+#: two surfaces render it (the sentence and the row marker) and a second copy
+#: would be free to drift.
+#:
+#: IT DOES NOT SAY "ANSWERED" (design round 1, D1): a member with no live link
+#: (``no_live_link``, :meth:`RelayServer.refresh_membership`) was never asked, so a
+#: headline claiming an answer that did not come contradicts the very next clause
+#: ("nothing is connected to it"). What is true in EVERY case this arm covers —
+#: asked-and-silent, unaskable, budget-expired — is that no table came back; each
+#: peer's own reason follows in the list.
+_NO_TABLE_CAME_BACK = "no table came back in the last read"
+
+
 def membership_marker(row: dict[str, Any]) -> str:
     """The short suffix a listing puts after a member count, so the count is never bare.
 
@@ -2145,30 +2303,68 @@ def membership_marker(row: dict[str, Any]) -> str:
     because the CLI and the agent's own tool render this line from the same JSON and a
     second copy would be free to disagree about what "verified" means.
 
-    THE PEERS THAT SAID NOTHING ARE NAMED IN WORDS (round 11, Step 1's enumeration).
-    The no-answer branch used to append each silent member's raw table reason
-    (``no_live_link``, ``no_table:error``) beside a 34-character device id, on a line
-    both `lop network ls` and the agent tool's digest print. The gloss is the table's
-    own (``resume.table_reason_words``) and the id is abbreviated; the raw rows stay in
-    ``membership.table.not_answered``, which is the machine register.
+    Rows built by an older build may carry no stamps; those ages are OMITTED rather
+    than invented, which also keeps the pre-age bytes for fixtures that never had
+    them.
+
+    EVERY ARM CARRIES ITS AGE, AND A FAILED READ SAYS IT IS RETRIED. The verified
+    arms name the OLDEST answer among the peers that answered (the weakest evidence
+    in the argument); the failure arm carries when the read ran and names the next
+    pass, and it does NOT say "answered" (design round 1, D1 — a member with no
+    live link was never asked, and its own reason follows; :data:`_NO_TABLE_CAME_BACK`
+    is the one home for the headline). A row that NO read has fed says that instead
+    — "no table read has completed yet — retrying": claiming "no peer answered"
+    about a read nobody ran is the same lie in the other direction, and the retry
+    is named there too (N2), like every sibling NOT-verified arm.
+
+    THE PEERS THAT SAID NOTHING ARE NAMED IN WORDS (round 11, Step 1's
+    enumeration) — on BOTH not-verified arms (design round 1, D4: the partial arm
+    used to drop the list, so a short count never showed which member was
+    missing). The branch used to append each silent member's raw table reason
+    (``no_live_link``, ``no_table:error``) beside a 34-character device id, on a
+    line both `lop network ls` and the agent tool's digest print. The gloss is the
+    table's own (``resume.table_reason_words``) and the id is abbreviated; the raw
+    rows stay in ``membership.table.not_answered``, which is the machine register.
     """
     if int(row.get("members") or 0) <= 1:
         return ""
     table = (row.get("membership") or {}).get("table") or {}
     answered = len(table.get("answered") or [])
     pending = len(table.get("not_answered") or [])
-    if table.get("complete"):
-        return f"  [members verified with all {answered} peer(s)]"
-    if answered:
-        return f"  [members verified with {answered} of {answered + pending} peer(s)]"
-    from local_operator.resume import short_device_id, table_reason_words
+    states = ""
+    if pending:
+        from local_operator.resume import short_device_id, table_reason_words
 
-    states = ", ".join(
-        f"{short_device_id(str(item.get('device_id') or ''))} "
-        f"({table_reason_words(str(item.get('reason') or ''))})"
-        for item in (table.get("not_answered") or [])
+        states = ", ".join(
+            f"{short_device_id(str(item.get('device_id') or ''))} "
+            f"({table_reason_words(str(item.get('reason') or ''))})"
+            for item in (table.get("not_answered") or [])
+        )
+    answered_age = _known_age_words(table.get("oldest_answer_age_s"))
+    aged = f" ({answered_age})" if answered_age else ""
+    if table.get("complete"):
+        return f"  [members verified with all {answered} peer(s){aged}]"
+    if answered:
+        # THE MISSING PEERS ARE NAMED HERE TOO (design round 1, D4): the long form
+        # says "NOT verified with …" and the sibling arm below names its peers, so
+        # a short count with the missing member unnamed was the one arm a reader
+        # could not act on.
+        named = f"; NOT verified with {states}" if states else ""
+        return f"  [members verified with {answered} of {answered + pending} peer(s){aged}{named}]"
+    if not pending:
+        # NO COMPLETED READ FED THIS ROW — the count is this device's own record.
+        # "No peer answered" here would claim an ask that never happened (the
+        # defect this arm exists for); the relay re-reads on its cadence, and the
+        # arm names the next step like its sibling (design round 1, N2).
+        return "  [members NOT verified: no table read has completed yet — retrying]"
+    read_age = _stamp_age_words(table.get("refreshed_at"))
+    return (
+        f"  [members NOT verified: {_NO_TABLE_CAME_BACK}"
+        + (f" ({read_age})" if read_age else "")
+        + " — retrying"
+        + (f": {states}" if states else "")
+        + "]"
     )
-    return f"  [members NOT verified: no peer answered{': ' + states if states else ''}]"
 
 
 def audit_status_words(payload: Mapping[str, Any], *, omit_steady: bool = False) -> str:
@@ -3560,6 +3756,22 @@ class RelayServer:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._reply_waiters: dict[tuple[str, Any], "_ReplyWaiter"] = {}
+        #: The last COMPLETED membership pass, by network id — what a `status` read
+        #: reports when its own bounded wait for a fresh pass did not land
+        #: (:meth:`_fresh_membership_read`), so the row is never a read nobody ran.
+        #: Written only under ``_membership_cond``.
+        self._membership_reports: dict[str, MembershipReport] = {}
+        #: How many passes have completed. A reader waits for THIS to move rather
+        #: than for an event to be set, because a pass may already be in flight when
+        #: the read arrives — its completion is the freshness that read wants.
+        self._membership_seq = 0
+        #: Guards ``_membership_reports``/``_membership_seq`` and wakes readers when
+        #: a pass completes.
+        self._membership_cond = threading.Condition()
+        #: Set to ask the membership loop for a pass NOW rather than at the next
+        #: cadence tick (a `status` read's bounded wait), and set by `stop()` so a
+        #: shutdown never waits a cadence out; the loop clears it as it wakes.
+        self._membership_wake = threading.Event()
         #: Serialises invite claim + mark, so two concurrent redemptions of one
         #: token cannot both pass the `minted` check.
         self._invite_lock = threading.Lock()
@@ -3756,6 +3968,11 @@ class RelayServer:
         narrow the race it is meant to close.
         """
         self._stop.set()
+        # THE MEMBERSHIP LOOP SLEEPS ON ITS OWN WAKE EVENT, so a stop must set that
+        # too: without it a stop waits out up to MEMBERSHIP_PULL_PASS_S before the
+        # loop notices — the same "nothing on the way in checks _stop" shape this
+        # method's post-condition documents for links.
+        self._membership_wake.set()
         # THE LISTENING SOCKETS GO FIRST, before any goodbye is sent. Closing the
         # listener is what stops the kernel queueing a connection at all, so a peer
         # that dials during the settle below meets a refused connection rather than
@@ -4052,6 +4269,16 @@ class RelayServer:
                 report.answered.append(member.device_id)
                 report.answer_ages.append(max(0.0, age))
             reports[record.network_id] = report
+        # PUBLISH THE PASS WHERE READS CAN SEE IT (see `_fresh_membership_read` and
+        # `status`): the reports and the sequence bump are ONE critical section, so a
+        # reader that waits on the condition is released into the reports that bump
+        # belongs to. Rebound, not edited in place — a reader may hold the previous
+        # dict — and bumped for EVERY pass, whoever ran it: a listing's refresh is as
+        # much a completed read as the cadence's.
+        with self._membership_cond:
+            self._membership_reports = reports
+            self._membership_seq += 1
+            self._membership_cond.notify_all()
         return reports
 
     def contact_peers(
@@ -4095,6 +4322,43 @@ class RelayServer:
             budget_s=None if deadline is None else max(0.0, deadline - time.monotonic())
         )
 
+    def _fresh_membership_read(
+        self, *, wait_s: float = MEMBERSHIP_READ_WAIT_S
+    ) -> dict[str, MembershipReport]:
+        """Ask the membership loop for a pass and wait BRIEFLY for one to complete.
+
+        WHAT THIS ANSWERS: a surface that REPORTS membership must not report a table
+        read nobody just ran, and it must not wait out the relay's whole probe budget
+        either. So this asks the loop for a pass NOW (rather than at the next cadence
+        tick), waits up to ``wait_s`` for a pass to COMPLETE, and then gives up
+        quietly: the caller reports the last completed pass, whose age travels with
+        its sentence and marker, so a stale answer is visibly stale instead of
+        silently fresh.
+
+        THE WAIT IS ON A SEQUENCE, NOT ON AN EVENT BEING SET. A pass may already be
+        in flight when the read arrives; its completion is exactly the freshness this
+        read wants, so the check is "has any pass completed since I asked" and not
+        "is a pass running". A pass that does not land (a peer spending its
+        four-second pull timeout) leaves the previous pass in place — bounded reads
+        are the requirement, and the marker prints the age.
+
+        Safe to call when the loop is not running (a relay that was never started, or
+        a stopping one): the wake is set, nothing completes it, and the wait expires
+        on its own bound.
+        """
+        if self._stop.is_set():
+            return self._membership_reports
+        with self._membership_cond:
+            target = self._membership_seq + 1
+            self._membership_wake.set()
+            deadline = time.monotonic() + wait_s
+            while self._membership_seq < target:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._membership_cond.wait(remaining)
+            return self._membership_reports
+
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
 
@@ -4108,8 +4372,19 @@ class RelayServer:
         :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S`, so the traffic is bounded per link
         whatever a mesh's diameter is. Every failure is swallowed and retried on the
         next pass: one unreachable peer must never be able to stop a relay's clock.
+
+        THE WAIT IS ON THE WAKE EVENT, NOT ONLY ON THE INTERVAL. ``stop()`` sets it,
+        so a shutdown never waits out a cadence, and a reader that wants the table
+        read NOW sets it (:meth:`_fresh_membership_read`) so the pass it waits for
+        starts immediately instead of at the next tick. An unconsumed wake is
+        harmless: the pass it triggers is per-link due-gated, so links inside
+        :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S` cost a walk and no traffic.
         """
-        while not self._stop.wait(MEMBERSHIP_PULL_PASS_S):
+        while not self._stop.is_set():
+            self._membership_wake.wait(MEMBERSHIP_PULL_PASS_S)
+            self._membership_wake.clear()
+            if self._stop.is_set():
+                break
             try:
                 self.refresh_membership()
             except Exception:  # noqa: BLE001 — a refresh must never kill the loop
@@ -8391,7 +8666,12 @@ class RelayServer:
             # this order makes the core table win even if that check were lost.
             **self._local_slice_handlers,
             "net_member_caps": self._ctl_member_caps,
-            "net_status": lambda frame: self.status(),
+            # THE ONE FIELD THIS OP READS: `refresh` asks the relay for a fresh
+            # table pass before it reports — the operator-facing `status` read
+            # (`RelayServer.status`). Health probes send nothing and wait for no
+            # pass; they read the booleans and whatever table the last completed
+            # pass left (the placeholder, before any pass has completed).
+            "net_status": lambda frame: self.status(refresh=bool(frame.get("refresh"))),
             "net_ls": self._ctl_ls,
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
             "net_peer_ls": lambda frame: self.peer_status(),
@@ -9508,9 +9788,14 @@ class RelayServer:
             state = {**state, "table": report.to_json()}
             state["sentence"] = f"{state['sentence']}; {report.sentence()}"
         else:
-            # NO REFRESH RAN, so no peer was asked, and the row says exactly that
-            # instead of leaving a bare count to be read as authoritative — the
-            # failure QA named separately from the convergence bug itself.
+            # NO COMPLETED READ FED THIS ROW, so the count is this device's own
+            # record and the row says exactly that — the failure QA named separately
+            # from the convergence bug (Q-R2-1) — rather than borrowing the failure
+            # branch's words: "no peer answered" about a read nobody ran is the same
+            # lie in the other direction (the "contradiction" class; the marker
+            # keys off the empty `not_answered` list to say "no table read has
+            # completed yet"). "Yet" is the honest tense: the relay re-reads on its
+            # cadence, and a `status` read asks for a pass of its own.
             state = {
                 **state,
                 "table": {
@@ -9520,8 +9805,8 @@ class RelayServer:
                     "oldest_answer_age_s": None,
                     "learned": [],
                     "sentence": (
-                        "members NOT verified: this row is the local table and no peer "
-                        "was asked for its own"
+                        "members NOT verified: no table read has completed yet — the "
+                        "count is this device's own record; the relay keeps reading"
                     ),
                 },
             }
@@ -9636,8 +9921,19 @@ class RelayServer:
                 )
         return peers
 
-    def status(self) -> dict[str, Any]:
-        """Install state, health, links, log paths — what ``lop network status`` prints."""
+    def status(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Install state, health, links, log paths — what ``lop network status`` prints.
+
+        ``refresh`` is the OPERATOR-FACING read asking for a fresh table pass: the
+        member count this command reports is a distributed fact, and a reader who ran
+        it to see "are my peers answering" must not be answered by the cadence's last
+        tick (see :meth:`_fresh_membership_read`; the wait is bounded, and the row
+        carries the age it actually has). The default stays false because this method
+        also answers HEALTH PROBES, which read ``relay_running``/``relay_answering``
+        and want the smallest, fastest reply — though they too see the last completed
+        pass's table rather than a placeholder, when one exists.
+        """
+        reports = self._fresh_membership_read() if refresh else self._membership_reports
         record = self.peer_record()
         return {
             "pid": os.getpid(),
@@ -9646,7 +9942,10 @@ class RelayServer:
             "instance_id": self.instance_id,
             "listen": record.listen,
             "control_port": self._control_port,
-            "networks": [self.network_summary(row) for row in store.list_networks(self.root)],
+            "networks": [
+                self.network_summary(row, report=reports.get(row.network_id))
+                for row in store.list_networks(self.root)
+            ],
             "links": [
                 {
                     "link_id": link.link_id,
@@ -10854,7 +11153,7 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
     }
 
 
-def health(timeout: float = 3.0) -> dict[str, Any] | None:
+def health(timeout: float = 3.0, *, refresh: bool = False) -> dict[str, Any] | None:
     """Ask the running relay for its status over the loopback control socket.
 
     THE ONE PLACE A NAMED CONTROL REFUSAL IS NOT RE-RAISED, and the reason is this
@@ -10869,12 +11168,17 @@ def health(timeout: float = 3.0) -> dict[str, Any] | None:
     bound or parse failure on it is a bug in this build, not a size an operator can
     reach. The ops whose replies grow with the mesh are the LISTING family, and those
     refuse by name all the way out to the operator's terminal.
+
+    ``refresh`` asks the relay to take a fresh table pass before it answers — the
+    `status` read's own request, whose client deadline is
+    :data:`MEMBERSHIP_READ_CLIENT_TIMEOUT_S`. It defaults off so the boolean callers
+    stay on the smallest, fastest reply.
     """
     record = store.find_own_relay()
     if record is None:
         return None
     try:
-        reply = control_request(record, "net_status", timeout=timeout)
+        reply = control_request(record, "net_status", timeout=timeout, refresh=refresh)
     except MeshRefusal:
         return None
     if reply is None:
@@ -10883,7 +11187,7 @@ def health(timeout: float = 3.0) -> dict[str, Any] | None:
     return detail if isinstance(detail, dict) else None
 
 
-def status(port: int = DEFAULT_PORT) -> dict[str, Any]:
+def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]:
     """What a human needs: is it installed, is it running, what does it see.
 
     ONE ANSWER PER FACT, AND NO FIELD CONTRADICTS ANOTHER. This payload used to
@@ -10908,9 +11212,15 @@ def status(port: int = DEFAULT_PORT) -> dict[str, Any]:
     A wedged relay therefore reads ``running: true, answering: false, state:
     "wedged"``, which is what it is: the remedy is ``kill -CONT``/a restart, not
     "start it".
+
+    ``refresh`` is passed through to the relay (:func:`health`): the CLI's `status`
+    verb sets it so the member blocks it prints were read FOR this call rather than
+    at the last cadence tick, and the client waits the fresh read's own deadline
+    (:data:`MEMBERSHIP_READ_CLIENT_TIMEOUT_S`) instead of the 3 s the boolean probes
+    use. The relay's wait is bounded and an unlanded pass is reported with its age.
     """
     record, state = store.scan_own_relay()
-    live = health()
+    live = health(timeout=MEMBERSHIP_READ_CLIENT_TIMEOUT_S, refresh=True) if refresh else health()
     running = live is not None or state in ("live", "wedged")
     return {
         "installed": plist_path().exists(),

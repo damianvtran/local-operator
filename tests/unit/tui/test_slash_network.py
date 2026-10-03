@@ -1886,6 +1886,13 @@ def test_the_membership_table_speaks_in_words_too() -> None:
     for leaked in (device, "no_live_link", "no_table", "d_ffffffffffffffffffffffffffffffff"):
         assert leaked not in sentence, (leaked, sentence)
     assert "nothing is connected to it" in sentence, sentence
+    # AND THE LINE NAMES THE READ AND THE RETRY (the "contradiction" class): an
+    # un-dated failure beside `peers`' fresh probe read as a verdict, while the
+    # next pass asks again — and the headline claims no ask (design round 1, D1:
+    # a no-live-link peer was never asked).
+    assert "no table came back in the last read" in sentence, sentence
+    assert "no peer answered" not in sentence, sentence
+    assert "— retrying" in sentence, sentence
 
     row = {
         "members": 3,
@@ -1900,6 +1907,7 @@ def test_the_membership_table_speaks_in_words_too() -> None:
     marker = relay.membership_marker(row)
     assert "NOT verified" in marker, marker
     assert device not in marker and "no_live_link" not in marker, marker
+    assert "— retrying" in marker, marker
     # A reason the producer wrote for a reader survives; one that names an address
     # does not, whichever shape it arrives in.
     assert (
