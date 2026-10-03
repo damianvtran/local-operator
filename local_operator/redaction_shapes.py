@@ -3891,9 +3891,45 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         0,
         guard=_vendor_tail_guard,
     ),
+    # GitHub tokens, by prefix. The family carries every prefix GitHub's token
+    # documentation lists (`ghp_` classic PATs, `gho_` OAuth, `ghu_`
+    # user-to-server, `ghs_` installation/server-to-server, `ghr_` refresh;
+    # fine-grained PATs are the sibling `github-pat` rule below), and it is
+    # widened by FORMAT rather than by entropy, because a format change here
+    # does not fail — it goes QUIET. That is measured, not hypothetical: from
+    # 2026-04-27 GitHub began minting installation tokens in a stateless
+    # format, `ghs_<APPID>_<JWT>` — ~520 characters, an internal `_` after the
+    # app id, and a dotted JWT tail — and the grammar below silently stopped
+    # covering the whole token while nothing reddened, because no corpus case
+    # spelled the new format (the 2026-04-24 notice changelog; rollout
+    # complete 2026-10-02). Each format this rule covers now has a corpus row
+    # in `credential_shape_corpus`; the next change adds its row rather than
+    # assuming an arm here covers it.
     Shape(
         "github-token",
-        re.compile(r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}\b"),
+        re.compile(
+            # The legacy formats, unchanged. Base62 tails of 36 for freshly
+            # minted tokens; 20 is the pre-existing tolerance. `ghs_` stays in
+            # this leg for tokens minted before the rollout, which keep working
+            # until they expire.
+            r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}\b"
+            # The stateless installation format, `ghs_<APPID>_<JWT>`: three
+            # base64url segments of 20+ characters — real ones measure 36 (a
+            # minimal header) to 342 (an RS256 signature) — ending greedily at
+            # the first character that cannot continue a segment, which keeps a
+            # trailing `-` or `_` inside the mask while a sentence's own `.`
+            # stays outside it. The 20-character floor is the over-match guard:
+            # it is what keeps a dotted spelling like `ghs_2024_q3.release-notes`
+            # readable. `_VENDOR_TAIL`'s "no dot" rule cannot apply here — this
+            # format IS dotted — so the floor does that duty instead.
+            r"|\bghs_[0-9A-Za-z]+_[A-Za-z0-9_\-]{20,}\."
+            r"[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}(?![A-Za-z0-9_\-])"
+            # Refresh tokens (`ghr_`), absent from the family before this change
+            # — found by the same audit that found the stateless gap, and
+            # covered now because a refresh token is a long-lived credential
+            # (six months) whose whole purpose is minting new access tokens.
+            r"|\bghr_[A-Za-z0-9]{20,}\b"
+        ),
         REDACTION_MARKER,
     ),
     Shape(
@@ -4937,6 +4973,7 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
     "gho_",  # github-token
     "ghs_",  # github-token
     "ghu_",  # github-token
+    "ghr_",  # github-token
     "github_pat_",  # github fine-grained token
     "akia",  # aws-access-key-id
     "asia",  # aws temporary access key id
@@ -4956,7 +4993,7 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
 #: the table it was meant to skip. ``str.__contains__`` is the C-level search the
 #: engine does not do for us: 61 of them cost ~25 ms for the same text — the
 #: count the alternation was measured against, and the tuple has since grown to
-#: 74, which scales both sides of that comparison together and does not reopen
+#: 75, which scales both sides of that comparison together and does not reopen
 #: the choice. A MISS reaches the end of the table, which is the case worth
 #: shaping the loop around; see the note under the signature for its cost.
 def has_shape_anchor(text: str) -> bool:
@@ -4964,7 +5001,7 @@ def has_shape_anchor(text: str) -> bool:
     # An explicit loop, not the equivalent ``any(anchor in lowered for anchor in
     # _SHAPE_ANCHORS)``: the generator spends a Python frame per anchor, and a CLEAN
     # line — every line of a build log, a directory listing, a JSON payload — tests
-    # all 74 of them, so the frame is paid 74 times per line for a scan that finds
+    # all 75 of them, so the frame is paid 75 times per line for a scan that finds
     # nothing. Measured over 20,000 clean log lines: 85.33 ms as a generator against
     # 49.19 ms here (1.73x), which is ~26 ms per MB of tool result on a pass that runs
     # on every one of them. The semantics are the ones `any` already had — stop at the

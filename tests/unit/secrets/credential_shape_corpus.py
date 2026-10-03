@@ -571,6 +571,25 @@ SECRET_NAME_REFUSAL_FOOTER = (
 )
 
 
+#: A stateless ``ghs_`` installation token — the ``ghs_<APPID>_<JWT>`` format
+#: GitHub began minting on 2026-04-27 (see the rule's comment in
+#: ``redaction_shapes``) and the value the legacy grammar went quiet on. Dummy
+#: claims and a fixed byte pattern in the signature: synthetic end to end.
+#: Assembled by concatenation for this file's standing reason — a reader sees
+#: the spelling, the pass never sees it contiguous in the SOURCE — with the
+#: split points mid-segment so no single piece is token-shaped either.
+GITHUB_STATELESS_TOKEN = (
+    "ghs_15368_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImR1bW15LWtpZCJ9.eyJhcHBfaWQiO"
+    "jE1MzY4LCJleHAiOjE3ODA1MDM2MDAsImlhdCI6MTc4MDUwMDAwMCwiaW5zdGFsbGF0aW9uX2lkIjo0MjQyN"
+    "DI0MiwiaXNzIjoiZ2l0aHViIiwicGVybWlzc2lvbnMiOnsiY29udGVudHMiOiJyZWFkIiwibWV0YWRhdGEiO"
+    "iJyZWFkIn19.BwoNEBMWGRwfIiUoKy4xNDc6PUBDRklMT1JVWFteYWRnam1wc3Z5fH-ChYiLjpGUl5qdoKOm"
+    "qayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-gIFCAsOERQXGh0gIyYpLC8yNTg7PkFER0pNUFNWWVxfYmVo"
+    "a25xdHd6fYCDhomMj5KVmJueoaSnqq2ws7a5vL_CxcjLztHU19rd4OPm6ezv8vX4AAMGCQwPEhUYGx4hJCcq"
+    "LTAzNjk8P0JFSEtOUVRXWl1gY2ZpbG9ydXh7foGEh4qNkJOWmZyfoqWoq66xtLe6vcDDxsnMz9LV2Nve4eTn"
+    "6u3w8_b5AQQHCg0QEw"
+)
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -816,6 +835,22 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnop",
         "a JWT under a credential name",
     ),
+    # The stateless `ghs_` format (see GITHUB_STATELESS_TOKEN), in the two
+    # spellings that matter: bare, and under a credential name. The second is
+    # the one that DEPENDS on this rule catching the value — the assignment
+    # grammar refuses a dotted value by design ("a JWT … is caught by its own
+    # bare-token rule rather than by a name-driven one" — see
+    # ``_value_is_not_a_credential``), so an env dump is only covered while
+    # this rule is.
+    Case(
+        GITHUB_STATELESS_TOKEN,
+        "a GitHub App installation token in the stateless ghs_APPID_JWT format",
+    ),
+    Case(
+        "GITHUB_TOKEN=" + GITHUB_STATELESS_TOKEN,
+        "a stateless installation token under a credential name (the env-dump spelling)",
+    ),
+    Case("ghr_Ab3dEf6hIj9lMn2pQr5tUv8xYz1bCd4fGh7k", "a GitHub App refresh token"),
     # --- environment / kubectl / docker / cloud CLI output -------------------
     Case(
         "AGENT_RUNTIME_API_KEY=abcdefghijklmnopqrstuvwxyz",
@@ -1168,6 +1203,15 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case("pypi-local-operator.json", "a filename whose tail has a dot"),
     Case('cache = tmp_path / "pypi-local-operator.json"', "the same, in a path expression"),
     Case("pypi-local-operator.json.<random>.tmp", "a dotted temp filename after the prefix"),
+    # The stateless `ghs_` format's own dot-trap, from the other side: spellings
+    # that OPEN like its `ghs_<APPID>_` prefix but whose dotted segments are far
+    # below a JWT's; the rule's 20-character floor is what keeps them readable,
+    # so lowering that floor to a length a filename carries reds here.
+    Case("ghs_2024_q3.release-notes", "a release artifact name that opens with the ghs_ prefix"),
+    Case(
+        "ghs_1234567_release-candidate-notes.build-artifacts-2.production-logs",
+        "a dotted artifact name, one segment above the floor and two below",
+    ),
     Case(
         '"npm_config_update_notifier": "false"',
         "an env var NAME that starts with a vendor prefix",
