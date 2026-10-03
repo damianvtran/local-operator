@@ -51,6 +51,14 @@ def _client() -> TestClient:
     return client
 
 
+def _client_and_daemon() -> tuple[TestClient, MobileDaemon]:
+    """``_client()`` plus the daemon, for the cells that read its list table."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
+    return client, daemon
+
+
 def _question(qid: str, text: str = "ship it?") -> dict[str, object]:
     return {
         "id": qid,
@@ -415,16 +423,359 @@ async def test_an_older_runtime_refuses_in_words_rather_than_with_a_stack_trace(
         registrant.close()
 
 
-def test_answering_a_session_with_no_runtime_says_so() -> None:
-    """An ask outlives its runtime, so the route must not pretend it is
-    connected: the phone shows this sentence and knows to reopen the session."""
+def test_answering_an_ask_for_a_gone_conversation_says_it_can_never_be_read() -> None:
+    """THE NEGATIVE, and it is as load-bearing as the engage itself.
+
+    An ask outlives its runtime, but it does NOT outlive its CONVERSATION. A
+    session id with no durable transcript has no log a runtime could own, so
+    engaging cannot help: the answer could never be read. The route must say
+    that in its own words rather than the generic "session not connected",
+    because a surface that reported success for an unreadable answer is worse
+    than one that refuses (design §2.4's durability is a promise about a log,
+    not about a process).
+    """
     client = _client()
     reply = client.post(
         f"/api/sessions/{SESSION_A}/command",
         json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
     )
     assert reply.status_code == 409
-    assert reply.json()["error"] == "session not connected"
+    assert reply.json()["code"] == "ask_session_gone"
+    assert "no longer exists" in reply.json()["error"]
+    assert reply.json()["error"].endswith(".")
+
+
+def test_the_gone_sentence_is_the_ops_own() -> None:
+    """ONE code, THREE sentences — and the op picks (design round 1, D2 = UX U2;
+    UX round 2, U9 for the third).
+
+    ``dismiss — send no reply`` promises that NOTHING is sent, so answering it
+    with "…ask again" prescribed the opposite of what the user asked for. A
+    ``decline``/``revise`` was then given the same re-ask clause, which is
+    addressed to someone who was not asking: handing the decision over leaves no
+    question for the user to put again. The queue's refusals are per-STATE; this
+    one is per-OP, because what is lost differs.
+    """
+    client = _client()
+    answer = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
+    )
+    assert answer.json()["error"] == (
+        "this conversation no longer exists — the ask can never be read; "
+        "start a new conversation and ask again."
+    )
+    dismissed = client.post(
+        f"/api/sessions/{SESSION_A}/command", json={"op": "ask_dismiss", "ask_id": "ask-1"}
+    )
+    assert dismissed.status_code == 409
+    assert dismissed.json()["code"] == "ask_session_gone"
+    assert dismissed.json()["error"] == (
+        "this conversation no longer exists — nothing was sent; the ask can never be read."
+    )
+    # ``decline`` and ``revise`` deliver a DECISION: the ask is unreadable and the
+    # user has nothing left to re-ask, so they take the handoff wording — which is
+    # NOT the sentence a surface shows before asking: the phone's pre-emptive
+    # state uses ``_ASK_GONE_RESPONSE`` (the answer's, remedy included) on a DEAD
+    # row, because the row it draws offers no control whose op could be known.
+    for op, body in (("ask_decline", {}), ("ask_revise", {"answers": {"q1": ["no"]}})):
+        reply = client.post(
+            f"/api/sessions/{SESSION_A}/command", json={"op": op, "ask_id": "ask-1", **body}
+        )
+        assert reply.json()["error"] == (
+            "this conversation no longer exists — the ask can never be read."
+        )
+
+
+def test_the_aggregate_says_whether_answering_will_have_to_engage() -> None:
+    """``runtime_live`` and ``durable`` are the two facts the card cannot derive
+    (design round 1, D1/D4 = UX U1/U3/U4; design round 2, D6 = UX U7).
+
+    An index row is durable but knows nothing about whether answering it is a
+    warm round trip or a ~30 s engage — that is a property of the relay's own
+    dial table. ``durable`` is the second half: `runtime_live` answers "can the
+    relay deliver right now", not "will anything EVER read this", and over a
+    conversation with no transcript both are false while the op is a terminal
+    409. Each is absent (not false) from an older daemon, so a reader must treat
+    absence as unknown.
+    """
+    for session, ask_id in ((SESSION_A, "ask-open-1"), (SESSION_B, "ask-open-b")):
+        _session_dir(session)
+    _session_dir("ccc777888999")
+    ask_store.write_entry(config_dir(), SESSION_A, cwd="/tmp/aaa", asks=[_pending()])
+    ask_store.write_entry(
+        config_dir(), SESSION_B, cwd="/tmp/bbb", asks=[_pending({"ask_id": "ask-open-b"})]
+    )
+    ask_store.write_entry(
+        config_dir(), "ccc777888999", cwd="/tmp/ccc", asks=[_pending({"ask_id": "ask-open-c"})]
+    )
+    # ONE durable conversation: a transcript is what the refusal predicate reads.
+    _write_transcript(SESSION_A)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    # A dialled, CONNECTED owner for A...
+    live = SessionEntry(_record(SESSION_A, 101))
+    live.writer = object()  # type: ignore[assignment]
+    daemon.table.entries[101] = live
+    # ...and an entry for C that has not finished dialling (no writer): the op
+    # cannot be delivered there either, so it is not live for this purpose.
+    dialling = SessionEntry(_record("ccc777888999", 102))
+    daemon.table.entries[102] = dialling
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
+    rows = {row["ask_id"]: row for row in client.get("/api/asks").json()["asks"]}
+    assert rows["ask-open-1"]["runtime_live"] is True
+    assert rows["ask-open-b"]["runtime_live"] is False
+    assert rows["ask-open-c"]["runtime_live"] is False
+    assert rows["ask-open-1"]["durable"] is True
+    assert rows["ask-open-b"]["durable"] is False
+    assert rows["ask-open-c"]["durable"] is False
+
+
+def _write_transcript(session_id: str) -> None:
+    """A transcript is what ``_durable_user_session_dir`` looks for, so an ask
+    can be answered INTO it; a session directory without one is the state the
+    route refuses with ``ask_session_gone``."""
+    (config_dir() / "sessions" / session_id / "transcript.jsonl").write_text("")
+
+
+class _FakeAskClient:
+    """The engaged client's half of the contract the relay's cold arm uses.
+
+    Records the op and its body — the assertion the route exists to make is
+    that the ANSWER reaches the freshly engaged runtime, so a stub whose calls
+    are not inspectable would let the route pass while delivering nothing.
+    """
+
+    def __init__(self, *, refusal: str = "") -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._refusal = refusal
+        self.closed = False
+
+    def _maybe_refuse(self) -> None:
+        if self._refusal:
+            raise RuntimeError(self._refusal)
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def ask_respond(self, ask_id, answers, by="") -> str:  # noqa: ANN001
+        self._maybe_refuse()
+        self.calls.append(("ask_respond", {"ask_id": ask_id, "answers": answers, "by": by}))
+        return "answered"
+
+    async def ask_revise(self, ask_id, answers, by="") -> str:  # noqa: ANN001
+        self._maybe_refuse()
+        self.calls.append(("ask_revise", {"ask_id": ask_id, "answers": answers, "by": by}))
+        return "revised"
+
+    async def ask_decline(self, ask_id, by="") -> str:  # noqa: ANN001
+        self._maybe_refuse()
+        self.calls.append(("ask_decline", {"ask_id": ask_id, "by": by}))
+        return "declined"
+
+    async def ask_dismiss(self, ask_id, by="") -> str:  # noqa: ANN001
+        self._maybe_refuse()
+        self.calls.append(("ask_dismiss", {"ask_id": ask_id, "by": by}))
+        return "dismissed"
+
+
+def _durable_session() -> None:
+    """A runtime-less but DURABLE user session: the folder, a real transcript
+    (the route's own gate reads it), and one open ask in the durable index."""
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    _session_dir(SESSION_A)
+    asyncio.run(
+        Transcript(config_dir() / "sessions" / SESSION_A).append_message(
+            Message.user("existing", id="existing")
+        )
+    )
+    ask_store.write_entry(config_dir(), SESSION_A, cwd="/tmp/gone", asks=[_pending()])
+
+
+def _cold_engage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_FakeAskClient, list[tuple[str, object]]]:
+    """Stand up a durable, runtime-less session and record the engage.
+
+    Returns ``(client, engagements)`` where each engagement is
+    ``(session_id, errand)``. Patching ``engage_session_client`` — not the
+    inner ``engage_runtime`` — keeps the assertion at the seam the route uses,
+    which is what pins "the same engage path the prompt uses".
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+    client = _FakeAskClient()
+    engagements: list[tuple[str, object]] = []
+
+    async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        engagements.append((session_id, work))
+        return client, "runtime ready"
+
+    monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
+    return client, engagements
+
+
+@pytest.mark.parametrize(
+    "op,body,answered_with",
+    [
+        ("ask_respond", {"ask_id": "ask-1", "answers": {"q1": ["yes"]}}, "answered"),
+        ("ask_revise", {"ask_id": "ask-1", "answers": {"q1": ["no"]}}, "revised"),
+        ("ask_decline", {"ask_id": "ask-1"}, "declined"),
+        ("ask_dismiss", {"ask_id": "ask-1"}, "dismissed"),
+    ],
+)
+def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answered_with) -> None:
+    """THE ENGAGE (design §2.4), for all four settle ops.
+
+    The operator's bug was exactly this: a queued ask is durable so the agent
+    can move on, and the relay REFUSED the answer once the runtime had exited —
+    "session not connected" — so the answer was accepted by the phone and read
+    by nobody. Decline and dismiss settle the ask just as an answer does, so
+    they take the SAME arm: one engage path, four ops.
+    """
+    from local_operator.session.runtime.launch import AskErrand
+
+    client, engagements = _cold_engage(monkeypatch)
+    reply = _client().post(f"/api/sessions/{SESSION_A}/command", json={"op": op, **body})
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": answered_with}
+    # The errand is the ASK errand, carrying the id for the log line, and the
+    # session engaged is the one the phone answered against.
+    assert len(engagements) == 1
+    session_id, errand = engagements[0]
+    assert session_id == SESSION_A
+    assert isinstance(errand, AskErrand)
+    assert errand.ask_id == "ask-1"
+    # The answer reached the freshly engaged runtime with the atomic body.
+    assert client.calls[-1][0] == op
+    if op in ("ask_respond", "ask_revise"):
+        assert client.calls[-1][1]["answers"] == body["answers"]
+    # The engaged connection is released rather than left open by the route.
+    assert client.closed is True
+
+
+def test_a_refused_cold_answer_keeps_the_session_claimed_active(monkeypatch) -> None:
+    """A REFUSAL is not a failed engage, and the list must not say it is.
+
+    The engage and the op are one call on the cold arm, so a raise is usually a
+    refusal from a runtime that IS live (an expired ask, a race lost to another
+    surface). Discarding the provisional claim there flashes the session out of
+    the active section on a refusal — a (brief) lie about a runtime that exists
+    — so the ask arm RETAINS it and lets ``retain_provisional_active``'s
+    one-scan settle remove the claim if discovery cannot confirm it.
+
+    THE CONTRAST IS THE POINT (agent review round 1, MINOR-1): the cell below
+    pins the prompt arm's OPPOSITE behaviour, so the two reasons stay distinct
+    in the code rather than one rollback being shared by accident.
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+    client_double = _FakeAskClient(refusal="this ask expired 7 days ago")
+
+    async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        return client_double, "runtime ready"
+
+    monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
+    client, daemon = _client_and_daemon()
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
+    )
+    assert reply.status_code == 422, reply.text
+    assert SESSION_A in daemon.table.provisional_active
+
+
+def test_a_failed_prompt_drops_the_provisional_claim(monkeypatch) -> None:
+    """The prompt arm's rollback, pinned beside the ask arm's retention.
+
+    A failed prompt means the message never reached a runtime, so the optimistic
+    "this session is coming up" claim is FALSE and must be retracted at once —
+    the opposite of the ask arm's refusal, where the runtime exists and only the
+    op was refused.
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+
+    async def fail(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ConnectionError("daemon restarted")
+
+    monkeypatch.setattr(attach_client, "continue_command", fail)
+    client, daemon = _client_and_daemon()
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "retry me",
+        },
+    )
+    assert reply.status_code == 502, reply.text
+    assert SESSION_A not in daemon.table.provisional_active
+
+
+def test_an_entry_with_no_writer_takes_the_engage_arm(monkeypatch) -> None:
+    """``entry is None`` was too narrow a condition for the cold arm.
+
+    An entry can be REGISTERED and still undeliverable — the dial has not
+    landed, or its socket is gone — and ``daemon.request`` needs ``entry.writer``
+    for exactly that reason. Under the narrower condition such an op fell through
+    to the generic "session not connected" while the aggregate had already
+    published ``runtime_live: false``, i.e. told the phone to expect an engage.
+    One predicate now answers both, so the surface's promise and the route's
+    behaviour cannot drift.
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+    client_double = _FakeAskClient()
+    engagements: list[tuple[str, object]] = []
+
+    async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        engagements.append((session_id, work))
+        return client_double, "runtime ready"
+
+    monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
+    client, daemon = _client_and_daemon()
+    daemon.table.entries[4242] = SessionEntry(_record(SESSION_A, 4242))  # no writer
+
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
+    )
+    assert reply.status_code == 200, reply.text
+    assert [session for session, _ in engagements] == [SESSION_A]
+    assert client_double.calls[-1][0] == "ask_respond"
+
+
+def test_a_refusal_from_the_engaged_runtime_keeps_the_queue_s_own_sentence(monkeypatch) -> None:
+    """The cold arm's refusals are the RUNTIME's, verbatim: an expired ask is
+    the ask's own sentence ("expired 7 days ago"), not this route's generic
+    "session not connected" — the user's next move depends on which it is."""
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+    client = _FakeAskClient(
+        refusal="this ask expired 7 days ago — ask again if it is still needed."
+    )
+
+    async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        return client, "runtime ready"
+
+    monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
+    )
+    assert reply.status_code == 422, reply.text
+    assert "expired 7 days ago" in reply.json()["error"]
 
 
 def test_the_frame_is_validated_at_the_boundary() -> None:

@@ -287,6 +287,27 @@ race; partial drafts are client-local and secret drafts are never persisted),
   `engage_runtime(AskErrand)`; boot reconcile injects. (Desktop route: the current
   `answer_gate` requires a connected client and refuses a cold daemon — the route grows a cold
   arm for `ask_id` bodies.)
+  > **As shipped (2026-10-03, the cold-answer fix).** The relay's cold arm does it the other
+  > way round, and one way for both secret and non-secret: it ENGAGES FIRST
+  > (`engage_session_client` → `engage_runtime(AskErrand)`, the same seam the prompt path
+  > uses) and then sends the op over the dial. The runtime's own `respond`/`revise`/
+  > `decline`/`dismiss` then do the validating, the single-winner append, the secret hop and
+  > the `reconcile` — so no surface carries a second copy of those rules, and the refusals
+  > (`expired`, `already answered by <surface>`) are the queue's own sentences rather than a
+  > route-local guess. The desktop route already worked this way through its viewer facade's
+  > bind (`AttachedSession._ensure_bound` → `engage_runtime(WarmErrand)`); this brings the
+  > relay to the same shape. A conversation with no durable transcript is refused in words
+  > (`ask_session_gone`) before any engage is attempted: it can never be read, so reporting
+  > success for it would be worse than a refusal.
+  >
+  > **The clock on the surface is the ENGAGE's, not a warm prompt's.** One cold answer is
+  > engage + dial + ack in a single call, so its worst case composes the engage budget
+  > (`launch.DEFAULT_DEADLINE_S`, 30 s) with the op's ack (`attach_client.ACK_TIMEOUT_S`,
+  > 15 s) — measured end to end at ~**30 s** on the fleet, against the 1–3 s a warm prompt
+  > pays. Any in-flight affordance on a cold answer must be sized for that window (the
+  > phone card's copy and spinner are the design round's, not this note's); nothing may
+  > shorten it by skipping the engage, because a refusal that arrives without a runtime is
+  > the bug the arm exists to fix.
 - **Secret:** the value rides the op to a **live runtime only** (it is stored in session
   memory, `variables.py:389-410` **(scout)**, and must live in the process that runs `bash`).
   Cold → engage first, then send; if that fails the ask stays open with a clear error. The
