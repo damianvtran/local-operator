@@ -1099,6 +1099,33 @@ class TestWakePanelOwedState:
         for tick, label in zip((0, 1_200, 2_400), labels, strict=True):
             assert WakePanel._owed_label(owed, first + age_ms + tick) == f"{state} · owed {label}"
 
+    def test_a_fresh_live_stall_ages_from_its_own_stamp(self) -> None:
+        """F2: the state whose age matters most rendered as a bare word.
+
+        A fresh live-stall record carries no attempt stamp — nothing was
+        attempted — so the panel must fall back to ``first_stalled_ms``, the
+        same anchor the CLI's ``_owed_age_s`` uses; without it the one state
+        that separates "stalled seconds ago" from "stranded last week" showed
+        no age while the CLI read "owed 23h" for the same record. A stall
+        carried over a retry run keeps dating from the attempt, exactly as the
+        CLI does it.
+        """
+        from local_operator.tui.widgets.wake_panel import WakePanel
+
+        first = 1_700_000_000_000
+        fresh = {"state": "live-stalled", "first_stalled_ms": first}
+        assert WakePanel._owed_label(fresh, first + 82_800_000) == "live-stalled · owed 23h"
+
+        carried = {
+            "state": "live-stalled",
+            "first_stalled_ms": first,
+            "first_attempt_ms": first - 86_400_000,
+        }
+        assert WakePanel._owed_label(carried, first) == "live-stalled · owed 1d"
+
+        # And a record with neither stamp still gets its state word.
+        assert WakePanel._owed_label({"state": "live-stalled"}, first) == "live-stalled"
+
     @pytest.mark.asyncio
     async def test_an_owed_fire_carries_its_state_and_age_and_a_healthy_one_does_not(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
