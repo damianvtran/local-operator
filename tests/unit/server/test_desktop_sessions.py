@@ -8422,7 +8422,9 @@ class _AskRemote:
     def __init__(self, *, refuse_with: str = "", detail: str = "answered") -> None:
         self.refuse_with = refuse_with
         self.detail = detail
-        self.calls: list[tuple[str, Any, bool]] = []
+        #: ``(ask_id, answers, decline, revise)`` — the third and fourth are the
+        #: two intent flags, positional because each cell asserts the whole tuple.
+        self.calls: list[tuple[str, Any, bool, bool]] = []
         # The route reads ``remote.frontend_state.epoch`` on the GATE arm (the
         # queued-ask arm skips the epoch check by design), so the double has to
         # carry the attribute the real ``AttachedSession`` carries. Declared as

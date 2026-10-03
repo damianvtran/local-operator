@@ -879,7 +879,8 @@ def test_successive_revisions_all_land_and_the_latest_is_effective(tmp_path: Pat
         if event["kind"] == store.EVENT_REVISED
     ]
     assert [event["supersedes"] for event in revised] == [BASE, BASE + 1]
-    assert queue.find(ask_id)["answers"] == {"q0": ["three"]}
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"] == {"q0": ["three"]}
     assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
     assert session.batches[-1][0].details["answers"] == {"q0": ["three"]}
 
