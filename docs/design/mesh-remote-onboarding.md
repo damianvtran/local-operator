@@ -54,7 +54,8 @@ Scout reports folded in @ the workstream scratchpad (`recon/scout-core-gate.md`,
 
 Today, the agent can drive everything about the mesh **except bringing a device to the point
 where it can complete work**: offloaded writes/execs on `cloud-node-1` park with
-"only the operator can allow it … run `lop operator install` on it (one privileged step)",
+"only the operator can allow it … run [the now-retired privileged install step] on it
+(one privileged step)",
 and nothing short of a human on that box (or a lot of manual SSH) changes that. This note
 makes that whole path agent-runnable behind **one remote approval** — a card in the Mesh tab
 that shows *what / where / who*, is answered with the operator's Touch ID, and authorizes:
@@ -76,11 +77,12 @@ agent-runnable way — one gesture plus one admin prompt, no terminal (§3.7).
 
 `cloud-node-1` (ec2-user@99.79.190.164, Amazon Linux, lop v0.63.2, `damian-mesh` member with
 role capabilities `list/prompt/slash/steer/stop/view`) parks every write/exec because it has
-no operator authority. Measured 2026-09-30, verbatim (the card refusal the operator pasted):
+no operator authority. Measured 2026-09-30 (the card refusal the operator pasted; its remedy
+clause is bracketed — §2.9 retires that copy):
 
 > "Your answer was not sent; this approval is still waiting: only the operator can allow it,
 > but operator authority is not installed on the machine running the session yet, so nothing
-> there can check a signature — run `lop operator install` on it (one privileged step).
+> there can check a signature — [the now-retired privileged install step on it].
 > Denying it works from here."
 
 (Revision 2 makes this family of sentences the copy this workstream REPAVES: a refusal's
@@ -560,8 +562,8 @@ and its `serving.py` mirror (the report's missing-anchor clause); `tui/notify.py
 remote park card's clause); `operator/cli.py` help strings for `init`/`install`. The sweep
 cells pinning these strings (`tests/unit/harness/test_approval_authority.py`,
 `tests/unit/tui/test_approvals_ux.py`) move their pins in the same commit, and the sweep's
-phrase list gains the retired "run `lop operator install`" shape deliberately — it is not
-widened to silence anything.
+phrase list gains the retired terminal-command shape deliberately — it is not widened to
+silence anything.
 
 ---
 

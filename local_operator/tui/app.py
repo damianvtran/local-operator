@@ -30694,9 +30694,7 @@ class OperatorApp(App[None]):
                 # design §5.4): seen in another window or app, the queue is the
                 # route that works — the producer's own sentence says "queue the
                 # move", and this line carries the spelling THIS surface runs.
-                text += (
-                    f" To queue it from here: /move {session_id} --to {request.to} --queue."
-                )
+                text += f" To queue it from here: /move {session_id} --to {request.to} --queue."
             if reached in MOVE_PHASE_ORDER:
                 # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
                 # the fact the user needs to know what state the two devices are in.
@@ -30739,8 +30737,7 @@ class OperatorApp(App[None]):
             notes = {
                 "queued": "waiting for a safe point",
                 "finishing": (
-                    "waiting for the current step to finish (a pending approval holds "
-                    "this up)"
+                    "waiting for the current step to finish (a pending approval holds " "this up)"
                 ),
                 "paused": "the move has started",
                 "copying": "the move has started",
@@ -30757,8 +30754,7 @@ class OperatorApp(App[None]):
                 )
             else:
                 text = (
-                    head
-                    + " Windows open on it are told first and get a moment to follow; any "
+                    head + " Windows open on it are told first and get a moment to follow; any "
                     "that can't will be disconnected, and the conversation continues on "
                     f"{target}. Cancel the queued move before it starts with "
                     f"`lop sessions move --cancel-queued {session_id}`."

@@ -87,6 +87,11 @@ def parse_move_to(arg: str) -> MoveTo | None:
         return None
     to = ""
     keep = False
+    # Defaulted here for EVERY form, not only where ``--queue`` is parsed: the
+    # request build at the bottom reads this name, so a form without the flag must
+    # still answer it — without the default, the bare ``--to`` forms raise
+    # ``UnboundLocalError`` (the red shard that added this line).
+    queue = False
     words: list[str] = []
     index = 0
     while index < len(tokens):
