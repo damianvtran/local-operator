@@ -431,7 +431,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     # Push command
     push_parser = agents_subparsers.add_parser(
-        "push", help="Push (upload) an agent to Radient", parents=[parent_parser]
+        "push",
+        help="Push (upload) an agent to Radient; `--org` and `--hub-id` push through "
+        "the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only "
+        "with changes pending, 3 declined, 130 cancelled)",
+        parents=[parent_parser],
     )
     push_group = push_parser.add_mutually_exclusive_group(required=True)
     push_group.add_argument(
@@ -455,8 +459,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--hub-id",
         type=str,
         default=None,
-        help="Republish (overwrite) this HUB listing from the local agent, through the "
-        "personal-reference preview; needs --name (--id is a local id)",
+        help="Republish (overwrite) this hub listing from the local agent (checks for "
+        "personal references first); needs --name (--id is a local id)",
     )
     _add_hub_publish_flags(push_parser)
     # Pull command
@@ -553,7 +557,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     teams_push = teams_subparsers.add_parser(
         "push",
         help="Push a team to an organization or the public hub (Agent Hub); exit codes: "
-        "0 published, 1 error, 2 preview-only with changes pending, 3 declined",
+        "0 published, 1 error, 2 preview-only with changes pending, 3 declined, "
+        "130 cancelled",
         parents=[parent_parser],
     )
     teams_push.add_argument("name", type=str, help="Name of the local team to push")
@@ -581,8 +586,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     _add_hub_publish_flags(teams_push)
     teams_pull = teams_subparsers.add_parser(
         "pull",
-        help="Pull a team from the hub by id, or by name from the public hub "
-        "(Agent Hub org sharing)",
+        help="Pull a team from the hub by id, or by name from the public hub " "(Agent Hub)",
         parents=[parent_parser],
     )
     teams_pull.add_argument(
@@ -9279,8 +9283,8 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Machine-readable preview output; it contains the reference values, so "
-        "treat it as sensitive",
+        help="Machine-readable preview output; it carries the reference values and the "
+        "single-use commit pin, so treat it as sensitive",
     )
     parser.add_argument(
         "--accept-unresolved",
@@ -9290,8 +9294,8 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-internal-ops",
         action="store_true",
-        help="Consent to the internal-operations review allowance for an organization "
-        "publish (requires --org; shows the consent text)",
+        help="Consent to the internal-operations allowance for an organization publish "
+        "(requires --org; shows the consent text interactively)",
     )
 
 
@@ -9817,8 +9821,8 @@ def _hub_cause(exc: BaseException) -> str:
             needed, limit = details.get("windows_needed"), details.get("windows_max")
             if needed and limit:
                 return (
-                    f"{exc} (the reference check needs {needed} windows; the limit is "
-                    f"{limit}) [{code}]"
+                    f"{exc} (this document needs {needed} reference-check windows and the "
+                    f"limit is {limit}; shorten it and push again) [{code}]"
                 )
             return f"{exc} (the reference check could not run) [{code}]"
     # The remaining commit-family codes (``generalization_required``,
@@ -9938,7 +9942,8 @@ def _org_target_or_picker(
     if not memberships:
         print(
             "\n\033[1;31mError: this command publishes inside an organization, and this "
-            "account is not a member of one. Ask an organization owner to invite you.\033[0m"
+            "account is not a member of any organization. Ask an organization owner to "
+            "invite you.\033[0m"
         )
         return None
     if declared is not None:
@@ -10015,6 +10020,213 @@ _PUBLIC_TEAM_SEARCH_MAX_PAGES = 50
 def _stdin_is_tty() -> bool:
     """True only when stdin can actually answer a prompt (never for None)."""
     return sys.stdin is not None and sys.stdin.isatty()
+
+
+#: The stream the --json payload is written to while the human flow's stdout is
+#: pointed at stderr (``_JsonStdoutGuard``). None outside a guarded command.
+_JSON_PAYLOAD_STREAM: "Optional[Any]" = None
+
+
+class _JsonStdoutGuard:
+    """Under --json, every human line moves to stderr (ux round 1, U1).
+
+    The flag promises a parseable payload; a success sentence or an error line
+    sharing stdout makes ``json.loads(stdout)`` fail with "Extra data" on the
+    ordinary success path and on the refusal path a script most wants to parse.
+    The guard points the process's stdout at stderr for the whole command body;
+    ``_print_payload`` keeps writing payloads to the saved stream. Human mode
+    (and every non-json invocation) passes through byte-untouched.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._saved: "Optional[Any]" = None
+
+    def __enter__(self) -> "_JsonStdoutGuard":
+        global _JSON_PAYLOAD_STREAM
+        if self._enabled and sys.stdout is not sys.stderr:
+            self._saved, _JSON_PAYLOAD_STREAM = sys.stdout, sys.stdout
+            sys.stdout = sys.stderr
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        global _JSON_PAYLOAD_STREAM
+        if self._saved is not None:
+            sys.stdout = self._saved
+            self._saved = None
+            _JSON_PAYLOAD_STREAM = None
+
+
+def _print_payload(payload: Any) -> None:
+    """Print one --json payload on the REAL stdout (see ``_JsonStdoutGuard``)."""
+    import json as _json  # lazy: same reason as everywhere else in this file
+
+    print(
+        _json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        file=_JSON_PAYLOAD_STREAM if _JSON_PAYLOAD_STREAM is not None else sys.stdout,
+    )
+
+
+def _term_width() -> int:
+    """The width renders wrap to: the real terminal, or 80 when stdout is not one.
+
+    ``shutil.get_terminal_size`` reads ``COLUMNS`` then the stdout tty -- the
+    same read the status renders make -- so a capture can pin the width (the
+    c1 evidence pins it via ``stty``/``COLUMNS``) and a pipe gets a stable 80.
+    """
+    import shutil  # lazy: matches the other width reads in this file
+
+    return max(40, shutil.get_terminal_size((80, 24)).columns)
+
+
+def _wrap_text(
+    text: Any, width: int, *, indent: str = "", subsequent: "Optional[str]" = None
+) -> "list[str]":
+    """``text`` whitespace-collapsed and word-wrapped to ``width`` (ux round 1, U4).
+
+    Every render used fixed clip constants measured at a 200-column capture, so
+    several lines ran past a default terminal; wrapping to the real width is
+    what makes the flow readable where it is actually watched.
+    """
+    import textwrap  # lazy: only the render paths pay for it
+
+    flat = " ".join(str(text or "").split())
+    if not flat:
+        return []
+    return textwrap.wrap(
+        flat,
+        width=max(20, width),
+        initial_indent=indent,
+        subsequent_indent=indent if subsequent is None else subsequent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [indent + flat]
+
+
+def _wrap_keep(text: str, width: int, subsequent: str = "  ") -> "list[str]":
+    """Pass ``text`` through when it fits; word-wrap it only when it does not."""
+    if len(text) <= width:
+        return [text]
+    return _wrap_text(text, width, subsequent=subsequent)
+
+
+def _emit_colored_wrapped(lead: str, runs: "list[tuple[str, Optional[str]]]", width: int) -> None:
+    """Runs printed under ``lead``, wrapped to ``width``, breaking at spaces.
+
+    The ``d`` diff colours only the changed span of a pair (ux round 1, U4), so
+    the writer takes (text, color) runs rather than a plain string; continuation
+    rows indent by two so a wrapped paragraph still reads as one unit.
+    """
+    pending = [(text, color) for text, color in runs if text]
+    first = True
+    while pending:
+        indent = lead if first else "  "
+        budget = max(10, width - len(indent))
+        row: "list[tuple[str, Optional[str]]]" = []
+        while pending and budget > 0:
+            text, color = pending[0]
+            if len(text) <= budget:
+                row.append((text, color))
+                budget -= len(text)
+                pending.pop(0)
+                continue
+            cut = text[:budget]
+            if " " in cut:
+                cut = cut[: cut.rfind(" ") + 1]
+            row.append((cut, color))
+            pending[0] = (text[len(cut) :], color)
+            budget = 0
+        sys.stdout.write(indent)
+        for text, color in row:
+            sys.stdout.write(f"\033[{color}m{text}\033[0m" if color else text)
+        sys.stdout.write("\n")
+        first = False
+
+
+def _print_changed_pair(old: str, new: str, width: int) -> None:
+    """One ``-``/``+`` pair with only the changed span coloured (ux round 1, U4).
+
+    The common shape is two near-identical paragraphs with one value swapped,
+    where whole-line colouring asks the publisher to eyeball four wrapped rows
+    to find the difference; the shared prefix and suffix stay plain and only
+    the middles carry the red/green.
+    """
+    limit = min(len(old), len(new))
+    index = 0
+    while index < limit and old[index] == new[index]:
+        index += 1
+    tail = 0
+    while tail < limit - index and old[len(old) - 1 - tail] == new[len(new) - 1 - tail]:
+        tail += 1
+    prefix = old[:index]
+    old_suffix = old[len(old) - tail :]
+    new_suffix = new[len(new) - tail :]
+    _emit_colored_wrapped(
+        "  -", [(prefix, None), (old[index : len(old) - tail], "1;31"), (old_suffix, None)], width
+    )
+    _emit_colored_wrapped(
+        "  +", [(prefix, None), (new[index : len(new) - tail], "1;32"), (new_suffix, None)], width
+    )
+
+
+def _print_wrapped_colored(text: str, color: "Optional[str]", width: int) -> None:
+    """A single (unpaired) diff row, wrapped to width, whole-line coloured."""
+    for row in _wrap_keep(text, width, subsequent="  "):
+        if color:
+            print(f"\033[{color}m{row}\033[0m")
+        else:
+            print(row)
+
+
+class _CheckingSpinner:
+    """The §7.3 spinner around the paid preview call (ux round 1, N5).
+
+    Frames render only on a TTY: a pipe keeps the one static line it has always
+    printed (its readers parse rather than watch), and --json gets nothing at
+    all -- there stdout is the machine payload. The thread is a daemon, is
+    joined before the caller resumes, and the frame line is erased on exit so
+    the next render starts clean.
+    """
+
+    _MESSAGE = "Checking for personal references…"
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._stop: "Optional[Any]" = None
+        self._thread: "Optional[Any]" = None
+
+    def __enter__(self) -> "_CheckingSpinner":
+        if not self._enabled:
+            return self
+        if not sys.stdout.isatty():
+            print(self._MESSAGE)
+            return self
+        import threading  # lazy: only the interactive path pays for it
+
+        stop = threading.Event()
+        self._stop = stop
+
+        def spin() -> None:
+            index = 0
+            while not stop.wait(0.08):
+                frame = self._FRAMES[index % len(self._FRAMES)]
+                sys.stdout.write(f"\r{frame} {self._MESSAGE}")
+                sys.stdout.flush()
+                index += 1
+
+        self._thread = threading.Thread(target=spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        stop = self._stop
+        if self._thread is not None and stop is not None:
+            stop.set()
+            self._thread.join()
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+        return None
 
 
 def _prompt_line(prompt: str) -> Optional[str]:
@@ -10133,24 +10345,33 @@ def _publish_error_label(kind: str, target: _PublishTarget) -> str:
     return f"Error pushing {noun} to the public hub"
 
 
-def _ask_for_consent(flags: argparse.Namespace) -> "tuple[bool, Optional[int]]":
+def _ask_for_consent(
+    flags: argparse.Namespace, *, kind: str, target: "_PublishTarget", name: str
+) -> "tuple[bool, Optional[int]]":
     """The typed-yes consent gate (P1 §3.1). Returns (given, stop code).
 
     Interactive use requires the literal ``yes``; non-interactive use requires
     BOTH flags (``--allow-internal-ops --yes``) because the CLI can prove the
     latter by the caller's scripting and nothing else. Declining is a normal
-    outcome (exit 3), not an error: the user was asked and said no.
+    outcome (exit 3), not an error: the user was asked and said no. The screen
+    names the target and the consequence before the legal text (ux round 1,
+    U6); the version id stays out of the user's way -- the constant beside the
+    text is what records drift.
     """
     if not getattr(flags, "allow_internal_ops", False):
         return False, None
     if not getattr(flags, "yes", False):
+        noun = "agent" if kind == "agent" else "team"
         print()
+        print(f"\033[1;36mPublishing {noun} '{name}' to {target.label}.\033[0m")
         print(
-            f"\033[1;36mInternal-operations allowance ({_ORG_INTERNAL_OPS_V1}) — "
-            "read before confirming:\033[0m"
+            "\033[1;36mConfirming applies the internal-operations allowance to this "
+            "publish's content review.\033[0m"
         )
-        print(f"  {_ORG_INTERNAL_OPS_V1_CONSENT}")
-        answer = _prompt_line('Type "yes" to confirm: ')
+        print()
+        for line in _wrap_text(_ORG_INTERNAL_OPS_V1_CONSENT, _term_width() - 4, indent="  "):
+            print(line)
+        answer = _prompt_line('\nType "yes" to confirm: ')
         if answer is None or answer.strip().lower() != "yes":
             print("\n\033[1;33mConsent not given; nothing was published.\033[0m")
             return False, 3
@@ -10171,8 +10392,8 @@ def _allowance_resend_guard(moderation: Any, flags: argparse.Namespace) -> Optio
     if scope != "org_allowance" or getattr(flags, "allow_internal_ops", False):
         return None
     sentence = (
-        "This listing was published under the internal-ops allowance. Re-publishing "
-        "without it triggers a fresh strict review and may be refused."
+        "This listing was published under the internal-operations allowance. "
+        "Re-publishing without it triggers a fresh strict review and may be refused."
     )
     if getattr(flags, "yes", False):
         print(f"\033[1;33m  {sentence} Continuing without it (--yes).\033[0m")
@@ -10186,6 +10407,7 @@ def _allowance_resend_guard(moderation: Any, flags: argparse.Namespace) -> Optio
         return 1
     answer = _prompt_line(f"{sentence} Continue without? [y/N] ")
     if answer is None or answer.strip().lower() not in ("y", "yes"):
+        print("\n\033[1;33mNothing was published.\033[0m")
         return 3
     return None
 
@@ -10197,10 +10419,14 @@ def _print_full_diff(
 
     Both texts exist locally (the generalized one is the preview's returned
     document), so this is a pure rendering -- no second request, nothing new
-    leaves the machine.
+    leaves the machine. Rows wrap to the real terminal width and only the
+    changed span of a ``-``/``+`` pair is coloured: the common shape is two
+    long near-identical paragraphs with one value swapped, which whole-line
+    colouring makes the publisher eyeball across wrapped rows (ux round 1, U4).
     """
     import difflib  # lazy: only the 'd' path pays for it
 
+    width = _term_width() - 2
     fields = (
         ("description", "when_to_use", "instructions")
         if kind == "agent"
@@ -10217,14 +10443,34 @@ def _print_full_diff(
             difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
         )
         body = lines[2:] if lines and lines[0].startswith("---") else lines
-        for line in body:
+        index = 0
+        while index < len(body):
+            line = body[index]
+            if line.startswith("-") and index + 1 < len(body) and body[index + 1].startswith("+"):
+                _print_changed_pair(line[1:], body[index + 1][1:], width)
+                index += 2
+                continue
             if line.startswith("-"):
-                print(f"\033[1;31m  {line}\033[0m")
+                _print_wrapped_colored(f"  -{line[1:]}", "1;31", width)
             elif line.startswith("+"):
-                print(f"\033[1;32m  {line}\033[0m")
+                _print_wrapped_colored(f"  +{line[1:]}", "1;32", width)
             else:
-                print(f"  {line}")
+                context = line[1:] if line.startswith(" ") else line
+                _print_wrapped_colored(f"  {context}", None, width)
+            index += 1
         print()
+
+
+def _print_resolution_unit(unit: Any, *, sign: str, width: int) -> None:
+    """One resolution unit as a bullet: the region heading when the resolver
+    determined one, else the unit text; clipped to the terminal width (ux N3)."""
+    if not isinstance(unit, dict):
+        return
+    label = unit.get("heading") or unit.get("text") or ""
+    prefix = f"  {sign} {unit.get('field', '')}: "
+    label = _clip_line(label, max(20, width - len(prefix) - 1))
+    if label:
+        print(f"{prefix}{label}")
 
 
 def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Namespace) -> None:
@@ -10237,9 +10483,9 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
     includes the values and is documented as sensitive).
     """
     if getattr(flags, "json", False):
-        import json as _json  # lazy: same reason as everywhere else in this file
-
-        print(_json.dumps(preview, indent=2, ensure_ascii=False, default=str))
+        # The payload goes to the real stdout even when the command's human
+        # flow was pointed at stderr by ``_JsonStdoutGuard`` (ux round 1, U1).
+        _print_payload(preview)
         return
 
     status = str(preview.get("status") or "")
@@ -10247,22 +10493,29 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
     unresolved = preview.get("unresolved") or []
     advisories = preview.get("advisories") or []
     resolution = preview.get("resolution") or {}
+    width = _term_width()
 
     if str(resolution.get("mode") or "") == "overwrite":
         removed = resolution.get("removed") or []
         added = resolution.get("added") or []
-        print(
-            f"Compared with the published version: {len(removed)} removed, "
-            f"{len(added)} added. Removed sections stay removed."
+        summary = (
+            f"Compared with the published version: {len(removed)} removed, {len(added)} added."
         )
+        if removed:
+            # The reminder is only claimable when something WAS removed (ux N1).
+            summary += " Removed sections stay removed."
+        for line in _wrap_text(summary, width):
+            print(line)
         for unit in removed[:10]:
-            if not isinstance(unit, dict):
-                continue
-            label = _clip_line(unit.get("heading") or unit.get("text") or "", 72)
-            if label:
-                print(f"  - {unit.get('field', '')}: {label}")
+            _print_resolution_unit(unit, sign="-", width=width)
         if len(removed) > 10:
-            print(f"  … and {len(removed) - 10} more (use --json for the full report)")
+            print(f"  … and {len(removed) - 10} more removed (use --json for the full report)")
+        # Additions are listed too (ux round 1, N2): the wire reports them as
+        # units (`resolution.added`), and a count alone hides what is landing.
+        for unit in added[:10]:
+            _print_resolution_unit(unit, sign="+", width=width)
+        if len(added) > 10:
+            print(f"  … and {len(added) - 10} more added (use --json for the full report)")
 
     if status == "unchanged":
         print("No personal references found.")
@@ -10302,21 +10555,33 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
         for item in unresolved:
             if not isinstance(item, dict):
                 continue
-            print(
+            line = (
                 f"  [{item.get('id', '?')}] {item.get('field', '')}  "
-                f'"{_clip_line(item.get("value"), 60)}"  — {_clip_line(item.get("reason"), 80)}'
+                f'"{_clip_line(item.get("value"), 60)}" — {item.get("reason", "")}'
             )
+            for row in _wrap_text(line, width, subsequent="      "):
+                print(row)
 
     if advisories:
         print()
         for note in advisories:
             if isinstance(note, dict):
-                print(f"  note: {note.get('field', '')} {_clip_line(note.get('note'), 96)}")
+                for row in _wrap_text(
+                    f"  note: {note.get('field', '')} {note.get('note', '')}",
+                    width,
+                    subsequent="        ",
+                ):
+                    print(row)
 
     if changes or unresolved:
         print()
-        print("  Your local copy is not changed. Behaviour and wording are never rewritten —")
-        print("  only the values above.")
+        for row in _wrap_text(
+            "  Your local copy is not changed. Behaviour and wording are never rewritten — "
+            "only the values above.",
+            width,
+            subsequent="  ",
+        ):
+            print(row)
 
 
 def _confirm_plan(
@@ -10356,19 +10621,26 @@ def _confirm_plan(
                 "interactively.\033[0m"
             )
             return None, 1
-        elif not _stdin_is_tty():
-            print(
-                "\n\033[1;31mError: values need your call and stdin is not a terminal; "
-                "re-run with --accept-unresolved (and --yes) to publish with them left "
-                "as-is.\033[0m"
-            )
-            return None, 1
+        # No separate non-TTY arm: a non-TTY run without --yes is refused
+        # before the preview is ever paid for, and with --yes the arm above
+        # fires -- an arm here could never render (copy round 1, C9).
         else:
             for item in unresolved:
                 if not isinstance(item, dict):
                     continue
                 label = f"[{item.get('id', '?')}] {item.get('value', '')}"
-                answer = _prompt_line(f'Publish with "{label}" left as-is? [y/N] ')
+                while True:
+                    answer = _prompt_line(
+                        f'Publish with "{label}" left as-is? [y/N/d]   (d = full diff) '
+                    )
+                    if answer is not None and answer.strip().lower() == "d":
+                        # `d` works here too (ux round 1, U5): seeing the diff
+                        # before deciding one value must not cost a re-run and a
+                        # second paid preview, and the prompt right below
+                        # advertises the same key.
+                        _print_full_diff(submitted, preview.get("document") or {}, kind=kind)
+                        continue
+                    break
                 if answer is None or answer.strip().lower() not in ("y", "yes"):
                     print(
                         "\n\033[1;33mNothing was published. Edit the value in your local "
@@ -10377,7 +10649,9 @@ def _confirm_plan(
                     return None, 1
                 accepted.append(str(item.get("id")))
 
-    consent_given, stop = _ask_for_consent(flags)
+    consent_given, stop = _ask_for_consent(
+        flags, kind=kind, target=target, name=str(submitted.get("name") or "")
+    )
     if stop is not None:
         return None, stop
     consent_version = _ORG_INTERNAL_OPS_V1 if consent_given else None
@@ -10392,6 +10666,7 @@ def _confirm_plan(
         while True:
             answer = _prompt_line(question)
             if answer is None:
+                print("\n\033[1;33mNothing was published.\033[0m")
                 return None, 3
             choice = answer.strip().lower()
             if choice in ("y", "yes"):
@@ -10399,6 +10674,7 @@ def _confirm_plan(
             if choice == "d" and changed:
                 _print_full_diff(submitted, preview.get("document") or {}, kind=kind)
                 continue
+            print("\n\033[1;33mNothing was published.\033[0m")
             return None, 3
 
     return (
@@ -10429,7 +10705,7 @@ def _publish_against_old_server(
     """
     print(
         "\033[1;33mnote: this hub does not support publication previews yet; publishing "
-        "without the personal-reference check.\033[0m"
+        "without checking for personal references.\033[0m"
     )
     if getattr(flags, "preview_only", False):
         print(
@@ -10437,12 +10713,15 @@ def _publish_against_old_server(
             "support.\033[0m"
         )
         return 1, None
-    consent_given, stop = _ask_for_consent(flags)
+    consent_given, stop = _ask_for_consent(
+        flags, kind=kind, target=target, name=str(document.get("name") or "")
+    )
     if stop is not None:
         return stop, None
     if not getattr(flags, "yes", False):
         answer = _prompt_line("Publish? [y/N] ")
         if answer is None or answer.strip().lower() not in ("y", "yes"):
+            print("\n\033[1;33mNothing was published.\033[0m")
             return 3, None
     plan = {
         "document": dict(document),
@@ -10505,12 +10784,17 @@ def _publish_with_preview(
         )
         return 1, None
 
-    if not bool(getattr(flags, "json", False)):
-        # The spinner line is for a human watching a slow paid call; under --json
-        # stdout is the machine payload and this line would make it unparseable.
-        print("Checking for personal references…")
     try:
-        preview = _run_preview(client, kind, document, target)
+        # The §7.3 spinner: frames on a TTY, the one static line on a pipe,
+        # nothing under --json (stdout is the machine payload there) (ux N5).
+        with _CheckingSpinner(not bool(getattr(flags, "json", False))):
+            preview = _run_preview(client, kind, document, target)
+    except KeyboardInterrupt:
+        # ^C during the paid call must read as a cancel, not an interpreter
+        # traceback; the preview mutates nothing, so the reassurance is exact
+        # (ux round 1, U2).
+        print("\n\033[1;33mCancelled; nothing was published.\033[0m")
+        return 130, None
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         if _is_missing_preview_route(exc):
             return _publish_against_old_server(client, kind, document, target, flags)
@@ -10521,7 +10805,9 @@ def _publish_with_preview(
 
     if preview_only:
         # 2 = "would change something" (CI can gate on it); 0 = nothing would change.
+        # The shared line says what the exit code means: nothing left the machine.
         status = str(preview.get("status") or "")
+        print("\n\033[1;33mNothing was published.\033[0m")
         return (2 if status != "unchanged" else 0), None
 
     plan, stop_code = _confirm_plan(preview, document, kind=kind, target=target, flags=flags)
@@ -10533,6 +10819,14 @@ def _publish_with_preview(
         try:
             result = _commit_publication(client, kind, target, plan)
             return 0, result
+        except KeyboardInterrupt:
+            # The commit was in flight, so unlike the preview the hub may still
+            # have received it: the honest line says so (ux round 1, U2).
+            print(
+                "\n\033[1;33mCancelled. The hub may still have received this publish — "
+                "check the listing before retrying.\033[0m"
+            )
+            return 130, None
         except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
             code = getattr(exc, "code", None)
             if code in ("preview_expired", "preview_stale") and not rechecked:
@@ -10545,7 +10839,11 @@ def _publish_with_preview(
                     "again…\033[0m"
                 )
                 try:
-                    fresh = _run_preview(client, kind, document, target)
+                    with _CheckingSpinner(not bool(getattr(flags, "json", False))):
+                        fresh = _run_preview(client, kind, document, target)
+                except KeyboardInterrupt:
+                    print("\n\033[1;33mCancelled; nothing was published.\033[0m")
+                    return 130, None
                 except Exception as exc2:  # noqa: BLE001
                     print(
                         f"\n\033[1;31m{_publish_error_label(kind, target)}: "
@@ -10555,7 +10853,7 @@ def _publish_with_preview(
                 if assume_yes and _preview_identity(fresh) != _preview_identity(preview):
                     print(
                         "\n\033[1;31mError: the preview changed after the commit was "
-                        "refused; re-run to review the new diff.\033[0m"
+                        "refused; re-run interactively to review the new diff.\033[0m"
                     )
                     return 1, None
                 if not assume_yes:
@@ -10631,7 +10929,7 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
         if not hub_id:
             print(
                 "\n\033[1;31mError: --hub-id needs a hub agent id (the value was empty). "
-                "A hub agent id is what a hosted push printed as the listing id.\033[0m"
+                'A hub agent id is what a hosted push printed as "Agent ID".\033[0m'
             )
             return 1
         if getattr(args, "id", None):
@@ -10639,7 +10937,7 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
             # beside `--hub-id` would make one flag mean two ids at once.
             print(
                 "\n\033[1;31mError: --id is a local agent id (the zip overwrite selector); "
-                "--hub-id names the HUB listing -- select the local agent with --name.\033[0m"
+                "--hub-id names the hub listing; select the local agent with --name.\033[0m"
             )
             return 1
         stop = _agents_republish_intro(client, hub_id, tenant, args)
@@ -10681,7 +10979,7 @@ def _agents_republish_intro(
     row = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(row, dict):
         print(
-            f"\n\033[1;31mError: no hub agent '{hub_id}' answers for this account — no such "
+            f"\n\033[1;31mError: no hub agent '{hub_id}' answers for this account: no such "
             "agent, or this account is not a member of the organization it belongs to "
             "(the hub answers both the same way).\033[0m"
         )
@@ -10696,7 +10994,7 @@ def _agents_republish_intro(
     if str(row.get("visibility") or "") != "org":
         print(
             "\n\033[1;31mError: that agent is published publicly, not into an "
-            "organization — republish it with `lop agents push --name <agent> "
+            "organization. Republish it with `lop agents push --name <agent> "
             "--hub-id <id>` (no --org).\033[0m"
         )
         return 1
@@ -10739,7 +11037,7 @@ def agents_push_public_republish_command(
         # beside `--hub-id` would make one flag mean two ids at once.
         print(
             "\n\033[1;31mError: --id is a local agent id (the zip overwrite selector); "
-            "--hub-id names the HUB listing -- select the local agent with --name.\033[0m"
+            "--hub-id names the hub listing; select the local agent with --name.\033[0m"
         )
         return 1
     config_manager = ConfigManager(base_dir)
@@ -10771,7 +11069,7 @@ def agents_push_public_republish_command(
     row = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(row, dict):
         print(
-            f"\n\033[1;31mError: no public agent '{hub_id}' answers for this account — "
+            f"\n\033[1;31mError: no public agent '{hub_id}' answers for this account: "
             "no such listing, or it belongs to a different account.\033[0m"
         )
         return 1
@@ -10783,7 +11081,7 @@ def agents_push_public_republish_command(
         # would also answer 404 to a key, but the coded refusal is friendlier.
         print(
             "\n\033[1;31mError: that agent is an organization listing, not a public "
-            "one — republish it with `lop agents push --name <agent> --org <tenant> "
+            "one. Republish it with `lop agents push --name <agent> --org <tenant> "
             "--hub-id <id>`.\033[0m"
         )
         return 1
@@ -10941,7 +11239,7 @@ def _teams_push_target(
     elif not memberships:
         print(
             "\n\033[1;31mError: this command publishes a team, and this account is not a "
-            "member of one. Pass --public to publish to the public hub.\033[0m"
+            "member of any organization. Pass --public to publish to the public hub.\033[0m"
         )
         return None
     else:
@@ -10979,8 +11277,8 @@ def _teams_republish_intro(
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         if getattr(exc, "status_code", None) == 404:
             print(
-                f"\n\033[1;31mError: no hub team '{target.hub_id}' answers for this account "
-                "— no such team, or this account is not a member of the organization it "
+                f"\n\033[1;31mError: no hub team '{target.hub_id}' answers for this account: "
+                "no such team, or this account is not a member of the organization it "
                 "belongs to (the hub answers both the same way).\033[0m"
             )
         else:
@@ -11170,7 +11468,7 @@ def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: P
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         if getattr(exc, "status_code", None) == 404:
             print(
-                "\n\033[1;31mError: no public team answers for that id — no such team, or "
+                "\n\033[1;31mError: no public team answers for that id: no such team, or "
                 "it belongs to an organization (the hub answers both the same way without "
                 "a membership; pass --org <tenant_id> to pull an organization team).\033[0m"
             )
@@ -11267,16 +11565,20 @@ def _looks_like_hub_id(value: str) -> bool:
     return bool(_HUB_UUID_RE.match(value) or _HUB_OBJECTID_RE.match(value))
 
 
-def _scan_public_teams(client: Any, matches: Any) -> "Optional[list[dict[str, Any]]]":
+def _scan_public_teams(client: Any, matches: Any) -> "Optional[tuple[list[dict[str, Any]], bool]]":
     """Walk the public listing page by page; the rows ``matches(row)`` accepts.
 
     The hub has no server-side search on this route, so the walk IS the search;
     it is bounded (``_PUBLIC_TEAM_SEARCH_MAX_PAGES``) and returns None -- after
-    saying so -- rather than scanning an unbounded catalogue. Refusals from the
-    hub are rendered like every other hub refusal.
+    saying so -- rather than scanning an unbounded catalogue. The second tuple
+    member says whether the WALK was complete: a walk that stopped at the bound
+    says so in words, because a confident "no such team" past the bound would
+    be a wrong negative (review round 1, M2). Refusals from the hub are
+    rendered like every other hub refusal.
     """
     found: "list[dict[str, Any]]" = []
     page = 1
+    total_pages = 1
     while page <= _PUBLIC_TEAM_SEARCH_MAX_PAGES:
         try:
             envelope = client.list_public_teams(page=page, per_page=100)
@@ -11291,7 +11593,14 @@ def _scan_public_teams(client: Any, matches: Any) -> "Optional[list[dict[str, An
         if page >= total_pages:
             break
         page += 1
-    return found
+    complete = page >= total_pages
+    if not complete:
+        print(
+            f"\033[1;33m  note: the listing walk stopped after "
+            f"{_PUBLIC_TEAM_SEARCH_MAX_PAGES} pages of {total_pages}; results may be "
+            "incomplete.\033[0m"
+        )
+    return found, complete
 
 
 def _resolve_public_team_id(client: Any, name: str) -> Optional[str]:
@@ -11302,14 +11611,22 @@ def _resolve_public_team_id(client: Any, name: str) -> Optional[str]:
     guessed at.
     """
     wanted = " ".join(name.split()).casefold()
-    found = _scan_public_teams(
+    scan = _scan_public_teams(
         client,
         lambda record: " ".join(str(record.get("name") or "").split()).casefold() == wanted,
     )
-    if found is None:
+    if scan is None:
         return None
+    found, complete = scan
     if found:
         return str(found[0].get("id") or "")
+    if not complete:
+        print(
+            f"\n\033[1;31mError: no public team named '{name}' in the pages read, and the "
+            f"listing walk stopped at its {_PUBLIC_TEAM_SEARCH_MAX_PAGES}-page bound; "
+            f"`lop teams search {name}` shows what the walk found.\033[0m"
+        )
+        return None
     print(
         f"\n\033[1;31mError: no public team named '{name}'. "
         f"`lop teams search {name}` lists what the hub does hold.\033[0m"
@@ -11344,8 +11661,6 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
     is still found. The listing is anonymous -- no login, no API key -- and
     every row carries the hub team id ``lop teams pull`` takes.
     """
-    import json as _json  # lazy: same reason as everywhere else in this file
-
     from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
 
     client = RadientClient(api_key=None, base_url=_radient_hub_base_url(ConfigManager(base_dir)))
@@ -11354,20 +11669,28 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
 
     if query:
         needle = query.casefold()
-        found = _scan_public_teams(
+        scan = _scan_public_teams(
             client,
             lambda record: needle
             in f"{record.get('name', '')} {record.get('description', '')}".casefold(),
         )
-        if found is None:
+        if scan is None:
             return 1
+        found, complete = scan
         if as_json:
-            print(_json.dumps(found, indent=2, ensure_ascii=False, default=str))
+            _print_payload(found)
             return 0
         if not found:
-            print(f"\n\033[1;33mNo public team matches '{query}'.\033[0m")
+            if complete:
+                print(f"\n\033[1;33mNo public team matches '{query}'.\033[0m")
+            else:
+                print(
+                    f"\n\033[1;33mNo public team matches '{query}' in the pages read; the "
+                    "listing walk stopped at its bound, so a match may exist past it.\033[0m"
+                )
             return 0
-        print(f"\n\033[1;33m{len(found)} public team(s) match '{query}':\033[0m")
+        teams_label = "team" if len(found) == 1 else "teams"
+        print(f"\n\033[1;33m{len(found)} public {teams_label} match '{query}':\033[0m")
         _print_public_team_rows(found)
         return 0
 
@@ -11380,7 +11703,7 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
         print(f"\n\033[1;31mError searching the public hub: {_hub_cause(exc)}\033[0m")
         return 1
     if as_json:
-        print(_json.dumps(envelope, indent=2, ensure_ascii=False, default=str))
+        _print_payload(envelope)
         return 0
     records = [row for row in (envelope.get("records") or []) if isinstance(row, dict)]
     if not records:
@@ -13209,13 +13532,15 @@ def main() -> int:
                     # (design §11 R-6). `is not None`, not truthiness: a PASSED
                     # but empty `--org` is the org path's to refuse, and must
                     # never fall through to the public one (round 1, R1-1).
-                    return agents_push_org_command(args, agent_registry, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return agents_push_org_command(args, agent_registry, base_dir)
                 if getattr(args, "hub_id", None) is not None:
                     # The explicit-overwrite arm of the PUBLIC transport (§7.2):
                     # the instruction-set republish, so the local copy's bytes
                     # (not an exported archive) land on the named listing. The
                     # ordinary public push below is untouched (§11 R-6).
-                    return agents_push_public_republish_command(args, agent_registry, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return agents_push_public_republish_command(args, agent_registry, base_dir)
                 legacy_flags = [
                     label
                     for attr, label in (
@@ -13230,11 +13555,15 @@ def main() -> int:
                     # This path still publishes through the legacy archive
                     # transport, which cannot preview; silently ignoring a
                     # preview flag would read as "it checked" (design §7.4
-                    # keeps this arm stable until phase 4).
+                    # keeps this arm stable until phase 4). The verb agrees
+                    # with the flag count so one flag does not read as
+                    # "--preview-only need" (copy round 1, C5).
+                    verbs = "requires" if len(legacy_flags) == 1 else "require"
                     print(
-                        f"\n\033[1;31mError: {', '.join(legacy_flags)} need a preview-publishing "
-                        "target; this build's public `agents push` still publishes through "
-                        "the legacy archive path (pass --org or --hub-id).\033[0m"
+                        f"\n\033[1;31mError: {', '.join(legacy_flags)} {verbs} a "
+                        "preview-capable target; public `agents push` (without --org or "
+                        "--hub-id) publishes directly, without a preview. Pass --org or "
+                        "--hub-id.\033[0m"
                     )
                     return 1
                 from local_operator.clients.radient import RadientClient  # lazy
@@ -13259,6 +13588,15 @@ def main() -> int:
                 # flow; nothing aligns a local uuid with a hub listing id, so the
                 # ordinary outcome for it is a create (see the outcome branch).
                 agent_id_to_overwrite = getattr(args, "id", None) or None
+                # The design's honest interim line (§7.4): this transport cannot
+                # run the reference check, so the publisher is told that the
+                # safety net is missing BEFORE the upload, not left to assume
+                # the preview ran (ux round 1, U7).
+                print(
+                    "\033[1;33m  note: this build publishes through a path that cannot "
+                    "show you the generalization diff; `--org` and `--hub-id` pushes "
+                    "preview and confirm before publishing.\033[0m"
+                )
                 # The zip is uploaded and finished with inside this block, so
                 # the context manager reclaims its temp directory on every
                 # exit path. The bare export_agent() left one behind per push.
@@ -13368,11 +13706,13 @@ def main() -> int:
                 elif args.teams_command == "delete":
                     return teams_delete_command(args.name, team_registry)
                 elif args.teams_command == "push":
-                    return teams_push_command(args, team_registry, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return teams_push_command(args, team_registry, base_dir)
                 elif args.teams_command == "pull":
                     return teams_pull_command(args, team_registry, base_dir)
                 elif args.teams_command == "search":
-                    return teams_search_command(args, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return teams_search_command(args, base_dir)
                 elif args.teams_command == "sync":
                     return teams_sync_command(args, team_registry, base_dir)
                 elif args.teams_command == "link":
