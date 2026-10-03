@@ -25468,14 +25468,18 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 #
 # Why the description leads with a BRAKE rather than the capability: a tool
 # described only by what it is for is read as a tool to use, and this one's cost
-# is invisible from inside the model — every call parks the turn on a human and
-# hands back work they delegated precisely so they would not have to do it.
-# Measured over 600 local sessions the failure was not rare-and-severe but
-# steady: 156 calls, and in the worst session 35 pickers on a task that had
-# already been authorized in full, most of them "here is what I found, how do
-# you want it handled?" — a research result reported as a question. So the
-# affordance and its limit ship together, in both places a model reads about the
-# tool: here (in the tools array of every request) and in the system prompt's
+# is invisible from inside the model. Until the queue became the default that
+# cost was a parked turn — work handed back to the operator who delegated it
+# precisely so they would not have to do it; it is now a queue row and a second
+# turn when the answer lands, which is cheap for the model and still attention
+# the human pays. Either way the model cannot feel it, so the brake ships in
+# both places a model reads about the tool. Measured over 600 local sessions the
+# failure was not rare-and-severe but steady: 156 calls, and in the worst session
+# 35 pickers on a task that had already been authorized in full, most of them
+# "here is what I found, how do you want it handled?" — a research result reported
+# as a question. So the affordance and its limit ship together, in both places a
+# model reads about the tool: here (in the tools array of every request) and in
+# the system prompt's
 # fuller trigger-then-brake paragraph. Naming the legitimate triggers is
 # what keeps this from reading as "never ask": the goal is fewer calls of higher
 # value, not a model that pushes on through a genuinely irreversible fork.
@@ -25664,9 +25668,14 @@ _ASK_DESCRIPTION_RESTRAINT = (
     "do not phrase it as a question; full mechanics are in `read tool://ask`."
 )
 
-#: The tail for a host whose ``ask`` BLOCKS: today's text, byte for byte. The
-#: queued engine ships dark, so this is what almost every session reads, and a
-#: wording change here would be a change to the shipping surface.
+#: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
+#:
+#: This was ``main``'s shipping text, byte for byte, while the queued engine was
+#: dark; since the flip (2026-10-03) the queue is the default and this arm is
+#: what ``LOP_ASK_NONBLOCKING=0`` selects. It is kept unchanged rather than
+#: retired because the switch is real: an operator who needs the old behaviour
+#: back must also read text that describes it, and a wording change here would
+#: silently change the surface that switch restores.
 _ASK_DESCRIPTION_INLINE = (
     "Ask everything you need in ONE call: the user "
     "answers the questions back to back rather than once per turn. "
@@ -25729,6 +25738,9 @@ def _ask_queue_enabled() -> bool:
     learns neither. ``execute_ask`` derives its own mode from the host's
     ``enqueue_ask`` callable; this is the same fact one step earlier, read from
     the one place that owns it (``asks.policy``) because a builder has no host.
+    The default is the queued arm; ``LOP_ASK_NONBLOCKING=0`` is the operator's
+    kill switch back to the blocking one, and this branch follows it because it
+    reads the same constant.
 
     Imported lazily and locally, like the policy read inside ``execute_ask``:
     ``tools/builtin`` is the largest module in the tree and a module-scope
@@ -25782,18 +25794,23 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
         # read tier: asking a question changes nothing. Gating it behind the
         # approval prompt would put one question in front of another.
         approval_tier="read",
-        # Exclusive because it blocks on a HUMAN: one picker owns the keyboard,
-        # and a second question mounted beside it would be unanswerable. It
-        # would also hold a shared slot for as long as the user takes.
+        # Exclusive because the BLOCKING arm parks on a HUMAN: one picker owns
+        # the keyboard, and a second question mounted beside it would be
+        # unanswerable. The queued arm (the default) returns at once and would
+        # not need it, but the mode is a process constant and the tool's
+        # metadata cannot branch — and holding a shared slot for one enqueue is
+        # a cost only the kill-switch arm pays.
         concurrency="exclusive",
-        # Interruptible because this call is parked on a HUMAN, and nothing else
-        # can settle it. A non-interruptible tool is cancelled by nothing but
-        # its own return (the approval gate documents that failure: an abort
-        # landed while a turn sat on the prompt and the runner went on waiting),
-        # so a stop or a steering message arriving while the question is up has
-        # to be able to end the call — the loop's steering poll cancels it and
-        # the host takes the picker off screen. Esc remains how the user
-        # DECLINES to answer: that returns a result, and is not a cancellation.
+        # Interruptible because the blocking arm's call is parked on a HUMAN, and
+        # nothing else can settle it. A non-interruptible tool is cancelled by
+        # nothing but its own return (the approval gate documents that failure:
+        # an abort landed while a turn sat on the prompt and the runner went on
+        # waiting), so a stop or a steering message arriving while the question
+        # is up has to be able to end the call — the loop's steering poll
+        # cancels it and the host takes the picker off screen. Esc remains how
+        # the user DECLINES to answer: that returns a result, and is not a
+        # cancellation. The queued arm returns before any of that can happen,
+        # so this costs it nothing.
         interruptible=True,
         execute=execute_ask,
     )

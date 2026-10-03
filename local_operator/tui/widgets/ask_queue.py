@@ -180,8 +180,9 @@ def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
     """Flatten the wire's asks into the surface view-model, dropping settled ones.
 
     ``None`` and ``[]`` both mean "no queued asks" — the wire is ABSENT, not
-    empty, while the feature is dark (§4/N2), so a caller that mistook absence
-    for a list would be rendering a feature the runtime does not have.
+    empty, while this runtime runs the BLOCKING arm (the kill switch, or an
+    older build), so a caller that mistook absence for a list would be
+    rendering a feature the runtime does not have.
     """
     out: list[AskRow] = []
     for row in rows or ():

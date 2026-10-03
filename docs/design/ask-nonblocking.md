@@ -459,17 +459,19 @@ agent moved on; you can still answer"; **late** "Answered late — the agent was
 agent again", with every answer control disabled and no error register (an expiry is not a
 failure). Countdown is rendered from `expires_at` on the client clock.
 
-**INVARIANT — flag-off behaviour is exactly today's, continuously through A1–D.** Until PR F
-flips `asks.policy.NONBLOCKING_ASK` (default `False`; env `LOP_ASK_NONBLOCKING=1` for
-QA/evidence), every surface's default behaviour is unchanged: the blocking card, the single
-`_ask_screen`/`_ask_pending` slot, the single `pending_gate`, the view bridge's single
-`_gate_task`, the desktop composer swallow and typed ordinals, and the fold's single
-`pending`. **Every new path introduced in B/C1/C2 exists only with the flag on** (client-side
-that is the presence of the `asks` wire field — true because A2 publishes it only when the
-flag is on, §4). No PR in B/C1/C2 may delete or repurpose
-an old path: the old paths are removed **once, in F**, in the same change that rewrites the
-pinning tests and ships §9. This is what makes §8.9's "the pinned tests stay green through
-A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this note.
+**INVARIANT — flag-off behaviour was exactly today's, continuously through A1–D; that is now
+HISTORY.** Until PR F flipped `asks.policy.NONBLOCKING_ASK`, every surface's default behaviour
+was unchanged: the blocking card, the single `_ask_screen`/`_ask_pending` slot, the single
+`pending_gate`, the view bridge's single `_gate_task`, the desktop composer swallow and typed
+ordinals, and the fold's single `pending`. **Every new path introduced in B/C1/C2 exists only
+with the flag on** (client-side that is the presence of the `asks` wire field — true because
+A2 publishes it only when the flag is on, §4). No PR in B/C1/C2 may delete or repurpose an old
+path: the old paths were to be removed **once, in F** — and F did **not** remove them. It kept
+them byte-unchanged, because they are what the operator's escape hatch selects. The current
+spec is the D6 STATUS note below: `NONBLOCKING_ASK` defaults **`True`** and
+`LOP_ASK_NONBLOCKING=0` restores the blocking arm. This is what makes §8.9's "the pinned
+tests stay green through A1–D" true, and a B/C1/C2 diff that removes an old path is a bug
+against this note.
 
 ### 5.0 Shared ask-surface interaction model (R7)
 
@@ -689,6 +691,14 @@ future machinery `app.py:24926`), rewrites the tests that pin it, and ships the 
 description edits (§9) — i.e. the prompts change in the *same change that makes the
 semantics live*. Alternative rejected: a long-lived integration branch (hot files
 `serving.py`, `app.py` [2.4 MB], `builtin.py` move under it daily).
+
+> **STATUS 2026-10-03 — F landed in part, and the deletion above is DEFERRED by the
+> operator's direction, not by drift.** F as executed (`feat/ask-flip-default`) flips the
+> default to the queue, rewrites the tests that pinned dark-by-default, and takes the §9
+> agent-facing text with it. It does **not** delete the blocking path: that path is what the
+> operator-facing KILL SWITCH (`LOP_ASK_NONBLOCKING=0`) selects, so it stays, stays tested,
+> and its text is byte-unchanged. A later PR may retire it once nobody needs the escape
+> hatch — until then, do not read the sentence above as the current spec for a deletion.
 
 | PR | Repo / branch | Scope | Depends on | Rounds | Release line |
 |---|---|---|---|---|---|

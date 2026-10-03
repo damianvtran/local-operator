@@ -24,10 +24,15 @@ the deadline — only the RESPONSE is written (design §2.3, rule N8): replaying
 "[Ask timed out] … you will be told" immediately before the answer it announces
 reads to the model as a contradiction. Both orders are asserted by the tests.
 
-**DARK BY DEFAULT.** Nothing here runs unless ``asks.policy.NONBLOCKING_ASK``
-is on AND a host installed an ask surface (the same ``_ask_user`` hook that
-makes the tool exist). With the flag off, ``Session`` never constructs this
-object and every existing path is untouched (§5 invariant).
+**THE SHIPPED DEFAULT, AND STILL CONDITIONAL.** Nothing here runs unless
+``asks.policy.NONBLOCKING_ASK`` is on AND a host installed an ask surface (the
+same ``_ask_user`` hook that makes the tool exist). The flag is on unless the
+operator sets the kill switch (``LOP_ASK_NONBLOCKING=0``), so on a normal host
+the two conditions are the same one; with it off — or on a host that cannot
+show a question — ``Session`` never constructs this object and every existing
+path is untouched (§5 invariant). That is what keeps the blocking arm real
+rather than vestigial, and it is why this class stays optional instead of
+becoming unconditional.
 """
 
 from __future__ import annotations

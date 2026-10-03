@@ -7,8 +7,11 @@ is reached only when a host bound a callable, so the mode is one fact rather tha
 a flag read in two places.
 
 ``tests/unit/tools/test_ask_tool.py`` is deliberately NOT edited by this change:
-it pins the blocking shape, and it must stay green and unmodified until the flip
-PR rewrites it (design §8 risk 9).
+it pins the blocking EXECUTION shape by driving a context that has an ask hook
+and NO ``enqueue_ask``, so the arm it covers is selected by the host rather than
+by the flag, and the flip cannot move it. Its description-text assertions read
+the shared RESTRAINT half of the tool description, which is byte-identical in
+both modes by construction.
 """
 
 from __future__ import annotations

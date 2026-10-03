@@ -1,16 +1,20 @@
 """The queued-ask policy: one module constant, its bounds, and the timeout parse.
 
 WHY THIS MODULE EXISTS (design ``docs/design/ask-nonblocking.md`` §3, D6/D9).
-The queued, timeout-bounded ``ask`` ships DARK. Core PRs A1–D merge behind a
-single module constant — ``NONBLOCKING_ASK`` — so no release window can carry a
-half-feature (a queue engine with no surface, or a TUI asking a backend that
-still blocks). PR F flips the constant, deletes the blocking path and ships the
-prompt/description edits in one change.
+The queued, timeout-bounded ``ask`` is the SHIPPED DEFAULT: every process that
+can ask queues, and the answer comes back as its own turn.
 
-The flag is an ENV seam (``LOP_ASK_NONBLOCKING=1``), deliberately not a config
+It shipped DARK for a reason that has now expired (D6): core PRs A1–D merged
+behind one module constant — ``NONBLOCKING_ASK`` — so no release window could
+carry a half-feature (a queue engine with no surface, or a TUI asking a backend
+that still blocks). The surfaces landed, so PR F flipped the constant. It does
+NOT delete the blocking path — the kill switch below still selects it, which is
+why that path stays tested.
+
+The env var (``LOP_ASK_NONBLOCKING``) is an ENV seam, deliberately not a config
 key: it has to be settable by a test or an evidence capture without touching the
-operator's settings store, and a user-facing setting for a feature that is not
-users' yet would be a promise this note does not make (D9: no new config key).
+operator's settings store, and a user-facing setting would be a promise this
+note does not make (D9: no new config key).
 
 **This module is stdlib-only by contract**, like ``wakes/store.py``: the index
 readers (a cold reader, the aggregate "all my open asks" view) reach the policy
@@ -43,27 +47,47 @@ from typing import Any
 #: path would start disagreeing about what "too old" means.
 from local_operator.asks.store import LATE_WINDOW_S as LATE_WINDOW_S
 
-#: THE FLAG. ``False`` = every existing path behaves exactly as it did before
-#: this feature (the §5 invariant); ``True`` = ``ask`` enqueues and returns a
-#: receipt instead of awaiting a human. Read from the environment ONCE, at
-#: import, because that is the only moment at which a process can be said to
-#: have started in one mode or the other; a test that needs the other mode
-#: monkeypatches this attribute (or sets the env var before importing).
-NONBLOCKING_ASK: bool = os.environ.get("LOP_ASK_NONBLOCKING", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
+#: THE DEFAULT, AND ITS KILL SWITCH. ``True`` = ``ask`` enqueues and returns a
+#: receipt instead of awaiting a human — the shipped behaviour. ``False`` = the
+#: blocking path, unchanged since before this feature (the §5 invariant), which
+#: is what ``LOP_ASK_NONBLOCKING`` still selects as an OPERATOR-FACING ESCAPE
+#: HATCH.
+#:
+#: THE DIRECTION IS DELIBERATE, and so is testing membership in the KILL set
+#: rather than truthiness of an enable set: an ABSENT variable (or an empty one)
+#: must leave the shipped default, so a queue can never be switched off by a
+#: variable nobody set. Only ``0``/``false``/``no``/``off`` (case- and
+#: whitespace-insensitively) turn the queue off; anything else, including a
+#: typo, leaves it on. A kill switch that a typo could arm would be a defect in
+#: the direction that hurts the operator it exists for.
+#:
+#: WHY IT FLIPPED (2026-10-03). The queue was dark to keep the §5 invariant
+#: while the surfaces landed; they have landed (the TUI ask list, the desktop
+#: wire, the relay/web sheet). Meanwhile the one operator who needed it was
+#: hitting the old blocking behaviour daily — an ask backlog, errors on
+#: answering, the same question answered twice through the TUI and the UI — so
+#: the default is the queue and the blocking path is the escape hatch.
+#:
+#: Read from the environment ONCE, at import, because that is the only moment
+#: at which a process can be said to have started in one mode or the other; a
+#: test that needs the other mode monkeypatches this attribute (or sets the env
+#: var before importing).
+NONBLOCKING_ASK: bool = os.environ.get("LOP_ASK_NONBLOCKING", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
 }
 
 
 def enabled() -> bool:
-    """Whether the queued-ask path is live in this process.
+    """Whether the queued-ask path is live in this process (default: yes).
 
     A function rather than a direct attribute read at every call site, so
     monkeypatching ``policy.NONBLOCKING_ASK`` in a test takes effect on every
     path at once. The module-level name stays the setting; nothing else caches
-    it.
+    it. ``LOP_ASK_NONBLOCKING=0`` is the one supported way to make it ``False``
+    in a real process; everything else about the value lives on the constant.
     """
     return NONBLOCKING_ASK
 
