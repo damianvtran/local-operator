@@ -203,10 +203,18 @@ class WakePanel(Container):
         The AGE is the fact the row lacked, and it is the one that separates
         "about to fire on a busy host" from "stuck since last week" without
         the reader having to know what the state words mean. A record with no
-        usable first-attempt stamp still gets its state word.
+        usable stamp of either kind still gets its state word.
         """
         state = str(owed.get("state") or "retrying")
         first = owed.get("first_attempt_ms")
+        if not isinstance(first, int) or isinstance(first, bool):
+            # THE STALL'S OWN ANCHOR (agent review round 1, F2). A fresh
+            # live-stall record has no attempt stamp — nothing was attempted —
+            # and without this fallback the one state whose age matters most
+            # rendered as the bare word while the CLI read "owed 23h" for the
+            # same record; a stall carried over a retry run keeps dating from
+            # the attempt instead, exactly as `_owed_age_s` does it.
+            first = owed.get("first_stalled_ms")
         if isinstance(first, int) and not isinstance(first, bool):
             # This is an approximate age, not round-trippable schedule syntax:
             # even whole-second ages need more than two terms after a poll tick.
