@@ -155,3 +155,181 @@ def test_note_failure_reports_a_refused_write(tmp_path: Path) -> None:
         tmp_path, "owedsession1", NOW_MS, error="unreachable", now_ms=NOW_MS
     )
     assert refused is None
+
+
+def test_a_live_stall_is_recorded_without_a_fabricated_retry(tmp_path: Path) -> None:
+    """The other shape of owing: a fire held behind a LIVE runtime that is not
+    firing it.
+
+    Nothing was attempted (the no-live-record rule forbids it), so the record
+    may not invent an attempt or a backoff: when the runtime stops answering,
+    the fire becomes engageable IMMEDIATELY rather than behind arithmetic that
+    describes an attempt nobody made.
+    """
+    record = deliveries.note_live_stall(
+        tmp_path,
+        "livesess0001",
+        NOW_MS,
+        overdue_s=25_000.0,
+        reason="a live runtime owns the wake and has not fired it",
+        now_ms=NOW_MS,
+    )
+
+    assert record is not None, "a live stall on a writable store must be recorded"
+    assert record["state"] == deliveries.STATE_LIVE_STALLED
+    assert record["occurrence_ms"] == NOW_MS
+    assert record["first_stalled_ms"] == NOW_MS
+    assert record["last_seen_ms"] == NOW_MS
+    assert record["overdue_s"] == 25_000.0
+    assert record["reason"] == "a live runtime owns the wake and has not fired it"
+    assert "attempts" not in record, "no attempt was made; the record must not invent one"
+    assert "next_attempt_ms" not in record, "a fabricated backoff would delay the real engage"
+    assert deliveries.read_delivery(tmp_path, "livesess0001") == record
+    assert deliveries.read_deliveries(tmp_path) == {"livesess0001": record}
+
+
+def test_a_live_stall_record_is_refreshed_only_when_stale(tmp_path: Path) -> None:
+    """The supervisor writes at the warning's throttle point, and the burst of
+    escalation passes must collapse into one write; a refresh must keep the
+    age anchor.
+
+    ``first_stalled_ms`` is what the surfaces age the stall by, so a refresh
+    that reset it would make a week-old strand read as fresh — the one figure
+    that separates "late on a busy host" from "stuck since last week".
+    """
+    first = deliveries.note_live_stall(
+        tmp_path, "livesess0001", NOW_MS, overdue_s=25_000.0, reason="stalled", now_ms=NOW_MS
+    )
+    assert first is not None
+
+    # Inside the write floor: the STORED record comes back, unchanged.
+    same = deliveries.note_live_stall(
+        tmp_path,
+        "livesess0001",
+        NOW_MS,
+        overdue_s=25_100.0,
+        reason="stalled",
+        now_ms=NOW_MS + 30_000,
+    )
+    assert same is not None and same["last_seen_ms"] == NOW_MS, same
+    on_disk = deliveries.read_delivery(tmp_path, "livesess0001")
+    assert on_disk is not None and on_disk["last_seen_ms"] == NOW_MS
+
+    # Past it: refreshed in place, age anchor preserved.
+    later = NOW_MS + int(deliveries.LIVE_STALL_REFRESH_S * 1000) + 1
+    refreshed = deliveries.note_live_stall(
+        tmp_path,
+        "livesess0001",
+        NOW_MS,
+        overdue_s=25_100.0,
+        reason="stalled",
+        now_ms=later,
+    )
+    assert refreshed is not None
+    assert refreshed["first_stalled_ms"] == NOW_MS, "the refresh reset the age anchor"
+    assert refreshed["last_seen_ms"] == later
+    assert refreshed["overdue_s"] == 25_100.0
+    assert deliveries.read_delivery(tmp_path, "livesess0001") == refreshed
+
+
+def test_a_live_stall_over_a_retry_run_carries_the_attempt_history(tmp_path: Path) -> None:
+    """HISTORY IS NOT THE LIVE RULE'S TO DISCARD.
+
+    A session that failed engagements and then came up live (or a drain strand
+    beside an earlier failure) supersedes a retry run for the SAME occurrence:
+    the new record keeps ``attempts``/``first_attempt_ms`` so ``note_delivered``
+    still reports "delivered after N failed attempts" instead of resetting the
+    count — while never carrying the one field that would hold the engage,
+    ``next_attempt_ms``.
+    """
+    deliveries.note_failure(tmp_path, "livesess0001", NOW_MS, error="one", now_ms=NOW_MS)
+    deliveries.note_failure(tmp_path, "livesess0001", NOW_MS, error="two", now_ms=NOW_MS)
+
+    record = deliveries.note_live_stall(
+        tmp_path,
+        "livesess0001",
+        NOW_MS,
+        overdue_s=25_000.0,
+        reason="a live runtime owns the wake and has not fired it",
+        now_ms=NOW_MS + 1_000,
+    )
+
+    assert record is not None
+    assert record["state"] == deliveries.STATE_LIVE_STALLED
+    assert record["attempts"] == 2
+    assert record["first_attempt_ms"] == NOW_MS
+    assert "next_attempt_ms" not in record, "a carried backoff would hold the immediate engage"
+    assert deliveries.note_delivered(tmp_path, "livesess0001", NOW_MS) == 2
+
+
+def test_a_new_occurrence_replaces_a_live_stall_record(tmp_path: Path) -> None:
+    """One occurrence at a time, like every record here: the recurrence is a
+    different fire, and inheriting the old stall's first_seen would age the new
+    fire by the old one's history."""
+    deliveries.note_live_stall(
+        tmp_path, "livesess0001", NOW_MS, overdue_s=25_000.0, reason="stalled", now_ms=NOW_MS
+    )
+
+    second = deliveries.note_live_stall(
+        tmp_path,
+        "livesess0001",
+        NOW_MS + 86_400_000,
+        overdue_s=7_000.0,
+        reason="stalled",
+        now_ms=NOW_MS + 86_400_000,
+    )
+
+    assert second is not None
+    assert second["occurrence_ms"] == NOW_MS + 86_400_000
+    assert second["first_stalled_ms"] == NOW_MS + 86_400_000
+
+
+def test_a_failed_engage_on_a_live_stalled_fire_starts_the_attempt_run(
+    tmp_path: Path,
+) -> None:
+    """THE TRANSITION, pinned: once the session stops being live an engage is
+    attempted, and its failure CONVERTS the record rather than stacking on it.
+
+    The attempt count starts at 1 — there never was an attempt to carry — and
+    the stall stamps go: nothing is stalled behind a live runtime any more, and
+    the fire is an ordinary failing delivery with a real backoff again.
+    """
+    deliveries.note_live_stall(
+        tmp_path, "livesess0001", NOW_MS, overdue_s=25_000.0, reason="stalled", now_ms=NOW_MS
+    )
+
+    record = deliveries.note_failure(
+        tmp_path, "livesess0001", NOW_MS, error="unreachable", now_ms=NOW_MS + 1_000
+    )
+
+    assert record is not None
+    assert record["state"] == deliveries.STATE_RETRYING
+    assert record["attempts"] == 1
+    assert "first_stalled_ms" not in record
+    assert record["next_attempt_ms"] > NOW_MS + 1_000
+
+
+def test_delivering_clears_a_live_stall_record(tmp_path: Path) -> None:
+    """``note_delivered`` is state-blind on purpose: a runtime taking the fire
+    ends the owing whatever shape the record had, and there are no attempts to
+    report for a stall (the answer is 0, not None)."""
+    deliveries.note_live_stall(
+        tmp_path, "livesess0001", NOW_MS, overdue_s=25_000.0, reason="stalled", now_ms=NOW_MS
+    )
+
+    assert deliveries.note_delivered(tmp_path, "livesess0001", NOW_MS) == 0
+    assert deliveries.read_delivery(tmp_path, "livesess0001") is None
+
+
+def test_a_live_stall_write_is_best_effort_like_its_siblings(tmp_path: Path) -> None:
+    """A ledger that cannot be written must never stop supervision: the live
+    branch keeps skipping (which is its job), and the operator still has the
+    WARNING even when the record could not land."""
+    blocker = tmp_path / "wakes"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    refused = deliveries.note_live_stall(
+        tmp_path, "livesess0001", NOW_MS, overdue_s=25_000.0, reason="stalled", now_ms=NOW_MS
+    )
+    assert refused is None
+    assert deliveries.read_deliveries(tmp_path) == {}

@@ -6277,7 +6277,12 @@ def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
 
     The ledger's ``first_attempt_ms`` is when the supervisor first failed to
     hand this occurrence to a runtime, so the difference is the age of the
-    OWED fire rather than the age of the schedule. Rendered in the row tail
+    OWED fire rather than the age of the schedule. When a record has no
+    attempt to date from — the fresh live stall, where nothing was attempted —
+    it falls back to ``first_stalled_ms``, the stamp of the first observation
+    of the stall (a stall carried over a retry run keeps dating from
+    ``first_attempt_ms`` instead): same question (how long has this been
+    owed), asked of the anchors the record has. Rendered in the row tail
     (design round 1, D2): the state words alone cannot separate a wake four
     minutes late from one stuck since last week, and below 69 columns the WHEN
     column is gone, so the row had no age of any kind.
@@ -6285,6 +6290,8 @@ def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
     if not record:
         return None
     first = record.get("first_attempt_ms")
+    if not isinstance(first, int) or isinstance(first, bool):
+        first = record.get("first_stalled_ms")
     if not isinstance(first, int) or isinstance(first, bool):
         return None
     return max((now_ms - first) / 1000.0, 0.0)
@@ -6468,6 +6475,61 @@ def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
     }
 
 
+def _readable_session_name(session_id: str) -> str:
+    """The session's stored title (else its opening message), or ``""``.
+
+    Reused from :mod:`local_operator.resume` so the wake surfaces call a
+    session what every picker and listing calls it — one name helper, not a
+    second way to answer "what is this session called". Consulted only for the
+    few rows a late/owed line NAMES (a stored title is one small sidecar read;
+    the transcript scan is the fallback), never for a whole listing, and its
+    documented tolerance is the contract: a torn sidecar or an unreadable
+    transcript yields ``""`` and the caller names the id alone.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import session_name
+
+    return session_name(config_dir() / "sessions" / session_id)
+
+
+def _wake_owner_label(session_id: str) -> str:
+    """``session <id> "<name>"`` — the owner of a wake, as these lines name it.
+
+    WHY THE OWNER AT ALL (the 2026-10-03 incident): the overdue line carried a
+    wake's TEXT and nothing else, so the operator read it off ``wake status``,
+    content-matched it to a different lane, and resumed a session that did not
+    own the wake — while the store held the right answer the whole time. The
+    id is what they act on (``lop sessions``, ``lop resume``); the name is what
+    they recognise. With no readable name the id stands alone rather than a
+    placeholder claiming one.
+    """
+    name = _readable_session_name(session_id)
+    return f'session {session_id} "{name}"' if name else f"session {session_id}"
+
+
+def _owed_state_word(state: str | None) -> str:
+    """The DUE column's word for an owed fire, from its recorded state.
+
+    ``retrying``/``undelivered`` are the backoff run's two faces. A
+    ``live-stalled`` record is NOT a retry — the no-live-record rule retries
+    nothing while the session stays live — so the word follows the record
+    rather than the retry vocabulary, and the table stays honest about what
+    the process is doing. An unknown or missing state keeps the historical
+    default (``retrying``): a future state should get its own word
+    deliberately rather than arrive under this one silently.
+    """
+    # Function-local like every other wake-subsystem import in this file: the
+    # branch above imports the same two constants for its legends, and one
+    # spelling of a state word is the point (see its comment).
+    from local_operator.wakes.deliveries import STATE_LIVE_STALLED, STATE_UNDELIVERED
+
+    if state == STATE_UNDELIVERED:
+        return "undelivered"
+    if state == STATE_LIVE_STALLED:
+        return "live-stalled"
+    return "retrying"
+
+
 def _supervisor_parentheticals() -> tuple[str, str]:
     """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
 
@@ -6532,6 +6594,7 @@ def wake_command(args: argparse.Namespace) -> int:
     # word, `status` as prose — so the two words are named once, here, rather
     # than imported into one branch and silently unbound in the other.
     from local_operator.wakes.deliveries import (
+        STATE_LIVE_STALLED,
         STATE_RETRYING,
         STATE_UNDELIVERED,
         UNDELIVERED_AFTER_ATTEMPTS,
@@ -6586,7 +6649,11 @@ def wake_command(args: argparse.Namespace) -> int:
         # renderer's output is printed whole or not at all.
         when_cells = {row["next_due_at"]: format_wake_time(row["next_due_at"]) for row in rows}
         when_w = max(len(cell) for cell in when_cells.values())
-        rel_w = 11  # "10m overdue"
+        # 12, one wider than "10m overdue": the longest state word the DUE
+        # column can now carry is `live-stalled`, and a word that overflows
+        # its column jogs that row's id out of line (round 2, R9's alignment
+        # rule). The message budget absorbs the extra cell.
+        rel_w = 12  # "10m overdue" / "live-stalled"
         # SLACK for the id (round 2, R9). Ids are `uuid4().hex[:12]`, and a
         # 12-wide column truncated a 12-character id to exactly itself with no
         # room to show that anything was cut — while the 15-character `lr_` ids
@@ -6657,11 +6724,14 @@ def wake_command(args: argparse.Namespace) -> int:
                 # still being fired at all. Reading it as `stale` would state
                 # the opposite of what the process is doing, and the legend
                 # under the table promises `stale` wakes are not fired.
-                state = (
-                    "undelivered"
-                    if row["delivery"].get("state") == STATE_UNDELIVERED
-                    else "retrying"
-                )
+                #
+                # THE THIRD WORD IS NOT A RETRY. A `live-stalled` record is a
+                # fire held behind a live runtime that is not firing it —
+                # nothing is retried while that lasts, and the historical
+                # default word would be the same frame-argues-with-process
+                # defect the other states here exist to avoid.
+                # `_owed_state_word` owns the mapping so row and legend agree.
+                state = _owed_state_word(row["delivery"].get("state"))
             elif row["stale"]:
                 state = "stale"
             else:
@@ -6785,6 +6855,21 @@ def wake_command(args: argparse.Namespace) -> int:
                     "",
                     "these are still owed and retried with a backoff; 'lop wake status' has "
                     "the attempts and the error",
+                )
+            )
+        if _owed_state(STATE_LIVE_STALLED):
+            # ON ITS OWN, so the shared tail above ("retried with a backoff")
+            # is never printed over it: nothing is retried while a live
+            # runtime owns the session, and claiming otherwise is the same
+            # contradiction the ghost fix removed one state earlier (QA round
+            # 1, Q1). Placed after the owed pair (D8's order: what an operator
+            # must ACT on first) and before the give-up states, because a
+            # restart is what delivers these.
+            legend_rows.append(
+                (
+                    "live-stalled",
+                    "a live runtime owns these and is not firing them; reopening "
+                    "or restarting that session delivers them",
                 )
             )
         if any(
@@ -6954,6 +7039,7 @@ def wake_command(args: argparse.Namespace) -> int:
     owed = _delivery_rows(None)
     stalled = _delivery_rows(STATE_UNDELIVERED)
     retrying = _delivery_rows(STATE_RETRYING)
+    live_stalled = _delivery_rows(STATE_LIVE_STALLED)
 
     # SPOOLED WAKES — the other held-delivery state, and until now the invisible
     # one: a runtime that spools its wakes for a replaced build and then
@@ -7090,6 +7176,17 @@ def wake_command(args: argparse.Namespace) -> int:
             "total": len(owed),
             "retrying": len(retrying),
             "undelivered": len(stalled),
+            # Additive, like the block itself: a consumer that predates the
+            # live-stall record keeps parsing every key above. This is the
+            # third shape of owing — a fire held behind a live runtime, not
+            # being retried — and its row is held fireable past the staleness
+            # bound, so it too stays inside `overdue` by construction. The KEY
+            # is snake_case like its siblings while the VALUE keeps the
+            # supervisor log's `live-stalled` spelling, deliberately: state
+            # values are the surface words (`retrying`/`undelivered` are words
+            # too, they just happen to need no separator), not key-normalised
+            # tokens (design round 1, D3).
+            "live_stalled": len(live_stalled),
         },
         # THE SPOOLED FIRES, additive like the blocks above (a consumer that
         # predates this block keeps parsing every key it knew). `fires` counts
@@ -7104,15 +7201,30 @@ def wake_command(args: argparse.Namespace) -> int:
         "deliveries": [
             {
                 "session_id": row["session_id"],
+                # The readable name the human form names with (id plus stored
+                # title, else opening message), so a monitor can address the
+                # same owner the operator reads — the 2026-10-03 mismatch was a
+                # surface that named the fire and not its owner at all.
+                "session_name": _readable_session_name(row["session_id"]),
                 "message": row["message"],
                 "wake_id": row["wake_id"],
                 "occurrence_ms": row["delivery"].get("occurrence_ms"),
+                # THE STALL ANCHOR (design round 1, D2 / QA Q2): the record's
+                # own first observation, so a machine consumer can tell a
+                # stall that began seconds ago from one stranded since last
+                # week — the distinction the human line's age makes. Null for
+                # the retry states, whose anchors are the attempt stamps.
+                "first_stalled_ms": row["delivery"].get("first_stalled_ms"),
                 "state": row["delivery"].get("state"),
                 "attempts": row["delivery"].get("attempts"),
                 "first_attempt_ms": row["delivery"].get("first_attempt_ms"),
                 "last_attempt_ms": row["delivery"].get("last_attempt_ms"),
                 "next_attempt_in_s": _next_attempt_s(row),
                 "last_error": row["delivery"].get("last_error"),
+                # The derived age of the owing — same name and derivation as
+                # the `wake list` row root, so one number reads off both
+                # surfaces (design round 1, D2's parity ask).
+                "owed_age_s": row["owed_age_s"],
             }
             for row in owed
         ],
@@ -7202,8 +7314,18 @@ def wake_command(args: argparse.Namespace) -> int:
         # actually coming rather than one the supervisor has given up on. The
         # soonest overdue row is named, since with nothing in the future this
         # is the line that answers "what is the supervisor working on".
+        #
+        # AND ITS OWNER IS NAMED WITH IT (the 2026-10-03 incident): this line
+        # carried the wake's text alone, so the operator read it off the
+        # screen, content-matched it to a different lane, and resumed a
+        # session that did not own the wake — the store held the right session
+        # and no surface said so. The id is what they act on; the name is what
+        # they recognise.
         worst = max(row["overdue_s"] for row in overdue)
-        summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        summary = (
+            f"{len(overdue)} (worst {_format_duration(worst)}) — "
+            f"{_wake_owner_label(overdue[0]['session_id'])}: {overdue[0]['message']}"
+        )
         if owed:
             # THE SUBSET IS STATED WHERE THE COUNTS ARE (design round 1, D4).
             # Every owed fire is overdue by construction, so `overdue` already
@@ -7211,16 +7333,30 @@ def wake_command(args: argparse.Namespace) -> int:
             # adding the three counted the same wakes twice (6 of 5 on the
             # designer's store). One clause, on the line a reader is already
             # doing the arithmetic against.
-            summary += f" — {len(retrying)} retrying, {len(stalled)} undelivered"
+            #
+            # EVERY delivery state is itemised — IN A STABLE SHAPE (design
+            # round 1, D4): all three terms print even when zero, the way
+            # `retrying`/`undelivered` always have, so the clause cannot change
+            # shape per store. Every owed fire is overdue by construction, so
+            # the operator adding these against `overdue` must be able to
+            # reconcile the counts without guessing which terms were omitted.
+            parts = [
+                f"{len(retrying)} retrying",
+                f"{len(stalled)} undelivered",
+                f"{len(live_stalled)} live-stalled",
+            ]
+            summary += f" — {', '.join(parts)}"
         print(_wrap_status(summary, "overdue:"))
     if stalled:
         # THE DEEPEST-FAILING ONE, because a count alone cannot distinguish "a
         # wake is 20 seconds late on a busy host" from "a session has not
         # constructible for an hour", and only the second is worth attention.
+        # The owner is named on the row this sentence describes.
         deepest = max(stalled, key=lambda row: row["delivery"].get("attempts") or 0)
         print(
             _wrap_status(
-                f"{len(stalled)} — {deepest['session_id']} {deepest['message']!r} could not be "
+                f"{len(stalled)} — {_wake_owner_label(deepest['session_id'])}: "
+                f"{deepest['message']!r} could not be "
                 f"handed to a runtime: {_attempts_label(deepest)}"
                 f"{_retry_clause(_next_attempt_s(deepest))} (last error: "
                 f"{deepest['delivery'].get('last_error') or 'unknown'}). It is STILL OWED "
@@ -7235,10 +7371,28 @@ def wake_command(args: argparse.Namespace) -> int:
         )
         print(
             _wrap_status(
-                f"{len(retrying)} — {soonest['session_id']} {soonest['message']!r}: "
-                f"{_attempts_label(soonest)}, retried with backoff"
+                f"{len(retrying)} — {_wake_owner_label(soonest['session_id'])}: "
+                f"{soonest['message']!r}, {_attempts_label(soonest)}, retried with backoff"
                 f"{_retry_clause(_next_attempt_s(soonest))}",
                 "retrying:",
+            )
+        )
+    if live_stalled:
+        # THE STATE THIS SURFACE NEVER HAD. A live-stalled fire is the one the
+        # supervisor is NOT retrying — a live runtime owns the session, so
+        # engaging it is forbidden — and the session is not firing it either.
+        # Nothing else on this screen would name it, and the record is what
+        # keeps it surviving the staleness bound; this line is what keeps it
+        # visible. The wording promises no supervisor action, because there is
+        # none to promise: the schedule is still the session's, and reopening
+        # or restarting that session is what delivers it.
+        deepest = max(live_stalled, key=lambda row: row["overdue_s"])
+        print(
+            _wrap_status(
+                f"{len(live_stalled)} — {_wake_owner_label(deepest['session_id'])}: "
+                f"its wake is {_format_duration(deepest['overdue_s'])} overdue and a live "
+                "runtime is not firing it; reopening or restarting that session delivers it",
+                "live-stalled:",
             )
         )
     if spooled["fires"]:
@@ -7828,8 +7982,19 @@ def _wrap_status(text: str, label: str = "") -> str:
     import textwrap
 
     width = max(shutil.get_terminal_size((80, 24)).columns, _STATUS_LABEL_W + 24)
-    indent = " " * _STATUS_LABEL_W
-    first = f"{label:<{_STATUS_LABEL_W}}{text}" if label else f"{indent}{text}"
+    # ONE SPACE BETWEEN LABEL AND TEXT, ALWAYS, AND THE CONTINUATIONS FOLLOW
+    # THE RENDERED HEAD (design round 1, D1; agent review F1; QA Q1). The
+    # padding alone guarantees the space for every label shorter than the
+    # column; splitting it out carries the longest label this surface gained
+    # (`live-stalled:`, exactly as wide as the column) — and that head is one
+    # column wider than the old fixed indent, so a `{:13}` continuation would
+    # sit one column left of its own text (measured col 15 vs 14, at every
+    # width; the head's width is the label's, not the terminal's). The indent
+    # is therefore derived from the head itself; every shorter label renders
+    # byte-identically to before (head 13, indent 13).
+    head = f"{label:<{_STATUS_LABEL_W - 1}} " if label else ""
+    indent = " " * max(_STATUS_LABEL_W, len(head))
+    first = f"{head}{text}" if label else f"{indent}{text}"
 
     # A QUOTED COMMAND IS ONE TOKEN. Every remedy on this surface is a command
     # the operator copies — `'lop wake install'`, `'lop stop --pid 4242'` — and

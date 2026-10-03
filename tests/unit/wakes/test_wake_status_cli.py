@@ -45,6 +45,18 @@ def _arm(config_dir: Path, session_id: str, **kwargs: object) -> None:
     write_entry(config_dir, session_id, **kwargs)  # type: ignore[arg-type]
 
 
+def _titled(config_dir: Path, session_id: str, text: str) -> None:
+    """Give the session the stored title its picker row shows.
+
+    The sidecar ``resume.session_name`` reads first, so the wake surfaces have
+    a name to call this wake's owner by — the same name `lop sessions` and the
+    picker would use.
+    """
+    (config_dir / "sessions" / session_id / "title.json").write_text(
+        json.dumps({"text": text, "user_set": False, "names": [text]}), encoding="utf-8"
+    )
+
+
 def _args(**kwargs: object) -> argparse.Namespace:
     base: dict[str, object] = {
         "wake_command": "status",
@@ -488,6 +500,216 @@ def test_status_says_an_undelivered_fire_is_still_owed(
     stored = deliveries.read_delivery(tmp_path, "statussess06")
     assert stored is not None and stored["next_attempt_ms"] > stored["last_attempt_ms"], stored
     assert payload["deliveries"][0]["next_attempt_in_s"] is not None
+
+
+def test_status_names_the_owner_of_an_overdue_wake(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE 2026-10-03 INCIDENT, as an assertion: the overdue line must name the
+    session that OWNS the wake, not only carry the wake's text.
+
+    The operator read this line's text, content-matched it to a different lane,
+    and resumed a session that did not own the wake — the store held the right
+    session id and no surface said it. The name is what a person recognises;
+    the id beside it is what they act on.
+    """
+    from local_operator.cli import wake_command
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "ownernamess1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "State: #8 head ee68489", "next_due_at": due}],
+    )
+    _titled(tmp_path, "ownernamess1", "Local Operator Mobile App Plan")
+
+    assert wake_command(_args()) == 0
+    overdue = _status_block(capsys.readouterr().out, "overdue:")
+    assert 'session ownernamess1 "Local Operator Mobile App Plan"' in overdue, overdue
+    # The wake's text still rides the line, after its owner.
+    assert "State: #8 head ee68489" in overdue, overdue
+
+
+def test_status_names_an_untitled_owner_by_id_alone(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No readable title (or opener) means the id stands alone.
+
+    A quoted empty would claim a name the store does not have; the id is the
+    half the operator acts on anyway.
+    """
+    from local_operator.cli import wake_command
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "nonamessess1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "second overdue", "next_due_at": due}],
+    )
+
+    assert wake_command(_args()) == 0
+    overdue = _status_block(capsys.readouterr().out, "overdue:")
+    assert "session nonamessess1: second overdue" in overdue, overdue
+    assert 'nonamessess1 "' not in overdue, overdue
+
+
+def test_status_names_the_owner_on_the_owed_lines(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same owner naming on `retrying:` and `undelivered:`, and the JSON
+    carries the readable name per row — so a monitor can address the session
+    the human form names, which is the half the incident lost."""
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    now = int(time.time() * 1000)
+    due = now - 600_000
+    _arm(
+        tmp_path,
+        "owedowner001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "nightly cleanup", "next_due_at": due}],
+    )
+    _titled(tmp_path, "owedowner001", "Nightly cleanup run")
+    deliveries.note_failure(tmp_path, "owedowner001", due, error="unreachable", now_ms=now)
+
+    undelivered_due = due - 60_000
+    _arm(
+        tmp_path,
+        "undelivname1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "collect metrics", "next_due_at": undelivered_due}],
+    )
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "undelivname1", undelivered_due, error="unreachable", now_ms=now
+        )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    retrying = _status_block(out, "retrying:")
+    undelivered = _status_block(out, "undelivered:")
+    assert 'session owedowner001 "Nightly cleanup run"' in retrying, retrying
+    assert "session undelivname1:" in undelivered, undelivered
+    assert 'undelivname1 "' not in undelivered, undelivered
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = {row["session_id"]: row["session_name"] for row in payload["deliveries"]}
+    assert names["owedowner001"] == "Nightly cleanup run"
+    assert names["undelivname1"] == ""
+
+
+def test_status_reports_a_live_stalled_fire(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE SURFACE THE LIVE STALL NEVER HAD.
+
+    A fire held behind a live runtime is one the supervisor is NOT retrying —
+    the no-live-record rule forbids engaging — and the session is not firing it
+    either. The line names the owner, says how overdue the wake is, and
+    promises no supervisor action: the schedule is still the session's, and
+    reopening or restarting it is what delivers.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(23 * 3600 * 1000)
+    _arm(
+        tmp_path,
+        "livestalls01",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "State: #8 head ee68489", "next_due_at": due}],
+    )
+    _titled(tmp_path, "livestalls01", "Local Operator Mobile App Plan")
+    deliveries.note_live_stall(
+        tmp_path,
+        "livestalls01",
+        due,
+        overdue_s=23 * 3600.0,
+        reason="a live runtime owns the wake and has not fired it",
+        now_ms=NOW_MS,
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+
+    line = _status_block(out, "live-stalled:")
+    assert line.startswith("live-stalled:"), out
+    assert 'session livestalls01 "Local Operator Mobile App Plan"' in line, line
+    assert "23h overdue" in line, line
+    assert "a live runtime is not firing it" in line, line
+    assert "reopening or restarting that session delivers it" in line, line
+    # NO RETRY IS CLAIMED that the state does not have (the shared owed tail is
+    # reserved for the states it is true of), and no supervisor action is
+    # promised for a fire the supervisor may not engage.
+    assert "retried with backoff" not in line, line
+    assert "will fire" not in line, line
+
+    # The overdue clause itemises the state, so the counts keep reconciling
+    # (overdue contains this fire by construction).
+    overdue = _status_block(out, "overdue:")
+    assert "1 live-stalled" in overdue, overdue
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["owed"]["live_stalled"] == 1, payload["owed"]
+    assert payload["owed"]["total"] == 1, payload["owed"]
+    assert payload["deliveries"][0]["state"] == deliveries.STATE_LIVE_STALLED
+    assert payload["deliveries"][0]["session_name"] == "Local Operator Mobile App Plan"
+    assert payload["deliveries"][0]["attempts"] is None
+    # THE STALL ANCHOR (design round 1, D2 / QA Q2): the machine-readable age,
+    # not four nulls — a consumer can tell a stall that began seconds ago from
+    # one stranded since last week.
+    assert payload["deliveries"][0]["first_stalled_ms"] == NOW_MS, payload["deliveries"][0]
+    age = payload["deliveries"][0]["owed_age_s"]
+    assert age is not None and age >= 0.0, payload["deliveries"][0]
+
+
+def test_list_marks_a_live_stalled_fire_and_explains_it(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The table's third owed word. `retrying` would claim a retry that is not
+    happening (the live rule forbids engaging); the word follows the record,
+    the legend clause says what actually delivers it, and the shared "retried
+    with a backoff" sentence — false for this state — is not printed over it.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(23 * 3600 * 1000)
+    _arm(
+        tmp_path,
+        "liststall001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "stranded pull", "next_due_at": due}],
+    )
+    deliveries.note_live_stall(
+        tmp_path,
+        "liststall001",
+        due,
+        overdue_s=23 * 3600.0,
+        reason="a live runtime owns the wake and has not fired it",
+        now_ms=NOW_MS,
+    )
+
+    assert wake_command(_args(wake_command="list")) == 0
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "liststall001" in line)
+    assert "live-stalled" in row, row
+    assert "retrying" not in row, row
+    assert "a live runtime owns these and is not firing them" in out, out
+    assert "retried with a backoff" not in out, out
+    # The age anchor is the stall's own stamp, so the row still says HOW LONG
+    # (design round 1, D2's job for the tail).
+    assert "owed " in row, row
+
+    assert wake_command(_args(wake_command="list", json=True)) == 0
+    rows = {row["session_id"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["liststall001"]["delivery"]["state"] == deliveries.STATE_LIVE_STALLED
+    assert rows["liststall001"]["owed_age_s"] is not None
 
 
 def test_status_reports_spooled_wake_fires_awaiting_delivery(
@@ -1112,6 +1334,71 @@ def test_a_long_status_line_folds_at_the_surfaces_indent(
     assert not continuations, f"a continuation broke the 13-column indent: {continuations}"
 
 
+def test_continuations_follow_the_rendered_head_at_every_label_and_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/F1/Q1: the hanging indent follows the RENDERED head, not the column
+    constant.
+
+    `live-stalled:` is exactly as wide as `_STATUS_LABEL_W`, so its explicit
+    separating space pushes the head text one column past a constant-width
+    indent — the wrapped block hung one column left of its own first line
+    (measured col 15 vs 14 by the design round, the reviewer and QA, at every
+    width; it is the label's length, not a width edge). Walked over the REAL
+    label set at the widths they measured; every shorter label keeps its
+    historical 13-column render byte-for-byte.
+    """
+    import re
+    import shutil
+
+    from local_operator.cli import _wrap_status
+
+    labels = [
+        "supervisor:",
+        "next:",
+        "overdue:",
+        "undelivered:",
+        "retrying:",
+        "live-stalled:",  # exactly _STATUS_LABEL_W wide — the ragged-edge case
+        "spooled:",
+        "stale:",
+        "ghost:",
+        "wedged:",
+    ]
+    text = (
+        "its wake is twenty three hours overdue and a live runtime is not firing "
+        "it; reopening or restarting that session delivers it"
+    )
+    for width in (37, 40, 60, 80, 100):
+        monkeypatch.setattr(
+            shutil,
+            "get_terminal_size",
+            lambda _default=None, w=width: os.terminal_size((w, 24)),
+        )
+        for label in labels:
+            wrapped = _wrap_status(text, label)
+            lines = wrapped.split("\n")
+            assert len(lines) >= 2, f"{label!r} at {width} did not wrap: {wrapped!r}"
+            # Where the head's text begins, read off the render itself.
+            match = re.match(rf"{re.escape(label)}( +)(\S)", lines[0])
+            assert match is not None, (label, width, lines[0])
+            text_col = match.end(2) - 1
+            for continuation in lines[1:]:
+                assert continuation.startswith(" " * text_col), (label, width, continuation)
+                assert continuation[text_col:].strip(), (label, width, continuation)
+            if len(label) < 13:
+                # Unchanged for the historical labels: head 13, indent 13.
+                assert lines[0].startswith(f"{label:<13}"), (label, width, lines[0])
+                assert text_col == 13, (label, width, text_col)
+            else:
+                assert lines[0].startswith(f"{label} "), (label, width, lines[0])
+                assert text_col == 14, (label, width, text_col)
+    # And a genuine tie to the surface, through the same helper: the
+    # live-stalled line continues at 14 while `overdue:` continues at 13.
+    assert _wrap_status(text, "live-stalled:").split("\n")[1].startswith(" " * 14)
+    assert _wrap_status(text, "overdue:").split("\n")[1].startswith(" " * 13)
+
+
 def test_a_remedy_command_is_never_split_across_lines(
     tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -1318,7 +1605,7 @@ def test_status_says_the_owed_fires_are_part_of_the_overdue_count(
     assert wake_command(_args()) == 0
     out = capsys.readouterr().out
     overdue_line = _status_block(out, "overdue:")
-    assert "— 1 retrying, 1 undelivered" in overdue_line, overdue_line
+    assert "— 1 retrying, 1 undelivered, 0 live-stalled" in overdue_line, overdue_line
 
     assert wake_command(_args(json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1328,6 +1615,7 @@ def test_status_says_the_owed_fires_are_part_of_the_overdue_count(
         "total": 2,
         "retrying": 1,
         "undelivered": 1,
+        "live_stalled": 0,
     }, payload["owed"]
 
 

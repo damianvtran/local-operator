@@ -39,6 +39,17 @@ interval (which is what stops a permanently failing session from occupying half
 the engagement slots), and an owed fire is reported on ``lop wake status``, so a
 scheduled wake that has not run is visible off the log file.
 
+**A fire held behind a live runtime that is not firing it is owed too, and is
+not retried while the skip lasts.** The no-live-record rule below forbids
+engaging a session whose own record answers, so a stalled live delivery path
+was the one shape the ledger could not describe: later than
+:data:`LIVE_STALL_WARN_S` this process now records the observation itself
+(``deliveries.note_live_stall`` — no fabricated backoff and no invented
+attempt, so the moment the runtime stops answering the fire is engaged
+immediately, past the staleness bound like any other owed fire) and names it on
+``lop wake status``. The schedule is still the session's; the record only keeps
+the fire from falling silently off every surface.
+
 **Self-retirement.** Nothing FIREABLE left to supervise (an empty index, or
 one holding only dormant entries) means the process exits 0 and its
 LaunchAgent (``KeepAlive: {SuccessfulExit: False}``) leaves it down. That is
@@ -918,13 +929,38 @@ async def _engage_one(
             # cover).
             if overdue_s >= LIVE_STALL_WARN_S:
                 if _skip_log.should_log(session_id, "live-stalled"):
+                    # THE FIRE IS RECORDED AS OWED, DURABLY — AT THIS WARNING'S
+                    # OWN THROTTLE POINT. A live skip used to throw the
+                    # observation away: nothing durable was written, so once
+                    # the schedule aged past the staleness bound the fire fell
+                    # off every surface with only this throttled line to show
+                    # for it (diagnosed 2026-10-03: a one-shot re-armed by an
+                    # abandoned build drain, stranded in the index of a live
+                    # session that never restarted — the drain fix does not
+                    # cover the surviving artifact). The record is the
+                    # supervisor's OWN (it still never writes schedule state):
+                    # it keeps the occurrence engageable past the bound and
+                    # names it on `lop wake status`. Written BEFORE the line
+                    # below, so the copy may claim only the durability the
+                    # ledger actually took — the same rule `_note_failure`
+                    # carries — and off-loop like `_note_failure`'s write.
+                    record = await asyncio.to_thread(
+                        _note_live_stall, config_dir, session_id, due_ms, overdue_s
+                    )
                     logger.warning(
-                        "live-stalled: %s — a live runtime owns its wake and has not "
-                        "fired it; the wake is %.1f h overdue. A healthy live session "
-                        "fires its own wakes within seconds of due, so check this "
+                        "live-stalled: %s — a live runtime owns its wake and is not "
+                        "firing it; the wake is %.1f h overdue.%s A healthy live session "
+                        "fires its own wakes within seconds of due, so check that "
                         "session's runtime ('lop sessions')",
                         session_id,
                         overdue_s / 3600.0,
+                        (
+                            " The fire is recorded as owed (named on 'lop wake "
+                            "status'); reopening or restarting that session delivers "
+                            "it."
+                            if record is not None
+                            else ""
+                        ),
                     )
             elif _skip_log.should_log(session_id, "live"):
                 logger.info(
@@ -1126,6 +1162,47 @@ def _note_failure(
             overdue_s,
             record.get("last_error"),
         )
+
+
+def _note_live_stall(
+    config_dir: Path, session_id: str, due_ms: int, overdue_s: float
+) -> dict[str, Any] | None:
+    """Record a fire held behind a live runtime that is not firing it.
+
+    The write the live skip never made — see ``deliveries.note_live_stall``
+    for what the record is and is not (no backoff EVER: nothing is retried
+    while the session stays live; a superseded retry run's attempt count is
+    carried, not discarded). The REASON is composed here so the record carries
+    the supervisor's own short statement of the condition, the way the WARNING
+    beside it does.
+
+    Returns the record as stored, or ``None`` when the ledger refused the
+    write: the caller's copy may claim only the durability that actually
+    landed (the review-round rule ``_note_failure``'s docstring carries).
+    """
+    from local_operator.wakes.deliveries import note_live_stall
+
+    record = note_live_stall(
+        config_dir,
+        session_id,
+        due_ms,
+        overdue_s=overdue_s,
+        reason="a live runtime owns the wake and is not firing it",
+    )
+    if record is None and _skip_log.should_log(session_id, "ledger"):
+        # The SAME throttle bucket as `_note_failure`'s refusal, deliberately:
+        # it is the same condition (this session's delivery ledger will not
+        # take a write), and one bucket keeps two refusal lines from doubling
+        # the burst for a store in that state.
+        logger.warning(
+            "cannot record the live-stalled fire for %s: the delivery ledger at %s "
+            "is not writable, so this fire is tracked only by its schedule "
+            "(best-effort by contract; the wake still fires when the session "
+            "restarts or is reopened)",
+            session_id,
+            config_dir,
+        )
+    return record
 
 
 def _note_delivered(config_dir: Path, session_id: str, due_ms: int) -> int:
