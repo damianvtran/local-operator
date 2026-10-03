@@ -1138,6 +1138,137 @@ def test_reachability_remedies_name_the_discriminating_checks() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The informational flip (drill finding, 2026-10-03)
+# ---------------------------------------------------------------------------
+
+
+def _reach_row(
+    endpoint: str,
+    outcome: str,
+    *,
+    ok: bool,
+    detail: str = "ok",
+    winner: str = "",
+    winner_verified: bool = False,
+) -> dict[str, Any]:
+    """A full reachability row shaped as ``_reachability_rows`` builds it."""
+    observed: dict[str, Any] = {"outcome": outcome, "attempted": True}
+    if winner:
+        observed["winner"] = winner
+        observed["winner_verified"] = winner_verified
+    return {
+        "check": "reachability",
+        "device_id": PEER,
+        "device_name": "cloud-node-1",
+        "endpoint": endpoint,
+        "ok": ok,
+        "detail": detail,
+        "observed": observed,
+        "remedies": ["a remedy that must not read as an action item under an ok row"],
+    }
+
+
+def test_a_remote_unusable_address_is_informational_when_the_peer_answers_elsewhere() -> None:
+    """The drill's exact shape: the VPC-private address refused, the public one
+    connected — and the report must not read unhealthy because of the address
+    no remote device can use (``172.31.22.23`` vs ``99.79.190.164``)."""
+    rows = [
+        _reach_row(
+            "172.31.22.23:4097",
+            "refused",
+            ok=False,
+            detail="connect_failed:ConnectionRefusedError",
+        ),
+        _reach_row(
+            "99.79.190.164:4097",
+            "connected",
+            ok=True,
+            winner="99.79.190.164:4097",
+            winner_verified=True,
+        ),
+    ]
+    readiness._mark_informational(rows)
+    dead, live = rows
+    assert dead["ok"] is True
+    assert dead["observed"]["informational"] is True
+    assert dead["observed"]["usable_elsewhere"] == ["99.79.190.164:4097"]
+    # The row keeps its observed facts, and the action bullet is gone.
+    assert dead["observed"]["outcome"] == "refused"
+    assert dead["remedies"] == []
+    assert live["ok"] is True and live["observed"].get("informational") is None
+    reading = readiness.reachability_reading(dead)
+    assert "something answered this address and refused the connection" in reading
+    assert "not remote-usable from this device" in reading
+    assert "the peer is reachable at 99.79.190.164:4097" in reading
+    assert "the machine's own private address" in reading
+
+
+def test_without_a_usable_address_the_report_keeps_its_failures() -> None:
+    """THE HONEST NEGATIVE: with no address answering anywhere, nothing flips —
+    a member nothing answers for must never read healthy because its addresses
+    "look" private."""
+    rows = [
+        _reach_row("172.31.22.23:4097", "refused", ok=False, detail="connect_failed"),
+        _reach_row("99.79.190.164:4097", "no_answer", ok=False, detail="no_answer"),
+    ]
+    readiness._mark_informational(rows)
+    assert [row["ok"] for row in rows] == [False, False]
+    assert all(row["observed"].get("informational") is None for row in rows)
+    assert all(row["remedies"] for row in rows)
+
+
+def test_an_unidentified_accept_never_vouches_for_the_member() -> None:
+    """``connected_unverified`` (a stranger answered the port) is not a usable
+    address: it must neither flip other rows nor ride someone else's accept."""
+    rows = [
+        _reach_row(
+            "203.0.113.9:4097", "connected_unverified", ok=False, detail="accepted_unverified"
+        ),
+        _reach_row("99.79.190.164:4097", "connected", ok=True, winner="99.79.190.164:4097"),
+    ]
+    readiness._mark_informational(rows)
+    stranger, live = rows
+    assert stranger["ok"] is False
+    assert stranger["observed"].get("informational") is None
+    assert live["ok"] is True
+
+    # And the reverse shape: an unidentified accept ALONE vouches for nothing.
+    only_stranger = [_reach_row("203.0.113.9:4097", "connected_unverified", ok=False)]
+    readiness._mark_informational(only_stranger)
+    assert only_stranger[0]["ok"] is False
+
+
+def test_a_public_dead_address_reads_informational_without_the_private_note() -> None:
+    rows = [
+        _reach_row("198.51.100.7:7777", "no_route", ok=False, detail="connect_failed:OSError"),
+        _reach_row("99.79.190.164:4097", "connected_link", ok=True, winner="99.79.190.164:4097"),
+    ]
+    readiness._mark_informational(rows)
+    reading = readiness.reachability_reading(rows[0])
+    assert "not remote-usable from this device" in reading
+    assert "the peer is reachable at 99.79.190.164:4097" in reading
+    assert "private address" not in reading
+
+
+def test_the_renderer_reads_an_informational_row_as_ok_and_keeps_failures_failing() -> None:
+    flipped = _reach_row("172.31.22.23:4097", "refused", ok=False, detail="connect_failed")
+    connected = _reach_row("99.79.190.164:4097", "connected", ok=True)
+    readiness._mark_informational([flipped, connected])
+    still_failing = {
+        "check": "readiness",
+        "capability": "mcp_login",
+        "device_name": "cloud-node-1",
+        "ok": False,
+        "detail": "no login for https://slack.example",
+        "remedies": [],
+    }
+    lines = readiness.render_check_lines([flipped, connected, still_failing])
+    assert lines[0].startswith("ok  reachability cloud-node-1 172.31.22.23:4097:")
+    assert "not remote-usable from this device" in lines[0]
+    assert lines[-1].startswith("FAIL readiness mcp_login cloud-node-1:")
+
+
+# ---------------------------------------------------------------------------
 # Degradation rows and sanitisation
 # ---------------------------------------------------------------------------
 

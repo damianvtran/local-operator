@@ -233,13 +233,16 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """One address answered, another refused — the row says which.
+    """One address answered, another refused — the row says which, informationally.
 
     The state the offload run actually produced on the cloud node: a member row
     whose FIRST endpoint was dead while the peer was up on the second. The dead
     row must read as "the peer is up (it answered <winner>); this address did
-    not answer", and the remedy must point at the address rather than send
-    someone to restart a running relay.
+    not answer" — and, since the drill finding of 2026-10-03, it renders
+    INFORMATIONAL (``ok: true``) because the member answers elsewhere: an
+    advertised address no remote device can use must not red the report. The
+    reading names the address to use; no remedy bullet asks anyone to restart a
+    running relay.
     """
     pair_devices: Devices = request.getfixturevalue("devices")
     server_a, server_b, _host, _port = pair_devices
@@ -258,10 +261,15 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     by_endpoint = {row["endpoint"]: row for row in reach}
     assert by_endpoint[live]["ok"] is True
     dead = by_endpoint["127.0.0.1:1"]
-    assert dead["ok"] is False
+    assert dead["ok"] is True  # informational: the member answers elsewhere
     assert dead["observed"]["outcome"] == "refused"
     assert dead["observed"]["winner"] == live
-    assert dead["remedies"] and "working address" in dead["remedies"][0]
+    assert dead["observed"]["informational"] is True
+    assert dead["observed"]["usable_elsewhere"] == [live]
+    assert dead["remedies"] == []
+    reading = readiness.reachability_reading(dead)
+    assert "not remote-usable from this device" in reading
+    assert f"the peer is reachable at {live}" in reading
     # And the link that the winner produced is what the capability rows were
     # asked over: the build row is a real comparison, not a not-asked placeholder.
     build = _capability(payload, readiness.CAPABILITY_BUILD)
@@ -793,6 +801,21 @@ def test_the_viewer_reports_its_own_facts_the_same_way(
         store.save(copy, server_b.root)
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    # The authority row is driven through the authority-report seam: this cell's
+    # claim is what a given LEVEL renders as, not how a host came to have it, and
+    # a developer machine with a real system anchor (a drill's Step 0) must not
+    # change this test's shape — the same reasoning the flip-to-ready cell above
+    # records.
+    monkeypatch.setattr(
+        "local_operator.operator.operator_authority_report",
+        lambda **kwargs: {
+            "level": "spawn-capability-only",
+            "reason": "no anchor is installed, so the runtime trusts no key yet",
+            "anchor_installed": False,
+            "anchor_root_owned": False,
+            "presence": False,
+        },
+    )
     rc = _ready("--peer", server_a.identity.name, "--json")
     payload = json.loads(capsys.readouterr().out)
     # A is not a ready peer on this host either (no operator authority here), so

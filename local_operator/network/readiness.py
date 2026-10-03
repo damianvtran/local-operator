@@ -36,6 +36,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
@@ -1669,6 +1670,46 @@ def _observed_route_text(observed: Mapping[str, Any]) -> str:
     return ""
 
 
+#: The outcomes that mean "this declared address did not lead to the peer from
+#: here": a refused connection, silence, no route, an unresolvable or
+#: undiallable address. When the member answers at ANOTHER address this run
+#: IDENTIFIED, one of these renders INFORMATIONAL (see ``_reachability_rows``):
+#: the relay advertises the host's own interface addresses — on EC2 that
+#: includes the VPC-private one — and an address no remote device can use is not
+#: evidence about the peer's health. With no usable address anywhere the row
+#: keeps failing, which is the honest negative this verb must never lose.
+#: Deliberately NOT here: ``connected_unverified``/``connected_elsewhere`` (a
+#: stranger answered the port — a security fact), ``handshake_failed`` (the
+#: address answered and no link came up — a defect at that address),
+#: ``not_attempted`` (unproven), and ``no_endpoint`` (nothing was dialled).
+_INFORMATIONAL_OUTCOMES: frozenset[str] = frozenset(
+    {"refused", "no_answer", "no_answer_elsewhere", "no_route", "resolve_failed", "bad_endpoint"}
+)
+
+
+def _private_address_note(endpoint: str) -> str:
+    """The provenance clause for an address no remote device can use.
+
+    ``relay.advertise_endpoints`` publishes the HOST'S OWN interface addresses,
+    and on EC2 that set includes the VPC-private address — which is exactly the
+    kind of address a remote viewer cannot dial. Naming that provenance is what
+    turns the row from "another failure" into a fact a reader can act on
+    (use the other address). Empty for anything not private/link-local, where
+    the failure's own sentence is the honest explanation.
+    """
+    host, _port = _split_endpoint(endpoint)
+    try:
+        octets = socket.inet_aton(host)
+    except OSError:
+        return ""
+    first, second = octets[0], octets[1]
+    if first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168):
+        return " (the machine's own private address — remote devices cannot use it)"
+    if first == 169 and second == 254:
+        return " (a link-local address — remote devices cannot use it)"
+    return ""
+
+
 def reachability_reading(row: Mapping[str, Any]) -> str:
     """The human sentence for a reachability row — this verb's own register.
 
@@ -1703,6 +1744,21 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     winner = str(observed.get("winner") or "")
     winner_verified = bool(observed.get("winner_verified"))
     link_address = str(observed.get("link_address") or "")
+    if observed.get("informational"):
+        # REPORTED, NOT FAILED (drill finding, 2026-10-03): this address did not
+        # lead to the peer from this device, but the peer ANSWERS at an address
+        # this run identified — so the member is reachable and the row must not
+        # read as a failure of the check. The base sentence keeps the observed
+        # fact; the tail names what the reader can use instead. Only set when
+        # ``usable_elsewhere`` is non-empty, so the clause always has content.
+        base = reachability_reading(
+            {**dict(row), "observed": {**dict(observed), "informational": False}}
+        )
+        usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
+        note = _private_address_note(str(row.get("endpoint") or ""))
+        return (
+            f"{base}{note}; not remote-usable from this device — the peer is reachable at {usable}"
+        )
     if row.get("probed") is False:
         # The no-relay fallback: nothing was dialled, and its ``detail`` is
         # already a sentence for a person ("not probed: no relay is running …").
@@ -1899,6 +1955,50 @@ def _reachability_remedies(
             ]
         return [f"re-check once {peer_label}'s relay answers a handshake again"]
     return []
+
+
+def _identified_endpoints(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The addresses this report IDENTIFIED an answer at.
+
+    ``connected`` handshaked THIS run; ``connected_link`` is the live link's own
+    declared address. ``connected_unpinned`` is excluded on purpose — a live
+    link with no pinnable address is a real answer that names nothing, so it
+    cannot vouch for another row (round 4's whole distinction).
+    """
+    return [
+        str(row["endpoint"])
+        for row in rows
+        if str((row.get("observed") or {}).get("outcome") or "") in ("connected", "connected_link")
+    ]
+
+
+def _mark_informational(rows: list[dict[str, Any]]) -> None:
+    """Mark "did not lead to the peer from here" rows informational, in place.
+
+    INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): a declared address
+    that did not lead to the peer from here is a fact about the ADDRESS, not
+    about the member, once the member answers at an address this run identified
+    — the relay advertises the host's own interface addresses (on EC2, the
+    VPC-private one), and that kind of address is not evidence about the peer's
+    health. THE FLIP REQUIRES A VERIFIED ANSWER: with none, every row keeps
+    failing — the honest negative (a member nothing answers for must never read
+    healthy), and the reason an accept nobody identified is not in the set. The
+    flipped row keeps its observed facts and gains ``informational`` plus the
+    addresses that ARE usable; its remedies are cleared because action items
+    under an ok row misread — the reading names the address to use instead.
+    """
+    usable = _identified_endpoints(rows)
+    if not usable:
+        return
+    for row in rows:
+        if row["ok"]:
+            continue
+        if str((row.get("observed") or {}).get("outcome") or "") not in _INFORMATIONAL_OUTCOMES:
+            continue
+        row["ok"] = True
+        row["observed"]["informational"] = True
+        row["observed"]["usable_elsewhere"] = list(usable)
+        row["remedies"] = []
 
 
 def _reachability_rows(
@@ -2123,6 +2223,7 @@ def _reachability_rows(
                 ),
             }
         )
+    _mark_informational(rows)
     return rows, link
 
 

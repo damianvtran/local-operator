@@ -1052,6 +1052,76 @@ def test_the_ready_verb_reads_refused_and_silent_apart(
     assert machine["ok"] is False and machine["code"] == "unhealthy" and machine["message"]
 
 
+def test_an_informational_address_does_not_red_the_report_and_a_real_failure_still_does(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drill finding, 2026-10-03: `ready`'s verdict is the row-level ``ok``.
+
+    A remote-unusable advertised address (the node's VPC-private one) flipped
+    informational by ``readiness._mark_informational`` must not ride in the
+    ``failures`` list — while the row still SHOWS, with the address that is
+    usable. And a legitimate uncovered item (an MCP login) keeps the report red
+    and is the ONLY row the message names.
+    """
+    dead: dict[str, Any] = {
+        "check": "reachability",
+        "device_id": "d_" + "b" * 32,
+        "device_name": "cloud-node-1",
+        "endpoint": "172.31.22.23:4097",
+        "ok": False,
+        "detail": "connect_failed:ConnectionRefusedError",
+        "observed": {"outcome": "refused", "attempted": True},
+        "remedies": [],
+    }
+    live: dict[str, Any] = {
+        "check": "reachability",
+        "device_id": "d_" + "b" * 32,
+        "device_name": "cloud-node-1",
+        "endpoint": "99.79.190.164:4097",
+        "ok": True,
+        "detail": "ok",
+        "observed": {
+            "outcome": "connected",
+            "winner": "99.79.190.164:4097",
+            "winner_verified": True,
+        },
+        "remedies": [],
+    }
+    readiness._mark_informational([dead, live])
+    assert dead["ok"] is True
+
+    checks: list[dict[str, Any]] = [
+        {"check": "identity", "ok": True, "detail": "present"},
+        dead,
+        live,
+    ]
+    payload: dict[str, Any] = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 0  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is True
+    row = [r for r in machine["checks"] if str(r.get("endpoint", "")).startswith("172.31")][0]
+    assert row["ok"] is True and row["observed"]["informational"] is True
+
+    checks.append(
+        {
+            "check": "readiness",
+            "capability": "mcp_login",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "detail": "no login for https://slack.example",
+            "remedies": [],
+        }
+    )
+    payload = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is False and machine["code"] == "unhealthy"
+    assert "slack.example" in machine["message"]
+    assert "172.31.22.23" not in machine["message"]
+
+
 def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
