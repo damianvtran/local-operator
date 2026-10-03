@@ -209,6 +209,16 @@ def timeout_text(
     return text
 
 
+#: THE DELIVERED REFUSAL (design §10, #1936). Deliberately NOT a row of
+#: :func:`refusal_copy`'s state table: that table answers "why is this ask not
+#: answerable here", and the state this sentence needs — "answered, and the
+#: response row already exists" — is the same ``answered`` state a plain repeat
+#: ``respond`` must keep reading as "already answered by <surface>". The revision
+#: path is the only caller that may say it, so the revision path emits it (see
+#: ``AskQueue.revise``): the sentence belongs to the OP, not to the state table.
+REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
+
+
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
 
@@ -329,6 +339,18 @@ def apply_secret_answers(
     implementation would be giving the secret two ways out. The context it
     expects is duck-typed (``.variables`` / ``.journal_credential``), so a few
     lines of shim is the whole adapter.
+
+    **ONLY THE CELLS THE CALLER SUPPLIED come back** (PRE-EXISTING defect found en
+    route in round 2, identical in ``respond_ask`` and fixed with the revision
+    contract). The delegated hop answers one cell for EVERY question id — ``[]``
+    for the ones the caller never supplied — because the blocking picker always
+    returned the whole set. Handed straight to ``AskQueue`` that fabricated cell
+    defeated the whole-ask COMPLETENESS check (§2.4): an omitted question was
+    recorded as "no answer" instead of being refused, so the model could be told
+    the user had skipped a question they were never shown. Filtering here rather
+    than in the hop keeps the tool layer's contract for the blocking path, and
+    covers every queued caller at once — ``respond_ask``, ``revise_ask`` and the
+    legacy per-tap mirror, which reads its one cell back out by key.
     """
     from local_operator.tools.builtin import _report_secret_answers
 
@@ -341,7 +363,12 @@ def apply_secret_answers(
     models = _question_models(list(questions))
     # The function duck-types its context (``.variables`` / ``.journal_credential``);
     # the cast is the adapter's whole purpose, so it is named rather than silenced.
-    return _report_secret_answers(models, {k: list(v) for k, v in answers.items()}, cast(Any, shim))
+    reported = _report_secret_answers(
+        models, {k: list(v) for k, v in answers.items()}, cast(Any, shim)
+    )
+    # The caller's OWN key set, so an omitted question stays omitted and the
+    # queue's completeness check can refuse it (see the docstring).
+    return {qid: cell for qid, cell in reported.items() if qid in answers}
 
 
 def _question_models(questions: Sequence[Any]) -> list[Any]:

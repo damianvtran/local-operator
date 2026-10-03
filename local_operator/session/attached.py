@@ -3349,8 +3349,18 @@ class AttachedSession:
         answers: Mapping[str, Sequence[str]] | None = None,
         *,
         decline: bool = False,
+        revise: bool = False,
     ) -> str:
-        """Answer or decline a QUEUED ask from a desktop client (design §2.4/§4).
+        """Answer, decline, or REVISE a QUEUED ask from a desktop client (§2.4/§4/§10).
+
+        ONE method for three intents because they share one wire shape, one bind
+        and one verdict path — and ``revise`` is a separate OP on the wire
+        (``ask_revise``), never a flag the far side could infer: design §10 is
+        explicit that value equality is not the marker, so the intent has to be
+        said in words by the caller and carried in words by the frame. ``decline``
+        and ``revise`` are mutually exclusive by construction; a body that set
+        both would be a malformed request rather than an ambiguous one, and the
+        route's ``Answer`` validator never emits it.
 
         THE COLD ARM IS THE BIND, and that is the design's whole point rather
         than an implementation convenience: an ask outlives the runtime that
@@ -3366,14 +3376,18 @@ class AttachedSession:
         a question twice.
         """
         # ONE plumbing point (`_ask_client_method`) for both contracts this
-        # facade offers on the same wire op: the ROUTE wants a detail string and
-        # an exception it can map onto an HTTP error, the DOCK wants a verdict
-        # dict and no exception (`respond_ask`/`decline_ask`/`dismiss_ask`,
-        # below). Two contracts, one sender — a second copy of the bind and body
-        # shaping is how the two drift.
-        return await self._ask_client_method(
-            "ask_decline" if decline else "ask_respond", ask_id, answers, by="desktop"
-        )
+        # facade offers on the same wire op family: the ROUTE wants a detail
+        # string and an exception it can map onto an HTTP error, the DOCK wants a
+        # verdict dict and no exception (`respond_ask`/`revise_ask`/`decline_ask`/
+        # `dismiss_ask`, below). Two contracts, one sender — a second copy of the
+        # bind and body shaping is how the two drift.
+        if revise:
+            name = "ask_revise"
+        elif decline:
+            name = "ask_decline"
+        else:
+            name = "ask_respond"
+        return await self._ask_client_method(name, ask_id, answers, by="desktop")
 
     async def respond_ask(
         self,
@@ -3401,6 +3415,25 @@ class AttachedSession:
         """
         return await self._ask_verdict(
             lambda: self._ask_client_method("ask_respond", ask_id, answers, by=by)
+        )
+
+    async def revise_ask(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """Revise a queued ask's recorded answer, in the dict contract the TUI reads.
+
+        The dock's spelling of the sanctioned exception (design §10, #1936): it
+        supersedes while the response row is absent and refuses, in the queue's
+        own words, once it exists. Same verdict shape as its three siblings — a
+        refusal is a verdict, not an exception — because the surface renders the
+        sentence rather than the stack trace.
+        """
+        return await self._ask_verdict(
+            lambda: self._ask_client_method("ask_revise", ask_id, answers, by=by)
         )
 
     async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
@@ -3448,7 +3481,7 @@ class AttachedSession:
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
         method = getattr(client, name)
-        if name == "ask_respond":
+        if name in ("ask_respond", "ask_revise"):
             body = {
                 str(key): [str(item) for item in (values or ())]
                 for key, values in (answers or {}).items()
