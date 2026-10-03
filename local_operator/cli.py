@@ -10775,7 +10775,12 @@ def agents_push_public_republish_command(
             "no such listing, or it belongs to a different account.\033[0m"
         )
         return 1
-    if str(row.get("visibility") or "") != "public":
+    if str(row.get("visibility") or "") == "org":
+        # The wire's own contract, read live: an ORG row carries visibility="org"
+        # while the PUBLIC projection omits the field entirely -- so absence is
+        # the public shape, and keying the refusal on "not public" would refuse
+        # every public row (the evidence run caught exactly that). An org row
+        # would also answer 404 to a key, but the coded refusal is friendlier.
         print(
             "\n\033[1;31mError: that agent is an organization listing, not a public "
             "one — republish it with `lop agents push --name <agent> --org <tenant> "
