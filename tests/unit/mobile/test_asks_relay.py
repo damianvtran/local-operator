@@ -51,6 +51,14 @@ def _client() -> TestClient:
     return client
 
 
+def _client_and_daemon() -> tuple[TestClient, MobileDaemon]:
+    """``_client()`` plus the daemon, for the cells that read its list table."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
+    return client, daemon
+
+
 def _question(qid: str, text: str = "ship it?") -> dict[str, object]:
     return {
         "id": qid,
@@ -554,6 +562,67 @@ def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answer
         assert client.calls[-1][1]["answers"] == body["answers"]
     # The engaged connection is released rather than left open by the route.
     assert client.closed is True
+
+
+def test_a_refused_cold_answer_keeps_the_session_claimed_active(monkeypatch) -> None:
+    """A REFUSAL is not a failed engage, and the list must not say it is.
+
+    The engage and the op are one call on the cold arm, so a raise is usually a
+    refusal from a runtime that IS live (an expired ask, a race lost to another
+    surface). Discarding the provisional claim there flashes the session out of
+    the active section on a refusal — a (brief) lie about a runtime that exists
+    — so the ask arm RETAINS it and lets ``retain_provisional_active``'s
+    one-scan settle remove the claim if discovery cannot confirm it.
+
+    THE CONTRAST IS THE POINT (agent review round 1, MINOR-1): the cell below
+    pins the prompt arm's OPPOSITE behaviour, so the two reasons stay distinct
+    in the code rather than one rollback being shared by accident.
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+    client_double = _FakeAskClient(refusal="this ask expired 7 days ago")
+
+    async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        return client_double, "runtime ready"
+
+    monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
+    client, daemon = _client_and_daemon()
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}},
+    )
+    assert reply.status_code == 422, reply.text
+    assert SESSION_A in daemon.table.provisional_active
+
+
+def test_a_failed_prompt_drops_the_provisional_claim(monkeypatch) -> None:
+    """The prompt arm's rollback, pinned beside the ask arm's retention.
+
+    A failed prompt means the message never reached a runtime, so the optimistic
+    "this session is coming up" claim is FALSE and must be retracted at once —
+    the opposite of the ask arm's refusal, where the runtime exists and only the
+    op was refused.
+    """
+    from local_operator.mobile import attach_client
+
+    _durable_session()
+
+    async def fail(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ConnectionError("daemon restarted")
+
+    monkeypatch.setattr(attach_client, "continue_command", fail)
+    client, daemon = _client_and_daemon()
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-5678-1234-567812345678",
+            "text": "retry me",
+        },
+    )
+    assert reply.status_code == 502, reply.text
+    assert SESSION_A not in daemon.table.provisional_active
 
 
 def test_a_refusal_from_the_engaged_runtime_keeps_the_queue_s_own_sentence(monkeypatch) -> None:

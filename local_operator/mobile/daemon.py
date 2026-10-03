@@ -2306,19 +2306,33 @@ async def _engage_and_publish(
     daemon: "MobileDaemon",
     session_id: str,
     engage: "Callable[[], Awaitable[str]]",
+    *,
+    keep_claim_on_failure: bool = False,
 ) -> str:
-    """Publish an accepted engage intent, run ``engage``, roll it back on failure.
+    """Publish an accepted engage intent, run ``engage``, settle the claim by outcome.
 
     EXTRACTED FROM THE PROMPT BRANCH so the queued-ask answer's cold arm is the
     SAME code and not a second implementation that drifts (the defect this whole
     route avoids): an engage is announced optimistically — the session moves to
     the active section before process discovery, so even a 50 ms worker is
-    observable in the phone's list SSE — and a failed engage retracts the claim
-    rather than leaving a session painted active forever.
+    observable in the phone's list SSE.
 
     ``engage`` does the dial-and-deliver itself and returns the detail string the
-    route answers with. Returns that detail; re-raises a failed engage after the
-    rollback.
+    route answers with. What happens to the claim when it RAISES is the caller's
+    to say, because whether a runtime came up is a property of the arm:
+
+    * ``keep_claim_on_failure=False`` (the prompt wake): a failure means the
+      prompt never reached a runtime, so the claim is RETRACTED — leaving it
+      would paint a session active forever.
+    * ``keep_claim_on_failure=True`` (the queued-ask cold answer): the engage and
+      the op are one call, so a raise is usually a REFUSAL from a runtime that
+      IS live (an expired ask, a race lost to another surface) — discarding here
+      flashes the session out of the active section on a refusal, which is a
+      (brief) lie about a runtime that exists. ``retain_provisional_active``
+      schedules the one-scan settle that discards the claim anyway if discovery
+      finds nothing, so the optimistic side self-corrects.
+
+    Returns the engage's detail; re-raises after settling the claim either way.
     """
     daemon.table.provisional_active.add(session_id)
     # Structural: the session moves to the active section.
@@ -2346,10 +2360,15 @@ async def _engage_and_publish(
     try:
         detail = await engage()
     except BaseException:
-        daemon.table.provisional_active.discard(session_id)
-        # Structural: the failed wake moves it back to previous.
-        daemon.table.invalidate_summaries_cache()
-        daemon.table.notify_list_changed()
+        if keep_claim_on_failure:
+            # See the docstring: the runtime may well exist and have only refused
+            # the op, and the settle task clears a claim discovery can refute.
+            daemon.retain_provisional_active(session_id)
+        else:
+            daemon.table.provisional_active.discard(session_id)
+            # Structural: the failed wake moves it back to previous.
+            daemon.table.invalidate_summaries_cache()
+            daemon.table.notify_list_changed()
         raise
     daemon.retain_provisional_active(session_id)
     return detail
@@ -4698,6 +4717,15 @@ def build_app(daemon: MobileDaemon):
                 }
 
                 async def _deliver_answer() -> str:
+                    # BUDGET, because the surface has to live with it: this call
+                    # is an ENGAGE plus a DIAL plus an ACK in one, so its worst
+                    # case composes ``DEFAULT_DEADLINE_S`` (30 s, the engage) with
+                    # ``ACK_TIMEOUT_S`` (15 s, the op) — measured end to end on
+                    # this fleet at ~30 s, not the 1-3 s a warm prompt pays. A
+                    # phone's in-flight state must be sized for that window;
+                    # nothing here may shorten it by dropping the engage, because
+                    # a refusal that arrives without a runtime is the bug this
+                    # arm exists to fix.
                     client, _ = await engage_session_client(
                         config_dir(), session_id, AskErrand(ask_id=ask_id)
                     )
@@ -4712,7 +4740,9 @@ def build_app(daemon: MobileDaemon):
                     finally:
                         client.close()
 
-                detail = await _engage_and_publish(daemon, session_id, _deliver_answer)
+                detail = await _engage_and_publish(
+                    daemon, session_id, _deliver_answer, keep_claim_on_failure=True
+                )
                 return JSONResponse({"ok": True, "detail": detail})
             if entry is None:
                 raise KeyError(session_id)
