@@ -74,9 +74,18 @@ export function columnCap(fraction: number): { maxHeight: string } {
  * list, new-session and pair screens mount sheets too, publish no pin, and
  * their columns are `h-dvh` — and for a browser without `visualViewport`, where
  * the two viewports coincide anyway.
+ *
+ * WHY `position` IS RETURNED FROM HERE rather than left as a Tailwind class.
+ * The anchoring is the half of this fix that a revert would silently undo: back
+ * to `absolute` and the overlay is a child of whichever ancestor is positioned
+ * again (measured on the real bundle: a 390x53 box, panel top -263). A class
+ * string is unassertable at the happy-dom layer — it resolves no stylesheet —
+ * while an inline declaration resolves, so the anchoring lives beside the rest
+ * of the box and a test can fail on it.
  */
-export function columnBox(): { top: string; height: string } {
+export function columnBox(): { position: "fixed"; top: string; height: string } {
 	return {
+		position: "fixed",
 		top: `var(${COLUMN_TOP_VAR}, 0px)`,
 		height: `var(${COLUMN_HEIGHT_VAR}, 100dvh)`,
 	};
