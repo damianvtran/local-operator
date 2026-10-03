@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from local_operator.logger import get_logger
+from local_operator.projects import ATTACHMENT_MAX_BYTES
 
 logger = get_logger(__name__)
 
@@ -116,21 +117,31 @@ PREVIEW_READ_TIMEOUT_S = 5.0
 def read_attachment_for_preview(path: str) -> tuple[str, str] | None:
     """The base64 payload and MIME type for one stored copy, or ``None``.
 
-        ``None`` covers every way there is nothing to show — the path is gone, it
-        is a directory, or the read failed — because the caller states ONE honest
-        sentence for all three ("could not read"). The MIME type falls back to
-        ``image/png`` only when the suffix is unknown: the block decodes the bytes
-        itself, so a wrong guess shows the ``could not be decoded`` receipt rather
-        than a wrong picture (and an ``.svg``, which PIL cannot rasterise, lands
+    ``None`` covers every way there is nothing to show — the path is gone, it
+    is a directory, or the read failed — because the caller states ONE honest
+    sentence for all three ("could not read"). The MIME type falls back to
+    ``image/png`` only when the suffix is unknown: the block decodes the bytes
+    itself, so a wrong guess shows the ``could not be decoded`` receipt rather
+    than a wrong picture (and an ``.svg``, which PIL cannot rasterise, lands
     there on purpose).
 
-        Synchronous on purpose: the caller runs it off the UI loop, and a plain
-        function is what makes that a ``to_thread`` hop rather than an event-loop
-        read that blocks the frame.
+    Synchronous on purpose: the caller runs it off the UI loop, and a plain
+    function is what makes that a ``to_thread`` hop rather than an event-loop
+    read that blocks the frame.
+
+    The store's own size cap is re-checked HERE rather than assumed: it is
+    enforced at write time (``projects._store_attachments``), so the only way
+    past it is a hand-edited record or a file replaced after the copy — and
+    either would otherwise be read whole into memory (base64 is ~1.37x it, plus
+    the decoded frame). Over the cap is ``None``, the same honest answer as
+    unreadable (agent review round 1, M1).
     """
     try:
         source = Path(path)
         if not source.is_file():
+            return None
+        if source.stat().st_size > ATTACHMENT_MAX_BYTES:
+            logger.debug("attachment preview refused: %s is over the store's cap", path)
             return None
         data = source.read_bytes()
     except Exception:  # noqa: BLE001 — an unreadable copy is a degraded row, not a crash
