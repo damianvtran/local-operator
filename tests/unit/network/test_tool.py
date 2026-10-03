@@ -983,6 +983,11 @@ def test_the_agent_digest_says_what_a_member_count_rests_on() -> None:
         },
     )
     assert any("NOT verified" in line for line in unread), unread
+    # AND IT SAYS THE HONEST THING ABOUT *WHY*: no read has completed, rather than
+    # borrowing the failure words ("no peer answered") about an ask nobody made —
+    # the "contradiction" class in the other direction.
+    assert any("no table read has completed yet" in line for line in unread), unread
+    assert not any("no peer answered" in line for line in unread), unread
 
 
 def test_the_agent_peer_digest_reads_a_reason_the_way_a_person_does() -> None:

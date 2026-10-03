@@ -529,6 +529,62 @@ def test_status_reports_the_local_networks_with_no_relay_running(
     assert payload["networks"][0]["links"] == 0
 
 
+def test_the_status_command_asks_the_relay_for_a_fresh_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`lop network status` is a READ THAT ASKS (the "contradiction" class).
+
+    The member block this command prints must come from a pass the command asked
+    for, not from the cadence's last tick — the shape that let `status` say "no
+    peer answered" beside `peers`' fresh probe. The relay side's semantics are
+    tested where the relay is (``test_membership_convergence``); this cell pins
+    the seam: the verb passes ``refresh=True`` through to ``relay.status``. The
+    payload itself is the existing audit-block fixture, so nothing here
+    re-derives the relay's answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    seen: list[dict[str, Any]] = []
+
+    def _status(*args: Any, **fields: Any) -> dict[str, Any]:
+        seen.append(dict(fields))
+        return _audit_status(root, audit_mod.AuditLog(root))
+
+    monkeypatch.setattr(relay, "status", _status)
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    capsys.readouterr()
+    assert seen and seen[0].get("refresh") is True, seen
+
+
+def test_the_show_member_line_does_not_say_members_twice() -> None:
+    """ONE "members" at the seam (design round 1, N4).
+
+    ``_show_lines`` prefixes the table line with "members: ", and the sentence it
+    wraps begins with the same subject — the screen read "members: members NOT
+    verified: …". The sentence keeps its subject for the readers that render it
+    WITHOUT the prefix (`--json`, the agent digest), and this line drops the
+    duplicate instead: the one place that would double it is the one place that
+    removes it.
+    """
+    payload = {
+        "name": "devmesh",
+        "network_id": "n_" + "a" * 22,
+        "epoch": 1,
+        "trust": "active",
+        "members": 2,
+        "membership": {
+            "sentence": "this device is an active member of devmesh",
+            "remedies": [],
+            "table": {
+                "sentence": "members NOT verified: no table read has completed yet — retrying"
+            },
+        },
+        "members_detail": [],
+    }
+    lines = net_cli._show_lines(payload)  # noqa: SLF001
+    seam = next(line for line in lines if line.startswith("  members: "))
+    assert seam == "  members: NOT verified: no table read has completed yet — retrying", seam
+
+
 def test_doctor_reports_identity_missing_rather_than_claiming_reachability(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

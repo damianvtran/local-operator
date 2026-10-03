@@ -171,11 +171,24 @@ rendering is not a contract.
    `membership.table.answered` is the peers whose table answered, `not_answered`
    names the ones that could not be asked and why, and `complete` is true only when
    EVERY other active member answered. A device with no route to a peer reads
-   `complete: false` permanently — that is the honest answer, not a fault — and
-   the human `ls` line carries the short form of it (`[members verified with 7 of
-   9 peer(s)]`, or `[members NOT verified: no peer answered]`). `--all-peers`
-   refreshes the table before it merges, so an incomplete peer set is named rather
-   than silently merged.
+   `complete: false` for as long as that is true — that is the honest answer, not a
+   fault — and the human `ls` line carries the short form of it, WITH THE AGE OF
+   THE EVIDENCE: `[members verified with 7 of 9 peer(s) (12s ago); NOT verified
+   with d_9f8e7d6c5b (nothing is connected to it)]` — the oldest answer's age, and
+   every member that did not answer named with its reason — or, when no table came
+   back, `[members NOT verified: no table came back in the last read (12s ago) —
+   retrying: d_1a2b3c4d5e (nothing is connected to it)]`. The age is when that
+   read ran, and "retrying" is the cadence in the reader's words: the next pass,
+   not a four-second timer (four seconds is one pull's timeout) — a snapshot, not
+   a verdict, since a link is asked again once about fifteen seconds have passed
+   since its last answer. `lop network status` asks the relay for a fresh pass
+   before it reports (bounded: a pass that does not land within a moment is
+   reported with the age it actually has, never dressed up as fresh), so its member
+   block answers from a read it asked for rather than from the last cadence tick.
+   And a count that NO read has fed yet says `no table read has completed yet —
+   retrying` — never the failure's words, which would claim an ask nobody made.
+   `--all-peers` refreshes the table before it merges, so an incomplete peer set is
+   named rather than silently merged.
 6. Tell the user what they now have: a relay this device supervises, an identity
    keypair other networks will address it by, and a member list they can inspect.
    The next section says what the session plane can and cannot do across the mesh.
