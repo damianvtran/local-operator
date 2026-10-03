@@ -46,7 +46,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -431,7 +431,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     # Push command
     push_parser = agents_subparsers.add_parser(
-        "push", help="Push (upload) an agent to Radient", parents=[parent_parser]
+        "push",
+        help="Push (upload) an agent to Radient; `--org` and `--hub-id` push through "
+        "the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only "
+        "with changes pending, 3 declined, 130 cancelled)",
+        parents=[parent_parser],
     )
     push_group = push_parser.add_mutually_exclusive_group(required=True)
     push_group.add_argument(
@@ -451,6 +455,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Publish into this organization's workspace instead of the public hub "
         "(Agent Hub org sharing; requires `lop login radient`)",
     )
+    push_parser.add_argument(
+        "--hub-id",
+        type=str,
+        default=None,
+        help="Republish (overwrite) this hub listing from the local agent (checks for "
+        "personal references first); needs --name (--id is a local id)",
+    )
+    _add_hub_publish_flags(push_parser)
     # Pull command
     pull_parser = agents_subparsers.add_parser(
         "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
@@ -544,23 +556,45 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     teams_push = teams_subparsers.add_parser(
         "push",
-        help="Push a team to an organization (Agent Hub org sharing)",
+        help="Push a team to an organization or the public hub (Agent Hub); exit codes: "
+        "0 published, 1 error, 2 preview-only with changes pending, 3 declined, "
+        "130 cancelled",
         parents=[parent_parser],
     )
     teams_push.add_argument("name", type=str, help="Name of the local team to push")
-    teams_push.add_argument(
+    teams_push_target = teams_push.add_mutually_exclusive_group()
+    teams_push_target.add_argument(
         "--org",
         type=str,
         default=None,
         help="Organization tenant to publish into (`lop teams push --org <tenant_id> "
         "<team>`; requires `lop login radient`)",
     )
+    teams_push_target.add_argument(
+        "--public",
+        action="store_true",
+        help="Publish to the public Agent Hub instead of an organization",
+    )
+    teams_push.add_argument(
+        "--id",
+        type=str,
+        dest="hub_id",
+        default=None,
+        help="Hub team id to overwrite (republish; what `lop teams push` printed as "
+        '"Team ID"); needs --org or --public',
+    )
+    _add_hub_publish_flags(teams_push)
     teams_pull = teams_subparsers.add_parser(
         "pull",
-        help="Pull a team from an organization (Agent Hub org sharing)",
+        help="Pull a team from the hub by id, or by name from the public hub " "(Agent Hub)",
         parents=[parent_parser],
     )
-    teams_pull.add_argument("team_id", type=str, help="ID of the published team to pull")
+    teams_pull.add_argument(
+        "team_id",
+        type=str,
+        help="ID of the published team to pull, or a public team's name "
+        "(`lop teams pull a-team`; names resolve over the public listing)",
+    )
     teams_pull.add_argument(
         "--org",
         type=str,
@@ -594,6 +628,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--accept-unknown-baseline",
         action="store_true",
         help="Link even though the local copy differs from the hub's (nothing is deleted)",
+    )
+
+    teams_search = teams_subparsers.add_parser(
+        "search",
+        help="Search the public Agent Hub for teams",
+        parents=[parent_parser],
+    )
+    teams_search.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Text to match against a public team's name or description "
+        "(omit to list the newest teams)",
+    )
+    teams_search.add_argument(
+        "--page", type=int, default=1, help="Page to list when no query is given (default: 1)"
+    )
+    teams_search.add_argument(
+        "--perpage",
+        type=int,
+        default=20,
+        help="Teams per page for a listing (default: 20; the hub maxes at 100)",
+    )
+    teams_search.add_argument(
+        "--json", action="store_true", help="Print the raw listing or matches as JSON"
     )
 
     hub_parser = subparsers.add_parser(
@@ -9198,6 +9257,48 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
+def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
+    """The preview/confirm surface `agents push` and `teams push` share (p2p3 §7.3).
+
+    One definition so the two commands cannot drift; the flags only DO anything
+    on a push that reaches the instruction-set transport (any `--org`, any
+    `--hub-id`, and every teams push). `--yes` is absent from that list on
+    purpose: it also covers the flows without a prompt, where it is trivially
+    satisfied, so it never needs refusing.
+    """
+
+    parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the confirmation prompts; does not accept unresolved values "
+        "(use --accept-unresolved for those)",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Run the preview and print the diff without publishing (exit 2 when it "
+        "would generalize something)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable preview output; it carries the reference values and the "
+        "single-use commit pin, so treat it as sensitive",
+    )
+    parser.add_argument(
+        "--accept-unresolved",
+        action="store_true",
+        help="Acknowledge every value the preview could not classify, publishing " "them as-is",
+    )
+    parser.add_argument(
+        "--allow-internal-ops",
+        action="store_true",
+        help="Consent to the internal-operations allowance for an organization publish "
+        "(requires --org; shows the consent text interactively)",
+    )
+
+
 def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     """The merge flags `agents sync` and `teams sync` share (design B5.3).
 
@@ -9708,6 +9809,26 @@ def _hub_cause(exc: BaseException) -> str:
             return f"{exc} ({field} {rule}) [{code}]"
     if code == "team_plan_required":
         return f"{exc} (the organization's Team plan is not active) [{code}]"
+    if code == "generalization_unresolved":
+        # Ids, never values: the preview issued these handles and the publisher's
+        # terminal is the only surface that ever saw the values themselves.
+        outstanding = details.get("ids")
+        if isinstance(outstanding, list) and outstanding:
+            return f"{exc} (outstanding: {', '.join(str(item) for item in outstanding)}) [{code}]"
+    if code == "moderation_unavailable":
+        stage = details.get("stage")
+        if stage == "generalization":
+            needed, limit = details.get("windows_needed"), details.get("windows_max")
+            if needed and limit:
+                return (
+                    f"{exc} (this document needs {needed} reference-check windows and the "
+                    f"limit is {limit}; shorten it and push again) [{code}]"
+                )
+            return f"{exc} (the reference check could not run) [{code}]"
+    # The remaining commit-family codes (``generalization_required``,
+    # ``preview_mismatch``, ``preview_expired``, ``preview_stale``,
+    # ``resolution_conflict``) and the rest of the moderation vocabulary carry
+    # complete sentences already; the code suffix is the machine half.
     return f"{exc} [{code}]"
 
 
@@ -9821,7 +9942,8 @@ def _org_target_or_picker(
     if not memberships:
         print(
             "\n\033[1;31mError: this command publishes inside an organization, and this "
-            "account is not a member of one. Ask an organization owner to invite you.\033[0m"
+            "account is not a member of any organization. Ask an organization owner to "
+            "invite you.\033[0m"
         )
         return None
     if declared is not None:
@@ -9849,16 +9971,947 @@ def _org_target_or_picker(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Hub publish preview / confirm (agent-server design p2p3 §7; public-teams
+# design §9 PR 2). One flow for every push that reaches the instruction-set
+# transport: preview -> show -> confirm -> commit.
+# ---------------------------------------------------------------------------
+
+
+class _PublishTarget(NamedTuple):
+    """Where a push lands, and which route family commits it.
+
+    ``visibility`` is ``"public"`` or ``"org"``; ``hub_id`` selects the
+    republish route when set (the hub listing being overwritten; ``None``
+    creates). ``label`` is the target's name in output sentences
+    ("organization 'org-a'" / "the public hub") so no caller re-derives it.
+    """
+
+    visibility: str
+    tenant_id: Optional[str]
+    hub_id: Optional[str]
+    label: str
+
+
+#: The consent-text version and its text, VERBATIM from agent-server's
+#: docs/MODERATION-ORG-ALLOWANCE.md §3 (the doc the server holds immutable).
+#: "The CLI holds only the version id and fetches nothing; the text lives in a
+#: constant next to the id so the two cannot drift" (p2p3 §7.3): a re-worded
+#: consent is a NEW version string, so these two change together or not at all.
+#: Shown after the diff and only when --allow-internal-ops was passed; never
+#: offered unprompted, never sent for a public target, never auto-retried
+#: after a moderation rejection.
+_ORG_INTERNAL_OPS_V1 = "org_internal_ops_v1"
+_ORG_INTERNAL_OPS_V1_CONSENT = (
+    "I confirm, as an administrator of this organization, that the agents I am publishing are "
+    "for the organization's own internal operations, that they will be visible only to the "
+    "organization's members, and that the organization accepts responsibility for how they are "
+    "used, including compliance with the laws that apply to the personal data they handle. I "
+    "understand that this changes the content review for this publish only, that harmful uses "
+    "(stalking, doxxing, covert tracking of a private individual, harassment, and every other "
+    "refused category) remain refused, and that the confirmation is recorded against my account."
+)
+
+#: How many pages of 100 the public-team walks read before giving up (the hub
+#: has no server-side search; the walk is bounded and says when it stopped).
+_PUBLIC_TEAM_SEARCH_MAX_PAGES = 50
+
+
+def _stdin_is_tty() -> bool:
+    """True only when stdin can actually answer a prompt (never for None)."""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+#: The stream the --json payload is written to while the human flow's stdout is
+#: pointed at stderr (``_JsonStdoutGuard``). None outside a guarded command.
+_JSON_PAYLOAD_STREAM: "Optional[Any]" = None
+
+
+class _JsonStdoutGuard:
+    """Under --json, every human line moves to stderr (ux round 1, U1).
+
+    The flag promises a parseable payload; a success sentence or an error line
+    sharing stdout makes ``json.loads(stdout)`` fail with "Extra data" on the
+    ordinary success path and on the refusal path a script most wants to parse.
+    The guard points the process's stdout at stderr for the whole command body;
+    ``_print_payload`` keeps writing payloads to the saved stream. Human mode
+    (and every non-json invocation) passes through byte-untouched.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._saved: "Optional[Any]" = None
+
+    def __enter__(self) -> "_JsonStdoutGuard":
+        global _JSON_PAYLOAD_STREAM
+        if self._enabled and sys.stdout is not sys.stderr:
+            self._saved, _JSON_PAYLOAD_STREAM = sys.stdout, sys.stdout
+            sys.stdout = sys.stderr
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        global _JSON_PAYLOAD_STREAM
+        if self._saved is not None:
+            sys.stdout = self._saved
+            self._saved = None
+            _JSON_PAYLOAD_STREAM = None
+
+
+def _print_payload(payload: Any) -> None:
+    """Print one --json payload on the REAL stdout (see ``_JsonStdoutGuard``)."""
+    import json as _json  # lazy: same reason as everywhere else in this file
+
+    print(
+        _json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        file=_JSON_PAYLOAD_STREAM if _JSON_PAYLOAD_STREAM is not None else sys.stdout,
+    )
+
+
+def _term_width() -> int:
+    """The width renders wrap to: the real terminal, or 80 when stdout is not one.
+
+    ``shutil.get_terminal_size`` reads ``COLUMNS`` then the stdout tty -- the
+    same read the status renders make -- so a capture can pin the width (the
+    c1 evidence pins it via ``stty``/``COLUMNS``) and a pipe gets a stable 80.
+    """
+    import shutil  # lazy: matches the other width reads in this file
+
+    return max(40, shutil.get_terminal_size((80, 24)).columns)
+
+
+def _wrap_text(
+    text: Any, width: int, *, indent: str = "", subsequent: "Optional[str]" = None
+) -> "list[str]":
+    """``text`` whitespace-collapsed and word-wrapped to ``width`` (ux round 1, U4).
+
+    Every render used fixed clip constants measured at a 200-column capture, so
+    several lines ran past a default terminal; wrapping to the real width is
+    what makes the flow readable where it is actually watched. The collapse
+    also eats any leading spaces inside ``text``, so callers pass a leading
+    indent through ``indent`` and never inside the string (ux round 2, R1).
+    """
+    import textwrap  # lazy: only the render paths pay for it
+
+    flat = " ".join(str(text or "").split())
+    if not flat:
+        return []
+    return textwrap.wrap(
+        flat,
+        width=max(20, width),
+        initial_indent=indent,
+        subsequent_indent=indent if subsequent is None else subsequent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [indent + flat]
+
+
+def _wrap_keep(text: str, width: int, subsequent: str = "  ") -> "list[str]":
+    """Pass ``text`` through when it fits; word-wrap it only when it does not.
+
+    A leading run of spaces survives as the first line's indent (the same
+    contract ``_wrap_text`` states): the ``d`` rows carry their own ``  -``/
+    ``  +`` prefix, and a wrap must not strip it (ux round 2, R1).
+    """
+    if len(text) <= width:
+        return [text]
+    lead = text[: len(text) - len(text.lstrip(" "))]
+    return _wrap_text(text, width, indent=lead, subsequent=subsequent)
+
+
+def _emit_colored_wrapped(lead: str, runs: "list[tuple[str, Optional[str]]]", width: int) -> None:
+    """Runs printed under ``lead``, wrapped to ``width``, breaking at spaces.
+
+    The ``d`` diff colours only the changed span of a pair (ux round 1, U4), so
+    the writer takes (text, color) runs rather than a plain string; continuation
+    rows indent by two so a wrapped paragraph still reads as one unit.
+    """
+    pending = [(text, color) for text, color in runs if text]
+    first = True
+    while pending:
+        indent = lead if first else "  "
+        budget = max(10, width - len(indent))
+        row: "list[tuple[str, Optional[str]]]" = []
+        while pending and budget > 0:
+            text, color = pending[0]
+            if len(text) <= budget:
+                row.append((text, color))
+                budget -= len(text)
+                pending.pop(0)
+                continue
+            cut = text[:budget]
+            if " " in cut:
+                cut = cut[: cut.rfind(" ") + 1]
+            row.append((cut, color))
+            pending[0] = (text[len(cut) :], color)
+            budget = 0
+        sys.stdout.write(indent)
+        for text, color in row:
+            sys.stdout.write(f"\033[{color}m{text}\033[0m" if color else text)
+        sys.stdout.write("\n")
+        first = False
+
+
+def _print_changed_pair(old: str, new: str, width: int) -> None:
+    """One ``-``/``+`` pair with only the changed span coloured (ux round 1, U4).
+
+    The common shape is two near-identical paragraphs with one value swapped,
+    where whole-line colouring asks the publisher to eyeball four wrapped rows
+    to find the difference; the shared prefix and suffix stay plain and only
+    the middles carry the red/green.
+    """
+    limit = min(len(old), len(new))
+    index = 0
+    while index < limit and old[index] == new[index]:
+        index += 1
+    tail = 0
+    while tail < limit - index and old[len(old) - 1 - tail] == new[len(new) - 1 - tail]:
+        tail += 1
+    prefix = old[:index]
+    old_suffix = old[len(old) - tail :]
+    new_suffix = new[len(new) - tail :]
+    _emit_colored_wrapped(
+        "  -", [(prefix, None), (old[index : len(old) - tail], "1;31"), (old_suffix, None)], width
+    )
+    _emit_colored_wrapped(
+        "  +", [(prefix, None), (new[index : len(new) - tail], "1;32"), (new_suffix, None)], width
+    )
+
+
+def _print_wrapped_colored(text: str, color: "Optional[str]", width: int) -> None:
+    """A single (unpaired) diff row, wrapped to width, whole-line coloured."""
+    for row in _wrap_keep(text, width, subsequent="  "):
+        if color:
+            print(f"\033[{color}m{row}\033[0m")
+        else:
+            print(row)
+
+
+class _CheckingSpinner:
+    """The §7.3 spinner around the paid preview call (ux round 1, N5).
+
+    Frames render only on a TTY: a pipe keeps the one static line it has always
+    printed (its readers parse rather than watch), and --json gets nothing at
+    all -- there stdout is the machine payload. The thread is a daemon, is
+    joined before the caller resumes, and the frame line is erased on exit so
+    the next render starts clean.
+    """
+
+    _MESSAGE = "Checking for personal references…"
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._stop: "Optional[Any]" = None
+        self._thread: "Optional[Any]" = None
+
+    def __enter__(self) -> "_CheckingSpinner":
+        if not self._enabled:
+            return self
+        if not sys.stdout.isatty():
+            print(self._MESSAGE)
+            return self
+        import threading  # lazy: only the interactive path pays for it
+
+        stop = threading.Event()
+        self._stop = stop
+
+        def spin() -> None:
+            index = 0
+            while not stop.wait(0.08):
+                frame = self._FRAMES[index % len(self._FRAMES)]
+                sys.stdout.write(f"\r{frame} {self._MESSAGE}")
+                sys.stdout.flush()
+                index += 1
+
+        self._thread = threading.Thread(target=spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        stop = self._stop
+        if self._thread is not None and stop is not None:
+            stop.set()
+            self._thread.join()
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+        return None
+
+
+def _prompt_line(prompt: str) -> Optional[str]:
+    """One interactive line; None on EOF or ^C -- never a default answer.
+
+    EOF returning None (rather than "") is the point at both prompts this
+    serves: a closed pipe must read as "declined", never as an empty answer a
+    comparison could accidentally accept.
+    """
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def _clip_line(text: Any, width: int) -> str:
+    """One whitespace-collapsed line, ellipsised past ``width``."""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
+
+
+def _is_missing_preview_route(exc: BaseException) -> bool:
+    """True when a preview 404 is the ROUTE's absence, not the row's (§4.5).
+
+    The hub's own 404s are coded (``agent_not_found`` / ``team_not_found``)
+    and keep their rendering; an uncoded 404 is the framework's "no such
+    route" -- the old-server signature this CLI degrades for. The caller has
+    already read the row a republish targets, so a coded 404 here is a genuine
+    refusal, not compat.
+    """
+    return getattr(exc, "status_code", None) == 404 and not getattr(exc, "code", None)
+
+
+def _preview_identity(preview: Any) -> str:
+    """The preview minus its pin, for the never-auto-commit-a-changed-diff check."""
+    import json as _json  # lazy: same reason as everywhere else in this file
+
+    payload = {key: value for key, value in dict(preview or {}).items() if key != "pin"}
+    return _json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _run_preview(
+    client: Any, kind: str, document: Mapping[str, Any], target: _PublishTarget
+) -> "dict[str, Any]":
+    """Dispatch the preview call for a (kind, target) pair: four routes, one shape."""
+    if kind == "agent":
+        if target.hub_id:
+            return client.preview_republish_agent_instruction_set(
+                target.hub_id, document, visibility=target.visibility, tenant_id=target.tenant_id
+            )
+        return client.preview_publish_agent_instruction_set(
+            document, visibility=target.visibility, tenant_id=target.tenant_id
+        )
+    if target.hub_id:
+        return client.preview_republish_team_document(
+            target.hub_id, document, visibility=target.visibility, tenant_id=target.tenant_id
+        )
+    return client.preview_publish_team_document(
+        document, visibility=target.visibility, tenant_id=target.tenant_id
+    )
+
+
+def _commit_publication(
+    client: Any, kind: str, target: _PublishTarget, plan: Mapping[str, Any]
+) -> "dict[str, Any]":
+    """Commit a confirmed plan: the pinned bytes, the pin, the acknowledgements, the consent."""
+    if kind == "agent":
+        if target.hub_id:
+            return client.republish_agent_instruction_set(
+                target.hub_id,
+                plan["document"],
+                visibility=target.visibility,
+                tenant_id=target.tenant_id,
+                preview_token=plan["token"],
+                accept_unresolved=plan["accepted"],
+                moderation_allowance=plan["allowance"],
+            )
+        return client.publish_agent_instruction_set(
+            plan["document"],
+            visibility=target.visibility,
+            tenant_id=target.tenant_id,
+            preview_token=plan["token"],
+            accept_unresolved=plan["accepted"],
+            moderation_allowance=plan["allowance"],
+        )
+    if target.hub_id:
+        return client.republish_team_document(
+            target.hub_id,
+            plan["document"],
+            visibility=target.visibility,
+            tenant_id=target.tenant_id,
+            preview_token=plan["token"],
+            accept_unresolved=plan["accepted"],
+            moderation_allowance=plan["allowance"],
+        )
+    return client.publish_team_document(
+        plan["document"],
+        visibility=target.visibility,
+        tenant_id=target.tenant_id,
+        preview_token=plan["token"],
+        accept_unresolved=plan["accepted"],
+        moderation_allowance=plan["allowance"],
+    )
+
+
+def _publish_error_label(kind: str, target: _PublishTarget) -> str:
+    """The sentence a failed call is prefixed with; kept stable per path."""
+    noun = "agent" if kind == "agent" else "team"
+    if target.hub_id:
+        if target.visibility == "org":
+            return f"Error republishing {noun} to the organization"
+        return f"Error republishing {noun} to the public hub"
+    if target.visibility == "org":
+        return f"Error pushing {noun} to the organization"
+    return f"Error pushing {noun} to the public hub"
+
+
+def _ask_for_consent(
+    flags: argparse.Namespace, *, kind: str, target: "_PublishTarget", name: str
+) -> "tuple[bool, Optional[int]]":
+    """The typed-yes consent gate (P1 §3.1). Returns (given, stop code).
+
+    Interactive use requires the literal ``yes``; non-interactive use requires
+    BOTH flags (``--allow-internal-ops --yes``) because the CLI can prove the
+    latter by the caller's scripting and nothing else. Declining is a normal
+    outcome (exit 3), not an error: the user was asked and said no. The screen
+    names the target and the consequence before the legal text (ux round 1,
+    U6); the version id stays out of the user's way -- the constant beside the
+    text is what records drift.
+    """
+    if not getattr(flags, "allow_internal_ops", False):
+        return False, None
+    if not getattr(flags, "yes", False):
+        noun = "agent" if kind == "agent" else "team"
+        print()
+        print(f"\033[1;36mPublishing {noun} '{name}' to {target.label}.\033[0m")
+        print(
+            "\033[1;36mConfirming applies the internal-operations allowance to this "
+            "publish's content review.\033[0m"
+        )
+        print()
+        for line in _wrap_text(_ORG_INTERNAL_OPS_V1_CONSENT, _term_width() - 4, indent="  "):
+            print(line)
+        answer = _prompt_line('\nType "yes" to confirm: ')
+        if answer is None or answer.strip().lower() != "yes":
+            print("\n\033[1;33mConsent not given; nothing was published.\033[0m")
+            return False, 3
+    return True, None
+
+
+def _allowance_resend_guard(moderation: Any, flags: argparse.Namespace) -> Optional[int]:
+    """The republish-side allowance check (§7.3): dropping the consent is never silent.
+
+    Reads the STORED row's ``moderation.scope`` -- the server projects it for
+    org rows (P1 §4.2), so no extra call is needed. Returns None to proceed, or
+    the exit code to stop with when the operator declined (3) or cannot
+    confirm at a terminal (1).
+    """
+    scope = ""
+    if isinstance(moderation, dict):
+        scope = str(moderation.get("scope") or "")
+    if scope != "org_allowance" or getattr(flags, "allow_internal_ops", False):
+        return None
+    sentence = (
+        "This listing was published under the internal-operations allowance. "
+        "Re-publishing without it triggers a fresh strict review and may be refused."
+    )
+    if getattr(flags, "yes", False):
+        print(f"\033[1;33m  {sentence} Continuing without it (--yes).\033[0m")
+        return None
+    if not _stdin_is_tty():
+        print(
+            f"\n\033[1;31mError: {sentence} stdin is not a terminal: re-run interactively, "
+            "pass --allow-internal-ops to keep the allowance, or --yes to continue without "
+            "it.\033[0m"
+        )
+        return 1
+    answer = _prompt_line(f"{sentence} Continue without? [y/N] ")
+    if answer is None or answer.strip().lower() not in ("y", "yes"):
+        print("\n\033[1;33mNothing was published.\033[0m")
+        return 3
+    return None
+
+
+def _print_full_diff(
+    submitted: Mapping[str, Any], generalized: Mapping[str, Any], *, kind: str
+) -> None:
+    """``d`` from the prompt: a unified line diff of each changed covered field.
+
+    Both texts exist locally (the generalized one is the preview's returned
+    document), so this is a pure rendering -- no second request, nothing new
+    leaves the machine. Rows wrap to the real terminal width and only the
+    changed span of a ``-``/``+`` pair is coloured: the common shape is two
+    long near-identical paragraphs with one value swapped, which whole-line
+    colouring makes the publisher eyeball across wrapped rows (ux round 1, U4).
+    """
+    import difflib  # lazy: only the 'd' path pays for it
+
+    width = _term_width() - 2
+    fields = (
+        ("description", "when_to_use", "instructions")
+        if kind == "agent"
+        else ("description", "instructions", "project")
+    )
+    for field in fields:
+        before = str(submitted.get(field) or "")
+        after = str(generalized.get(field) or "")
+        if before == after:
+            continue
+        print(f"--- {field}: submitted")
+        print(f"+++ {field}: generalized")
+        lines = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        body = lines[2:] if lines and lines[0].startswith("---") else lines
+        index = 0
+        while index < len(body):
+            line = body[index]
+            if line.startswith("-") and index + 1 < len(body) and body[index + 1].startswith("+"):
+                _print_changed_pair(line[1:], body[index + 1][1:], width)
+                index += 2
+                continue
+            if line.startswith("-"):
+                _print_wrapped_colored(f"  -{line[1:]}", "1;31", width)
+            elif line.startswith("+"):
+                _print_wrapped_colored(f"  +{line[1:]}", "1;32", width)
+            else:
+                context = line[1:] if line.startswith(" ") else line
+                _print_wrapped_colored(f"  {context}", None, width)
+            index += 1
+        print()
+
+
+def _print_resolution_unit(unit: Any, *, sign: str, width: int) -> None:
+    """One resolution unit as a bullet: the region heading when the resolver
+    determined one, else the unit text; clipped to the terminal width (ux N3)."""
+    if not isinstance(unit, dict):
+        return
+    label = unit.get("heading") or unit.get("text") or ""
+    prefix = f"  {sign} {unit.get('field', '')}: "
+    label = _clip_line(label, max(20, width - len(prefix) - 1))
+    if label:
+        print(f"{prefix}{label}")
+
+
+def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Namespace) -> None:
+    """Render the preview object for the publisher (§7.3), or emit it as JSON.
+
+    The reference VALUES (``changes[].original``, ``unresolved[].value``) exist
+    on no other surface -- the preview body is their one carriage to the
+    publisher who submitted them -- so this renderer is print-only and nothing
+    on this path may log it. ``--json`` prints the whole object instead (it
+    includes the values and is documented as sensitive).
+    """
+    if getattr(flags, "json", False):
+        # The payload goes to the real stdout even when the command's human
+        # flow was pointed at stderr by ``_JsonStdoutGuard`` (ux round 1, U1).
+        _print_payload(preview)
+        return
+
+    status = str(preview.get("status") or "")
+    changes = preview.get("changes") or []
+    unresolved = preview.get("unresolved") or []
+    advisories = preview.get("advisories") or []
+    resolution = preview.get("resolution") or {}
+    width = _term_width()
+
+    if str(resolution.get("mode") or "") == "overwrite":
+        removed = resolution.get("removed") or []
+        added = resolution.get("added") or []
+        summary = (
+            f"Compared with the published version: {len(removed)} removed, {len(added)} added."
+        )
+        if removed:
+            # The reminder is only claimable when something WAS removed (ux N1).
+            summary += " Removed sections stay removed."
+        for line in _wrap_text(summary, width):
+            print(line)
+        for unit in removed[:10]:
+            _print_resolution_unit(unit, sign="-", width=width)
+        if len(removed) > 10:
+            print(f"  … and {len(removed) - 10} more removed (use --json for the full report)")
+        # Additions are listed too (ux round 1, N2): the wire reports them as
+        # units (`resolution.added`), and a count alone hides what is landing.
+        for unit in added[:10]:
+            _print_resolution_unit(unit, sign="+", width=width)
+        if len(added) > 10:
+            print(f"  … and {len(added) - 10} more added (use --json for the full report)")
+
+    if status == "unchanged":
+        print("No personal references found.")
+    elif changes:
+        count = len(changes)
+        heading = (
+            f"{count} reference{'s' if count != 1 else ''} would be generalized before "
+            "this is published:"
+        )
+        for line in _wrap_text(heading, width):
+            print(line)
+        print()
+        rows: "list[tuple[str, str, str, str, str]]" = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = _clip_line(change.get("original"), 44)
+            occurrences = change.get("occurrences")
+            times = f" ×{occurrences}" if isinstance(occurrences, int) and occurrences >= 1 else ""
+            rows.append(
+                (
+                    str(change.get("field") or ""),
+                    str(change.get("class") or ""),
+                    f'"{value}"',
+                    f"→ {change.get('placeholder', '')}",
+                    times,
+                )
+            )
+        field_w = min(max((len(row[0]) for row in rows), default=0), 16)
+        class_w = min(max((len(row[1]) for row in rows), default=0), 12)
+        value_w = max((len(row[2]) for row in rows), default=0)
+        for field, cls, value, arrow, times in rows:
+            row_text = (
+                f"{field:<{field_w}}  {cls:<{class_w}}  {value:<{value_w}}  {arrow}{times}"
+            ).rstrip()
+            if len(row_text) + 2 <= width:
+                print(f"  {row_text}")
+            else:
+                # Narrow terminal: wrap the row at spaces ourselves rather than
+                # let the terminal split a padded column mid-word (ux round 2, R2).
+                for wrapped in _wrap_text(row_text, width, indent="  ", subsequent="      "):
+                    print(wrapped)
+
+    if unresolved:
+        n = len(unresolved)
+        print()
+        print(f"  {n} value{'s' if n != 1 else ''} could not be classified (needs your call):")
+        for item in unresolved:
+            if not isinstance(item, dict):
+                continue
+            line = (
+                f"[{item.get('id', '?')}] {item.get('field', '')}  "
+                f'"{_clip_line(item.get("value"), 60)}" — {item.get("reason", "")}'
+            )
+            for row in _wrap_text(line, width, indent="  ", subsequent="      "):
+                print(row)
+
+    if advisories:
+        print()
+        for note in advisories:
+            if isinstance(note, dict):
+                for row in _wrap_text(
+                    f"note: {note.get('field', '')} {note.get('note', '')}",
+                    width,
+                    indent="  ",
+                    subsequent="        ",
+                ):
+                    print(row)
+
+    if changes or unresolved:
+        print()
+        for row in _wrap_text(
+            "Your local copy is not changed. Behaviour and wording are never rewritten — "
+            "only the values above.",
+            width,
+            indent="  ",
+            subsequent="  ",
+        ):
+            print(row)
+
+
+def _confirm_plan(
+    preview: Mapping[str, Any],
+    submitted: Mapping[str, Any],
+    *,
+    kind: str,
+    target: _PublishTarget,
+    flags: argparse.Namespace,
+) -> "tuple[Optional[dict[str, Any]], int]":
+    """Walk the unresolved / consent / confirm gates; a plan, or (None, exit code).
+
+    The plan is exactly what the commit sends: the PREVIEW's document (the
+    pinned bytes), the pin's token, the acknowledged ids and the consent
+    version -- so the commit cannot accidentally send the local copy, and a
+    re-preview rebuilds the plan from the fresh response rather than reusing
+    stale bytes. Exit codes: 1 = a refusal (an unresolved value was declined),
+    3 = the user declined (or there was nobody to ask).
+    """
+    unresolved = preview.get("unresolved") or []
+    status = str(preview.get("status") or "")
+    pin = preview.get("pin") or {}
+    token = pin.get("token") if isinstance(pin, dict) else None
+    accepted: "list[str]" = []
+
+    if unresolved:
+        ids = [
+            str(item.get("id")) for item in unresolved if isinstance(item, dict) and item.get("id")
+        ]
+        if getattr(flags, "accept_unresolved", False):
+            # The explicit acknowledgement: every listed value lands as-is.
+            accepted = ids
+        elif getattr(flags, "yes", False):
+            print(
+                "\n\033[1;31mError: --yes does not accept unresolved values; pass "
+                "--accept-unresolved to publish with them left as-is, or re-run "
+                "interactively.\033[0m"
+            )
+            return None, 1
+        # No separate non-TTY arm: a non-TTY run without --yes is refused
+        # before the preview is ever paid for, and with --yes the arm above
+        # fires -- an arm here could never render (copy round 1, C9).
+        else:
+            for item in unresolved:
+                if not isinstance(item, dict):
+                    continue
+                label = f"[{item.get('id', '?')}] {item.get('value', '')}"
+                while True:
+                    answer = _prompt_line(
+                        f'Publish with "{label}" left as-is? [y/N/d]   (d = full diff) '
+                    )
+                    if answer is not None and answer.strip().lower() == "d":
+                        # `d` works here too (ux round 1, U5): seeing the diff
+                        # before deciding one value must not cost a re-run and a
+                        # second paid preview, and the prompt right below
+                        # advertises the same key.
+                        _print_full_diff(submitted, preview.get("document") or {}, kind=kind)
+                        continue
+                    break
+                if answer is None or answer.strip().lower() not in ("y", "yes"):
+                    print(
+                        "\n\033[1;33mNothing was published. Edit the value in your local "
+                        "copy and push again, or re-run and confirm.\033[0m"
+                    )
+                    return None, 1
+                accepted.append(str(item.get("id")))
+
+    consent_given, stop = _ask_for_consent(
+        flags, kind=kind, target=target, name=str(submitted.get("name") or "")
+    )
+    if stop is not None:
+        return None, stop
+    consent_version = _ORG_INTERNAL_OPS_V1 if consent_given else None
+
+    changed = status != "unchanged"
+    question = (
+        "Publish the generalized version? [y/N/d]   (d = full diff) "
+        if changed
+        else "Publish? [y/N] "
+    )
+    if not getattr(flags, "yes", False):
+        while True:
+            answer = _prompt_line(question)
+            if answer is None:
+                print("\n\033[1;33mNothing was published.\033[0m")
+                return None, 3
+            choice = answer.strip().lower()
+            if choice in ("y", "yes"):
+                break
+            if choice == "d" and changed:
+                _print_full_diff(submitted, preview.get("document") or {}, kind=kind)
+                continue
+            print("\n\033[1;33mNothing was published.\033[0m")
+            return None, 3
+
+    return (
+        {
+            "document": preview.get("document") or dict(submitted),
+            "token": token,
+            "accepted": accepted or None,
+            "allowance": consent_version,
+        },
+        0,
+    )
+
+
+def _publish_against_old_server(
+    client: Any,
+    kind: str,
+    document: Mapping[str, Any],
+    target: _PublishTarget,
+    flags: argparse.Namespace,
+) -> "tuple[int, Optional[dict[str, Any]]]":
+    """The pre-preview hub: warn, confirm with a plain yes/no, publish as before (§4.5).
+
+    No diff exists to show -- the server cannot produce one -- so the publisher
+    is TOLD that, in the one place they can act on it (upgrading is the fix),
+    and the publication proceeds through the ordinary confirm gate.
+    ``--preview-only`` has nothing to report here and refuses rather than
+    guessing an exit code.
+    """
+    print(
+        "\033[1;33mnote: this hub does not support publication previews yet; publishing "
+        "without checking for personal references.\033[0m"
+    )
+    if getattr(flags, "preview_only", False):
+        print(
+            "\n\033[1;31mError: --preview-only cannot run against a hub without preview "
+            "support.\033[0m"
+        )
+        return 1, None
+    consent_given, stop = _ask_for_consent(
+        flags, kind=kind, target=target, name=str(document.get("name") or "")
+    )
+    if stop is not None:
+        return stop, None
+    if not getattr(flags, "yes", False):
+        answer = _prompt_line("Publish? [y/N] ")
+        if answer is None or answer.strip().lower() not in ("y", "yes"):
+            print("\n\033[1;33mNothing was published.\033[0m")
+            return 3, None
+    plan = {
+        "document": dict(document),
+        "token": None,
+        "accepted": None,
+        "allowance": _ORG_INTERNAL_OPS_V1 if consent_given else None,
+    }
+    try:
+        result = _commit_publication(client, kind, target, plan)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
+        return 1, None
+    return 0, result
+
+
+def _publish_with_preview(
+    client: Any,
+    kind: str,
+    document: Mapping[str, Any],
+    target: _PublishTarget,
+    base: Any,
+    flags: argparse.Namespace,
+) -> "tuple[int, Optional[dict[str, Any]]]":
+    """Preview -> show -> confirm -> commit, for every instruction-set transport (§7.3).
+
+    One implementation for both families and both scopes, so the confirm flow
+    cannot drift per path; the caller owns only its success sentence. Returns
+    ``(exit_code, commit_result)``: 0 with the hub's publication result, or the
+    code to return as-is (1 refusal, 2 preview-only with changes pending, 3
+    declined). Nothing here writes anything locally: the preview's returned
+    document is what the commit sends -- the pinned bytes, never the local
+    copy. The reference values live only in this terminal's output.
+
+    ``base`` is the P3 resolution baseline (combine, phase 3): ``None`` in v1,
+    whose overwrite mode needs none; it is part of the signature so the phase-3
+    wiring lands here rather than in a second helper.
+
+    Compat: a hub without the preview routes answers the preview 404 (an
+    uncoded, route-missing 404 -- the hub's own 404s carry a code). That is the
+    old-server path: warn once, then confirm and publish exactly as this CLI
+    did before previews existed (§4.5).
+    """
+    if getattr(flags, "allow_internal_ops", False) and target.visibility != "org":
+        # The server's own sentence, refused locally before anything is spent:
+        # a consent that cannot apply is an error, not something to ignore.
+        print(
+            "\n\033[1;31mError: --allow-internal-ops needs an organization target "
+            "(moderation_allowance is only valid together with visibility=org).\033[0m"
+        )
+        return 1, None
+
+    preview_only = bool(getattr(flags, "preview_only", False))
+    assume_yes = bool(getattr(flags, "yes", False))
+
+    if not preview_only and not assume_yes and not _stdin_is_tty():
+        # Never default-yes on a pipe: a mutation that cannot be confirmed is refused.
+        print(
+            "\n\033[1;31mError: stdin is not a terminal; re-run with --yes to confirm "
+            "or --preview-only to inspect.\033[0m"
+        )
+        return 1, None
+
+    try:
+        # The §7.3 spinner: frames on a TTY, the one static line on a pipe,
+        # nothing under --json (stdout is the machine payload there) (ux N5).
+        with _CheckingSpinner(not bool(getattr(flags, "json", False))):
+            preview = _run_preview(client, kind, document, target)
+    except KeyboardInterrupt:
+        # ^C during the paid call must read as a cancel, not an interpreter
+        # traceback; the preview mutates nothing, so the reassurance is exact
+        # (ux round 1, U2).
+        print("\n\033[1;33mCancelled; nothing was published.\033[0m")
+        return 130, None
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        if _is_missing_preview_route(exc):
+            return _publish_against_old_server(client, kind, document, target, flags)
+        print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
+        return 1, None
+
+    _render_preview(preview, kind=kind, flags=flags)
+
+    if preview_only:
+        # 2 = "would change something" (CI can gate on it); 0 = nothing would change.
+        # The shared line says what the exit code means: nothing left the machine.
+        status = str(preview.get("status") or "")
+        print("\n\033[1;33mNothing was published.\033[0m")
+        return (2 if status != "unchanged" else 0), None
+
+    plan, stop_code = _confirm_plan(preview, document, kind=kind, target=target, flags=flags)
+    if plan is None:
+        return stop_code, None
+
+    rechecked = False
+    while True:
+        try:
+            result = _commit_publication(client, kind, target, plan)
+            return 0, result
+        except KeyboardInterrupt:
+            # The commit was in flight, so unlike the preview the hub may still
+            # have received it: the honest line says so (ux round 1, U2).
+            print(
+                "\n\033[1;33mCancelled. The hub may still have received this publish; "
+                "check the listing before retrying.\033[0m"
+            )
+            return 130, None
+        except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+            code = getattr(exc, "code", None)
+            if code in ("preview_expired", "preview_stale") and not rechecked:
+                # One automatic re-preview, NEVER an automatic commit of a
+                # changed diff: the confirmed bytes may no longer be the right
+                # ones (the row moved), so the diff is shown and re-confirmed.
+                rechecked = True
+                print(
+                    f"\033[1;33m  The hub asks for a fresh preview ({code}); previewing "
+                    "again…\033[0m"
+                )
+                try:
+                    with _CheckingSpinner(not bool(getattr(flags, "json", False))):
+                        fresh = _run_preview(client, kind, document, target)
+                except KeyboardInterrupt:
+                    print("\n\033[1;33mCancelled; nothing was published.\033[0m")
+                    return 130, None
+                except Exception as exc2:  # noqa: BLE001
+                    print(
+                        f"\n\033[1;31m{_publish_error_label(kind, target)}: "
+                        f"{_hub_cause(exc2)}\033[0m"
+                    )
+                    return 1, None
+                if assume_yes and _preview_identity(fresh) != _preview_identity(preview):
+                    print(
+                        "\n\033[1;31mError: the preview changed after the commit was "
+                        "refused; re-run interactively to review the new diff.\033[0m"
+                    )
+                    return 1, None
+                if not assume_yes:
+                    _render_preview(fresh, kind=kind, flags=flags)
+                new_plan, stop_code = _confirm_plan(
+                    fresh, document, kind=kind, target=target, flags=flags
+                )
+                if new_plan is None:
+                    return stop_code, None
+                preview, plan = fresh, new_plan
+                continue
+            print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
+            if (
+                code == "moderation_rejected"
+                and target.visibility == "org"
+                and not getattr(flags, "allow_internal_ops", False)
+            ):
+                print(
+                    "\033[1;33m  hint: --allow-internal-ops publishes under the "
+                    "organization's internal-operations allowance.\033[0m"
+                )
+            return 1, None
+
+
 def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_dir: Path) -> int:
-    """``lop agents push --org <tenant>`` -- publish into an organization (§8.3).
+    """``lop agents push --name <n> --org <tenant> [--hub-id <id>]`` -- org publish (§8.3).
 
     Same local selection as the public push (``--name``/``--id`` address the
     LOCAL row); the difference is the transport: the row is published as an
     instruction-set document (the org workspace's format, §4.4) through a
-    client that acts as the signed-in person. There is no overwrite arm here:
-    the hub refuses a name the organization already holds with ``name_taken``
-    (the existing id rides in ``details``), and republish-by-hub-id is the
-    desktop transport's, not this command's.
+    client that acts as the signed-in person. ``--hub-id`` adds the republish
+    arm (§7.2): the named listing is read first so the target is SHOWN before
+    anything is spent, a row owned by another organization is refused before
+    the preview, and the commit goes through the preview/confirm flow. Without
+    ``--hub-id`` the call creates, and the hub still refuses a name the
+    organization already holds with ``name_taken`` (the existing id rides in
+    ``details``).
     """
     from local_operator.agents import instruction_set_fields  # lazy: heavy module
     from local_operator.clients.radient import (  # lazy: HTTP stack
@@ -9890,15 +10943,185 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
     except (InstructionSetError, ValueError) as exc:
         print(f"\n\033[1;31mError: cannot publish this agent: {exc}\033[0m")
         return 1
+
+    hub_id: Optional[str] = None
+    if getattr(args, "hub_id", None) is not None:
+        hub_id = str(args.hub_id).strip()
+        if not hub_id:
+            print(
+                "\n\033[1;31mError: --hub-id needs a hub agent id (the value was empty). "
+                'A hub agent id is what a hosted push printed as "Agent ID".\033[0m'
+            )
+            return 1
+        if getattr(args, "id", None):
+            # `--id` addresses the LOCAL row for the zip flow; letting it ride
+            # beside `--hub-id` would make one flag mean two ids at once.
+            print(
+                "\n\033[1;31mError: --id is a local agent id (the zip overwrite selector); "
+                "--hub-id names the hub listing; select the local agent with --name.\033[0m"
+            )
+            return 1
+        stop = _agents_republish_intro(client, hub_id, tenant, args)
+        if stop is not None:
+            return stop
+
+    target = _PublishTarget("org", tenant, hub_id, f"organization '{tenant}'")
+    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    if code != 0:
+        return code
+    agent_id = result.get("agent_id") if isinstance(result, dict) else None
+    if hub_id:
+        print(
+            f"\n\033[1;32mSuccessfully republished agent '{agent.name}' (ID: {agent_id}) "
+            f"in organization '{tenant}'\033[0m"
+        )
+    else:
+        print(
+            f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to organization "
+            f"'{tenant}'. Agent ID: {agent_id}\033[0m"
+        )
+    return 0
+
+
+def _agents_republish_intro(
+    client: Any, hub_id: str, tenant: str, flags: argparse.Namespace
+) -> Optional[int]:
+    """Step 2 of an agent republish (§7.2): show the row, refuse mismatches, check consent.
+
+    Returns None to proceed, or the exit code to stop with. The read is
+    read-only and runs before the preview so nothing is spent on a target the
+    caller will be refused for.
+    """
     try:
-        result = client.publish_agent_instruction_set(document, visibility="org", tenant_id=tenant)
+        payload = client.get_agent(hub_id, with_credential=True)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
-        print(f"\n\033[1;31mError pushing agent to the organization: {_hub_cause(exc)}\033[0m")
+        print(f"\n\033[1;31mError: could not read hub agent '{hub_id}': {_hub_cause(exc)}\033[0m")
         return 1
+    row = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(row, dict):
+        print(
+            f"\n\033[1;31mError: no hub agent '{hub_id}' answers for this account: no such "
+            "agent, or this account is not a member of the organization it belongs to "
+            "(the hub answers both the same way).\033[0m"
+        )
+        return 1
+    row_tenant = str(row.get("tenant_id") or "")
+    if row_tenant != tenant:
+        print(
+            f"\n\033[1;31mError: that agent belongs to organization '{row_tenant}', not "
+            f"'{tenant}'. Check --org.\033[0m"
+        )
+        return 1
+    if str(row.get("visibility") or "") != "org":
+        print(
+            "\n\033[1;31mError: that agent is published publicly, not into an "
+            "organization. Republish it with `lop agents push --name <agent> "
+            "--hub-id <id>` (no --org).\033[0m"
+        )
+        return 1
+    print(
+        f'Overwriting hub agent {hub_id} "{row.get("name", "")}" '
+        f'v{row.get("version", "")} in organization \'{tenant}\''
+    )
+    return _allowance_resend_guard(row.get("moderation"), flags)
+
+
+def agents_push_public_republish_command(
+    args: argparse.Namespace, agent_registry: Any, base_dir: Path
+) -> int:
+    """``lop agents push --name <local> --hub-id <id>`` -- republish a PUBLIC agent listing (§7.2).
+
+    The public half of the instruction-set transport: an ordinary public push
+    (no ``--org``, no ``--hub-id``) still runs the legacy archive path
+    unchanged; only the explicit overwrite uses this arm, because the archive
+    path can express an overwrite only when a local id happens to equal the
+    hub's (§7.4's phase-4 move is out of scope). The credential is the stored
+    API key -- the same one the public zip push spends, and the account the
+    listing belongs to.
+    """
+    from local_operator.agents import instruction_set_fields  # lazy: heavy module
+    from local_operator.clients.radient import (  # lazy: HTTP stack
+        InstructionSetError,
+        RadientClient,
+        build_instruction_set_document,
+    )
+    from local_operator.providers.radient_credentials import (
+        resolve_radient_credential_sync,
+    )
+
+    hub_id = str(getattr(args, "hub_id", "") or "").strip()
+    if not hub_id:
+        print("\n\033[1;31mError: --hub-id needs a hub agent id (the value was empty).\033[0m")
+        return 1
+    if getattr(args, "id", None):
+        # `--id` addresses the LOCAL row for the zip flow; letting it ride
+        # beside `--hub-id` would make one flag mean two ids at once.
+        print(
+            "\n\033[1;31mError: --id is a local agent id (the zip overwrite selector); "
+            "--hub-id names the hub listing; select the local agent with --name.\033[0m"
+        )
+        return 1
+    config_manager = ConfigManager(base_dir)
+    base_url = _radient_hub_base_url(config_manager)
+    api_key = resolve_radient_credential_sync(config_manager.config_dir, base_url)
+    if not api_key:
+        print("\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m")
+        return 1
+    client = RadientClient(api_key=api_key, base_url=base_url)
+    agent = _select_local_agent(args, agent_registry)
+    if agent is None:
+        return 1
+    try:
+        document = build_instruction_set_document(
+            **instruction_set_fields(agent_registry, agent, {})
+        )
+    except (InstructionSetError, ValueError) as exc:
+        print(f"\n\033[1;31mError: cannot publish this agent: {exc}\033[0m")
+        return 1
+
+    # Step 2: read the row this will overwrite (read-only; the public row is
+    # readable with the key, an organization row answers 404 to a key by the
+    # isolation pins, so a wrong target is refused before anything is spent).
+    try:
+        payload = client.get_agent(hub_id, with_credential=True)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError: could not read hub agent '{hub_id}': {_hub_cause(exc)}\033[0m")
+        return 1
+    row = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(row, dict):
+        print(
+            f"\n\033[1;31mError: no public agent '{hub_id}' answers for this account: "
+            "no such listing, or it belongs to a different account.\033[0m"
+        )
+        return 1
+    if str(row.get("visibility") or "") == "org":
+        # The wire's own contract, read live: an ORG row carries visibility="org"
+        # while the PUBLIC projection omits the field entirely -- so absence is
+        # the public shape, and keying the refusal on "not public" would refuse
+        # every public row (the evidence run caught exactly that). An org row
+        # would also answer 404 to a key, but the coded refusal is friendlier.
+        print(
+            "\n\033[1;31mError: that agent is an organization listing, not a public "
+            "one. Republish it with `lop agents push --name <agent> --org <tenant> "
+            "--hub-id <id>`.\033[0m"
+        )
+        return 1
+    print(
+        f'Overwriting hub agent {hub_id} "{row.get("name", "")}" '
+        f'v{row.get("version", "")} on the public hub'
+    )
+    stop = _allowance_resend_guard(row.get("moderation"), args)
+    if stop is not None:
+        return stop
+
+    target = _PublishTarget("public", None, hub_id, "the public hub")
+    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    if code != 0:
+        return code
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
     print(
-        f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to organization "
-        f"'{tenant}'. Agent ID: {agent_id}\033[0m"
+        f"\n\033[1;32mSuccessfully republished agent '{agent.name}' (ID: {agent_id}) "
+        f"on the public hub\033[0m"
     )
     return 0
 
@@ -9994,15 +11217,127 @@ def _print_model_notice(notice: Any) -> None:
     print(f"\033[1;33m  {notice.describe()}\033[0m")
 
 
-def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
-    """``lop teams push --org <tenant> <team>`` -- publish a team (§8.3).
+def _target_phrase(target: _PublishTarget) -> str:
+    """Where the target sits, for sentences that read ``... {phrase}`` (no leading preposition)."""
+    if target.visibility == "org":
+        return f"in organization '{target.tenant_id}'"
+    return "on the public hub"
 
-    Builds the hub_teams document from the local Team (``hub_team_document``;
-    §1.6's mapping) and publishes it into the organization's workspace. Teams
-    are org-only in v1, so ``--org`` is required: when it is omitted the
-    account's memberships are printed and the flag demanded -- no interactive
-    prompt, no guessed target. The document is preflighted by the builder, so
-    a team the hub would refuse reports here, before any upload is spent.
+
+def _teams_push_target(
+    args: argparse.Namespace, base_dir: Path
+) -> "Optional[tuple[Any, _PublishTarget]]":
+    """The ``(client, target)`` ``teams push`` runs against: ``--org``, ``--public``, or the demand.
+
+    ``--public`` publishes to the public hub (any signed-in account); ``--org``
+    names an organization; neither prints the account's memberships (and the
+    ``--public`` alternative) and demands a choice -- no interactive prompt, no
+    guessed target, the picker's rule. Both arms authenticate as the signed-in
+    PERSON: the team publish routes are person-JWT only (there is no API-key
+    team publish), and even a public team records its publisher.
+    """
+    client = _resolve_org_client(base_dir)
+    if client is None:
+        return None
+    if getattr(args, "public", False):
+        return client, _PublishTarget("public", None, None, "the public hub")
+    declared = getattr(args, "org", None)
+    tenant = (declared or "").strip()
+    if tenant:
+        return client, _PublishTarget("org", tenant, None, f"organization '{tenant}'")
+    try:
+        memberships = client.list_memberships()
+    except Exception as exc:  # noqa: BLE001 — any hub failure gets the same remedy
+        print(f"\n\033[1;31mError: could not list your organizations: {_hub_cause(exc)}\033[0m")
+        return None
+    if declared is not None:
+        # The flag was PASSED but empty: say so rather than letting a blank
+        # value read like an omitted one (review round 1, R1-1's parenthetical).
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). Pass --org <tenant_id>, or --public. Your organizations:\033[0m"
+        )
+    elif not memberships:
+        print(
+            "\n\033[1;31mError: this command publishes a team, and this account is not a "
+            "member of any organization. Pass --public to publish to the public hub.\033[0m"
+        )
+        return None
+    else:
+        print(
+            "\n\033[1;33mThis command publishes a team into an organization or the public "
+            "hub -- pass --org <tenant_id>, or --public. Your organizations:\033[0m"
+        )
+    for membership in memberships:
+        if not isinstance(membership, dict):
+            continue
+        plan = membership.get("plan") or {}
+        print(
+            f"  • {membership.get('tenant_name', '?')} "
+            f"(tenant_id: {membership.get('tenant_id', '?')}, "
+            f"role: {membership.get('role', '?')}, "
+            f"plan: {plan.get('status', 'none') if isinstance(plan, dict) else 'none'})"
+        )
+    return None
+
+
+def _teams_republish_intro(
+    client: Any, target: _PublishTarget, flags: argparse.Namespace
+) -> Optional[int]:
+    """Step 2 of a team republish (§7.2): show the row, refuse a wrong org, check consent.
+
+    The read is ``get_team`` -- read-only, the same call ``teams pull`` makes --
+    and it runs before the preview so a wrong target costs nothing. A 404 is
+    rendered without asserting which cause it was: a missing row and a
+    non-member answer identically. The public arm cannot pre-check the row's
+    scope from here (the hub's team projection carries no visibility field); a
+    mismatch is answered by the preview with a coded 404 instead.
+    """
+    try:
+        row = client.get_team(target.hub_id)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        if getattr(exc, "status_code", None) == 404:
+            print(
+                f"\n\033[1;31mError: no hub team '{target.hub_id}' answers for this account: "
+                "no such team, or this account is not a member of the organization it "
+                "belongs to (the hub answers both the same way).\033[0m"
+            )
+        else:
+            print(
+                f"\n\033[1;31mError: could not read hub team '{target.hub_id}': "
+                f"{_hub_cause(exc)}\033[0m"
+            )
+        return 1
+    if not isinstance(row, dict):
+        print(f"\n\033[1;31mError: the hub's answer for '{target.hub_id}' carried no team.\033[0m")
+        return 1
+    row_tenant = str(row.get("tenant_id") or "")
+    if target.visibility == "org" and row_tenant != target.tenant_id:
+        print(
+            f"\n\033[1;31mError: that team belongs to organization '{row_tenant}', "
+            f"not '{target.tenant_id}'. Check --org.\033[0m"
+        )
+        return 1
+    print(
+        f'Overwriting hub team {target.hub_id} "{row.get("name", "")}" '
+        f'v{row.get("version", "")} {_target_phrase(target)}'
+    )
+    return _allowance_resend_guard(row.get("moderation"), flags)
+
+
+def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """``lop teams push [--org <tenant> | --public] <team> [--id <hub-id>]`` (§8.3; teams §9).
+
+    Publishes a team to the public hub or into an organization's workspace,
+    through the preview → diff → confirm → commit flow (p2p3 §7.3). ``--id``
+    is a HUB team id -- what a previous push printed as "Team ID" -- and makes
+    the call a REPUBLISH (``PUT``) of exactly that row: the row is read first,
+    so the target is shown, a wrong organization is refused, and a row that was
+    published under the internal-ops allowance warns before consent is dropped
+    -- all before anything is spent. On a public target a non-empty ``project``
+    is left out of the published copy (the hub refuses it: a public team has no
+    project), and the CLI says so before sending rather than letting a
+    refusal arrive later (D3; the local team is never modified).
     """
     from local_operator.agents import (  # lazy: heavy module
         AgentRegistry,
@@ -10013,10 +11348,11 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         hub_team_document,
     )
 
-    target = _org_target_or_picker(args, base_dir)
-    if target is None:
+    resolved = _teams_push_target(args, base_dir)
+    if resolved is None:
         return 1
-    client, tenant = target
+    client, target = resolved
+
     team = team_registry.get_team_by_name(args.name)
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {args.name}\033[0m")
@@ -10035,29 +11371,68 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         # so render it like this command's other refusals and spend no upload.
         print(f"\n\033[1;31mError: cannot push this team: {exc.field} {exc.rule}\033[0m")
         return 1
-    try:
-        result = client.publish_team_document(document, tenant)
-    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
-        print(f"\n\033[1;31mError pushing team to the organization: {_hub_cause(exc)}\033[0m")
-        return 1
+
+    if target.visibility == "public" and str(document.get("project") or "").strip():
+        # D3: the hub REFUSES a non-empty project on a public publish -- a public
+        # team has no project, and the field is the publisher's local context.
+        # The fix belongs on this side of the wire and must be VISIBLE: the
+        # published copy drops the field, the local team keeps it, and the user
+        # is told before anything is sent. Never a silent rewrite.
+        document = {key: value for key, value in document.items() if key != "project"}
+        print(
+            "\033[1;33m  note: 'project' is internal context and is not published on the "
+            "public hub; it is left out of the published copy (your local team is "
+            "unchanged).\033[0m"
+        )
+
+    hub_id = None
+    if getattr(args, "hub_id", None) is not None:
+        hub_id = str(args.hub_id).strip()
+        if not hub_id:
+            # A passed-but-empty `--id` must never fall through to a create (R1-1).
+            print(
+                "\n\033[1;31mError: --id needs a hub team id (the value was empty). "
+                'A hub team id is what `lop teams push` printed as "Team ID".\033[0m'
+            )
+            return 1
+        target = _PublishTarget(target.visibility, target.tenant_id, hub_id, target.label)
+        stop = _teams_republish_intro(client, target, args)
+        if stop is not None:
+            return stop
+
+    code, result = _publish_with_preview(client, "team", document, target, None, args)
+    if code != 0:
+        return code
     info = result.get("team") if isinstance(result, dict) else None
     team_id = info.get("id") if isinstance(info, dict) else None
-    print(
-        f"\n\033[1;32mSuccessfully pushed team '{team.name}' to organization "
-        f"'{tenant}'. Team ID: {team_id}\033[0m"
-    )
+    if hub_id:
+        print(
+            f"\n\033[1;32mSuccessfully republished team '{team.name}' (ID: {team_id}) "
+            f"{_target_phrase(target)}\033[0m"
+        )
+    else:
+        print(
+            f"\n\033[1;32mSuccessfully pushed team '{team.name}' to {target.label}. "
+            f"Team ID: {team_id}\033[0m"
+        )
     return 0
 
 
 def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
-    """``lop teams pull --org <tenant> <team-id>`` -- reconstruct a team (§8.3).
+    """``lop teams pull [--org <tenant>] <team-id|name>`` -- reconstruct a team (§8.3; teams §9).
 
-    ``GET /v1/teams/:teamid`` is org-agnostic by id, so ``--org`` is the user's
-    statement of which organization they mean; a document owned by a different
-    tenant is refused rather than stored under the wrong expectation. The local
-    row is reconstructed by ``TeamRegistry.import_hub_team`` and the rename
-    notes (if any) are printed -- the pull reports what it actually stored.
+    With ``--org`` the pull asserts WHICH organization the row is expected
+    from (the historical shape, unchanged): the id is read as the signed-in
+    person and a document owned by another tenant is refused. Without
+    ``--org`` the PUBLIC arm runs: an id is fetched anonymously, a name is
+    resolved through the public listing first (public names are unique there),
+    and an organization team answers 404 -- the message names both causes and
+    ``--org`` as the way in. Either arm reconstructs the row through
+    ``TeamRegistry.import_hub_team`` and reports what it stored.
     """
+    declared = getattr(args, "org", None)
+    if declared is None:
+        return _teams_pull_public(args, team_registry, base_dir)
     target = _org_target_or_picker(args, base_dir)
     if target is None:
         return 1
@@ -10079,6 +11454,77 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     except (ValueError, TypeError) as exc:
         print(f"\n\033[1;31mError: cannot reconstruct this team locally: {exc}\033[0m")
         return 1
+    return _finish_team_pull(
+        team_registry,
+        outcome,
+        document,
+        source=f"from organization '{tenant}'",
+        tenant_id=owner or tenant,
+    )
+
+
+def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """The public arm of ``teams pull`` (no ``--org``): anonymous, by id or name.
+
+    Anonymous is deliberate: the public route serves public rows without a
+    credential, so the public arm needs none -- and an organization row then
+    answers 404 for everyone who cannot prove membership, which the refusal
+    sentence covers without asserting which cause it was.
+    """
+    from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
+
+    client = RadientClient(api_key=None, base_url=_radient_hub_base_url(ConfigManager(base_dir)))
+    value = str(getattr(args, "team_id", "") or "").strip()
+    if not value:
+        print("\n\033[1;31mError: a team id (or a public team's name) is required.\033[0m")
+        return 1
+    team_id = value
+    if not _looks_like_hub_id(value):
+        resolved = _resolve_public_team_id(client, value)
+        if resolved is None:
+            return 1
+        team_id = resolved
+    try:
+        document = client.get_team(team_id, with_credential=False)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        if getattr(exc, "status_code", None) == 404:
+            print(
+                "\n\033[1;31mError: no public team answers for that id: no such team, or "
+                "it belongs to an organization (the hub answers both the same way without "
+                "a membership; pass --org <tenant_id> to pull an organization team).\033[0m"
+            )
+        else:
+            print(f"\n\033[1;31mError pulling team from the hub: {_hub_cause(exc)}\033[0m")
+        return 1
+    try:
+        outcome = team_registry.import_hub_team(document)
+    except (ValueError, TypeError) as exc:
+        print(f"\n\033[1;31mError: cannot reconstruct this team locally: {exc}\033[0m")
+        return 1
+    return _finish_team_pull(
+        team_registry,
+        outcome,
+        document,
+        source="from the public hub",
+        tenant_id=str(document.get("tenant_id") or ""),
+    )
+
+
+def _finish_team_pull(
+    team_registry: Any,
+    outcome: Any,
+    document: Mapping[str, Any],
+    *,
+    source: str,
+    tenant_id: str,
+) -> int:
+    """The shared tail of both pull arms: link, report, name what was stored.
+
+    Extracted so the two arms cannot drift on the post-import contract: the
+    success sentence, the link warning, the rename notes and the model
+    suggestion notice are one implementation; the arms differ only in
+    ``source`` ("from organization 'x'" | "from the public hub").
+    """
     team = outcome.team
     # Link the row to its hub document and record what was pulled, so `teams sync`
     # and the update runner can three-way merge later. Best-effort inside: the pull
@@ -10089,12 +11535,9 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         team_registry.config_dir,
         team_registry.get_team(team.id),
         document,
-        tenant_id=owner or tenant,
+        tenant_id=tenant_id,
     )
-    print(
-        f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) "
-        f"from organization '{tenant}'\033[0m"
-    )
+    print(f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) {source}\033[0m")
     if linked is None:
         print(
             "\033[1;33m  This team could not be linked to the hub, so it will not receive "
@@ -10124,6 +11567,181 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
             f"the selected agent's own model, or a resumed session's saved model "
             f"overrides it.\033[0m"
         )
+    return 0
+
+
+#: Hub team ids are UUIDs (the shape every row the live hub serves carries; the
+#: first public-team QA run printed one) or, on older rows, 24-hex ObjectIds.
+#: The UUID form is checked first so a UUID can never fall through to the name
+#: search -- the exact mistake the evidence run caught (it printed "no public
+#: team named '<uuid>'" instead of fetching by id).
+_HUB_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+_HUB_OBJECTID_RE = re.compile(r"[0-9a-fA-F]{24}\Z")
+
+
+def _looks_like_hub_id(value: str) -> bool:
+    """A hub team id (UUID or ObjectId) vs a public team name, for ``teams pull``."""
+    return bool(_HUB_UUID_RE.match(value) or _HUB_OBJECTID_RE.match(value))
+
+
+def _scan_public_teams(client: Any, matches: Any) -> "Optional[tuple[list[dict[str, Any]], bool]]":
+    """Walk the public listing page by page; the rows ``matches(row)`` accepts.
+
+    The hub has no server-side search on this route, so the walk IS the search;
+    it is bounded (``_PUBLIC_TEAM_SEARCH_MAX_PAGES``) and returns None -- after
+    saying so -- rather than scanning an unbounded catalogue. The second tuple
+    member says whether the WALK was complete: a walk that stopped at the bound
+    says so in words, because a confident "no such team" past the bound would
+    be a wrong negative (review round 1, M2). Refusals from the hub are
+    rendered like every other hub refusal.
+    """
+    found: "list[dict[str, Any]]" = []
+    page = 1
+    total_pages = 1
+    reached_end = False
+    while page <= _PUBLIC_TEAM_SEARCH_MAX_PAGES:
+        try:
+            envelope = client.list_public_teams(page=page, per_page=100)
+        except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+            print(f"\n\033[1;31mError searching the public hub: {_hub_cause(exc)}\033[0m")
+            return None
+        records = envelope.get("records") if isinstance(envelope, dict) else None
+        for record in records or []:
+            if isinstance(record, dict) and matches(record):
+                found.append(record)
+        total_pages = int((envelope or {}).get("total_pages") or 1)
+        if page >= total_pages:
+            # The flag is set HERE, on the iteration that actually read the last
+            # page: the loop can also exit by incrementing past the bound, and a
+            # post-loop `page >= total_pages` conflates the two -- at exactly
+            # total_pages == bound + 1 the walk read bound pages and still
+            # claimed complete (review round 2, M2 boundary).
+            reached_end = True
+            break
+        page += 1
+    complete = reached_end
+    if not complete:
+        print(
+            f"\033[1;33m  note: the listing walk stopped after "
+            f"{_PUBLIC_TEAM_SEARCH_MAX_PAGES} pages of {total_pages}; results may be "
+            "incomplete.\033[0m"
+        )
+    return found, complete
+
+
+def _resolve_public_team_id(client: Any, name: str) -> Optional[str]:
+    """A public team id from its name (exact, case/whitespace-normalized).
+
+    Public team names are unique per the hub's public index, so an exact
+    normalized match is unambiguous; anything else is reported rather than
+    guessed at.
+    """
+    wanted = " ".join(name.split()).casefold()
+    scan = _scan_public_teams(
+        client,
+        lambda record: " ".join(str(record.get("name") or "").split()).casefold() == wanted,
+    )
+    if scan is None:
+        return None
+    found, complete = scan
+    if found:
+        return str(found[0].get("id") or "")
+    if not complete:
+        print(
+            f"\n\033[1;31mError: no public team named '{name}' in the pages read, and the "
+            f"listing walk stopped at its {_PUBLIC_TEAM_SEARCH_MAX_PAGES}-page bound; "
+            f"`lop teams search {name}` shows what the walk found.\033[0m"
+        )
+        return None
+    print(
+        f"\n\033[1;31mError: no public team named '{name}'. "
+        f"`lop teams search {name}` lists what the hub does hold.\033[0m"
+    )
+    return None
+
+
+def _print_public_team_rows(records: "list[dict[str, Any]]") -> None:
+    """The public listing's tree, mirroring ``teams list``'s shape."""
+    print("\n\033[1;32m╭─ Public teams ──────────────────────────────\033[0m")
+    for index, record in enumerate(records):
+        is_last = index == len(records) - 1
+        branch = "└──" if is_last else "├──"
+        spine = "│  " if is_last else "│ │"
+        print(
+            f"\033[1;32m│ {branch} {record.get('name', '?')} "
+            f"(v{record.get('version', '')}) — id {record.get('id', '?')}\033[0m"
+        )
+        description = _clip_line(record.get("description"), 72)
+        if description:
+            print(f"\033[1;32m{spine}   • {description}\033[0m")
+        print(f"\033[1;32m{spine}   • Manager: {record.get('manager', '?')}\033[0m")
+    print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+
+
+def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop teams search [query]`` -- browse the public Agent Hub's teams (§9 PR 2).
+
+    No query lists the newest public teams (paginated; the hub omits briefs
+    from this projection). A query filters NAME and DESCRIPTION
+    case-insensitively, walking the listing's pages so a match past page one
+    is still found. The listing is anonymous -- no login, no API key -- and
+    every row carries the hub team id ``lop teams pull`` takes.
+    """
+    from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
+
+    client = RadientClient(api_key=None, base_url=_radient_hub_base_url(ConfigManager(base_dir)))
+    query = str(getattr(args, "query", None) or "").strip()
+    as_json = bool(getattr(args, "json", False))
+
+    if query:
+        needle = query.casefold()
+        scan = _scan_public_teams(
+            client,
+            lambda record: needle
+            in f"{record.get('name', '')} {record.get('description', '')}".casefold(),
+        )
+        if scan is None:
+            return 1
+        found, complete = scan
+        if as_json:
+            _print_payload(found)
+            return 0
+        if not found:
+            if complete:
+                print(f"\n\033[1;33mNo public team matches '{query}'.\033[0m")
+            else:
+                print(
+                    f"\n\033[1;33mNo public team matches '{query}' in the pages read; the "
+                    "listing walk stopped at its bound, so a match may exist past it.\033[0m"
+                )
+            return 0
+        teams_label = "team matches" if len(found) == 1 else "teams match"
+        print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
+        _print_public_team_rows(found)
+        return 0
+
+    try:
+        envelope = client.list_public_teams(
+            page=max(1, int(getattr(args, "page", 1) or 1)),
+            per_page=max(1, int(getattr(args, "perpage", 20) or 20)),
+        )
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError searching the public hub: {_hub_cause(exc)}\033[0m")
+        return 1
+    if as_json:
+        _print_payload(envelope)
+        return 0
+    records = [row for row in (envelope.get("records") or []) if isinstance(row, dict)]
+    if not records:
+        print("\n\033[1;33mNo public teams on this page.\033[0m")
+        return 0
+    _print_public_team_rows(records)
+    print(
+        f"showing page {envelope.get('page', '?')} of {envelope.get('total_pages', '?')} "
+        f"({envelope.get('total_records', '?')} teams)"
+    )
     return 0
 
 
@@ -11942,7 +13560,40 @@ def main() -> int:
                     # (design §11 R-6). `is not None`, not truthiness: a PASSED
                     # but empty `--org` is the org path's to refuse, and must
                     # never fall through to the public one (round 1, R1-1).
-                    return agents_push_org_command(args, agent_registry, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return agents_push_org_command(args, agent_registry, base_dir)
+                if getattr(args, "hub_id", None) is not None:
+                    # The explicit-overwrite arm of the PUBLIC transport (§7.2):
+                    # the instruction-set republish, so the local copy's bytes
+                    # (not an exported archive) land on the named listing. The
+                    # ordinary public push below is untouched (§11 R-6).
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return agents_push_public_republish_command(args, agent_registry, base_dir)
+                legacy_flags = [
+                    label
+                    for attr, label in (
+                        ("preview_only", "--preview-only"),
+                        ("json", "--json"),
+                        ("accept_unresolved", "--accept-unresolved"),
+                        ("allow_internal_ops", "--allow-internal-ops"),
+                    )
+                    if getattr(args, attr, False)
+                ]
+                if legacy_flags:
+                    # This path still publishes through the legacy archive
+                    # transport, which cannot preview; silently ignoring a
+                    # preview flag would read as "it checked" (design §7.4
+                    # keeps this arm stable until phase 4). The verb agrees
+                    # with the flag count so one flag does not read as
+                    # "--preview-only need" (copy round 1, C5).
+                    verbs = "requires" if len(legacy_flags) == 1 else "require"
+                    print(
+                        f"\n\033[1;31mError: {', '.join(legacy_flags)} {verbs} a "
+                        "preview-capable target; public `agents push` (without --org or "
+                        "--hub-id) publishes directly, without a preview. Pass --org or "
+                        "--hub-id.\033[0m"
+                    )
+                    return 1
                 from local_operator.clients.radient import RadientClient  # lazy
                 from local_operator.providers.radient_credentials import (
                     resolve_radient_credential_sync,
@@ -11965,6 +13616,15 @@ def main() -> int:
                 # flow; nothing aligns a local uuid with a hub listing id, so the
                 # ordinary outcome for it is a create (see the outcome branch).
                 agent_id_to_overwrite = getattr(args, "id", None) or None
+                # The design's honest interim line (§7.4): this transport cannot
+                # run the reference check, so the publisher is told that the
+                # safety net is missing BEFORE the upload, not left to assume
+                # the preview ran (ux round 1, U7).
+                print(
+                    "\033[1;33m  note: this build publishes through a path that cannot "
+                    "show you the generalization diff; `--org` and `--hub-id` pushes "
+                    "preview and confirm before publishing.\033[0m"
+                )
                 # The zip is uploaded and finished with inside this block, so
                 # the context manager reclaims its temp directory on every
                 # exit path. The bare export_agent() left one behind per push.
@@ -12074,9 +13734,13 @@ def main() -> int:
                 elif args.teams_command == "delete":
                     return teams_delete_command(args.name, team_registry)
                 elif args.teams_command == "push":
-                    return teams_push_command(args, team_registry, base_dir)
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return teams_push_command(args, team_registry, base_dir)
                 elif args.teams_command == "pull":
                     return teams_pull_command(args, team_registry, base_dir)
+                elif args.teams_command == "search":
+                    with _JsonStdoutGuard(bool(getattr(args, "json", False))):
+                        return teams_search_command(args, base_dir)
                 elif args.teams_command == "sync":
                     return teams_sync_command(args, team_registry, base_dir)
                 elif args.teams_command == "link":

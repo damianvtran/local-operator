@@ -284,7 +284,7 @@ def test_org_transport_failure_reports_no_status(radient_client: RadientClient) 
             radient_client.get_team("team-1")
 
     assert exc_info.value.status_code is None
-    assert str(exc_info.value) == "Could not pull the team from the organization"
+    assert str(exc_info.value) == "Could not pull the team from the Radient Agent Hub"
 
 
 def test_get_agent_carries_the_bearer_only_when_asked(

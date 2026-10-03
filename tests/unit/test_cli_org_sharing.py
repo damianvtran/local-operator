@@ -41,8 +41,50 @@ def quiet_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("local_operator.cli.setup_cross_platform_environment", lambda: None)
 
 
+def _preview(
+    document: dict[str, Any],
+    *,
+    mode: str = "create",
+    status: str = "unchanged",
+    changes: "list[dict[str, Any]] | None" = None,
+    unresolved: "list[dict[str, Any]] | None" = None,
+    resolution: "dict[str, Any] | None" = None,
+) -> dict[str, Any]:
+    """The hub's preview object, at the shape the client parses (design p2p3 §4.1).
+
+    ``unchanged`` is the neutral fixture -- a document carrying no references --
+    and the preview is the only surface a reference VALUE ever travels on, so
+    cells that need values build their own ``changes``/``unresolved``.
+    """
+    unresolved = unresolved or []
+    return {
+        "status": status,
+        "document": document,
+        "changes": changes or [],
+        "unresolved": unresolved,
+        "advisories": [],
+        "resolution": resolution or {"mode": mode, "removed": [], "added": []},
+        "review": "not_run",
+        "pin": {
+            "token": "rgp-preview-fixture",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "commit_header": "X-Radient-Preview-Token",
+            "accept_header": "X-Radient-Accept-Unresolved",
+            "accept_ids": [str(item.get("id")) for item in unresolved],
+        },
+        "transform": {"version": "gen-v1", "model": "stub"},
+    }
+
+
 class _FakeOrgHub:
-    """The org-surface calls the commands make, and what they were asked for."""
+    """The org-surface calls the commands make, and what they were asked for.
+
+    Since the preview/commit protocol (design p2p3 §4) every instruction-set
+    push previews first, so the fake answers the four preview routes with the
+    neutral ``unchanged`` object and records the calls; the commit methods keep
+    the legacy tuples the older cells assert on and gain a ``team_commits`` /
+    ``agent_commits`` record of the preview kwargs for the newer ones.
+    """
 
     def __init__(self) -> None:
         self.memberships: list[dict[str, Any]] = [
@@ -57,9 +99,14 @@ class _FakeOrgHub:
         ]
         self.published_teams: list[tuple[dict[str, Any], str]] = []
         self.published_agents: list[tuple[dict[str, Any], Any, Any]] = []
+        #: The commit kwargs of each publish, beside the legacy tuples above.
+        self.team_commits: list[dict[str, Any]] = []
+        self.agent_commits: list[dict[str, Any]] = []
+        #: Every preview call: (kind, id-or-None, document, visibility, tenant).
+        self.preview_calls: list[tuple[str, Any, Any, Any, Any]] = []
         self.pulled_teams: list[str] = []
         self.team_documents: dict[str, dict[str, Any]] = {}
-        #: Rows ``get_agent`` answers, and every (id, with_credential) it was asked for.
+        #: Rows ``get_agent`` answers, and every (id, with_credential-flag) asked for.
         self.agent_rows: dict[str, dict[str, Any]] = {
             "hub-agent-1": {"tenant_id": "org-a", "visibility": "org"}
         }
@@ -68,11 +115,85 @@ class _FakeOrgHub:
     def list_memberships(self) -> list[dict[str, Any]]:
         return self.memberships
 
-    def publish_team_document(self, document: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    def publish_team_document(
+        self,
+        document: dict[str, Any],
+        tenant_id: Any = None,
+        *,
+        visibility: Any = None,
+        preview_token: Any = None,
+        accept_unresolved: Any = None,
+        moderation_allowance: Any = None,
+    ) -> dict[str, Any]:
         self.published_teams.append((document, tenant_id))
+        self.team_commits.append(
+            {
+                "visibility": visibility,
+                "preview_token": preview_token,
+                "accept_unresolved": accept_unresolved,
+                "moderation_allowance": moderation_allowance,
+            }
+        )
         return {
             "team": {"id": "hub-team-1", "name": document["name"], "version": document["version"]}
         }
+
+    def republish_team_document(
+        self,
+        team_id: str,
+        document: dict[str, Any],
+        *,
+        visibility: Any = None,
+        tenant_id: Any = None,
+        preview_token: Any = None,
+        accept_unresolved: Any = None,
+        moderation_allowance: Any = None,
+    ) -> dict[str, Any]:
+        self.published_teams.append((document, tenant_id))
+        self.team_commits.append(
+            {
+                "visibility": visibility,
+                "preview_token": preview_token,
+                "accept_unresolved": accept_unresolved,
+                "moderation_allowance": moderation_allowance,
+                "team_id": team_id,
+            }
+        )
+        return {"team": {"id": team_id, "name": document["name"], "version": document["version"]}}
+
+    def preview_publish_team_document(
+        self, document: dict[str, Any], *, visibility: Any = None, tenant_id: Any = None
+    ) -> dict[str, Any]:
+        self.preview_calls.append(("team-create", None, document, visibility, tenant_id))
+        return _preview(document, mode="create")
+
+    def preview_republish_team_document(
+        self,
+        team_id: str,
+        document: dict[str, Any],
+        *,
+        visibility: Any = None,
+        tenant_id: Any = None,
+    ) -> dict[str, Any]:
+        self.preview_calls.append(("team-republish", team_id, document, visibility, tenant_id))
+        return _preview(document, mode="overwrite")
+
+    def preview_publish_agent_instruction_set(
+        self, document: dict[str, Any], *, visibility: Any = None, tenant_id: Any = None
+    ) -> dict[str, Any]:
+        self.preview_calls.append(("agent-create", None, document, visibility, tenant_id))
+        return _preview(document, mode="create")
+
+    def preview_republish_agent_instruction_set(
+        self,
+        agent_id: str,
+        document: dict[str, Any],
+        *,
+        visibility: Any = None,
+        tenant_id: Any = None,
+    ) -> dict[str, Any]:
+        self.preview_calls.append(("agent-republish", agent_id, document, visibility, tenant_id))
+        return _preview(document, mode="overwrite")
 
     def get_team(self, team_id: str, **_kw: Any) -> dict[str, Any]:
         self.pulled_teams.append(team_id)
@@ -88,10 +209,54 @@ class _FakeOrgHub:
         return {"msg": "Agent retrieved successfully", "result": row}
 
     def publish_agent_instruction_set(
-        self, document: dict[str, Any], *, visibility: Any = None, tenant_id: Any = None
+        self,
+        document: dict[str, Any],
+        *,
+        visibility: Any = None,
+        tenant_id: Any = None,
+        preview_token: Any = None,
+        accept_unresolved: Any = None,
+        moderation_allowance: Any = None,
     ) -> dict[str, Any]:
         self.published_agents.append((document, visibility, tenant_id))
-        return {"agent_id": "hub-agent-1", "name": document["name"], "version": document["version"]}
+        self.agent_commits.append(
+            {
+                "preview_token": preview_token,
+                "accept_unresolved": accept_unresolved,
+                "moderation_allowance": moderation_allowance,
+            }
+        )
+        return {
+            "agent_id": "hub-agent-1",
+            "name": document["name"],
+            "version": document["version"],
+        }
+
+    def republish_agent_instruction_set(
+        self,
+        agent_id: str,
+        document: dict[str, Any],
+        *,
+        visibility: Any = None,
+        tenant_id: Any = None,
+        preview_token: Any = None,
+        accept_unresolved: Any = None,
+        moderation_allowance: Any = None,
+    ) -> dict[str, Any]:
+        self.published_agents.append((document, visibility, tenant_id))
+        self.agent_commits.append(
+            {
+                "preview_token": preview_token,
+                "accept_unresolved": accept_unresolved,
+                "moderation_allowance": moderation_allowance,
+                "agent_id": agent_id,
+            }
+        )
+        return {
+            "agent_id": agent_id,
+            "name": document["name"],
+            "version": document["version"],
+        }
 
 
 @pytest.fixture
@@ -158,7 +323,10 @@ def test_teams_push_publishes_the_local_team(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _make_team()
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"],
+    )
 
     assert main() == 0
 
@@ -240,7 +408,9 @@ def test_teams_push_sends_a_brief_over_the_old_cap(
     TeamRegistry(config_dir()).create_team(
         TeamEditFields(name="release-crew", manager="manager", instructions=brief)
     )
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
 
     assert main() == 0
 
@@ -283,7 +453,7 @@ def test_teams_push_without_memberships_explains_the_invite_path(
     assert main() == 1
 
     out = capsys.readouterr().out
-    assert "not a member of one" in out
+    assert "not a member of any organization" in out
     assert org_hub.published_teams == []
 
 
@@ -298,7 +468,7 @@ def test_teams_push_renders_the_hub_code(
 
     _make_team()
 
-    def refuse(document: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    def refuse(document: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise APIError(
             "The name is already held.",
             status_code=409,
@@ -307,7 +477,9 @@ def test_teams_push_renders_the_hub_code(
         )
 
     org_hub.publish_team_document = refuse  # type: ignore[method-assign]
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
 
     assert main() == 1
 
@@ -394,7 +566,7 @@ def test_agents_push_org_publishes_an_instruction_set(
     )
     registry.set_agent_system_prompt(agent.id, "You write code.")
     monkeypatch.setattr(
-        "sys.argv", ["program", "agents", "push", "--name", "OrgCoder", "--org", "org-a"]
+        "sys.argv", ["program", "agents", "push", "--name", "OrgCoder", "--org", "org-a", "--yes"]
     )
 
     assert main() == 0
@@ -600,7 +772,9 @@ def test_org_calls_refuse_a_non_canonical_hub_by_default(
 
     monkeypatch.setattr("local_operator.clients.radient.RadientClient", note_client)
     _make_team()
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
 
     assert main() == 1
 
@@ -823,7 +997,9 @@ def test_teams_push_derives_from_the_manager_when_an_agents_store_exists(
         ),
     )
     _make_team()
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
 
     assert main() == 0
 
@@ -845,7 +1021,9 @@ def test_teams_push_without_an_agents_store_derives_nothing(
     from local_operator.paths import config_dir
 
     _make_team()
-    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
 
     assert main() == 0
 
