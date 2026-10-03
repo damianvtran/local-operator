@@ -2925,6 +2925,26 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 #: ``_composer_placeholder_for``, the one owner of that swap.
 ASK_ANSWER_PLACEHOLDER = "Answer the question above… — Enter sends it to the ask"
 
+#: How often the ask surfaces re-derive their countdown while a row is present.
+#:
+#: ``expiry_text`` reads ``expires_at`` against the client clock AT PAINT TIME
+#: (§5's copy contract) — and every paint used to be driven by a frontend
+#: snapshot, so a surface the user had left open froze its own "expires in 42m"
+#: until the next wire event: a deadline could pass while the row still named a
+#: minute that no longer existed. This interval is what re-derives the copy
+#: without an event, at the fine end of the 30-60 s band the audit set.
+#:
+#: One timer repaints EVERY row from one ``now`` rather than a timer per row,
+#: and the period is coarse relative to the shortest thing the row says: the
+#: words are minute-granular above a minute (where the freeze was visible) and
+#: second-granular below it, so a sub-minute row can trail by up to one period
+#: before it reads "expiring". That is the deliberate trade: the state that
+#: matters there arrives within a tick, and a finer clock would repaint every
+#: open surface for a word that changes nothing the user does in that half
+#: minute. The timeout ITSELF is the queue's, off in the runtime — this timer
+#: is a repaint, never a second authority on when an ask dies.
+ASK_COUNTDOWN_TICK_S = 30.0
+
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
 #: list that simply vanished would read as the gesture having been dropped —
@@ -5552,6 +5572,11 @@ class OperatorApp(App[None]):
         self._ask_card: AskPickerScreen | None = None
         #: The queue list widget while it is mounted, else None.
         self._ask_list: AskQueueList | None = None
+        #: The interval that keeps a painted countdown honest while rows exist,
+        #: else None. Started and stopped by `_sync_ask_tick` — the ONE clock
+        #: this surface has, and only ever armed while there is something to
+        #: repaint (see that method for why a timer is needed at all).
+        self._ask_tick: Timer | None = None
         #: Whether the mounted CARD was opened out of the list. Escaping such a
         #: card hands the user back to the list they were choosing in rather
         #: than all the way out to the minimized bar (UX round 1, U6). Cleared
@@ -25548,9 +25573,13 @@ class OperatorApp(App[None]):
     #   reads the app-level slot and answers "a card is owed" for a source with
     #   no gate at all.
     #
-    # * No timer, no clock and no notification here. The countdown is derived
-    #   from ``expires_at`` at paint time (§5's copy contract) and the timeout
-    #   itself is the queue's, off in the runtime.
+    # * ONE timer, and only while rows exist — ``_sync_ask_tick``. The countdown
+    #   is still derived from ``expires_at`` at paint time (§5's copy contract)
+    #   and the timeout is still the queue's, off in the runtime, so the timer
+    #   is not a second authority on when an ask dies: it exists because a
+    #   derivation that only runs on a frontend snapshot FREEZES when the wire
+    #   goes quiet, which is how "expires in 42m" outlived its own deadline on
+    #   a surface the user was looking at.
 
     def _sync_ask_surface(self, rows: list[AskRow]) -> None:
         """Reconcile the bar, the card and the drafts with the wire's asks.
@@ -25593,8 +25622,10 @@ class OperatorApp(App[None]):
             # surface for a feature its runtime does not have.
             self._ask_rows = []
             self._ask_bar.set_state(count=0, expanded=False, present=False)
+            self._sync_ask_tick()
             return
         self._ask_rows = list(rows)
+        self._sync_ask_tick()
         self._paint_ask_bar()
         if self._ask_list is not None:
             # The OPEN LIST follows the wire while it is up, which it did not
@@ -25627,9 +25658,7 @@ class OperatorApp(App[None]):
             # Nothing left to answer at all: a list of zero rows is dead chrome
             # holding the composer hostage.
             self._collapse_asks()
-        self._sync_sidebar_asks(
-            len([row for row in self._open_ask_rows() if row.status == STATUS_OPEN])
-        )
+        self._sync_sidebar_asks(len(self._open_ask_rows()))
 
     @staticmethod
     def _ask_now_ms() -> int:
@@ -25651,10 +25680,14 @@ class OperatorApp(App[None]):
         had to be made: a late answer is an ANSWER (the agent was told, one
         deadline too late), so offering it an answer box can only be refused —
         and the bar counted it as an owed question for as long as it stayed in
-        this list. ``ask_rows`` drops it for the same reason; both gates read
-        the same two statuses.
+        this list.
+
+        The rule is ``AskRow.answerable``, which reads the fold's own
+        ``OUTSTANDING_STATUSES`` — the same set the wire's tally and the index
+        use, so a timed-out-but-answerable ask can never be counted by one
+        surface and dropped by another.
         """
-        return [row for row in self._ask_rows if row.status in (STATUS_OPEN, STATUS_TIMED_OUT)]
+        return [row for row in self._ask_rows if row.answerable]
 
     @staticmethod
     def _ask_head_text(rows: list[AskRow]) -> str:
@@ -25827,6 +25860,56 @@ class OperatorApp(App[None]):
             present=bool(answerable),
             timed_out=len(answerable) - len(waiting),
         )
+
+    def _sync_ask_tick(self) -> None:
+        """Run the countdown clock for exactly as long as a row is present.
+
+        THE ONE CLOCK THESE SURFACES HAVE. ``expiry_text`` is derived at paint
+        time from the row's own deadline, so nothing else in the app has to be
+        told the clock moved — but a derivation that only ever runs on a
+        frontend snapshot freezes when the wire goes quiet, which is how an
+        open list kept saying "expires in 42m" for a deadline that had already
+        passed. This interval is the missing event. One timer repaints every row
+        from one ``now`` (not a timer per row), and it is armed on the ROWS
+        being present rather than on the list being mounted: the list can be
+        mounted and unmounted between two snapshots, so following the mount
+        would need a second call site for no gain — the tick is a no-op
+        whenever nothing paints a deadline (see ``_on_ask_tick``).
+
+        Stopped, never merely paused, when the last row leaves: a session with
+        no asks, or a build with the flag off, must carry no clock at all.
+        Idempotent, and guarded on ``is_running`` the way ``ToolCard``'s clock
+        is — a card built but not mounted (which every unit test holding one
+        directly is) has no loop to schedule against, and ``set_interval``
+        raises out of a lifecycle method there.
+        """
+        from local_operator.asks import policy
+
+        if policy.enabled() and self._ask_rows:
+            if self._ask_tick is None and self.is_running:
+                self._ask_tick = self.set_interval(ASK_COUNTDOWN_TICK_S, self._on_ask_tick)
+            return
+        if self._ask_tick is not None:
+            self._ask_tick.stop()
+            self._ask_tick = None
+
+    def _on_ask_tick(self) -> None:
+        """Repaint the countdown-bearing surface from the current clock.
+
+        Only the LIST paints a deadline (``expiry_text``), so only the list is
+        repainted: the bar's copy is derived from the counts and the head
+        question, and no clock can change any of them, so a bar repaint here
+        could only ever be a no-op refresh. The rows are NOT rebuilt — the
+        clock moved and nothing else did — which is also why the highlight
+        cannot be re-derived from under the user.
+
+        A row inside its last minute therefore trails by up to one period
+        before it reads ``expiring``: that is ``ASK_COUNTDOWN_TICK_S``'s
+        documented trade, not an oversight — the alternative is repainting
+        every open surface every second for a word nothing acts on.
+        """
+        if self._ask_list is not None:
+            self._ask_list.set_now(self._ask_now_ms())
 
     def _sync_ask_composer(self, *, restore_draft: bool = True) -> None:
         """Apply the composer's mode: placeholder, draft and focus in one place."""
@@ -26034,6 +26117,22 @@ class OperatorApp(App[None]):
                     outcome = {"ok": False, "error": "the answer could not be delivered"}
                 self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
+            # ONE QUEUE COSTS ONE COLLAPSE, not one per answer. The card was
+            # opened OUT of the list, so finishing it hands the user back to
+            # that same list at the NEXT outstanding ask — the row that slides
+            # into the place the answered one leaves — instead of collapsing to
+            # the bar and making them re-expand (and re-hunt) for every ask
+            # left. Nothing outstanding still collapses: a list of rows nobody
+            # owes an answer to is dead chrome, and the answered ask's own row
+            # is excluded from the walk because the wire has not dropped it
+            # yet. This mirrors the partial-map route below, which already
+            # returns to the list at the row the user came from.
+            if self._ask_from_list:
+                following = self._next_outstanding_ask(ask_id)
+                if following is not None:
+                    self._clear_ask_surface()
+                    self._mount_ask_list(highlight=following.ask_id)
+                    return
         elif self._ask_from_list and self._ask_list is None:
             # A PARTIAL map means the user Escaped mid-walk (§5.0/D5: a
             # back-out is never an answer). If they picked this ask out of the
@@ -26046,10 +26145,37 @@ class OperatorApp(App[None]):
             else:  # pragma: no cover - the fold emptied under the card
                 self._collapse_asks()
             return
-        # A submit collapses too: §5.0's "answering one collapses the surface
-        # (TUI, which returns to work)". The card is already settled, so the
-        # collapse only has to take it down and give the composer back.
+        # A submit from a CARD THAT WAS NOT PICKED OUT OF THE LIST still
+        # collapses: there was no list to return to, and a single ask's card
+        # answers §5.0's "returns to work" case — the composer comes back and
+        # the conversation is theirs again. (The list route above is the
+        # multiple-ask case, where "work" is the next answer.)
         self._collapse_asks()
+
+    def _next_outstanding_ask(self, ask_id: str) -> AskRow | None:
+        """The ask to hand the user after ``ask_id`` settles, or None.
+
+        The list is a PLACE, so "next" is positional: the rows AFTER the
+        answered one come first, and when it was the last of them the walk falls
+        back to the last outstanding row BEFORE it — the row that moves up into
+        the space the answered one leaves is the row the user was about to
+        reach.
+
+        ``answerable`` is the same predicate the bar, the list and the fold
+        count with, so a row the user owes nothing on (timed out and dismissed,
+        late, declined) is never handed over.
+
+        ``ask_id`` is guaranteed present in ``self._ask_rows``: the only caller
+        is the submit branch of ``_on_queue_ask_settle``, which found that very
+        row in the list to decide the answer complete, and nothing between the
+        two awaits. ``ids.index`` is therefore the honest lookup — a fallback
+        for a missing row would be a branch no caller can reach.
+        """
+        rows = self._ask_rows
+        ids = [row.ask_id for row in rows]
+        at = ids.index(ask_id)
+        candidates = [*rows[at + 1 :], *reversed(rows[:at])]
+        return next((row for row in candidates if row.answerable), None)
 
     def _submit_ask_answer(self, text: str) -> None:
         """Route a composer submission into the expanded queued ask.
