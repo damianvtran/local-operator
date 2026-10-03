@@ -453,7 +453,7 @@ def test_teams_push_without_memberships_explains_the_invite_path(
     assert main() == 1
 
     out = capsys.readouterr().out
-    assert "not a member of one" in out
+    assert "not a member of any organization" in out
     assert org_hub.published_teams == []
 
 

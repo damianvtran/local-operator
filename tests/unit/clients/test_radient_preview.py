@@ -188,12 +188,22 @@ def test_publish_without_the_new_kwargs_is_byte_identical(
     ) as mock_post:
         radient_client.publish_agent_instruction_set(document)
 
-    _args, kwargs = mock_post.call_args
-    assert PREVIEW_TOKEN_HEADER not in kwargs["headers"]
-    assert PREVIEW_ACCEPT_HEADER not in kwargs["headers"]
-    assert kwargs["params"] == {}
-    assert "moderation_allowance" not in kwargs["params"]
-    assert kwargs["json"] == document
+    args, kwargs = mock_post.call_args
+    # The full request shape, frozen: a stray default header or an accidentally
+    # added kwarg would pass the absence checks but fail this (review round 1,
+    # N1). "Byte-identical" means this dict and nothing else.
+    assert args[0] == f"{base_url}/agents/publish"
+    assert kwargs == {
+        "headers": {
+            "X-Title": "Local Operator",
+            "HTTP-Referer": "https://local-operator.com",
+            "Authorization": "Bearer test_api_key",
+            "Content-Type": "application/json",
+        },
+        "json": document,
+        "params": {},
+        "allow_redirects": False,
+    }
 
 
 def test_republish_commit_kwargs_ride_too(radient_client: RadientClient, base_url: str) -> None:
@@ -252,6 +262,25 @@ def test_list_public_teams_reads_the_listing_anonymously(
     assert args[0] == f"{base_url}/teams"
     assert kwargs["params"] == {"page": 2, "per_page": 20}
     assert "Authorization" not in kwargs["headers"]
+    # The listing refuses redirects like every other hub call (S-1).
+    assert kwargs["allow_redirects"] is False
+
+
+def test_list_public_teams_refuses_a_redirect(anonymous_client: RadientClient) -> None:
+    """A 3xx listing is refused instead of followed (security round 1, S-1).
+
+    Following it would render (or import) another origin's rows as "the public
+    hub"; no credential can ride this call, so the refusal is provenance, not
+    secrecy -- and it matches every other hub call this slice adds.
+    """
+    response = MagicMock()
+    response.status_code = 302
+    with patch("requests.get", return_value=response) as mock_get:
+        with pytest.raises(APIError) as excinfo:
+            anonymous_client.list_public_teams()
+
+    assert getattr(excinfo.value, "code", None) == "unexpected_redirect"
+    assert mock_get.call_args.kwargs["allow_redirects"] is False
 
 
 def test_get_team_anonymous_sends_no_authorization(

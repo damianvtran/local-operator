@@ -1532,9 +1532,17 @@ class RadientClient:
         headers = self._get_headers(content_type="application/json", require_api_key=False)
         try:
             response = requests.get(
-                url, headers=headers, params={"page": page, "per_page": per_page}
+                url,
+                headers=headers,
+                params={"page": page, "per_page": per_page},
+                # No credential can ride this call, but the redirect refusal is
+                # provenance, not just secrecy: following a 3xx would render (or
+                # import) another origin's rows as "the public hub" (review
+                # round 1, S-1). Every other hub call this slice adds pins both.
+                allow_redirects=False,
             )
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,

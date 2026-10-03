@@ -17,6 +17,7 @@ True); the non-TTY cells force it False.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -157,7 +158,7 @@ class _Hub:
         )
         if self.preview_queue:
             item = self.preview_queue.pop(0)
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 raise item
             return item
         return _preview(document, mode="overwrite" if ident else "create")
@@ -183,7 +184,7 @@ class _Hub:
         self.commit_calls.append((kind, ident, {"document": document, **kwargs}))
         if self.commit_queue:
             item = self.commit_queue.pop(0)
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 raise item
         return (
             {"team": {"id": "hub-team-1", "name": "x", "version": "1.0.0"}}
@@ -245,6 +246,16 @@ def _tty(monkeypatch: pytest.MonkeyPatch, answers: List[str]) -> None:
 
 def _no_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
+
+
+def _plain(text: str) -> str:
+    """``text`` with ANSI escapes stripped: assertions compare the rendered words.
+
+    The remediation round added in-line colour (only the changed span of a
+    ``d`` pair is highlighted, ux U4), so a substring that spans a highlighted
+    token no longer matches the raw output.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _make_team(name: str = "release-crew", project: str = "rad-1", instructions: str = "You ship."):
@@ -443,7 +454,10 @@ def test_full_diff_is_printed_on_d(
 
     out = capsys.readouterr().out
     assert "--- instructions: submitted" in out and "+++ instructions: generalized" in out
-    assert "-You ship. Damian Tran reviews." in out
+    assert "-You ship. Damian Tran reviews." in _plain(out)
+    # U4: only the changed span is coloured -- the shared prefix/suffix stay
+    # plain and "Damian Tran" alone carries the red.
+    assert "\x1b[1;31mDamian Tran\x1b[0m" in out
 
 
 def test_confirm_commits_the_pinned_document_not_the_local_one(
@@ -590,7 +604,7 @@ def test_unresolved_prompts_one_at_a_time_and_n_aborts(
     assert main() == 1
 
     out = capsys.readouterr().out
-    assert 'Publish with "[u1] Q4 pilot" left as-is? [y/N]' in out
+    assert 'Publish with "[u1] Q4 pilot" left as-is? [y/N/d]' in out
     assert "Edit the value in your local copy" in out
     assert hub.commit_calls == []
 
@@ -648,7 +662,14 @@ def test_allow_internal_ops_requires_typed_yes(
     assert main() == 0
 
     out = capsys.readouterr().out
-    assert "org_internal_ops_v1" in out and 'Type "yes" to confirm' in out
+    assert "Publishing team 'release-crew' to organization 'org-a'." in out
+    assert (
+        "Confirming applies the internal-operations allowance to this publish's "
+        "content review." in out
+    )
+    assert 'Type "yes" to confirm' in out
+    # U6: the version id is code-side bookkeeping, not user copy.
+    assert "org_internal_ops_v1" not in out
     _kind, _ident, kwargs = hub.commit_calls[0]
     assert kwargs["moderation_allowance"] == "org_internal_ops_v1"
 
@@ -705,7 +726,7 @@ def test_republish_resend_consent_prompts_before_dropping(
     assert main() == 0
 
     out = capsys.readouterr().out
-    assert "published under the internal-ops allowance" in out
+    assert "published under the internal-operations allowance" in out
     assert "Continue without? [y/N]" in out
     _kind, _ident, kwargs = hub.commit_calls[0]
     assert kwargs["moderation_allowance"] is None
@@ -747,7 +768,7 @@ def test_republish_resend_consent_with_yes_keeps_running_with_a_notice(
     assert main() == 0
 
     out = capsys.readouterr().out
-    assert "published under the internal-ops allowance" in out
+    assert "published under the internal-operations allowance" in out
     assert "Continuing without it (--yes)." in out
 
 
@@ -1101,8 +1122,17 @@ def test_agents_push_zip_path_refuses_preview_flags(
     assert main() == 1
 
     out = capsys.readouterr().out
-    assert "--preview-only need a preview-publishing target" in out
+    assert "--preview-only requires a preview-capable target" in out
+    assert "Pass --org or --hub-id." in out
     assert hub.preview_calls == [] and hub.commit_calls == []
+
+    # Two flags read plural; one reads singular (copy round 1, C5).
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "agents", "push", "--name", "OrgCoder", "--preview-only", "--json"],
+    )
+    assert main() == 1
+    assert "--preview-only, --json require a preview-capable target" in capsys.readouterr().out
 
 
 # --- _hub_cause: the new codes ----------------------------------------------------
@@ -1127,7 +1157,8 @@ def test_hub_cause_renders_the_new_codes() -> None:
         (
             "moderation_unavailable",
             {"stage": "generalization", "windows_needed": 41, "windows_max": 24},
-            "needs 41 windows; the limit is 24",
+            "this document needs 41 reference-check windows and the limit is 24; "
+            "shorten it and push again",
         ),
         ("resolution_conflict", {}, "resolution_conflict"),
     ]
@@ -1249,3 +1280,278 @@ def test_teams_pull_public_by_uuid_id_skips_the_listing(
     out = capsys.readouterr().out
     assert "Successfully pulled team 'open-crew'" in out
     assert hub.get_team_calls == [(uuid_id, False)]
+
+
+# --- remediation round 1: the rev/ux/sec/copy findings ------------------------------
+
+
+def test_json_stdout_is_machine_clean_on_success_and_refusal(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--json: the payload alone on stdout; every human line on stderr (ux U1)."""
+    _make_team()
+    hub.preview_queue.append(_preview({"name": "release-crew"}, status="ready", changes=_CHANGES))
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "teams", "push", "--org", "org-a", "--json", "--yes", "release-crew"],
+    )
+
+    assert main() == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # stdout is ONE JSON object on success
+    assert payload["status"] == "ready"
+    assert "Successfully pushed" in captured.err  # the human line moved to stderr
+
+    # The refusal path: name_taken fires after the payload was emitted, and
+    # stdout still parses -- the case a script most wants to read.
+    hub.commit_queue.append(
+        APIError('A team named "release-crew" already exists.', status_code=409, code="name_taken")
+    )
+    hub.preview_queue.append(_preview({"name": "release-crew"}, status="ready", changes=_CHANGES))
+    assert main() == 1
+    captured = capsys.readouterr()
+    json.loads(captured.out)
+    assert "name_taken" in captured.err
+
+
+def test_keyboard_interrupt_is_a_clean_cancel_with_an_honest_exit(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """^C on the paid call is a cancel, not a traceback (ux U2)."""
+    _make_team()
+    hub.preview_queue.append(KeyboardInterrupt())
+    _tty(monkeypatch, [])
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 130
+    assert "Cancelled; nothing was published." in capsys.readouterr().out
+
+    # The commit path cannot claim nothing happened: the hub may have received it.
+    hub.preview_queue.append(_preview({}, status="ready", changes=_CHANGES))
+    hub.commit_queue.append(KeyboardInterrupt())
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "teams", "push", "--org", "org-a", "--yes", "release-crew"],
+    )
+    assert main() == 130
+    assert "The hub may still have received this publish" in capsys.readouterr().out
+
+
+def test_declines_and_preview_only_say_nothing_was_published(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The common "no" gets the one-line reassurance every other exit already had (ux U3)."""
+    _make_team()
+    hub.preview_queue.append(_preview({}, status="ready", changes=_CHANGES))
+    _tty(monkeypatch, ["n"])
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 3
+    assert "Nothing was published." in capsys.readouterr().out
+
+    hub.preview_queue.append(_preview({}, status="ready", changes=_CHANGES))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "teams", "push", "--org", "org-a", "--preview-only", "release-crew"],
+    )
+    assert main() == 2
+    assert "Nothing was published." in capsys.readouterr().out
+
+
+def test_d_at_the_unresolved_prompt_shows_the_diff_and_reasks(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "d" works at the unresolved prompt too: show, then re-ask (ux U5)."""
+    _make_team(instructions="You ship. Damian Tran reviews.")
+    generalized = {"name": "release-crew", "instructions": "You ship. [PERSON_1] reviews."}
+    hub.preview_queue.append(_preview(generalized, status="needs_ack", unresolved=_UNRESOLVED))
+    _tty(monkeypatch, ["d", "y", "y"])
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "--- instructions: submitted" in out  # shown at the unresolved prompt
+    assert _plain(out).count("left as-is? [y/N/d]") == 2  # asked, shown, asked again
+    assert hub.commit_calls
+
+
+def test_render_wraps_to_the_terminal_width(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No rendered line exceeds the terminal width (ux U4; the captures pin 80)."""
+    monkeypatch.setenv("COLUMNS", "80")
+    _make_team()
+    long_reason = "could be an internal system name or a generic description " * 3
+    hub.preview_queue.append(
+        _preview(
+            {},
+            status="needs_ack",
+            changes=_CHANGES,
+            unresolved=[
+                {"id": "u1", "field": "project", "value": "Q4 pilot", "reason": long_reason}
+            ],
+        )
+    )
+    _tty(monkeypatch, ["y", "y"])
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 0
+
+    out = _plain(capsys.readouterr().out)
+    # Prompt echoes never break at the terminal width (input() renders those),
+    # and outcome sentences stay single-line by convention (they are grep
+    # targets; terminals soft-wrap them) -- the preview RENDER is the surface
+    # that must fit.
+    over = [
+        line
+        for line in out.splitlines()
+        if len(line) > 80
+        and "[y/N/d]" not in line
+        and "Continue without?" not in line
+        and not line.startswith("Successfully ")
+    ]
+    assert over == []
+
+
+def test_resolution_summary_reminder_and_headings(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The "stay removed" reminder is only claimable when something was removed (ux N1/N3)."""
+    _make_team()
+    hub.team_rows["hub-1"] = {
+        "id": "hub-1",
+        "tenant_id": "org-a",
+        "name": "release-crew",
+        "version": "1.0.0",
+    }
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "--id", "hub-1", "release-crew"]
+    )
+
+    hub.preview_queue.append(
+        _preview(
+            {},
+            status="ready",
+            changes=_CHANGES,
+            resolution={
+                "mode": "overwrite",
+                "removed": [],
+                "added": [{"field": "description", "text": "Ships it."}],
+            },
+        )
+    )
+    _tty(monkeypatch, ["y"])
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "Compared with the published version: 0 removed, 1 added." in out
+    assert "Removed sections stay removed." not in out
+    # Additions are listed too, not just counted (ux N2).
+    assert "+ description: Ships it." in out
+    hub.preview_queue.append(
+        _preview(
+            {},
+            status="ready",
+            changes=_CHANGES,
+            resolution={
+                "mode": "overwrite",
+                "removed": [{"field": "instructions", "heading": "Release steps"}],
+                "added": [],
+            },
+        )
+    )
+    _tty(monkeypatch, ["y"])
+    assert main() == 0
+    out = capsys.readouterr().out
+    # The summary wraps to the terminal width, so compare the flattened words.
+    flat = " ".join(_plain(out).split())
+    assert "Removed sections stay removed." in flat
+    assert "Release steps" in out  # the removed unit's heading, not just the field (ux N3)
+
+
+def test_agent_republish_resend_guard(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The agent-side resend arm shares the guard; pin it directly (security note)."""
+    _make_agent()
+    hub.agent_rows["hub-agent-1"] = {
+        "id": "hub-agent-1",
+        "tenant_id": "org-a",
+        "name": "OrgCoder",
+        "version": "1.0.0",
+        "visibility": "org",
+        "moderation": {"scope": "org_allowance"},
+    }
+    _tty(monkeypatch, ["n"])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "program",
+            "agents",
+            "push",
+            "--name",
+            "OrgCoder",
+            "--org",
+            "org-a",
+            "--hub-id",
+            "hub-agent-1",
+        ],
+    )
+
+    assert main() == 3
+
+    out = capsys.readouterr().out
+    assert "published under the internal-operations allowance" in out
+    assert "Nothing was published." in out
+    assert hub.preview_calls == []  # refused before anything is spent
+
+
+def test_public_walk_stops_at_the_bound_and_says_so(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A walk that stopped at its page bound must not claim a confident "no such" (rev M2)."""
+    monkeypatch.setattr("local_operator.cli._PUBLIC_TEAM_SEARCH_MAX_PAGES", 2)
+
+    def listing(*, page: int = 1, per_page: int = 20):
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_pages": 5,
+            "total_records": 480,
+            "records": [{"id": f"t{page}", "name": f"page-{page}-crew"}],
+        }
+
+    hub.list_public_teams = listing  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.argv", ["program", "teams", "search", "does-not-exist"])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "listing walk stopped after 2 pages of 5" in out
+    assert "a match may exist past it" in out
+
+
+def test_public_pull_name_past_the_bound_does_not_claim_absence(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The name-resolving arm softens the "no such team" claim past the bound (rev M2)."""
+    monkeypatch.setattr("local_operator.cli._PUBLIC_TEAM_SEARCH_MAX_PAGES", 2)
+
+    def listing(*, page: int = 1, per_page: int = 20):
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_pages": 5,
+            "total_records": 480,
+            "records": [{"id": f"t{page}", "name": f"page-{page}-crew"}],
+        }
+
+    hub.list_public_teams = listing  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.argv", ["program", "teams", "pull", "ghost-crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "listing walk stopped at its 2-page bound" in out
