@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -148,7 +149,7 @@ def test_hub_status_prints_the_store_and_json_matches_the_route_payload(
 
 
 def test_hub_status_survives_an_unreadable_credential_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, caplog
 ) -> None:
     """A corrupt credential store must not turn a read-only status read into a crash.
 
@@ -157,7 +158,9 @@ def test_hub_status_survives_an_unreadable_credential_store(
     this failure mode (review round 2, M-8). A store that cannot be opened means
     no usable credential, so the honest degradation is ``login none`` — not a
     traceback, and not the pre-fix unchecked "ok". This runs the REAL resolver
-    (no ``build_clients_sync`` stub) against a genuinely unreadable file.
+    (no ``build_clients_sync`` stub) against a genuinely unreadable file, and it
+    asserts the degradation is LOGGED, so a future silent failure is not the
+    only evidence it happened (review round 3, N-5).
     """
 
     root = tmp_path / ".local-operator"
@@ -166,10 +169,37 @@ def test_hub_status_survives_an_unreadable_credential_store(
     root.mkdir(parents=True, exist_ok=True)
     (root / "auth.db").write_bytes(b"not a sqlite database!")
 
-    rc = cli.hub_status_command(cli.build_cli_parser().parse_args(["hub", "status"]), root)
+    with caplog.at_level(logging.WARNING):
+        rc = cli.hub_status_command(cli.build_cli_parser().parse_args(["hub", "status"]), root)
 
     assert rc == 0
     assert "login none" in capsys.readouterr().out
+    assert any("credential store could not be read" in r.message for r in caplog.records)
+
+
+def test_hub_status_does_not_swallow_an_unexpected_resolution_bug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corrupt-store fallback is scoped to store-open failures, not to everything.
+
+    An unconditional ``except Exception`` around the credential read would make a
+    genuine bug inside ``sync_context`` present forever as the checked fact
+    "login none" — the same instrument-returns-a-reading shape the Q-4 fix
+    removed. Only the store-open class degrades; anything else is left to raise
+    (review round 3, N-5).
+    """
+
+    from local_operator.hub_sync import service as svc
+
+    def boom(_cm: object) -> object:
+        raise ValueError("a genuine bug, not an unreadable store")
+
+    monkeypatch.setattr(svc, "sync_context", boom)
+    root = tmp_path / ".local-operator"
+    root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError):
+        cli.hub_status_command(cli.build_cli_parser().parse_args(["hub", "status"]), root)
 
 
 def test_teams_link_refuses_a_differing_copy_until_accepted_and_then_never_deletes(
