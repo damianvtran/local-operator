@@ -1203,10 +1203,13 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case("pypi-local-operator.json", "a filename whose tail has a dot"),
     Case('cache = tmp_path / "pypi-local-operator.json"', "the same, in a path expression"),
     Case("pypi-local-operator.json.<random>.tmp", "a dotted temp filename after the prefix"),
-    # The stateless `ghs_` format's own dot-trap, from the other side: spellings
-    # that OPEN like its `ghs_<APPID>_` prefix but whose dotted segments are far
-    # below a JWT's; the rule's 20-character floor is what keeps them readable,
-    # so lowering that floor to a length a filename carries reds here.
+    # The stateless `ghs_` format's own dot-trap, from the other side: two
+    # spellings that OPEN like its `ghs_<APPID>_` prefix and must stay readable,
+    # each pinning a different half of the arm's shape (agent review R1):
+    #  - the first has only TWO dotted segments (2 and 13), so it is the missing
+    #    third segment that releases it — no floor value reds this row;
+    #  - the second sits at the 20-character floor (segments 23/17/15, two of
+    #    them under it), so lowering the floor to 10 or below reds this one.
     Case("ghs_2024_q3.release-notes", "a release artifact name that opens with the ghs_ prefix"),
     Case(
         "ghs_1234567_release-candidate-notes.build-artifacts-2.production-logs",
