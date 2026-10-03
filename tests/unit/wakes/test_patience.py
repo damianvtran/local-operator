@@ -250,16 +250,42 @@ class TestScanEntries:
 
 class TestScanTranscript:
     @pytest.mark.asyncio
-    async def test_the_file_scan_agrees_with_the_live_scan(self, tmp_path) -> None:
+    async def test_the_file_scan_agrees_with_the_live_scan(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The tool path reads the journal; the live path reads memory.
 
         One classification behind both, so the two can never disagree about
         whether a reply or a fire happened — this pins that by running them on
         the same rows.
+
+        WHY THE CLOCK IS PINNED (the shard that came back red): the scan
+        derives each fact's millisecond by truncating the entry's ``ts``, so
+        two appends landing inside ONE millisecond made the ordering
+        assertion below compare a value with itself (``assert X < X``; CI
+        shard ``test (3.12, 1)`` failed exactly so). The transcript module's
+        ``time`` is replaced with a strictly increasing stand-in — every read
+        10 ms after the last — so the two appends cannot share a millisecond:
+        determinism by construction, no sleep and no production change. The
+        clock starts at the real time so the ``now_ms`` window given to the
+        file scan still brackets the stamps.
         """
         from local_operator.harness.types import CustomMessage, Message
         from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+        from local_operator.session import transcript as transcript_mod
         from local_operator.session.transcript import Transcript
+
+        class _AdvancingClock:
+            """The transcript module's ``time``, advancing 10 ms per read."""
+
+            def __init__(self) -> None:
+                self._now = time.time()
+
+            def time(self) -> float:
+                self._now += 0.01
+                return self._now
+
+        monkeypatch.setattr(transcript_mod, "time", _AdvancingClock())
 
         directory = tmp_path / "sess"
         directory.mkdir(parents=True)
