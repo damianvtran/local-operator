@@ -3919,9 +3919,9 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # the first character that cannot continue a segment, which keeps a
             # trailing `-` or `_` inside the mask while a sentence's own `.`
             # stays outside it. Two guards hold the over-match boundary: the
-            # segment COUNT (a JWS has three; a fourth, JWE-style segment would
-            # leave its tail readable, so the corpus row is where such a format
-            # lands — not a silent widening here) and the 20-character FLOOR
+            # segment COUNT (a JWS has three; anything beyond a third segment
+            # would leave its tail readable — so the corpus row is where such a
+            # format lands, not a silent widening here) and the 20-character FLOOR
             # (dotted artifact names must survive; `_VENDOR_TAIL`'s "no dot"
             # rule cannot apply because this format IS dotted, so the floor does
             # that duty instead).
