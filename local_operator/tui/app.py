@@ -34105,31 +34105,54 @@ class OperatorApp(App[None]):
         )
 
     async def _preview_attachment(self, name: str, path: str, project_name: str) -> None:
-        """The off-loop half of the preview read (spec §7.4, staged part)."""
+        """The off-loop half of the preview read (spec §7.4, staged part).
+
+        ``answered`` is what the page's in-flight mark turns on: every exit
+        that does not hand a payload back must drop it, or the path stays
+        pending and the NEXT `space` on that row is read as a cancel — a lit
+        key answering the opposite of what it says. The reader's own contract
+        (``read_for_preview`` answers ``None`` rather than raising) is honoured
+        one level in: an exception is a bug in the read, not something to
+        crash the worker with, so it is logged and answered with the honest
+        sentence — and the ``finally`` covers the exits nobody planned for
+        (agent review round 2, N1).
+        """
         from local_operator.tui.attachments import read_for_preview
 
-        payload = await read_for_preview(path)
-        view = self._projects_view
-        if view is None:
-            return
-        if payload is None:
-            view.attachment_preview_failed(path=path)
-            # The sentence names the FACT and nothing else: the earlier
-            # `… the path is <path>` overflowed the footer at every width and
-            # its prefix cut left a plausible-looking but invalid path, while
-            # the path row above already carries the file (design review round
-            # 1, D2).
-            view.show_notice(f"could not read {name} — the stored copy is unreadable")
-            return
-        data_b64, mime_type = payload
-        view.show_attachment_preview(
-            path=path,
-            data_b64=data_b64,
-            mime_type=mime_type,
-            project_name=project_name,
-        )
-        # The picture is the receipt; the in-flight line must not outlive it.
-        view.show_notice("")
+        answered = False
+        try:
+            try:
+                payload = await read_for_preview(path)
+            except Exception:  # noqa: BLE001 — see the docstring: answer, do not raise
+                logger.debug("attachment preview read raised", exc_info=True)
+                payload = None
+            view = self._projects_view
+            if view is None:
+                return
+            if payload is None:
+                view.attachment_preview_failed(path=path)
+                # The sentence names the FACT and nothing else: the earlier
+                # `… the path is <path>` overflowed the footer at every width and
+                # its prefix cut left a plausible-looking but invalid path, while
+                # the path row above already carries the file (design review round
+                # 1, D2).
+                view.show_notice(f"could not read {name} — the stored copy is unreadable")
+                return
+            data_b64, mime_type = payload
+            view.show_attachment_preview(
+                path=path,
+                data_b64=data_b64,
+                mime_type=mime_type,
+                project_name=project_name,
+            )
+            answered = True
+            # The picture is the receipt; the in-flight line must not outlive it.
+            view.show_notice("")
+        finally:
+            if not answered:
+                view = self._projects_view
+                if view is not None:
+                    view.attachment_preview_failed(path=path)
 
     def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
         """`↵` on a milestone row: flip completion through the store, re-show.

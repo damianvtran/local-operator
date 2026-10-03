@@ -29,6 +29,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.geometry import Region
 from textual.widgets import Static
 
 from local_operator.logger import get_logger
@@ -61,6 +62,18 @@ logger = get_logger(__name__)
 #: who opens a fourth picture loses the first, and the row says so by painting
 #: its closed state again rather than a stale frame.
 PREVIEW_CACHE_MAX = 3
+
+#: How many deferred passes the preview's reveal may take. The re-show mounts
+#: the picture in the SAME turn the reveal is queued for, so the first pass
+#: scrolls against a scroller that is still one layout behind it: its
+#: ``max_scroll_y`` is the OLD content's, the clamp eats the delta (measured: no
+#: movement at all) and the block lands wherever the settle leaves it — QA
+#: round 2's Q2-1, where the same code landed right on the pin's own feed and
+#: left 0 of 18 picture rows visible at the 60-column floor on a longer one.
+#: Each pass re-derives the geometry, so the second lands and the third
+#: confirms; the bound keeps a page that cannot satisfy the anchor (a block at
+#: the very start of the content) from spinning.
+PREVIEW_REVEAL_PASSES = 3
 
 #: A row action the page relays to its host: ``(kind, row)`` with kind
 #: ``"session"`` (open the conversation), ``"milestone"`` (toggle it) or
@@ -256,12 +269,19 @@ class DetailAttachmentRow(DetailRow):
         *,
         on_action: RowAction,
         style_for: StyleFor,
+        preview_open: bool = False,
     ) -> None:
         super().__init__(classes="projects-detail-attachment")
         self._attachment = attachment
         self._on_action = on_action
         self._style_for = style_for
         self.section_label = "updates"
+        #: Whether this row's own picture is mounted just now — the affordance
+        #: reads `· space hide` rather than `· space` while it is (agent review
+        #: round 2, N2: the row and the ladder must not name the same key two
+        #: ways). It is set at construction because every open and close
+        #: rebuilds the rows through ``_reshow``.
+        self._preview_open = preview_open
         #: The box width the row last fit itself to (``None`` until measured),
         #: and whether the cursor is on it — both feed :meth:`set_selected`.
         self._width: int | None = None
@@ -277,6 +297,7 @@ class DetailAttachmentRow(DetailRow):
                 style_for=self._style_for,
                 width=self._width,
                 previewable=self.can_preview(),
+                preview_open=self._preview_open,
             )
         )
 
@@ -287,11 +308,35 @@ class DetailAttachmentRow(DetailRow):
         round 1, D1) and it must not wrap: a ``Static`` wraps what it is given
         whatever its ``no_wrap`` says, which is the defect that put the path on
         its own fitted row in the first place (see ``attachment_path_text``).
+
+        ``width`` is the PAGE's content width, and it is one cell wider than
+        this row's own box whenever the vertical scrollbar is up (measured: 96
+        against 95), so fitting to it left the fitted line a cell too wide and
+        Textual wrapped the tail — the size on an unselected row, the `· space`
+        affordance on the selected one, taking a row from the page above the
+        path line (agent review round 2, A1). The row's own CONTENT REGION is
+        the box it renders into; the argument is only the fallback for a row
+        that has not been laid out yet.
+
+        Nothing here re-fits on the row's OWN resize INLINE, deliberately: the
+        page already fits after every re-show and every page resize through
+        ``call_after_refresh(self._fit_meta)``, but the vertical scrollbar
+        arriving narrows this row's content region without touching the page's,
+        so the fit it was handed then is one cell too wide (a stored 94 against
+        a settled 93 is what wraps the tail). :meth:`on_resize` closes that gap
+        with a DEFERRED refit: doing it inside the layout pass re-enters it,
+        which was measured inflating a boundary-length row to three blank rows
+        at 100x30 and four at 60 columns.
         """
-        if self._width == width:
+        target = self.content_region.width or self.size.width or width
+        if target <= 0 or self._width == target:
             return
-        self._width = width
+        self._width = target
         self.set_selected(self._selected)
+
+    def on_resize(self) -> None:
+        """Re-fit when this row's own box moves — deferred, never inline."""
+        self.call_after_refresh(lambda: self.fit_width(self.size.width))
 
     def action_label(self) -> str | None:
         """No verb while the copy is gone (UX round 1, U3).
@@ -417,6 +462,9 @@ class DetailAttachmentPathRow(DetailRow):
         super().__init__(classes="projects-detail-attachment-path")
         self._attachment = attachment
         self._style_for = style_for
+        #: The box width this row last fit itself to, so a resize that does not
+        #: move the box does not re-cut the text (``None`` until measured).
+        self._width: int | None = None
         self.update(attachment_path_text(attachment, style_for=style_for))
 
     def fit_width(self, width: int) -> None:
@@ -431,12 +479,25 @@ class DetailAttachmentPathRow(DetailRow):
         # The CONTENT REGION — the box minus its padding — not the outer size
         # and not `content_size` (which is the TEXT's own size, so fitting to it
         # is circular: measured at 60 cols it answered the un-padded width and
-        # the fitted path wrapped onto a second row).
+        # the fitted path wrapped onto a second row). The stored width also
+        # keeps a second fit at the same box from re-cutting the text.
         target = self.content_region.width or self.size.width or width
-        if target > 0:
-            self.update(
-                attachment_path_text(self._attachment, width=target, style_for=self._style_for)
-            )
+        if target <= 0 or target == self._width:
+            return
+        self._width = target
+        self.update(attachment_path_text(self._attachment, width=target, style_for=self._style_for))
+
+    def on_resize(self) -> None:
+        """Re-fit when this row's own box moves — deferred, never inline.
+
+        The page fits after its own resizes and after every re-show, but the
+        vertical scrollbar arriving narrows this row's box without resizing the
+        page, and the fit it was handed then is one cell too wide (the trap the
+        docstring above records — agent review round 2's A1 is the same one on
+        the affordance row). The refit runs on the next refresh: doing it inside
+        the layout pass re-enters it.
+        """
+        self.call_after_refresh(lambda: self.fit_width(self.size.width))
 
     def readback(self) -> str | None:
         """The path line as plain text, for ``painted_rows``."""
@@ -868,9 +929,15 @@ class ProjectDetailPage(VerticalScroll):
                 )
             attachments = [a for a in entry.get("attachments") or [] if isinstance(a, dict)]
             for attachment in attachments:
+                path = str(attachment.get("path") or "")
                 rows.append(
                     DetailAttachmentRow(
-                        attachment, on_action=self._on_action, style_for=self._style_for
+                        attachment,
+                        on_action=self._on_action,
+                        style_for=self._style_for,
+                        # The row's affordance flips to `space hide` while its
+                        # own picture is mounted (agent review round 2, N2).
+                        preview_open=bool(path) and path in self._preview_open,
                     )
                 )
                 rows.append(DetailAttachmentPathRow(attachment, self._style_for))
@@ -1039,7 +1106,7 @@ class ProjectDetailPage(VerticalScroll):
                     return candidate, preview
         return None
 
-    def _reveal_preview(self, path: str) -> None:
+    def _reveal_preview(self, path: str, *, pass_number: int = 1) -> None:
         """Bring a just-opened preview's BLOCK into view; the cursor does not move.
 
         ONE authority, and the unit is the attachment row, its path line and
@@ -1059,19 +1126,64 @@ class ProjectDetailPage(VerticalScroll):
         only as a SPAN (screen rows subtracted from screen rows); nothing here
         mixes a screen row with ``scroll_offset``, which is the mistake the row
         cursor's own reveal documents.
+
+        A pass that does not LAND is retried, bounded by
+        :data:`PREVIEW_REVEAL_PASSES` — and the retry is what makes the reveal
+        feed-independent. The scroll is the least reliable part of this: it is
+        computed against the scroller's metrics and CLAMPED against
+        ``max_scroll_y``, and the mount that carried the picture had not been
+        laid out for the first pass, so the clamp swallowed the delta and the
+        block stayed wherever the settle left it. Verification is the same
+        geometry the reveal promises, read live, so a pass that landed costs
+        nothing and one that did not gets a second, now-settled attempt.
         """
         unit = self.preview_unit(path)
         if unit is None:
             return
         owner, preview = unit
+        box = self.content_region
         try:
             span = preview.region.y + preview.region.height - owner.region.y
-            if span > self.content_region.height:
+            taller = span > box.height
+            if taller:
                 owner.scroll_visible(animate=False, top=True)
             else:
-                preview.scroll_visible(animate=False)
+                # The WHOLE unit, in the scroller's own virtual space. Revealing
+                # the picture alone scrolls the row that NAMES it off the top
+                # (measured at 60x24: owner y=2 against a box at 4), and the two
+                # widgets' regions are screen rows — handing those to
+                # ``scroll_to_region`` is the mixed-space mistake this page
+                # documents, so the union comes from the virtual regions.
+                whole = owner.virtual_region_with_margin.union(preview.virtual_region_with_margin)
+                self.scroll_to_region(whole, animate=False)
+            landed = self._preview_landed(owner, preview, box=box, taller=taller)
         except Exception:  # noqa: BLE001 — a reveal is a bonus, never a failure
-            pass
+            return
+        # The FIRST pass reads the layout the re-show replaced: the picture was
+        # mounted in this turn, so the rows it measures are the PREVIOUS
+        # layout's — measured on a case that fits, a unit read as 12 rows when
+        # it is 8, so it took the taller branch and reported itself landed with
+        # the owner row at −2. Its verdict is therefore not trusted and the
+        # confirmation pass is unconditional; from the second pass the numbers
+        # have settled and a landed block stops the chain.
+        if pass_number < PREVIEW_REVEAL_PASSES and (pass_number == 1 or not landed):
+            self.call_after_refresh(lambda: self._reveal_preview(path, pass_number=pass_number + 1))
+
+    def _preview_landed(
+        self, owner: DetailRow, preview: DetailAttachmentPreviewRow, *, box: Region, taller: bool
+    ) -> bool:
+        """Whether the block sits where the reveal promises, read live.
+
+        The promise in the same screen rows the reveal compares: a block that
+        FITS is wholly inside the box; a TALLER one has its owning row on the
+        box's first row, so the path line under it still names the picture.
+        ``scroll_offset.y <= 0`` counts as landed for the taller case — the
+        content cannot move any further down, so the owner is as high as the
+        scroll can put it and another pass would only spin.
+        """
+        if taller:
+            return owner.region.y == box.y or self.scroll_offset.y <= 0
+        return owner.region.y >= box.y and preview.region.bottom <= box.bottom
 
     def close_preview(self, path: str) -> None:
         """Hide one open preview. The payload stays cached for a re-open."""

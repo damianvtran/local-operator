@@ -1937,14 +1937,18 @@ def _feed_registry_with_images(tmp_path: Path, *, images: int = 2) -> ProjectReg
 
 
 async def _open_preview_after_paging(
-    pilot: Any, page: Any, pages: int
+    pilot: Any, page: Any, pages: int, *, name: str | None = None
 ) -> DetailAttachmentPreviewRow | None:
-    """Cursor on the first image row, page the feed away, press `space`."""
+    """Cursor on the first image row (or the named one), page away, press `space`."""
     for _ in range(60):
         row: Any = page._selectables[page.selected_index]
         getter: Any = getattr(row, "attachment", None)
         record: Any = getter() if callable(getter) else None
-        if isinstance(record, dict) and record.get("kind") == "image":
+        if (
+            isinstance(record, dict)
+            and record.get("kind") == "image"
+            and (name is None or record.get("name") == name)
+        ):
             break
         await pilot.press("down")
         await pilot.pause()
@@ -2295,3 +2299,239 @@ def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
     second = [hint for hint, _label, _lead in rungs[1][0]]
     assert view._copy_hint in second
     assert view._preview_hint not in second
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the reveal on a feed the fix was not written against (Q2-1), the
+# row's own box (A1), a read that dies (N1), and the affordance's two states.
+# ---------------------------------------------------------------------------
+
+
+def _long_feed_registry(tmp_path: Path) -> ProjectRegistry:
+    """A feed shaped like the one Q2-1 was measured on, not like the pin's own.
+
+    Round 2's reveal landed on ``_feed_registry_with_images`` and left the
+    reader with NOTHING visible on a feed that carries more: one update holding
+    the store's per-update cap of attachments (a picture whose block is taller
+    than the box among them) and a second update to page past. The first pass
+    runs against the layout the re-show replaced, so how far out that read is
+    depends on how much the feed carries — which is why the pin has to run a
+    feed the fix was not written against.
+    """
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="parity-spec", title="TUI parity spec"))
+    many: list[Path] = []
+    for index in range(6):
+        shot = tmp_path / f"shot-{index}.png"
+        shot.write_bytes(_png_bytes(120, 90))
+        many.append(shot)
+    tall = tmp_path / "tall.png"
+    tall.write_bytes(_png_bytes(240, 900))
+    many.append(tall)
+    newest = tmp_path / "newest.png"
+    newest.write_bytes(_png_bytes(120, 90))
+    notes = tmp_path / "notes.md"
+    notes.write_text("# notes\n")
+    registry.update_project(
+        project.id,
+        ProjectEdit(
+            progress="report 0\n\nbody\n\n" + "\n".join(f"filler {n}" for n in range(1, 9))
+        ),
+        reporter="operator",
+        attachments=many,
+    )
+    registry.update_project(
+        project.id,
+        ProjectEdit(progress="report 1\n\nbody"),
+        reporter="operator",
+        attachments=[newest, notes],
+    )
+    return registry
+
+
+@pytest.mark.parametrize(("size", "pages"), [((100, 30), 8), ((60, 24), 10), ((60, 24), 0)])
+async def test_the_reveal_lands_on_a_feed_that_is_not_the_pins_own_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: tuple[int, int], pages: int
+) -> None:
+    """QA round 2's Q2-1: the landing must not depend on the feed's shape.
+
+    The pin above proves the geometry on ONE fixture; the same code landed the
+    unit ABOVE the box on a longer one (owner −2 / path −1 at 60x24 paged to the
+    bottom, and 0 of 18 picture rows visible for the taller block), because the
+    reveal's first pass reads the pre-mount layout and only the feed's own
+    length decides how far out that read is. The contract is the one the frames
+    assert: a block taller than the box anchors its owning row on the box's
+    first row, a block that fits is wholly inside the box, and either way the
+    box shows picture ink.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _long_feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        preview = await _open_preview_after_paging(pilot, page, pages, name="tall.png")
+        assert preview is not None, "the tall picture never mounted"
+        unit = page.preview_unit(preview.path())
+        assert unit is not None, "the picture lost the row that names it"
+        owner, picture = unit
+        box = page.content_region
+        if owner.region.height + 1 + picture.region.height > box.height:
+            assert owner.region.y == box.y, "a taller block anchors its owning row at the box's top"
+        else:
+            assert owner.region.y >= box.y
+            assert picture.region.bottom <= box.bottom
+        visible = min(picture.region.bottom, box.bottom) - max(picture.region.y, box.y)
+        assert visible > 0, "the reader pressed space and the box shows no picture"
+
+
+@pytest.mark.parametrize("size", [(100, 30), (60, 24)])
+async def test_a_boundary_length_name_keeps_the_row_on_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: tuple[int, int]
+) -> None:
+    """Agent review round 2, A1: the row fits to its OWN box, not the page's.
+
+    The page's content width is one cell wider than the row's box whenever the
+    vertical scrollbar is up (measured 96 against 95, i.e. 93 against 95 with
+    this row's two-cell padding), so a fit handed the page's width left the
+    line a cell too wide and Textual wrapped the tail — the size on an
+    unselected row, the `· space` affordance on the selected one — stealing a
+    row from the page above the path line. The assertion is the painted line
+    count, because a wrap is what a reader sees; ``size.height == 1`` is the
+    same fact read off the layout.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    long_name = "boundary-" + ("x" * 96) + ".png"
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="parity-spec", title="TUI parity spec"))
+    shot = tmp_path / long_name
+    shot.write_bytes(_png_bytes(120, 90))
+    # A second image so the cursor can leave the long row: the unselected state
+    # is what shows the SIZE tail wrapping rather than the affordance.
+    other_shot = tmp_path / "second.png"
+    other_shot.write_bytes(_png_bytes(60, 40))
+    registry.update_project(
+        project.id,
+        ProjectEdit(progress="a name longer than the box"),
+        reporter="operator",
+        attachments=[shot, other_shot],
+    )
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    other = (60, 24) if size == (100, 30) else (100, 30)
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        image = await _press_until_attachment(pilot, page, image=True)
+        assert image["name"] == long_name
+        row = page._selectables[page.selected_index]
+        painted = str(row.content.plain)
+        assert "· space" in painted, "the selected row stopped advertising the key"
+        assert row.size.height == 1, "the affordance wrapped the selected row"
+        assert cell_len(painted) <= row.content_region.width
+        # Unselected: the affordance goes, the size tail stays, still one line.
+        await pilot.press("down")
+        await pilot.pause()
+        assert page._selectables[page.selected_index] is not row, "the cursor never left"
+        assert "· space" not in str(row.content.plain)
+        assert row.size.height == 1, "the size tail wrapped the unselected row"
+        assert cell_len(str(row.content.plain)) <= row.content_region.width
+        # And the re-fit survives the box moving: the scrollbar's column, then
+        # the terminal's own resize.
+        await pilot.press("up")
+        await pilot.pause()
+        assert page._selectables[page.selected_index] is row
+        await pilot.press("space")
+        await _settle_preview(pilot)
+        again = page._selectables[page.selected_index]
+        assert again.size.height == 1, "the row wrapped once the picture was mounted"
+        await pilot.resize_terminal(*other)
+        for _ in range(3):
+            await pilot.pause()
+        assert again.size.height == 1, "the row wrapped after the terminal resized"
+        assert cell_len(str(again.content.plain)) <= again.content_region.width
+
+
+async def _settle_preview(pilot: Any) -> None:
+    """Let the reveal's passes and the page's own re-fit all land."""
+    for _ in range(10):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_row_affordance_flips_with_its_own_picture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 2, N2: the row and the ladder name one key one way.
+
+    With a preview mounted the ladder's label is `space hide` from 120 columns
+    while the row went on saying `· space` — not a false promise (the key does
+    both) but two surfaces disagreeing about the same key on the same row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=True)
+        assert str(page._selectables[page.selected_index].content.plain).endswith("· space")
+        await pilot.press("space")
+        await _settle_preview(pilot)
+        opened = page._selectables[page.selected_index]
+        assert str(opened.content.plain).endswith("· space hide")
+        await pilot.press("space")
+        await _settle_preview(pilot)
+        closed = page._selectables[page.selected_index]
+        assert str(closed.content.plain).endswith("· space")
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_dies_does_not_strand_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 2, N1: a worker that never answers must not hold the mark.
+
+    The page marks a path in flight when it asks the host for bytes and clears
+    it on both answers; a read that DIES before either left the mark up, and the
+    next `space` on that row was then read as a cancel — the one lit key that
+    answers the opposite of what it says. The second press here must be a new
+    read, and it must mount.
+    """
+    import local_operator.tui.attachments as attachments_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    calls: list[str] = []
+
+    async def dies_once(path: str) -> tuple[str, str] | None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise RuntimeError("the read died before answering")
+        return (base64.b64encode(_png_bytes(6, 4)).decode("ascii"), "image/png")
+
+    monkeypatch.setattr(attachments_mod, "read_for_preview", dies_once)
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        image = await _press_until_attachment(pilot, page, image=True)
+        path = str(image["path"])
+        await pilot.press("space")
+        await _settle_preview(pilot)
+        assert len(calls) == 1, "the first press never reached the host"
+        assert page.preview_pending(path) is False, "a dead read left the row pending"
+        await pilot.press("space")
+        await _settle_preview(pilot)
+        assert len(calls) == 2, "the second press was read as a cancel, not a new read"
+        assert any(
+            isinstance(child, DetailAttachmentPreviewRow) for child in page.children
+        ), "the second read answered and nothing mounted"
