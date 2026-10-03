@@ -2575,25 +2575,58 @@ def update_more_lines_text(
 
 
 def attachment_row_text(
-    attachment: dict[str, Any], *, selected: bool = False, style_for: StyleFor | None = None
+    attachment: dict[str, Any],
+    *,
+    selected: bool = False,
+    style_for: StyleFor | None = None,
+    width: int | None = None,
+    previewable: bool = False,
+    preview_open: bool = False,
 ) -> Text:
-    """``[img] board-60x20.png · 82 KB`` — one attachment affordance (spec §7.4).
+    """``[img] board-60x20.png · 82 KB · space`` — one attachment affordance.
 
     A terminal cannot render the image, and this row does not pretend: it
     carries the KIND, the name and the size, and the path lives on its own
     line under it (:func:`attachment_path_text`). The kind word is the
     store's own classification, so the row cannot disagree with what was
     copied in.
+
+    ``previewable`` appends the ``· space`` affordance to the SELECTED row
+    whose copy can actually be shown (design review round 1, D1). The ladder
+    cannot afford that key at the width most readers have — it costs 17 cells
+    against a 96-cell footer — so without it the capability is invisible to
+    anyone who has not read the spec, and the only advertised verb on that row
+    (``↵ open``) hands the file to the OS opener. ``preview_open`` reads the
+    SAME key back the other way (`· space hide`) while the picture is mounted,
+    so the row and the ladder never name one key two ways (agent review round
+    2, N2); the labels differ by four cells, which the budget below absorbs.
+
+    ``width`` is the MEASURED box the row renders into, and it is what keeps
+    the affordance from costing a WRAP: a ``Static`` wraps what it is given
+    whatever its ``no_wrap`` says (see :func:`attachment_path_text`), so the
+    name is middle-ellipsized to make room for the size and the affordance —
+    the file's own tail, which names it, is the end that survives.
     """
     resolver = _styles(style_for)
     kind = str(attachment.get("kind") or "data")
     name = str(attachment.get("name") or "(unnamed)")
     size = attachment.get("bytes")
+    marker = "[img]" if kind == "image" else "[file]"
+    tail = f" · {file_size_text(size)}" if isinstance(size, int) and size >= 0 else ""
+    affordance = ""
+    if previewable and selected:
+        affordance = " · space hide" if preview_open else " · space"
+    if width is not None:
+        budget = max(width - cell_len(f"{marker} {tail}{affordance}"), 1)
+        if cell_len(name) > budget:
+            name = _middle_ellipsize(name, budget)
     line = Text(no_wrap=True)
-    line.append(f"[{'img' if kind == 'image' else 'file'}]", style=resolver("dim"))
+    line.append(marker, style=resolver("dim"))
     line.append(f" {name}", style=resolver("name" if selected else "dim"))
-    if isinstance(size, int) and size >= 0:
-        line.append(f" · {file_size_text(size)}", style=resolver("dim"))
+    if tail:
+        line.append(tail, style=resolver("dim"))
+    if affordance:
+        line.append(affordance, style=resolver("dim"))
     return line
 
 
