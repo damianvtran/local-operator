@@ -629,6 +629,90 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     assert network_store.pair_decision("inv_1", isolated) is None
 
 
+def test_a_join_failure_names_the_already_serving_relay_and_keeps_the_nodes_message(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill finding, 2026-10-03: four re-onboards of an already-joined node
+    failed at ``join`` as a bare ``join_failed``, while the node's own systemd
+    relay held :4097 (its log: ``OSError: [Errno 98] Address already in use``).
+
+    Two things change on the failure path only: the node's own sentence (the
+    payload's ``message``) rides beside the code instead of being swallowed, and
+    the status probe's verdict — a relay already serving there — is named as the
+    cause beside the remedy that actually worked.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    failing = payload["steps"][-1]
+    assert failing["step"] == "join" and failing["ok"] is False
+    detail = failing["detail"]
+    assert "did not complete" in detail
+    # The node's own sentence rides beside the code instead of being swallowed.
+    assert "join_failed" in detail
+    assert "nothing was listening at 192.168.0.155:4097" in detail
+    # Cause + remedy, from the status probe.
+    assert "a relay already serves :4097 on that machine" in detail
+    assert "retry the join" in detail
+    assert failing["data"]["relay_serving"] is True
+    assert failing["data"]["relay_port"] == 4097
+    assert failing["data"]["node_refused"] is True
+    # The runner stopped at the join, exactly as before.
+    commands = " | ".join(" ".join(c[1]) for c in transport.calls if c[0] == "run")
+    assert "member grant" not in commands
+
+
 def test_a_retry_reuses_the_record_with_a_new_run_id(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

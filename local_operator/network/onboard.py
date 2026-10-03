@@ -1258,16 +1258,57 @@ class OnboardRun:
             payload = _json_from(joined.stdout or "")
             if joined.rc != 0 or not payload or not payload.get("ok"):
                 refusal = ""
+                message = ""
                 if isinstance(payload, dict):
-                    refusal = str(payload.get("code") or payload.get("message") or "")
+                    refusal = str(payload.get("code") or "")
+                    message = str(payload.get("message") or payload.get("error") or "")
                 tail = (joined.stderr or "").strip().splitlines()
-                detail = refusal or (tail[-1][:200] if tail else "the join was refused")
+                # BOTH HALVES RIDE (drill finding, 2026-10-03): preferring the
+                # code alone rendered every failed re-onboard as a bare
+                # ``join_failed`` and dropped the payload's ``message`` — where
+                # the per-host detail lives ("nothing was listening at …").
+                # A code for the machine, the sentence for the person.
+                detail = ": ".join(part for part in (refusal, message) if part)
+                detail = detail or (tail[-1][:200] if tail else "the join was refused")
+                data: dict[str, Any] = {
+                    "invite_id": self.invite_id,
+                    "node_refused": bool(refusal or message),
+                }
+                # DETECT AN ALREADY-SERVING RELAY BEFORE BLAMING THE TOKEN (drill
+                # finding, 2026-10-03; four failed re-onboards while the node's own
+                # systemd relay held :4097, its log carrying ``OSError: [Errno 98]
+                # Address already in use``): a machine onboarded once serves its own
+                # relay, and a relay left running from an earlier onboarding can
+                # hold the connection a join needs. The probe is the one
+                # ``step_relay`` reads; when it answers "serving", the failure names
+                # cause and remedy instead of a bare ``join_failed``. FAILURE-PATH
+                # ONLY: a join that completes never asks, so the success semantics
+                # are untouched.
+                status = self._node_json("lop network status", timeout=60.0)
+                if status and (status.get("relay_running") or status.get("relay_answering")):
+                    # THE LIVE PORT WHEN THERE IS ONE: the status verb's ``port``
+                    # key is the default it was asked about; an ANSWERING relay's
+                    # own block (``listening``) is where the real one lives.
+                    # Anything unparseable falls back to the shipped default —
+                    # this is a sentence, not a gate.
+                    listening = status.get("listening")
+                    live_port = listening.get("port") if isinstance(listening, dict) else None
+                    try:
+                        port = int(live_port or status.get("port") or 0) or 4097
+                    except (TypeError, ValueError):
+                        port = 4097
+                    detail = (
+                        f"a relay already serves :{port} on that machine, and the join did "
+                        f"not complete ({detail}). A relay left running from an earlier "
+                        "onboarding can hold the connection a join needs: restart it there, "
+                        "or retry the join and let this run's relay step do that"
+                    )
+                    data["relay_serving"] = True
+                    data["relay_port"] = port
+                else:
+                    detail = f"the join did not complete ({detail})"
                 # The token file is removed by the ``finally`` below — one place.
-                return _StepOutcome(
-                    False,
-                    f"the join did not complete ({detail})",
-                    {"invite_id": self.invite_id, "node_refused": bool(refusal)},
-                )
+                return _StepOutcome(False, detail, data)
             after = self._node_json("lop network identity show", timeout=60.0)
             device_id = str((after or {}).get("device_id") or payload.get("device_id") or "")
             fingerprint = str((after or {}).get("fingerprint") or payload.get("fingerprint") or "")
