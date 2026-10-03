@@ -36,7 +36,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
-import { outstandingAsks, orderedForDisplay } from "../lib/asks";
+import { isAnswerable, orderedForDisplay, outstandingAsks } from "../lib/asks";
 import { useAsksRevision, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -209,7 +209,7 @@ export function AsksSheet({
 									<span className="min-w-0 truncate">
 										{named?.name ?? sessionId}
 									</span>
-									{onOpenConversation ? (
+									{onOpenConversation && row.durable !== false ? (
 										/* THE PARENT OWNS THE WHOLE TRANSITION (agent review round 2,
 										   M1). This control used to navigate and THEN close itself, and
 										   closing gives the sheet's history entry back with
@@ -231,16 +231,26 @@ export function AsksSheet({
 									) : null}
 								</span>
 							) : null}
-							{/* THE WAIT IS STATED BEFORE THE TAP, AND IN BOTH STATES (design
-							    round 1, D4 = UX U4). This strip used to render only for an `ended`
-							    row, and its copy described a MANUAL remedy the relay now performs
-							    itself — so for the operator's case (a durable conversation this
-							    daemon never watched die, which the list reports `ended:false`) it
-							    did not render at all. The aggregate now carries `runtime_live`,
-							    so the cue appears for both, and each names the cost the cold
-							    answer adds (~30 s: the engage budget composed with the op's ack)
-							    rather than leaving it to be discovered by a tap. */}
-							{named?.ended || row.runtime_live === false ? (
+							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
+							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
+
+							    ANSWERABLE, because a settled receipt offers nothing to answer, so
+							    a wait stated above it is noise about a tap that does not exist
+							    (UX round 2, U6). This strip used to render only for an `ended` row
+							    with copy naming a manual remedy the relay now performs itself;
+							    `runtime_live` widened it to the merely-not-running conversation
+							    the operator actually hits.
+
+							    DURABLE, because `runtime_live === false` is ALSO true of a
+							    conversation with no transcript at all — where every op is a
+							    terminal refusal, and the promise of a ~30 s bring-up is a claim
+							    about a backend that does not exist (design round 2, D6). On
+							    those rows the strip goes silent and the card states the truth
+							    it already knows, so the sheet and the card cannot contradict
+							    each other one element apart. */}
+							{isAnswerable(String(row.status || "open")) &&
+							row.durable !== false &&
+							(named?.ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">
 									{named?.ended
 										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
@@ -252,6 +262,7 @@ export function AsksSheet({
 								sessionId={sessionId}
 								nowMs={nowMs}
 								runtimeLive={row.runtime_live}
+								durable={row.durable}
 								onSettled={() => void load()}
 							/>
 						</div>
