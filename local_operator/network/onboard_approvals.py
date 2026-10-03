@@ -362,6 +362,14 @@ def finish(
         )
 
 
+#: The finding kinds this refile can actually apply to a fresh card — the
+#: facts §3.3 step 4's halt may correct. Anything else (``install_scope``,
+#: ``sudo``) is a scope/authority finding that a fresh request repeating it
+#: does not fix; the caller's sentence says what must change instead (design
+#: round 1, D2).
+_CORRECTABLE_CHECKS = frozenset({"host_key_fp", "build", "os", "arch"})
+
+
 def refile_after_contradiction(
     approval_id: str, finding: dict[str, Any], *, root: Any = None
 ) -> str | None:
@@ -371,13 +379,15 @@ def refile_after_contradiction(
     slice (a)'s ``create_request`` (nothing here is authority-increasing — the
     fresh record is ``requested`` and the operator approves it the normal way);
     the corrected facts are the finding's ``observed`` value applied to the
-    surface it names — host key, OS, architecture, build — so the fresh card
-    describes what the machine ACTUALLY is; every other field is carried from
-    the failed record. ``None`` means the store offers no request surface — or
-    the finding has nothing to correct the fresh request WITH (a host-key halt
-    whose observation failed; minting that replacement would reproduce the very
-    hole the halt names, so the caller's sentence stands instead), and the
-    caller's sentence still says a new request is needed either way.
+    surface it names — host key, OS, architecture, build (``_CORRECTABLE_CHECKS``)
+    — so the fresh card describes what the machine ACTUALLY is; every other field
+    is carried from the failed record. ``None`` means the store offers no request
+    surface — or the finding has nothing a fresh request can carry: a host-key
+    halt whose observation failed (minting that replacement would reproduce the
+    very hole the halt names), or a scope/authority finding (``install_scope``,
+    ``sudo``) no fact of which this refile can apply — an identical card minted
+    under a "corrected facts" sentence is a lie one family over (design round 1,
+    D2). The caller's sentence names what must change instead.
     """
     module = _module()
     create = getattr(module, "create_request", None)
@@ -398,6 +408,13 @@ def refile_after_contradiction(
         # the finding's ``observed`` was empty. Nothing is minted then; the
         # caller's sentence says a new request is needed, and the request verb
         # now OBSERVES the key when one is filed.
+        return None
+    if check not in _CORRECTABLE_CHECKS:
+        # NOTHING CORRECTED ⇒ NOTHING MINTED (design round 1, D2): a scope or
+        # authority finding has no fact this refile can apply, and the earlier
+        # shape minted an IDENTICAL card while its sentence claimed "the
+        # corrected facts" — the same lie-class as the keyless refile, one
+        # family over. The caller's sentence names what must change instead.
         return None
     if observed:
         if check == "host_key_fp":

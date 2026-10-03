@@ -164,6 +164,11 @@ def test_a_request_whose_host_key_cannot_be_observed_is_refused(
     assert payload["ok"] is False
     assert payload["code"] == "host_key_unobserved"
     assert "could not be observed" in payload["message"]
+    # D7 (design round 1): the copy says NOTHING WAS FILED — the refusal is not
+    # a card that later halts — and trades the un-introduced "a key read"
+    # jargon for the observable condition.
+    assert "nothing was filed" in payload["message"]
+    assert "answers a key read" not in payload["message"]
 
 
 def test_a_given_host_key_fp_never_probes(

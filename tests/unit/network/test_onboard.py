@@ -640,8 +640,53 @@ def test_a_missing_host_key_with_no_observation_files_no_unrunnable_replacement(
     assert payload["state"] == "failed"
     assert payload["error"]["code"] == "pre_read_contradiction"
     failing = payload["steps"][-1]
-    assert "A new request is needed before anything runs" in failing["detail"]
+    # The sentence scopes to what is missing and names it (design round 1, D2):
+    # nothing claims corrected facts, because nothing was corrected.
+    assert "Nothing can run until this changes" in failing["detail"]
+    assert "the request does not say which host key to expect" in failing["detail"]
+    assert "A new request is needed then" in failing["detail"]
+    assert "corrected facts" not in failing["detail"]
     assert fake.refiled == []
+
+
+def test_an_unmapped_contradiction_mints_no_identical_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design round 1, D2: ``install_scope``/``sudo`` findings carry no fact the
+    refile can apply, and the earlier shape minted an IDENTICAL card under a
+    "corrected facts" sentence — the same lie-class as the keyless refile, one
+    family over."""
+    created: list[dict[str, Any]] = []
+
+    class FakeModule:
+        """Only the surface ``refile_after_contradiction`` reads."""
+
+        def load_record(self, approval_id: str, **_kwargs: Any) -> Any:
+            return {
+                "approval_id": approval_id,
+                "kind": "device_onboard",
+                "device": {"device_id": "d_node", "name": "cloud-node-1"},
+                "what": {"build": "0.64.12"},
+                "requested_by": {},
+                "credential_ref": {},
+            }
+
+        def create_request(self, **fields: Any) -> dict[str, Any]:
+            created.append(fields)
+            return {"approval_id": "ap_never"}
+
+        def new_request_id(self) -> str:
+            return "ap_never"
+
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: FakeModule())
+    finding = {
+        "check": "sudo",
+        "approved": "the anchor install was approved",
+        "observed": "no sudo on the machine",
+        "why": "the admin approval cannot be raised on this machine",
+    }
+    assert onboard_approvals.refile_after_contradiction("ap_aaaa1111", finding) is None
+    assert created == []
 
 
 # ---------------------------------------------------------------------------
@@ -769,18 +814,95 @@ def test_a_join_failure_names_the_already_serving_relay_and_keeps_the_nodes_mess
     assert failing["step"] == "join" and failing["ok"] is False
     detail = failing["detail"]
     assert "did not complete" in detail
-    # The node's own sentence rides beside the code instead of being swallowed.
-    assert "join_failed" in detail
-    assert "nothing was listening at 192.168.0.155:4097" in detail
-    # Cause + remedy, from the status probe.
-    assert "a relay already serves :4097 on that machine" in detail
+    # The node's own SENTENCE rides (design round 1, D6): the code is a machine
+    # field now, never part of the sentence.
+    assert "could not join: nothing was listening at 192.168.0.155:4097" in detail
+    assert "join_failed" not in detail
+    assert failing["data"]["code"] == "join_failed"
+    # What the probe VERIFIED: the serving port, the named machine, ONE action —
+    # and no mechanism this build cannot produce.
+    assert "a relay is already serving :4097 on cloud-node-1" in detail
+    assert "lop network restart" in detail
     assert "retry the join" in detail
+    assert "relay step" not in detail
+    assert "can hold the connection" not in detail
     assert failing["data"]["relay_serving"] is True
     assert failing["data"]["relay_port"] == 4097
     assert failing["data"]["node_refused"] is True
     # The runner stopped at the join, exactly as before.
     commands = " | ".join(" ".join(c[1]) for c in transport.calls if c[0] == "run")
     assert "member grant" not in commands
+
+
+def test_a_wedged_relay_failure_names_no_unverified_port_or_mechanism(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review round 1, R-MINOR: the earlier shape fell back to the port it was
+    ASKED about and asserted the relay serving — a claim the probe did not
+    verify. A registered relay that did not answer this probe says exactly
+    that, with the same one action."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "relay_running": True,
+                        "relay_answering": False,
+                        "relay_state": "wedged",
+                        "port": 4097,
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    failing = payload["steps"][-1]
+    detail = failing["detail"]
+    assert "could not confirm it serving" in detail
+    assert "state: wedged" in detail
+    assert "a relay is already serving" not in detail
+    assert "serving :4097" not in detail
+    assert "lop network restart" in detail
+    assert "retry the join" in detail
+    assert "relay_serving" not in failing["data"]
+    assert failing["data"]["relay_state"] == "wedged"
 
 
 def test_a_retry_reuses_the_record_with_a_new_run_id(

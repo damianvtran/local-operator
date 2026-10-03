@@ -1696,6 +1696,12 @@ def _private_address_note(endpoint: str) -> str:
     turns the row from "another failure" into a fact a reader can act on
     (use the other address). Empty for anything not private/link-local, where
     the failure's own sentence is the honest explanation.
+
+    THE NOTE NAMES THE KIND, NOT AN ABSOLUTE (design round 1, D8): "remote
+    devices cannot use it" overclaimed — a device on the same network could —
+    while the sentence this rides says "not remote-usable from this device",
+    the scope that is actually true. The kind is what this clause contributes;
+    the scope lives in the clause it rides.
     """
     host, _port = _split_endpoint(endpoint)
     try:
@@ -1704,9 +1710,9 @@ def _private_address_note(endpoint: str) -> str:
         return ""
     first, second = octets[0], octets[1]
     if first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168):
-        return " (the machine's own private address — remote devices cannot use it)"
+        return " (the machine's own private address)"
     if first == 169 and second == 254:
-        return " (a link-local address — remote devices cannot use it)"
+        return " (a link-local address)"
     return ""
 
 
@@ -1745,20 +1751,15 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     winner_verified = bool(observed.get("winner_verified"))
     link_address = str(observed.get("link_address") or "")
     if observed.get("informational"):
-        # REPORTED, NOT FAILED (drill finding, 2026-10-03): this address did not
-        # lead to the peer from this device, but the peer ANSWERS at an address
-        # this run identified — so the member is reachable and the row must not
-        # read as a failure of the check. The base sentence keeps the observed
-        # fact; the tail names what the reader can use instead. Only set when
-        # ``usable_elsewhere`` is non-empty, so the clause always has content.
-        base = reachability_reading(
-            {**dict(row), "observed": {**dict(observed), "informational": False}}
-        )
-        usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
-        note = _private_address_note(str(row.get("endpoint") or ""))
-        return (
-            f"{base}{note}; not remote-usable from this device — the peer is reachable at {usable}"
-        )
+        # REPORTED, NOT FAILED (drill finding, 2026-10-03; design round 1, D1):
+        # this address did not lead to the peer from this device, but the peer
+        # ANSWERS at an address this run identified — so the member is reachable
+        # and the row must not read as a failure of the check. And its raw
+        # failure cause must not ride along either: "nothing is listening on
+        # that port" names a wrong action in the exact row this flip exists
+        # for. The shared clause IS the reading (D3) — the same string doctor's
+        # renderers hang, so the two surfaces cannot drift.
+        return informational_clause(row)
     if row.get("probed") is False:
         # The no-relay fallback: nothing was dialled, and its ``detail`` is
         # already a sentence for a person ("not probed: no relay is running …").
@@ -2004,18 +2005,30 @@ def _did_not_lead(row: Mapping[str, Any]) -> bool:
 
 
 def informational_clause(row: Mapping[str, Any]) -> str:
-    """The suffix an informational row adds to a DOCTOR line — the address that
-    works, named — or ``""`` for every other row.
+    """The sentence an informational row reads in place of its raw failure.
 
-    Doctor's two renderers build their own lines (``cli._cmd_doctor`` and the
-    agent digest in ``network/tool.py``), so the clause lives here, beside the
-    flip that sets the marker, rather than spelled twice.
+    ONE SPELLING FOR EVERY READER (design round 1, D1/D3): ``ready``'s reading
+    returns this string verbatim, and doctor's two renderers
+    (``cli._cmd_doctor`` and the agent digest in ``network/tool.py``) hang it
+    after the row's detail words — so order and punctuation cannot drift
+    between the surfaces, and the doctor reader keeps the provenance note the
+    readiness reader gets.
+
+    THE RAW FAILURE IS NOT PARROTED (D1): the failed reading's own cause
+    ("nothing is listening on that port") points the reader at a wrong action
+    in the exact row this flip exists for, so the clause REPLACES it — stating
+    what is true of the address (not remote-usable from here; the kind of
+    address it is, when that is known; and the address that works). The raw
+    outcome stays a machine fact in ``observed``/``detail``.
+
+    Empty for a row the flip did not mark.
     """
     observed = row.get("observed")
     if not isinstance(observed, Mapping) or not observed.get("informational"):
         return ""
     usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
-    return f" — not remote-usable from this device; the peer is reachable at {usable}"
+    note = _private_address_note(str(row.get("endpoint") or ""))
+    return f"not remote-usable from this device{note}; the peer is reachable at {usable}"
 
 
 def mark_informational(rows: list[dict[str, Any]]) -> None:

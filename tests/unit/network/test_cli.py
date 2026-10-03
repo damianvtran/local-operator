@@ -1179,6 +1179,9 @@ def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_
     # The human line names the address that works, same treatment as ready's.
     assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 1  # noqa: SLF001
     human = capsys.readouterr().out
+    # The shared clause rides the line behind ONE separator spelling, note
+    # included (design round 1, D3): the doctor reader gets the provenance too.
+    assert "— not remote-usable from this device (the machine's own private address)" in human
     assert "the peer is reachable at 99.79.190.164:4097" in human
 
 

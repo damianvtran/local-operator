@@ -802,7 +802,7 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 f"{'ok  ' if check.get('ok') else 'FAIL'} {check.get('check')} "
                 f"{check.get('device_id', '')} {check.get('endpoint', '')} "
                 f"{doctor_detail_words(str(check.get('detail', '')))}"
-                + readiness_mod.informational_clause(check)
+                + (f" — {clause}" if (clause := readiness_mod.informational_clause(check)) else "")
             ).rstrip()
             for check in payload.get("checks") or []
         ]

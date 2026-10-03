@@ -1197,10 +1197,17 @@ def test_a_remote_unusable_address_is_informational_when_the_peer_answers_elsewh
     assert dead["remedies"] == []
     assert live["ok"] is True and live["observed"].get("informational") is None
     reading = readiness.reachability_reading(dead)
-    assert "something answered this address and refused the connection" in reading
+    # The raw failure clause is REPLACED, never parroted (design round 1, D1):
+    # "nothing is listening on that port" would name a wrong action for the one
+    # row this flip exists for — and the reading IS the shared clause (D3), so
+    # the doctor renderers cannot drift from it.
+    assert reading == readiness.informational_clause(dead)
+    assert "nothing is listening on that port" not in reading
     assert "not remote-usable from this device" in reading
     assert "the peer is reachable at 99.79.190.164:4097" in reading
     assert "the machine's own private address" in reading
+    # The note names the KIND; the clause carries the scope (D8).
+    assert "remote devices cannot use it" not in reading
 
 
 def test_without_a_usable_address_the_report_keeps_its_failures() -> None:
@@ -1288,7 +1295,8 @@ def test_doctor_marks_a_dead_address_informational_when_the_handshake_verified_e
     assert dead["observed"]["informational"] is True
     assert dead["observed"]["usable_elsewhere"] == ["99.79.190.164:4097"]
     assert readiness.informational_clause(dead) == (
-        " — not remote-usable from this device; the peer is reachable at 99.79.190.164:4097"
+        "not remote-usable from this device (the machine's own private address); "
+        "the peer is reachable at 99.79.190.164:4097"
     )
     # Every other row gets no clause; the handshake row keeps its own shape.
     assert readiness.informational_clause(rows[1]) == ""

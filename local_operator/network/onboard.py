@@ -1154,12 +1154,14 @@ class OnboardRun:
                 )
             except MeshRefusal:
                 refiled = None
+        why = str(finding.get("why") or "").strip()
         suffix = (
             f" A new request {refiled} now carries the corrected facts — ask Local "
             "Operator to take it to approval."
             if refiled
-            else " A new request is needed before anything runs — ask Local Operator "
-            "to file one."
+            else " Nothing can run until this changes"
+            + (f": {why}" if why else "")
+            + ". A new request is needed then — ask Local Operator to file one."
         )
         return OnboardContradiction(sentence + "." + suffix, finding=finding, refiled=refiled)
 
@@ -1270,50 +1272,69 @@ class OnboardRun:
                     refusal = str(payload.get("code") or "")
                     message = str(payload.get("message") or payload.get("error") or "")
                 tail = (joined.stderr or "").strip().splitlines()
-                # BOTH HALVES RIDE (drill finding, 2026-10-03): preferring the
-                # code alone rendered every failed re-onboard as a bare
-                # ``join_failed`` and dropped the payload's ``message`` — where
-                # the per-host detail lives ("nothing was listening at …").
-                # A code for the machine, the sentence for the person.
-                detail = ": ".join(part for part in (refusal, message) if part)
-                detail = detail or (tail[-1][:200] if tail else "the join was refused")
+                # THE SENTENCE IS THE MESSAGE; THE CODE IS A MACHINE FIELD (drill
+                # finding, 2026-10-03; design round 1, D6): preferring the code
+                # alone rendered every failed re-onboard as a bare ``join_failed``
+                # and dropped the payload's ``message`` — where the per-host detail
+                # lives ("nothing was listening at …"). The message now rides the
+                # sentence; the code rides ``data.code`` for the machine register.
+                embedded = message or refusal
+                embedded = embedded or (tail[-1][:200] if tail else "the join was refused")
                 data: dict[str, Any] = {
                     "invite_id": self.invite_id,
+                    "code": refusal,
                     "node_refused": bool(refusal or message),
                 }
-                # DETECT AN ALREADY-SERVING RELAY BEFORE BLAMING THE TOKEN (drill
-                # finding, 2026-10-03; four failed re-onboards while the node's own
-                # systemd relay held :4097, its log carrying ``OSError: [Errno 98]
-                # Address already in use``): a machine onboarded once serves its own
-                # relay, and a relay left running from an earlier onboarding can
-                # hold the connection a join needs. The probe is the one
-                # ``step_relay`` reads; when it answers "serving", the failure names
-                # cause and remedy instead of a bare ``join_failed``. FAILURE-PATH
-                # ONLY: a join that completes never asks, so the success semantics
-                # are untouched.
+                # WHAT THE NODE PROBE VERIFIED, IN ITS OWN WORDS (drill finding,
+                # 2026-10-03; design round 1, D4/D5). Four failed re-onboards ran
+                # while the node's own systemd relay held :4097 (its log:
+                # ``OSError: [Errno 98] Address already in use``). The probe is
+                # the one ``step_relay`` reads; the failure names what it SAW —
+                # never a mechanism this build cannot produce (this build's join
+                # starts no relay), never a port it did not verify, and never an
+                # alternative where only one action works: restart the relay
+                # there, then retry the join. FAILURE-PATH ONLY: a join that
+                # completes never probes, so the success semantics are untouched.
                 status = self._node_json("lop network status", timeout=60.0)
-                if status and (status.get("relay_running") or status.get("relay_answering")):
-                    # THE LIVE PORT WHEN THERE IS ONE: the status verb's ``port``
-                    # key is the default it was asked about; an ANSWERING relay's
-                    # own block (``listening``) is where the real one lives.
-                    # Anything unparseable falls back to the shipped default —
-                    # this is a sentence, not a gate.
-                    listening = status.get("listening")
-                    live_port = listening.get("port") if isinstance(listening, dict) else None
+                where = str(self.view.device.get("name") or "").strip() or "that machine"
+                status = status if isinstance(status, dict) else {}
+                listening = status.get("listening")
+                live_port = None
+                if isinstance(listening, dict):
                     try:
-                        port = int(live_port or status.get("port") or 0) or 4097
+                        live_port = int(listening.get("port") or 0) or None
                     except (TypeError, ValueError):
-                        port = 4097
+                        live_port = None
+                if status.get("relay_answering") and live_port is not None:
+                    # VERIFIED serving: the relay answered THIS probe AND named
+                    # its port — the only state that may say "serving :<port>".
+                    # The parenthetical prevents the one misread this sentence
+                    # invites: the serving listener is the node's OWN port, not
+                    # one of the addresses the join's refusal names.
                     detail = (
-                        f"a relay already serves :{port} on that machine, and the join did "
-                        f"not complete ({detail}). A relay left running from an earlier "
-                        "onboarding can hold the connection a join needs: restart it there, "
-                        "or retry the join and let this run's relay step do that"
+                        f"a relay is already serving :{live_port} on {where} (its own "
+                        "listener — a different address from any endpoint the join's "
+                        f"refusal names), and the join did not complete ({embedded}). "
+                        f"Restart the relay on {where} with `lop network restart`, then "
+                        "retry the join"
                     )
                     data["relay_serving"] = True
-                    data["relay_port"] = port
+                    data["relay_port"] = live_port
+                elif status.get("relay_running"):
+                    # RUNNING BUT UNCONFIRMED (review round 1, R-MINOR): the earlier
+                    # shape fell back to the port it was ASKED about and asserted
+                    # it serving — a claim the probe did not verify. It says what
+                    # is known instead, with the same one action.
+                    detail = (
+                        f"a relay process is registered on {where} but this probe "
+                        f"could not confirm it serving (state: "
+                        f"{status.get('relay_state') or 'unknown'}), and the join did "
+                        f"not complete ({embedded}). Restart the relay on {where} with "
+                        "`lop network restart`, then retry the join"
+                    )
+                    data["relay_state"] = str(status.get("relay_state") or "")
                 else:
-                    detail = f"the join did not complete ({detail})"
+                    detail = f"the join did not complete ({embedded})"
                 # The token file is removed by the ``finally`` below — one place.
                 return _StepOutcome(False, detail, data)
             after = self._node_json("lop network identity show", timeout=60.0)

@@ -268,6 +268,8 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     assert dead["observed"]["usable_elsewhere"] == [live]
     assert dead["remedies"] == []
     reading = readiness.reachability_reading(dead)
+    assert reading == readiness.informational_clause(dead)
+    assert "nothing is listening on that port" not in reading
     assert "not remote-usable from this device" in reading
     assert f"the peer is reachable at {live}" in reading
     # And the link that the winner produced is what the capability rows were
@@ -314,7 +316,7 @@ def test_doctors_dead_endpoint_row_is_informational_once_a_handshake_succeeds(
     assert dead["observed"]["informational"] is True
     assert dead["observed"]["usable_elsewhere"] == [live]
     assert readiness.informational_clause(dead) == (
-        f" — not remote-usable from this device; the peer is reachable at {live}"
+        f"not remote-usable from this device; the peer is reachable at {live}"
     )
 
     # NOTHING VERIFIED: with both declared addresses dead, every row keeps

@@ -5494,11 +5494,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     lines = []
     for check in checks:
         state = "ok " if check.get("ok") else "FAIL"
+        # The shared clause hangs here with one separator spelling (design round
+        # 1, D3): the sentence itself lives in ``readiness``, so this line and
+        # the readiness reading cannot drift apart.
+        clause = readiness_mod.informational_clause(check)
         lines.append(
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
             f"{check.get('endpoint', '')} {doctor_detail_words(str(check.get('detail', '')))}"
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
-            + readiness_mod.informational_clause(check)
+            + (f" — {clause}" if clause else "")
         )
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
@@ -6166,9 +6170,9 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
         raise MeshRefusal(
             "host_key_unobserved",
             f"the host key at {probe_host}:{port} could not be observed "
-            f"({found.detail or 'the machine did not answer'}); a request filed "
-            "without one is a card that halts at its first step. Make sure that "
-            "machine answers a key read, then file again — or pass --host-key-fp "
+            f"({found.detail or 'the machine did not answer'}); nothing was filed, "
+            "because a request without it would halt at its first step. Make sure "
+            "the machine is reachable, then file again — or pass --host-key-fp "
             "when the fingerprint is already known.",
         )
     return found.host_key_fp
