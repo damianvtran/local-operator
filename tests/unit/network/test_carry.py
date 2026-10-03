@@ -277,8 +277,14 @@ class TestOrderingOnARealMove:
         # The supervisor installer shells out to launchctl/systemd; a test must
         # not install a real unit. The promote still takes the §5.3 `ensure`
         # step — it just lands on this stub — and the installed-ness itself is
-        # covered where it belongs (``tests/unit/wakes/test_install.py``).
-        monkeypatch.setattr(carry_mod, "ensure_supervisor", lambda root: "stubbed")
+        # covered where it belongs (``tests/unit/wakes/test_install.py``). The
+        # stub answers the verify shape (``running``); the carried-wake receipt
+        # half is exercised by ``test_move_carry_supervisor`` on a fake installer.
+        monkeypatch.setattr(
+            carry_mod,
+            "ensure_supervisor",
+            lambda root: {"installed": True, "running": True, "detail": "stubbed"},
+        )
 
         result = _move(server_b, SESSION, monkeypatch=monkeypatch)
         assert result.get("ok"), result
