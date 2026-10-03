@@ -451,6 +451,16 @@ forks instead: the destination mints a NEW id, copies the transcript, and leaves
 the source running untouched, with the copy's origin recorded as a fork; the two
 transcripts diverge from there.
 
+WHAT TRAVELS OF A SESSION'S SCHEDULED STATE. A wake travels with the conversation,
+and the destination installs and starts its wake supervisor for it as part of the
+move — the receipt confirms it ("supervisor running on <device>") — so the schedule
+fires there with nothing open; if that device cannot run a supervisor, the receipt
+says so in one line and names the fix to run ON THAT DEVICE (`lop wake install`),
+so the right machine gets repaired. **Monitor state does not travel with a move**: a
+monitor's counters and snapshots are device-local observations, so their checks
+start fresh on the destination and the move itself never fires an alert. Watch the
+receipt's `carry` block on `--json` for both halves.
+
 OTHER FLAGS. `--wait [SECONDS]` re-checks a conversation whose turn is in flight
 every five seconds, up to the design's thirty minutes (a bare `--wait`). A session
 with a turn in flight is otherwise REFUSED rather than interrupted, and the refusal
