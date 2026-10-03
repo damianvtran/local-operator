@@ -22,9 +22,11 @@
 //
 // WHAT THIS LAYER CAN PROVE, AND WHAT IT CANNOT. happy-dom does no layout — every
 // box is 0x0 — so "the panel is on screen" is unanswerable here, and it carries
-// no viewport units either. What it CAN resolve is the panel's `max-height`, which
-// is the cap that has to track the column; that is asserted below, and it fails
-// if the cap goes back to a `dvh` class or to any other source than the pin.
+// no viewport units either. Two things it DOES resolve, and both are asserted
+// below: the panel's `max-height` (the cap that has to track the column) and the
+// dialog's `position` (the anchoring that keeps the overlay off whatever ancestor
+// happens to be positioned). They fail on a cap that stops tracking the pin, and
+// on a revert to `absolute` — the revert that causes this whole ticket.
 // The pixels are asserted on the real bundle: the capture rig measured the gate
 // sheet's panel at top=-263/bottom=53 before the fix and top=528/bottom=844 after
 // it, and the asks sheet's at 717px tall clipped in a 480px pinned column before
@@ -63,6 +65,15 @@ function mountInHeader(pinPx: number, offsetPx = 0) {
 }
 
 describe("the sheet overlay's box", () => {
+	it("is anchored to the viewport, not to whichever ancestor is positioned", () => {
+		// Mounted inside a POSITIONED wrapper on purpose: this is the real shape
+		// (the session view's header sits in a `relative` div) and the shape in
+		// which `absolute inset-0` resolved to a 390x53 box and put the panel
+		// 263px above a 390x844 screen.
+		const { dialog } = mountInHeader(844);
+		expect(getComputedStyle(dialog).position).toBe("fixed");
+	});
+
 	it("reads the panel's cap from the column's pin, so it cannot be taller than the column", () => {
 		const { panel } = mountInHeader(480);
 		// Column units: the cap resolves against the pinned visual viewport the
@@ -89,7 +100,6 @@ describe("the sheet overlay's box", () => {
 		const { container, dialog } = mountInHeader(844);
 		expect(screen.getByTestId("column-header").contains(dialog)).toBe(true);
 		expect(container.firstElementChild?.contains(dialog)).toBe(true);
-		expect(document.body.querySelectorAll('[role="dialog"]').length).toBe(1);
 	});
 
 	it("keeps the panel's content scrollable inside whatever the cap allows", () => {

@@ -200,22 +200,26 @@ export function Sheet({
 	   screen, cut mid-sentence, with its buttons and its ✕ 263px above the top
 	   of a screen that cannot scroll up to them.
 
-	   `fixed` takes the overlay off whatever happens to be positioned and puts it
-	   on the phone's viewport, wherever a caller mounts it. Two constraints are
-	   deliberately kept:
+	   `columnBox()` supplies the anchor: `position: fixed`, and the two numbers
+	   the column is itself pinned to (`--lo-vvh`, `--lo-vvh-top`, published by
+	   the same `visualViewport` handler in `screens/session-view.tsx`). The
+	   position sits in that helper rather than in this class list on purpose —
+	   an inline declaration is the only one the happy-dom layer can assert, and
+	   a revert to `absolute` is exactly what has to fail in CI.
+
+	   Two constraints are deliberately kept:
 
 	   1. NO PORTAL. The overlay still renders in place, inside the phone column:
 	      the cmux screenshot surface is that column, and a body portal paints
-	      outside it. `fixed` does not move the node; and the box is the column's
-	      own — same width, same centre (`--lo-column-max`, the var the column
-	      itself is capped by) — so the captured surface contains the sheet.
+	      outside it. Anchoring it to the viewport does not move the node; and the
+	      box is the column's own — same width, same centre
+	      (`--lo-column-max`, the var the column itself is capped by) — so the
+	      captured surface contains the sheet.
 	   2. THE VISUAL VIEWPORT, NOT THE LAYOUT ONE. A `fixed` box resolves against
 	      the LAYOUT viewport, which a virtual keyboard does not shrink
-	      (`resizes-visual`), so `inset-0` would hold the panel's foot under the
-	      keyboard. `columnBox()` reads the two numbers the column is itself
-	      pinned to (`--lo-vvh`, `--lo-vvh-top`, published by the same
-	      `visualViewport` handler in `screens/session-view.tsx`), so the overlay
-	      and the column are the same box by construction.
+	      (`resizes-visual`), so a bare `inset-0` would hold the panel's foot
+	      under the keyboard — while the column it belongs with has already been
+	      pinned to the visual one.
 
 	   Safe areas: the panel keeps the bottom inset as padding (it is the panel's
 	   foot that meets the home indicator). The top needs no term — the panel is
@@ -224,7 +228,7 @@ export function Sheet({
 	return (
 		<div
 			ref={dialogRef}
-			className="fixed inset-x-0 z-50 mx-auto w-full max-w-[var(--lo-column-max,28rem)]"
+			className="inset-x-0 z-50 mx-auto w-full max-w-[var(--lo-column-max,28rem)]"
 			style={columnBox()}
 			role="dialog"
 			aria-modal="true"
