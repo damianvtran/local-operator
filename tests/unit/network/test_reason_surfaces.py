@@ -190,6 +190,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input; the returned sentences are authored here, never echoed",
     ),
+    # The doctor-dialect classifier (drill finding, 2026-10-03): the value read is
+    # the PROBE'S OWN machine code — compared against the producer's constants so
+    # a rename cannot drift it, and never printed from this site (the renderers
+    # gloss through ``doctor_detail_words``).
+    ("local_operator/network/readiness.py", "_did_not_lead", "detail"): (
+        1,
+        "classifier input (the probe's own code, compared against the producer's "
+        "constants); the row's sentence is rendered by the glossing renderers",
+    ),
     (
         "local_operator/network/readiness.py",
         "render_check_lines",

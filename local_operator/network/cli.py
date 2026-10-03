@@ -5488,15 +5488,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     # state the listing's own round-10 fix exists for — the endpoint address on a
     # human line. These lines are the human register; the raw strings are unchanged
     # and still ride in ``checks[].detail`` of the payload ``--json`` prints.
+    from local_operator.network import readiness as readiness_mod
     from local_operator.resume import doctor_detail_words
 
     lines = []
     for check in checks:
         state = "ok " if check.get("ok") else "FAIL"
+        # The shared clause hangs here with one separator spelling (design round
+        # 1, D3): the sentence itself lives in ``readiness``, so this line and
+        # the readiness reading cannot drift apart.
+        clause = readiness_mod.informational_clause(check)
         lines.append(
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
             f"{check.get('endpoint', '')} {doctor_detail_words(str(check.get('detail', '')))}"
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
+            + (f" — {clause}" if clause else "")
         )
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
@@ -6140,6 +6146,38 @@ def _approval_signature_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     return {"key_id": str(signature.get("key_id") or "")}
 
 
+def _host_key_for_request(host: str, user: str, given: str) -> str:
+    """The host-key fingerprint the request will carry — supplied, or OBSERVED.
+
+    A card approved without one cannot run: step zero halts with "the request
+    does not carry the host-key fingerprint it was approved against", and its
+    auto-refiled replacement used to be minted with the same hole — the remedy
+    reproduced the failure (drill finding, 2026-10-03). When the caller did not
+    pass ``--host-key-fp``, the request OBSERVES the key through the
+    credential-free handshake — the whole of pre-approval contact (§3.1), and
+    what makes an approval card factual. An UNOBSERVABLE key refuses rather than
+    filing the unusable card: raising the flag is the fallback, not the default.
+    """
+    if given:
+        return given
+    from local_operator.network import onboard as onboard_mod
+    from local_operator.network.types import MeshRefusal
+
+    port = onboard_mod._port_from(host) or 22
+    probe_host = host.partition(":")[0] if ":" in host else host
+    found = onboard_mod.probe(probe_host, port=port, user=user)
+    if not found.ok or not found.host_key_fp:
+        raise MeshRefusal(
+            "host_key_unobserved",
+            f"the host key at {probe_host}:{port} could not be observed "
+            f"({found.detail or 'the machine did not answer'}); nothing was filed, "
+            "because a request without it would halt at its first step. Make sure "
+            "the machine is reachable, then file again — or pass --host-key-fp "
+            "when the fingerprint is already known.",
+        )
+    return found.host_key_fp
+
+
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
     """File the onboarding request: the card an operator will be asked to sign."""
     from local_operator.network import approvals as approval_store
@@ -6173,6 +6211,12 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
     if network_id:
         what["network_id"] = network_id
         what["role"] = args.role
+    # THE KEY IS OBSERVED HERE WHEN NOT SUPPLIED (drill finding, 2026-10-03): the
+    # card the operator is asked to sign must be a card that can run — see the
+    # helper for why filing without it reproduced a failure instead of fixing it.
+    host_key_fp = _host_key_for_request(
+        args.host, str(args.user or ""), str(args.host_key_fp or "")
+    )
     record = approval_store.create_request(
         kind=approval_store.KIND_DEVICE_ONBOARD,
         request_id=args.request_id or approval_store.new_request_id(),
@@ -6188,7 +6232,7 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
             "host": args.host,
             "user": args.user,
             "transport": "ssh",
-            "host_key_fp": args.host_key_fp,
+            "host_key_fp": host_key_fp,
         },
         what=what,
         credential_ref=(

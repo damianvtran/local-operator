@@ -10131,6 +10131,16 @@ class RelayServer:
                         "detail": attempt.detail,
                     }
                 )
+        # INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): the same
+        # semantics ``ready`` applies to its own rows — ONE home,
+        # ``readiness.mark_informational`` — because doctor's reader met the same
+        # false negative: a dead advertised address (the node's VPC-private one)
+        # reds the whole report while the handshake VERIFIED the member at
+        # another address. The flip touches reachability rows only; the
+        # credential-repair rows beside them stay exactly as they are.
+        from local_operator.network import readiness as readiness_mod
+
+        readiness_mod.mark_informational(rows)
         return rows
 
     def _handshake_row(
