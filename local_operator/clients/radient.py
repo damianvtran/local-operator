@@ -441,6 +441,64 @@ def org_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> Di
     raise ValueError('visibility must be "public" or "org"')
 
 
+def team_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> Dict[str, str]:
+    """The ``visibility``/``tenant_id`` query params a TEAM call sends.
+
+    Teams do NOT share ``parseOrgTarget``'s rule, and this helper exists so the
+    difference lives in one place. The team routes' ``parseTeamTarget`` treats a
+    lone ``tenant_id`` as the org spelling (the shape every caller sent before
+    public teams existed), where the agent routes refuse it with
+    ``tenant_id is only valid together with visibility=org``. The consequences,
+    each mirrored here so a malformed target fails locally instead of on the
+    wire:
+
+    * absent visibility + a tenant -> ``{"tenant_id": t}``: today's org call,
+      byte-identical;
+    * ``"public"`` -> ``{}`` (no params; the hub's own default is the public
+      hub), and a tenant alongside it is the server's 400;
+    * ``"org"`` -> both params, tenant required;
+    * a third value -> refused by name.
+    """
+
+    if visibility in (None, ""):
+        if not tenant_id or not str(tenant_id).strip():
+            raise ValueError("tenant_id is required to publish a team")
+        return {"tenant_id": tenant_id}
+    if visibility == "public":
+        if tenant_id and str(tenant_id).strip():
+            raise ValueError("tenant_id is only valid together with visibility=org")
+        return {}
+    if visibility == "org":
+        if not tenant_id or not str(tenant_id).strip():
+            raise ValueError("tenant_id is required when visibility=org")
+        return {"visibility": "org", "tenant_id": tenant_id}
+    raise ValueError('visibility must be "public" or "org"')
+
+
+# The publish-preview protocol (agent-server design p2p3 §4). A preview is its own route family --
+# an old server answers it 404 instead of publishing for real (design D5) -- and the commit is the
+# ordinary write route carrying the pin in a HEADER. Header, not body, because both document
+# decoders refuse unknown fields: a token inside the document would be a 422 rather than a
+# mechanism.
+#
+# The envelope version is explicit so an older client (or a future one) is refused by name rather
+# than half-understood. ``base_document`` is part of the envelope for the phase-3 `combine`
+# resolver; v1's `overwrite` mode needs none, and the server accepts-and-ignores it today.
+PREVIEW_ENVELOPE_VERSION = 1
+PREVIEW_TOKEN_HEADER = "X-Radient-Preview-Token"
+PREVIEW_ACCEPT_HEADER = "X-Radient-Accept-Unresolved"
+#: The query parameter the internal-operations consent rides on (P1). It travels next to the
+#: target it is only meaningful for -- never in the document -- and only on a COMMIT: a preview
+#: route refuses it, because consent is confirmed after the diff is seen.
+MODERATION_ALLOWANCE_PARAM = "moderation_allowance"
+#: How long a preview request may take. The server's own worst case is the transform call's 25 s
+#: attempt plus transport slack (≈50 s, p2p3 §2.5), so 60 s is that envelope plus margin. The
+#: COMMIT calls keep their deliberate no-timeout stance (see ``publish_agent_instruction_set``):
+#: a preview is non-mutating and can simply be re-run, while a commit the caller abandoned may
+#: still be landing on the hub.
+PREVIEW_TIMEOUT_SECONDS = 60.0
+
+
 def _is_an_error_envelope(response: requests.Response) -> bool:
     """Is this successful response actually an error the upstream reported?
 
@@ -763,6 +821,9 @@ class RadientClient:
         *,
         visibility: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        accept_unresolved: Optional[Sequence[str]] = None,
+        moderation_allowance: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Publish an agent to the Radient Agent Hub as an instruction-set document.
 
@@ -788,12 +849,29 @@ class RadientClient:
         surfaces as an :class:`APIError`; it is only the caller's own impatience
         that is not allowed to cancel the request.
 
+        The COMMIT half of the preview protocol (p2p3 §4): with ``preview_token``
+        set, this same route commits the previewed document — the server verifies
+        these bytes against the pin and skips its transform — and
+        ``accept_unresolved`` carries the preview's ``u``-ids (ids, never values) in
+        the acknowledgement header. ``moderation_allowance`` adds the P1 consent
+        query parameter (org targets only; a preview route refuses it because
+        consent is confirmed at the commit). All three default to ``None``; with
+        none set the request is byte-identical to what this method sent before the
+        parameters existed.
+
         Args:
             document: The instruction-set document to publish.
             visibility: ``"org"`` to publish into an organization workspace;
                 omit (or ``"public"``) for the public hub.
             tenant_id: The organization tenant to publish into; required with
                 ``visibility="org"`` and refused without it.
+            preview_token: The pin a preview issued (``None`` publishes without
+                one; the server then runs its check and may refuse
+                ``generalization_required``).
+            accept_unresolved: The preview's unresolved ids to acknowledge, in
+                order (``None`` acknowledges nothing).
+            moderation_allowance: The consent-text version for an org-internal
+                publish; only meaningful with ``visibility="org"``.
 
         Returns:
             The hub's publication result (``agent_id``, ``name``, ``version``,
@@ -804,15 +882,21 @@ class RadientClient:
                 ``details`` carry the hub's machine-readable refusal (contract
                 §2.4) — ``name_taken``, ``name_reserved_builtin``,
                 ``moderation_rejected``, ``moderation_unavailable``,
-                ``invalid_instruction_set``, ``payload_too_large`` — so the caller
-                can render a different next step for each without reading prose.
+                ``invalid_instruction_set``, ``payload_too_large``, plus the commit
+                family's ``generalization_required``, ``preview_mismatch``,
+                ``preview_expired``, ``preview_stale`` and
+                ``generalization_unresolved`` — so the caller can render a
+                different next step for each without reading prose.
             RuntimeError: When no API key is configured for this client.
             ValueError: When ``visibility``/``tenant_id`` do not form a valid
                 target (§4.4's rule, refused before the request is sent).
         """
         url = f"{self.base_url}/agents/publish"
         headers = self._get_headers(content_type="application/json")
+        headers.update(self._preview_commit_headers(preview_token, accept_unresolved))
         params = org_target_params(visibility, tenant_id)
+        if moderation_allowance is not None:
+            params[MODERATION_ALLOWANCE_PARAM] = moderation_allowance
         try:
             response = requests.post(
                 url, headers=headers, json=dict(document), params=params, allow_redirects=False
@@ -834,6 +918,9 @@ class RadientClient:
         *,
         visibility: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        accept_unresolved: Optional[Sequence[str]] = None,
+        moderation_allowance: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update an already-published agent with a new instruction-set document.
 
@@ -847,6 +934,12 @@ class RadientClient:
         keeps refusing unknown fields, so a scope cannot be smuggled inside it —
         and without either param the call is today's public republish exactly.
 
+        The commit half of the preview protocol is identical to
+        :meth:`publish_agent_instruction_set`: ``preview_token``,
+        ``accept_unresolved`` and ``moderation_allowance`` ride exactly as they do
+        there, and with all three ``None`` the request is byte-identical to
+        today's.
+
         Args:
             agent_id: The id of the HUB listing to update (not a local agent id;
                 the local registry keeps no link to the listing a row was
@@ -856,6 +949,10 @@ class RadientClient:
                 omit (or ``"public"``) for the public hub.
             tenant_id: The organization whose workspace to update in; required
                 with ``visibility="org"`` and invalid without it.
+            preview_token: The pin a preview issued for THIS listing and target.
+            accept_unresolved: The preview's unresolved ids to acknowledge.
+            moderation_allowance: The consent-text version for an org-internal
+                republish; only meaningful with ``visibility="org"``.
 
         Returns:
             The hub's publication result for the updated listing.
@@ -869,7 +966,10 @@ class RadientClient:
         """
         url = f"{self.base_url}/agents/{agent_id}/publish"
         headers = self._get_headers(content_type="application/json")
+        headers.update(self._preview_commit_headers(preview_token, accept_unresolved))
         params = org_target_params(visibility, tenant_id)
+        if moderation_allowance is not None:
+            params[MODERATION_ALLOWANCE_PARAM] = moderation_allowance
         try:
             response = requests.put(
                 url, headers=headers, json=dict(document), params=params, allow_redirects=False
@@ -883,6 +983,191 @@ class RadientClient:
                 secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="update the agent")
+
+    def _preview_commit_headers(
+        self, preview_token: Optional[str], accept_unresolved: Optional[Sequence[str]]
+    ) -> Dict[str, str]:
+        """The two commit headers a publish call may carry, or nothing at all.
+
+        Split out so the three publish methods add them identically, and so the
+        ``None``/``None`` case is provably an EMPTY dict — the default every
+        caller that does not use the preview protocol depends on (the request it
+        produces must stay byte-identical to the pre-preview wire).
+        """
+        headers: Dict[str, str] = {}
+        if preview_token:
+            headers[PREVIEW_TOKEN_HEADER] = preview_token
+        if accept_unresolved:
+            headers[PREVIEW_ACCEPT_HEADER] = ",".join(str(entry) for entry in accept_unresolved)
+        return headers
+
+    def _preview_request(
+        self,
+        method: str,
+        url: str,
+        document: Mapping[str, Any],
+        *,
+        params: Dict[str, str],
+        fallback_message: str,
+    ) -> Dict[str, Any]:
+        """The one request behind all four preview methods (p2p3 §4.1).
+
+        WHY THE ENVELOPE: the preview body is ``{preview_version, document}`` and
+        not the bare document (design D5). The version field is how a future
+        envelope is refused by name instead of half-understood, and the wrapper is
+        what lets the pin ride beside the document without either becoming a
+        document field — the write decoder refuses unknown fields, so a token
+        inside the document would be a 422 rather than a mechanism.
+
+        WHY THE TIMEOUT: a preview is a paid, NON-mutating model call; unlike a
+        publish, nothing lands if the caller gives up, so this side may bound
+        itself (:data:`PREVIEW_TIMEOUT_SECONDS`). Commits keep their no-timeout
+        stance.
+
+        WHY NO REDIRECTS: same rule as every org call (S-2 of the security
+        review) — a redirect to another origin would carry the credential with it;
+        the response is refused rather than followed.
+
+        ``params`` arrives already computed: the AGENT family targets with
+        ``org_target_params`` and the TEAM family with ``team_target_params``
+        (whose lone-tenant spelling differs), so the two cannot disagree with
+        their own write routes about what a target means.
+        """
+        headers = self._get_headers(content_type="application/json")
+        envelope: Dict[str, Any] = {
+            "preview_version": PREVIEW_ENVELOPE_VERSION,
+            "document": dict(document),
+        }
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                json=envelope,
+                params=params,
+                timeout=PREVIEW_TIMEOUT_SECONDS,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message=fallback_message,
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="preview the publication")
+
+    def preview_publish_agent_instruction_set(
+        self,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Preview a new agent publication (``POST /agents/publish/preview``).
+
+        Runs the hub's reference transform and returns the generalized document
+        plus the change list and the commit pin — and publishes NOTHING. The
+        review has not run at this point (``review: "not_run"``): it runs at the
+        commit, on exactly the bytes this returned.
+
+        Returns the hub's preview object: ``status`` (``ready`` | ``needs_ack`` |
+        ``unchanged``), ``document`` (the exact bytes a commit must send back),
+        ``changes`` (values → placeholders, with occurrence counts), ``unresolved``
+        (flagged values with ``u``-ids), ``advisories``, ``resolution`` and
+        ``pin`` (token, expiry, header names, accept ids).
+
+        A server without the preview routes answers 404 — the caller treats that
+        as "old server" and falls back to a plain publication.
+
+        Raises:
+            APIError: When the hub refuses the preview (``invalid_preview_request``,
+                ``invalid_instruction_set``, ``rate_limited``,
+                ``moderation_unavailable``); a 404 means the route is absent.
+            ValueError: When the target is malformed (refused locally).
+        """
+        url = f"{self.base_url}/agents/publish/preview"
+        return self._preview_request(
+            "POST",
+            url,
+            document,
+            params=org_target_params(visibility, tenant_id),
+            fallback_message="Could not preview the agent publication",
+        )
+
+    def preview_republish_agent_instruction_set(
+        self,
+        agent_id: str,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Preview a republish of an existing agent listing (``PUT /agents/:id/publish/preview``).
+
+        The republish twin of :meth:`preview_publish_agent_instruction_set`; its
+        ``resolution`` reports what the submission would remove from the
+        published copy (v1 overwrite: every published-only unit is a first-class
+        removal the publisher confirms). The route runs the same authorization as
+        the write it fronts — a non-member org preview answers the same 404 the
+        write would, before any transform spend.
+        """
+        url = f"{self.base_url}/agents/{agent_id}/publish/preview"
+        return self._preview_request(
+            "PUT",
+            url,
+            document,
+            params=org_target_params(visibility, tenant_id),
+            fallback_message="Could not preview the agent republish",
+        )
+
+    def preview_publish_team_document(
+        self,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Preview a new team publication (``POST /teams/publish/preview``).
+
+        The team preview is its own route family and uses the TEAM target rules
+        (:func:`team_target_params`). A public target with a non-empty
+        ``project`` is refused 422 ``invalid_team_document`` at this point, by
+        design: the refusal is a cheap deterministic check that must run BEFORE
+        the paid transform, so a public publisher is never billed for a document
+        that cannot land.
+        """
+        url = f"{self.base_url}/teams/publish/preview"
+        return self._preview_request(
+            "POST",
+            url,
+            document,
+            params=team_target_params(visibility, tenant_id),
+            fallback_message="Could not preview the team publication",
+        )
+
+    def preview_republish_team_document(
+        self,
+        team_id: str,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Preview a republish of an existing team (``PUT /teams/:id/publish/preview``).
+
+        The pin this issues is bound to this team, this route kind and this
+        target; committing it anywhere else answers 409 ``preview_expired``.
+        """
+        url = f"{self.base_url}/teams/{team_id}/publish/preview"
+        return self._preview_request(
+            "PUT",
+            url,
+            document,
+            params=team_target_params(visibility, tenant_id),
+            fallback_message="Could not preview the team republish",
+        )
 
     def check_agent_name_availability(self, name: str) -> Dict[str, Any]:
         """Ask the hub whether a name can be published, before submitting one.
@@ -1056,14 +1341,28 @@ class RadientClient:
         teams = result.get("teams")
         return list(teams) if isinstance(teams, list) else []
 
-    def get_team(self, team_id: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
-        """Pull one organization team by id (``GET /teams/:teamid``).
+    def get_team(
+        self,
+        team_id: str,
+        *,
+        timeout: Optional[float] = None,
+        with_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Pull one team by id (``GET /teams/:teamid``).
 
-        The pull path (§8.2): no tenant in the URL so a client can pull by the
-        id it holds, and the full document -- brief included -- for a member of
-        the owning organization. Anyone else is answered 404 (existence is not
-        disclosed), which surfaces here as an :class:`APIError` with
-        ``status_code == 404``.
+        The pull path (§8.2 / public-teams §7.1): no tenant in the URL so a client
+        can pull by the id it holds, and the full document -- brief included --
+        for a readable row. The route is optional-auth and resolves scope from the
+        ROW: a public team is served to anyone (the publisher's email withheld by
+        the public projection), an org team only to an entitled member. Everyone
+        else is answered 404 (existence is not disclosed), which surfaces here as
+        an :class:`APIError` with ``status_code == 404``.
+
+        ``with_credential`` is the PUBLIC arm's switch: the default ``True`` sends
+        this client's bearer (the org pull, and the only way an org row is
+        readable at all), while ``False`` sends NONE -- the route serves public
+        rows to anonymous callers, and the CLI's no-``--org`` pull is anonymous by
+        design so it needs no login and cannot read an org row by accident.
 
         Returns:
             The team document: ``id``, ``tenant_id``, ``name``, ``description``,
@@ -1072,10 +1371,12 @@ class RadientClient:
 
         Raises:
             APIError: When the hub refuses (404 ``team_not_found`` for a missing
-                team or a non-member; 403 ``team_plan_required``).
+                team or a caller who may not read it; 403 ``team_plan_required``).
         """
         url = f"{self.base_url}/teams/{team_id}"
-        headers = self._get_headers(content_type="application/json")
+        headers = self._get_headers(
+            content_type="application/json", require_api_key=with_credential
+        )
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
@@ -1084,21 +1385,38 @@ class RadientClient:
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
-                fallback_message="Could not pull the team from the organization",
+                fallback_message="Could not pull the team from the Radient Agent Hub",
                 secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="pull the team")
 
-    def publish_team_document(self, document: Mapping[str, Any], tenant_id: str) -> Dict[str, Any]:
-        """Publish a team document into an organization (``POST /teams/publish``).
+    def publish_team_document(
+        self,
+        document: Mapping[str, Any],
+        tenant_id: Optional[str] = None,
+        *,
+        visibility: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        accept_unresolved: Optional[Sequence[str]] = None,
+        moderation_allowance: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish a team document to the public hub or into an organization.
 
-        The team half of org sharing (§4.5/§8.3): ``tenant_id`` is a required
-        query param, admin+ of that tenant, and the hub re-runs the same
-        reviewer pipeline agent publications run. The document is the shape of
-        ``local_operator.teams.hub_team_document`` -- ``{name, description,
-        manager, members[], instructions, project, version}`` -- deliberately
-        NOT an agent instruction set (§8.1: teams are a parallel family and the
-        instruction-set schema refuses unknown fields).
+        The team half of hub publishing (§4.5/§8.3; public-teams design §2.1):
+        ``tenant_id`` names an organization (admin+ of that tenant -- the legacy
+        spelling, one param), ``visibility="public"`` targets the public hub
+        (any signed-in account), and a tenant alongside ``"public"`` is refused
+        here as the server refuses it. On a public target the hub refuses a
+        non-empty ``project`` (422 ``invalid_team_document``): ``project`` is the
+        publisher's local context and a public team has no project, so the
+        CALLER is the side that leaves it out -- visibly, never silently (the
+        CLI says so before anything is sent). The hub re-runs the same reviewer
+        pipeline agent publications run.
+
+        The commit half of the preview protocol is identical to
+        :meth:`publish_agent_instruction_set` (``preview_token``,
+        ``accept_unresolved``, ``moderation_allowance``; the consent param is
+        org-only and a preview route refuses it).
 
         Returns:
             The publication result: ``{"team": {"id", "name", "version"}}``.
@@ -1106,22 +1424,28 @@ class RadientClient:
         Raises:
             APIError: When the hub refuses -- ``name_taken``,
                 ``name_reserved_builtin``, ``invalid_team_document`` (with
-                ``field``/``rule`` details), ``moderation_rejected``,
-                ``moderation_unavailable``, ``not_a_member``,
-                ``insufficient_role``, ``team_plan_required``.
-            ValueError: When ``tenant_id`` is empty -- the hub's required
-                param, refused before the request is sent.
+                ``field``/``rule`` details; ``project`` on a public target),
+                ``moderation_rejected``, ``moderation_unavailable``,
+                ``not_a_member``, ``insufficient_role``, ``team_plan_required``,
+                plus the commit family's ``generalization_required``,
+                ``preview_mismatch``, ``preview_expired``, ``preview_stale``
+                and ``generalization_unresolved``.
+            ValueError: When the target params are malformed (mirrors the
+                server's 400s: a missing tenant for an org target, a tenant with
+                ``visibility="public"``, an unknown visibility).
         """
-        if not tenant_id or not tenant_id.strip():
-            raise ValueError("tenant_id is required to publish a team")
         url = f"{self.base_url}/teams/publish"
         headers = self._get_headers(content_type="application/json")
+        headers.update(self._preview_commit_headers(preview_token, accept_unresolved))
+        params = team_target_params(visibility, tenant_id)
+        if moderation_allowance is not None:
+            params[MODERATION_ALLOWANCE_PARAM] = moderation_allowance
         try:
             response = requests.post(
                 url,
                 headers=headers,
                 json=dict(document),
-                params={"tenant_id": tenant_id},
+                params=params,
                 allow_redirects=False,
             )
             response.raise_for_status()
@@ -1129,10 +1453,95 @@ class RadientClient:
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
-                fallback_message="Could not publish the team to the organization",
+                fallback_message="Could not publish the team to the Radient Agent Hub",
                 secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="publish the team")
+
+    def republish_team_document(
+        self,
+        team_id: str,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        accept_unresolved: Optional[Sequence[str]] = None,
+        moderation_allowance: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update an already-published team (``PUT /teams/:teamid/publish``).
+
+        The team twin of :meth:`republish_agent_instruction_set`, and the reason
+        it exists (p2p3 §7.1): the server route has always been there, but a
+        local team could only ever CREATE a hub row, so a second push of the same
+        name answered ``name_taken`` instead of overwriting. The target must
+        agree with the row (a public target against an org row is 404, and a
+        mismatched tenant is 404 before any ownership comparison); who may is
+        admin+ for an org row and ``row.AccountID == caller`` for a public one.
+
+        ``preview_token`` / ``accept_unresolved`` / ``moderation_allowance``
+        behave exactly as on the create method; with all three ``None`` this is
+        the plain PUT.
+
+        Raises:
+            APIError: As :meth:`publish_team_document`, plus ``team_not_found``
+                (404 for a missing row, a non-member, or a target/row scope
+                mismatch) and ``not_owner`` (403) on a public row.
+        """
+        url = f"{self.base_url}/teams/{team_id}/publish"
+        headers = self._get_headers(content_type="application/json")
+        headers.update(self._preview_commit_headers(preview_token, accept_unresolved))
+        params = team_target_params(visibility, tenant_id)
+        if moderation_allowance is not None:
+            params[MODERATION_ALLOWANCE_PARAM] = moderation_allowance
+        try:
+            response = requests.put(
+                url,
+                headers=headers,
+                json=dict(document),
+                params=params,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not update the team on the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="update the team")
+
+    def list_public_teams(self, *, page: int = 1, per_page: int = 20) -> Dict[str, Any]:
+        """List the public hub's teams (``GET /teams``; anonymous).
+
+        The public listing the teams-search surface reads: newest first, briefs
+        omitted (``instructions`` absent on these rows), paginated on
+        ``page``/``per_page`` (the hub clamps per_page to 100). No credential is
+        required; a client that holds no API key sends none, and the route is
+        anonymous so holding one changes nothing.
+
+        Returns:
+            The paginated envelope: ``page``, ``per_page``, ``total_pages``,
+            ``total_records`` and ``records`` (the team rows).
+
+        Raises:
+            APIError: When the hub refuses or is unreachable.
+        """
+        url = f"{self.base_url}/teams"
+        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        try:
+            response = requests.get(
+                url, headers=headers, params={"page": page, "per_page": per_page}
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not list the public teams",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="list the public teams")
 
     def list_models(self) -> RadientListModelsResponse:
         """Lists all available models on Radient along with their pricing.
