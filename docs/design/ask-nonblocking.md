@@ -287,6 +287,18 @@ race; partial drafts are client-local and secret drafts are never persisted),
   `engage_runtime(AskErrand)`; boot reconcile injects. (Desktop route: the current
   `answer_gate` requires a connected client and refuses a cold daemon — the route grows a cold
   arm for `ask_id` bodies.)
+  > **As shipped (2026-10-03, the cold-answer fix).** The relay's cold arm does it the other
+  > way round, and one way for both secret and non-secret: it ENGAGES FIRST
+  > (`engage_session_client` → `engage_runtime(AskErrand)`, the same seam the prompt path
+  > uses) and then sends the op over the dial. The runtime's own `respond`/`revise`/
+  > `decline`/`dismiss` then do the validating, the single-winner append, the secret hop and
+  > the `reconcile` — so no surface carries a second copy of those rules, and the refusals
+  > (`expired`, `already answered by <surface>`) are the queue's own sentences rather than a
+  > route-local guess. The desktop route already worked this way through its viewer facade's
+  > bind (`AttachedSession._ensure_bound` → `engage_runtime(WarmErrand)`); this brings the
+  > relay to the same shape. A conversation with no durable transcript is refused in words
+  > (`ask_session_gone`) before any engage is attempted: it can never be read, so reporting
+  > success for it would be worse than a refusal.
 - **Secret:** the value rides the op to a **live runtime only** (it is stored in session
   memory, `variables.py:389-410` **(scout)**, and must live in the process that runs `bash`).
   Cold → engage first, then send; if that fails the ask stays open with a clear error. The
