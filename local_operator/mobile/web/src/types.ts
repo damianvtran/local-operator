@@ -282,6 +282,15 @@ export interface PendingAsk {
 	session_id?: string;
 	/** The owning conversation's working directory, aggregate rows only. */
 	cwd?: string;
+	/** Whether the relay can deliver an answer to this conversation RIGHT NOW
+	    (design round 1, D1/D4 = UX U1/U3/U4). `GET /api/asks` computes it from
+	    the relay's own dial table, so it is the one fact the index cannot carry:
+	    an ask is durable, but answering it is a warm round trip when the
+	    conversation is up and a ~30 s engage when it is not.
+
+	    ABSENT is not `false`: an older daemon omits it, and a reader must then
+	    promise nothing about the wait rather than promise the wrong one. */
+	runtime_live?: boolean;
 	created_at: number;
 	expires_at: number;
 	timeout_s: number;

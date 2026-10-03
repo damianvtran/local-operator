@@ -231,19 +231,27 @@ export function AsksSheet({
 									) : null}
 								</span>
 							) : null}
-							{/* A conversation whose process is GONE is stated before
-							    the controls, not discovered by a refused tap: the ask
-							    outlives its runtime, so answering may need it reopened,
-							    and the reader deserves to know that before pressing. */}
-							{named?.ended ? (
+							{/* THE WAIT IS STATED BEFORE THE TAP, AND IN BOTH STATES (design
+							    round 1, D4 = UX U4). This strip used to render only for an `ended`
+							    row, and its copy described a MANUAL remedy the relay now performs
+							    itself — so for the operator's case (a durable conversation this
+							    daemon never watched die, which the list reports `ended:false`) it
+							    did not render at all. The aggregate now carries `runtime_live`,
+							    so the cue appears for both, and each names the cost the cold
+							    answer adds (~30 s: the engage budget composed with the op's ack)
+							    rather than leaving it to be discovered by a tap. */}
+							{named?.ended || row.runtime_live === false ? (
 								<p className="text-meta text-ink-dim">
-									this conversation has ended — answering may need it reopened
+									{named?.ended
+										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
+										: "this conversation is not running — answering will bring it up (this can take up to ~30 s)"}
 								</p>
 							) : null}
 							<AskCard
 								row={row}
 								sessionId={sessionId}
 								nowMs={nowMs}
+								runtimeLive={row.runtime_live}
 								onSettled={() => void load()}
 							/>
 						</div>
