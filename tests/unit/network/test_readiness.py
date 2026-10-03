@@ -1138,6 +1138,202 @@ def test_reachability_remedies_name_the_discriminating_checks() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The informational flip (drill finding, 2026-10-03)
+# ---------------------------------------------------------------------------
+
+
+def _reach_row(
+    endpoint: str,
+    outcome: str,
+    *,
+    ok: bool,
+    detail: str = "ok",
+    winner: str = "",
+    winner_verified: bool = False,
+) -> dict[str, Any]:
+    """A full reachability row shaped as ``_reachability_rows`` builds it."""
+    observed: dict[str, Any] = {"outcome": outcome, "attempted": True}
+    if winner:
+        observed["winner"] = winner
+        observed["winner_verified"] = winner_verified
+    return {
+        "check": "reachability",
+        "device_id": PEER,
+        "device_name": "cloud-node-1",
+        "endpoint": endpoint,
+        "ok": ok,
+        "detail": detail,
+        "observed": observed,
+        "remedies": ["a remedy that must not read as an action item under an ok row"],
+    }
+
+
+def test_a_remote_unusable_address_is_informational_when_the_peer_answers_elsewhere() -> None:
+    """The drill's exact shape: the VPC-private address refused, the public one
+    connected — and the report must not read unhealthy because of the address
+    no remote device can use (``172.31.22.23`` vs ``99.79.190.164``)."""
+    rows = [
+        _reach_row(
+            "172.31.22.23:4097",
+            "refused",
+            ok=False,
+            detail="connect_failed:ConnectionRefusedError",
+        ),
+        _reach_row(
+            "99.79.190.164:4097",
+            "connected",
+            ok=True,
+            winner="99.79.190.164:4097",
+            winner_verified=True,
+        ),
+    ]
+    readiness.mark_informational(rows)
+    dead, live = rows
+    assert dead["ok"] is True
+    assert dead["observed"]["informational"] is True
+    assert dead["observed"]["usable_elsewhere"] == ["99.79.190.164:4097"]
+    # The row keeps its observed facts, and the action bullet is gone.
+    assert dead["observed"]["outcome"] == "refused"
+    assert dead["remedies"] == []
+    assert live["ok"] is True and live["observed"].get("informational") is None
+    reading = readiness.reachability_reading(dead)
+    # The raw failure clause is REPLACED, never parroted (design round 1, D1):
+    # "nothing is listening on that port" would name a wrong action for the one
+    # row this flip exists for — and the reading IS the shared clause (D3), so
+    # the doctor renderers cannot drift from it.
+    assert reading == readiness.informational_clause(dead)
+    assert "nothing is listening on that port" not in reading
+    assert "not remote-usable from this device" in reading
+    assert "the peer is reachable at 99.79.190.164:4097" in reading
+    assert "the machine's own private address" in reading
+    # The note names the KIND; the clause carries the scope (D8).
+    assert "remote devices cannot use it" not in reading
+
+
+def test_without_a_usable_address_the_report_keeps_its_failures() -> None:
+    """THE HONEST NEGATIVE: with no address answering anywhere, nothing flips —
+    a member nothing answers for must never read healthy because its addresses
+    "look" private."""
+    rows = [
+        _reach_row("172.31.22.23:4097", "refused", ok=False, detail="connect_failed"),
+        _reach_row("99.79.190.164:4097", "no_answer", ok=False, detail="no_answer"),
+    ]
+    readiness.mark_informational(rows)
+    assert [row["ok"] for row in rows] == [False, False]
+    assert all(row["observed"].get("informational") is None for row in rows)
+    assert all(row["remedies"] for row in rows)
+
+
+def test_an_unidentified_accept_never_vouches_for_the_member() -> None:
+    """``connected_unverified`` (a stranger answered the port) is not a usable
+    address: it must neither flip other rows nor ride someone else's accept."""
+    rows = [
+        _reach_row(
+            "203.0.113.9:4097", "connected_unverified", ok=False, detail="accepted_unverified"
+        ),
+        _reach_row("99.79.190.164:4097", "connected", ok=True, winner="99.79.190.164:4097"),
+    ]
+    readiness.mark_informational(rows)
+    stranger, live = rows
+    assert stranger["ok"] is False
+    assert stranger["observed"].get("informational") is None
+    assert live["ok"] is True
+
+    # And the reverse shape: an unidentified accept ALONE vouches for nothing.
+    only_stranger = [_reach_row("203.0.113.9:4097", "connected_unverified", ok=False)]
+    readiness.mark_informational(only_stranger)
+    assert only_stranger[0]["ok"] is False
+
+
+def test_a_public_dead_address_reads_informational_without_the_private_note() -> None:
+    rows = [
+        _reach_row("198.51.100.7:7777", "no_route", ok=False, detail="connect_failed:OSError"),
+        _reach_row("99.79.190.164:4097", "connected_link", ok=True, winner="99.79.190.164:4097"),
+    ]
+    readiness.mark_informational(rows)
+    reading = readiness.reachability_reading(rows[0])
+    assert "not remote-usable from this device" in reading
+    assert "the peer is reachable at 99.79.190.164:4097" in reading
+    assert "private address" not in reading
+
+
+def test_the_renderer_reads_an_informational_row_as_ok_and_keeps_failures_failing() -> None:
+    flipped = _reach_row("172.31.22.23:4097", "refused", ok=False, detail="connect_failed")
+    connected = _reach_row("99.79.190.164:4097", "connected", ok=True)
+    readiness.mark_informational([flipped, connected])
+    still_failing = {
+        "check": "readiness",
+        "capability": "mcp_login",
+        "device_name": "cloud-node-1",
+        "ok": False,
+        "detail": "no login for https://slack.example",
+        "remedies": [],
+    }
+    lines = readiness.render_check_lines([flipped, connected, still_failing])
+    assert lines[0].startswith("ok  reachability cloud-node-1 172.31.22.23:4097:")
+    assert "not remote-usable from this device" in lines[0]
+    assert lines[-1].startswith("FAIL readiness mcp_login cloud-node-1:")
+
+
+def _doctor_row(
+    endpoint: str, *, check: str = "reachability", ok: bool, detail: str = "ok"
+) -> dict[str, Any]:
+    """A doctor-dialect row as ``RelayServer._probe_member`` builds it."""
+    return {"check": check, "device_id": PEER, "endpoint": endpoint, "ok": ok, "detail": detail}
+
+
+def test_doctor_marks_a_dead_address_informational_when_the_handshake_verified_elsewhere() -> None:
+    """Same semantics, doctor's row shape (drill finding, 2026-10-03): the dead
+    row is a fact about the address once the handshake row proves the member."""
+    rows = [
+        _doctor_row("172.31.22.23:4097", ok=False, detail="connect_failed:ConnectionRefusedError"),
+        _doctor_row("99.79.190.164:4097", check="handshake", ok=True),
+    ]
+    readiness.mark_informational(rows)
+    dead = rows[0]
+    assert dead["ok"] is True
+    assert dead["observed"]["informational"] is True
+    assert dead["observed"]["usable_elsewhere"] == ["99.79.190.164:4097"]
+    assert readiness.informational_clause(dead) == (
+        "not remote-usable from this device (the machine's own private address); "
+        "the peer is reachable at 99.79.190.164:4097"
+    )
+    # Every other row gets no clause; the handshake row keeps its own shape.
+    assert readiness.informational_clause(rows[1]) == ""
+
+
+def test_doctor_keeps_failing_when_nothing_verified() -> None:
+    """THE HONEST NEGATIVE: no verified address anywhere ⇒ nothing flips, and a
+    handshake that did NOT pass verifies nothing."""
+    rows = [
+        _doctor_row("172.31.22.23:4097", ok=False, detail="connect_failed:ConnectionRefusedError"),
+        _doctor_row("99.79.190.164:4097", check="handshake", ok=False, detail="no_answer"),
+    ]
+    readiness.mark_informational(rows)
+    assert [row["ok"] for row in rows] == [False, False]
+    assert "observed" not in rows[0]
+
+
+def test_doctor_keeps_not_attempted_failing_and_repair_rows_untouched() -> None:
+    rows = [
+        _doctor_row("172.31.22.23:4097", ok=False, detail="not_attempted"),
+        _doctor_row("198.51.100.7:7777", ok=False, detail="bad_endpoint"),
+        _doctor_row("99.79.190.164:4097", check="handshake", ok=True),
+        {
+            "check": "credential_repair",
+            "device_id": PEER,
+            "ok": False,
+            "detail": "the owner's minerva-qa login died; the owner must sign in again",
+        },
+    ]
+    readiness.mark_informational(rows)
+    assert rows[0]["ok"] is False  # unproven is not a fact about the address
+    assert rows[1]["ok"] is True  # bad_endpoint IS one: it cannot be dialled
+    assert rows[2]["ok"] is True  # the verification row itself, untouched
+    assert rows[3]["ok"] is False  # a different check; the flip never touches it
+
+
+# ---------------------------------------------------------------------------
 # Degradation rows and sanitisation
 # ---------------------------------------------------------------------------
 
