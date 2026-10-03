@@ -100,6 +100,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "_sessions_move_words",
         "detail",
     ): (1, "the engage path's own sentence, printed as why the runtime did not start"),
+    # The hub publish preview's per-unresolved explanation: SERVER-AUTHORED prose for
+    # the publisher who submitted the document — it explains the publisher's OWN value
+    # ("may be a project code name"), design p2p3 §7.3 renders the sentence on screen
+    # by intent, and nothing about it is a peer's mesh token (the reference VALUES are
+    # the publisher's own, and the ids beside it are preview-local).
+    ("local_operator/cli.py", "_render_preview", "reason"): (
+        1,
+        "the preview's explanation of the publisher's own submitted value, "
+        "rendered by design (§7.3)",
+    ),
     # The push's per-peer report: ``reason`` here is the CONFLICT's own sentence (the
     # peer composed it), printed verbatim so a person learns why a row was refused.
     # The refusal/conflict SENTENCES this module composes around the peer's own
