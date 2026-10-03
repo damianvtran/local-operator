@@ -216,6 +216,11 @@ class _AskHandle(FakeHandle):
         self.ask_calls.append(("ask_respond", {"ask_id": ask_id, "answers": answers, "by": by}))
         return "answered"
 
+    async def ask_revise(self, ask_id, answers, by="") -> str:  # noqa: ANN001
+        self._maybe_refuse()
+        self.ask_calls.append(("ask_revise", {"ask_id": ask_id, "answers": answers, "by": by}))
+        return "revised"
+
     async def ask_decline(self, ask_id, by="") -> str:  # noqa: ANN001
         self._maybe_refuse()
         self.ask_calls.append(("ask_decline", {"ask_id": ask_id, "by": by}))
@@ -282,6 +287,29 @@ async def test_a_queued_ask_is_answered_through_the_command_route() -> None:
             assert handle.ask_calls[-1] == (
                 "ask_respond",
                 {"ask_id": "ask-1", "answers": {"q1": ["yes"], "q2": []}, "by": ""},
+            )
+
+            # §10 (#1936): the SAME atomic body over the SAME route, as a
+            # REVISION. A separate op rather than a flag — the intent has to be
+            # explicit on the wire, so the runtime never has to compare values.
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=build_app(daemon)),
+                base_url="http://fixture",
+                cookies={COOKIE_NAME: sign_cookie("pw123")},
+            ) as client:
+                reply = await client.post(
+                    f"/api/sessions/{record.session_id}/command",
+                    json={
+                        "op": "ask_revise",
+                        "ask_id": "ask-1",
+                        "answers": {"q1": ["no"], "q2": []},
+                    },
+                )
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["ok"] is True
+            assert handle.ask_calls[-1] == (
+                "ask_revise",
+                {"ask_id": "ask-1", "answers": {"q1": ["no"], "q2": []}, "by": ""},
             )
         finally:
             dial.cancel()
@@ -408,6 +436,10 @@ def test_the_frame_is_validated_at_the_boundary() -> None:
         {"op": "ask_respond", "ask_id": "", "answers": {"q1": ["yes"]}},
         {"op": "ask_respond", "ask_id": "ask-1"},
         {"op": "ask_decline"},
+        # §10's revision is the same body, so it must be validated the same way.
+        {"op": "ask_revise", "ask_id": "", "answers": {"q1": ["yes"]}},
+        {"op": "ask_revise", "ask_id": "ask-1"},
+        {"op": "ask_revise", "ask_id": "ask-1", "answers": "yes"},
     ):
         reply = client.post(f"/api/sessions/{SESSION_A}/command", json=body)
         assert reply.status_code == 422, body

@@ -251,6 +251,12 @@ class AskQueue:
         reads :func:`asks.render.refusal_copy` — the same rule ``_resolve_pending``
         enforced in memory, moved onto the durable record.
 
+        THIS IS THE ONE-WAY PATH, AND ITS ONE SANCTIONED EXCEPTION IS
+        :meth:`revise` (design §10, #1936): a recorded answer can be changed ONLY
+        by an explicit revision while it is still undelivered, never by a second
+        ``respond``. A plain repeat — even with a different map — keeps its
+        refusal here, because "a repeat tap is a retry, not a change of mind".
+
         TWO REFUSALS THAT ARE CONTRACTS RATHER THAN GUARDS. FIRST, the map must be
         COMPLETE (design §2.4, review round 1 QA Q1): every question id has to be
         present, because the row that lands is terminal — a surface that forgot a
@@ -271,15 +277,10 @@ class AskQueue:
         refusal = render.refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
-        cleaned = {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()}
-        unanswered = [
-            str(q.get("id"))
-            for q in (record.get("questions") or ())
-            if str(q.get("id")) not in cleaned
-        ]
-        if unanswered:
-            return {"ok": False, "error": _partial_answer_error(unanswered)}
-        cleaned = _guard_secret_cells(record, cleaned)
+        cleaned, map_refusal = self._whole_ask_cells(record, answers)
+        if map_refusal:
+            return {"ok": False, "error": map_refusal}
+        assert cleaned is not None  # ``_whole_ask_cells`` returns one with no refusal
         payload = {
             "v": store.EVENT_SCHEMA,
             "kind": store.EVENT_ANSWERED,
@@ -299,6 +300,118 @@ class AskQueue:
         self._settled(ask_id)
         return {"ok": True}
 
+    def revise(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str = "unknown",
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """SUPERSEDE a recorded answer while it is still UNDELIVERED (design §10).
+
+        THE INTENT IS EXPLICIT, AND VALUE EQUALITY IS NEVER THE MARKER. A
+        revision is its own op precisely so that :meth:`answer_one`'s rule — "a
+        repeat tap is a retry, not a change of mind" — survives the retry case:
+        a resent map is still refused there, and so is a different one. This is
+        the single entry point that reads a second answer as a change of mind,
+        and only while the change is still cheap.
+
+        **THE WINDOW IS THE RESPONSE ROW, not the folded ``delivered`` flag.**
+        ``delivered`` is ``store.delivered_hint``, which is deliberately STICKY:
+        it counts the ``ask-timeout-`` row too, because a timeout notice is a
+        delivery for the model as much as an answer is. A ``late`` answer is
+        exactly where the two disagree — the deadline notice went out, the answer
+        has not — and keying the window on the hint would refuse the one revision
+        that is still free to make. What actually pins what the model was told is
+        the single ``ask-response-<ask_id>`` row, so THAT is what closes the
+        window (design §10: "the row pins what the model was told").
+
+        ACCEPTED: the ask already carries an answer (``answered`` or ``late``)
+        with no response row yet, from ANY surface — a revision is not a race, so
+        the single-winner rule that governs two in-flight ``respond``s is not a
+        surface gate here. REFUSED once the response row exists, in
+        :data:`asks.render.REVISED_ALREADY_DELIVERED`'s words rather than the
+        state table's "already answered by <surface>": the user's next move is a
+        new message, not a different tap. ``declined``/``dismissed``/``expired``
+        keep their state-mapped sentences — a revision of an answer that was
+        never recorded is not what those states are.
+
+        BEFORE any answer is recorded (``open``/``timed_out``) the intent degrades
+        to the plain first answer, with ``revised: False`` on the verdict: the
+        ``revised`` kind exists only to supersede, so with nothing to name the
+        ask settles on one ``answered`` row and no revision event.
+        """
+        now = self._now()
+        # ONE read: the fold for the record and the row-presence set the window
+        # is decided on. ``find`` would read the log again for the same answer.
+        records, present = self._fold_state(now)
+        record = next((item for item in records if item["ask_id"] == ask_id), None)
+        if record is None:
+            return {"ok": False, "error": render.refusal_copy(None)}
+        status = record.get("status")
+        if status in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
+            outcome = self.respond(ask_id, answers, by=by, tool_call_id=tool_call_id)
+            if outcome.get("ok"):
+                outcome["revised"] = False
+            return outcome
+        if status not in (store.STATUS_ANSWERED, store.STATUS_LATE):
+            # declined / dismissed / expired: the state table's own sentence,
+            # byte-for-byte the one every other path gives for that state.
+            return {"ok": False, "error": render.refusal_copy(record)}
+        if store.response_row_id(ask_id) in present:
+            # The row IS the delivery marker (this module's docstring), so this is
+            # the one check that means "the agent has been handed the answer" —
+            # and it is also the reason an accepted revision can never be dropped
+            # after the fact: the check and the append run on this session's own
+            # loop, which is the only writer of that row (:meth:`reconcile`).
+            return {"ok": False, "error": render.REVISED_ALREADY_DELIVERED}
+        cleaned, map_refusal = self._whole_ask_cells(record, answers)
+        if map_refusal:
+            return {"ok": False, "error": map_refusal}
+        assert cleaned is not None  # ``_whole_ask_cells`` returns one with no refusal
+        payload = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_REVISED,
+            "ask_id": ask_id,
+            "at": now,
+            "by": {"surface": by},
+            "answers": cleaned,
+            # The ``at`` of the write this supersedes: the newest revision's when
+            # one exists, else the first answer's. Naming it keeps the log a chain
+            # a reader can walk rather than a pile of claims about one moment.
+            "supersedes": int(record.get("revised_at") or record.get("answered_at") or 0),
+        }
+        if not store.append_event(self.session_dir, payload):
+            return {"ok": False, "error": "the revision could not be recorded."}
+        self._settled(ask_id)
+        return {"ok": True, "revised": True}
+
+    def _whole_ask_cells(
+        self, record: Mapping[str, Any], answers: Mapping[str, Sequence[str]]
+    ) -> tuple[dict[str, list[str]] | None, str]:
+        """The whole-ask map contract, shared by :meth:`respond` and :meth:`revise`.
+
+        Returns ``(cleaned cells, refusal sentence)``, the refusal empty when the
+        map is usable. Both rules are the design's (§2.4, review round 1 QA Q1 and
+        MINOR 6) and both entry points must agree on them — the row that lands is
+        terminal, so a surface that forgot a key would lose that question for
+        good, and a SECRET cell may only ever be a KEY NAME: the ``[<key>]`` shape
+        is what makes this hop load-bearing, because a cold CLI or relay route
+        reaches the queue directly and the value must not reach the log through
+        it. Kept in ONE function for the same reason ``refusal_copy`` is one
+        sentence per state: two copies of a contract drift.
+        """
+        cleaned = {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()}
+        unanswered = [
+            str(q.get("id"))
+            for q in (record.get("questions") or ())
+            if str(q.get("id")) not in cleaned
+        ]
+        if unanswered:
+            return None, _partial_answer_error(unanswered)
+        return _guard_secret_cells(record, cleaned), ""
+
     def answer_one(
         self,
         ask_id: str,
@@ -317,7 +430,9 @@ class AskQueue:
         it merges one cell into a per-ask draft, refuses a SECOND answer for the
         same question (a repeat tap is a retry, not a change of mind), and hands
         the completed draft to :meth:`respond` so the ask still settles in ONE
-        atomic log write.
+        atomic log write. The one sanctioned way to CHANGE a recorded answer is
+        :meth:`revise`, and it never passes through here: the draft path keeps its
+        refusal exactly so a retry stays a retry (design §10).
 
         Returns ``{"ok": True, "settled": bool, "waiting": [qid, ...]}`` for an
         accepted cell — ``waiting`` names the questions the card should offer

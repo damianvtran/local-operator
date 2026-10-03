@@ -1217,6 +1217,13 @@ class Answer(Input):
     answers: dict[str, list[str]] | None = None
     #: "No answer — decide yourself", the explicit form of today's Esc.
     decline: StrictBool | None = None
+    #: REVISE the recorded answer instead of submitting a first one (design §10,
+    #: #1936). A modifier on the SAME ``{ask_id, answers}`` body — the intent
+    #: cannot be inferred from the values, so the client has to say it here — and
+    #: it rides a different wire op (``ask_revise``) rather than a flag the
+    #: runtime has to interpret. Accepted while the answer is undelivered, refused
+    #: once the response row exists; the runtime decides, not this schema.
+    revise: StrictBool | None = None
 
     @model_validator(mode="after")
     def one_answer(self):
@@ -1227,12 +1234,17 @@ class Answer(Input):
             # shape that carries no answers and no decline is malformed, and the
             # refusal must happen HERE (422) rather than at the queue (409).
             if self.decline is not True and not self.answers:
-                raise ValueError("A queued-ask answer needs answers or decline")
+                raise ValueError("A queued-ask answer needs answers, or a decline or revise")
             if self.decline is True and self.answers is not None:
                 # Contradictory rather than merely redundant: "here are the
                 # answers" and "no answer, decide yourself" cannot both settle
                 # one ask, and the log records whichever arrives first.
                 raise ValueError("Supply either answers or decline")
+            if self.revise is True and self.decline is True:
+                # Same class of contradiction as the row above: a revision is how
+                # an answer is CHANGED, and a decline is the refusal to give one —
+                # no single intent sends both.
+                raise ValueError("Supply either decline or revise")
             if self.answers is not None:
                 if not self.answers:
                     raise ValueError("answers must name at least one question")
@@ -1244,6 +1256,11 @@ class Answer(Input):
             return self
         if not self.epoch:
             raise ValueError("An epoch is required to answer a gate")
+        if self.revise is True:
+            # A gate has no recorded answer to revise, so the field would be
+            # silently ignored — the class of no-op §10 rules out. Refused in
+            # words at the boundary instead of dropped on the floor.
+            raise ValueError("revise applies to a queued ask")
         if not self.request_id:
             raise ValueError("A request_id is required to answer a gate")
         if (self.value is None) == (self.approved is None):
@@ -3590,7 +3607,10 @@ async def answer(session_id: str, body: Answer, request: Request):
             # which of those it is.
             try:
                 detail = await bridge.remote.ask_respond(
-                    body.ask_id, body.answers, decline=bool(body.decline)
+                    body.ask_id,
+                    body.answers,
+                    decline=bool(body.decline),
+                    revise=bool(body.revise),
                 )
             except (ValueError, RuntimeError) as error:
                 # BOTH classes, and the second is not defensive padding: a refusal

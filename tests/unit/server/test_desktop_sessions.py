@@ -8430,8 +8430,15 @@ class _AskRemote:
         # the gate test's own override type-checks against the same name.
         self.frontend_state: Any = SimpleNamespace(epoch="epoch-current")
 
-    async def ask_respond(self, ask_id: str, answers: Any = None, *, decline: bool = False) -> str:
-        self.calls.append((ask_id, answers, decline))
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Any = None,
+        *,
+        decline: bool = False,
+        revise: bool = False,
+    ) -> str:
+        self.calls.append((ask_id, answers, decline, revise))
         if self.refuse_with:
             raise RuntimeError(self.refuse_with)
         return self.detail
@@ -8448,7 +8455,7 @@ async def test_a_queued_ask_answer_is_accepted_without_an_epoch(answers_api) -> 
     )
     assert result.status_code == 200, result.text
     assert result.json()["result"] == {"detail": "answered"}
-    assert remote.calls == [("a-1", {"q0": ["yes"]}, False)]
+    assert remote.calls == [("a-1", {"q0": ["yes"]}, False, False)]
 
 
 @pytest.mark.asyncio
@@ -8460,7 +8467,7 @@ async def test_a_declined_ask_answer_is_accepted(answers_api) -> None:
         "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
     )
     assert result.status_code == 200, result.text
-    assert remote.calls == [("a-1", None, True)]
+    assert remote.calls == [("a-1", None, True, False)]
 
 
 @pytest.mark.asyncio
@@ -8499,6 +8506,40 @@ async def test_a_queued_ask_body_without_answers_or_decline_is_a_422(answers_api
         {"ask_id": "a-1"},
         {"ask_id": "a-1", "decline": False},
         {"ask_id": "a-1", "answers": {}},
+    ):
+        result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+        assert result.status_code == 422, (body, result.text)
+    assert remote.calls == [], "a malformed body must not reach the runtime"
+
+
+@pytest.mark.asyncio
+async def test_a_revision_reaches_the_runtime_as_its_own_op(answers_api) -> None:
+    """§10 (#1936): ``revise: true`` on the SAME answers body selects the
+    ``ask_revise`` op — the body is not re-parsed for intent, because equal or
+    different values are never the marker."""
+    client, app = answers_api
+    remote = _AskRemote(detail="revised")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": True},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "revised"}
+    assert remote.calls == [("a-1", {"q0": ["yes"]}, False, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_contradictory_revision_body_is_a_422_before_the_runtime(answers_api) -> None:
+    """``decline`` and ``revise`` are mutually exclusive, ``revise`` needs the
+    answers it revises, and neither belongs on a gate body."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    for body in (
+        {"ask_id": "a-1", "answers": {"q0": ["yes"]}, "decline": True, "revise": True},
+        {"ask_id": "a-1", "revise": True},
+        {"epoch": "e-1", "request_id": "r-1", "approved": True, "revise": True},
     ):
         result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
         assert result.status_code == 422, (body, result.text)
