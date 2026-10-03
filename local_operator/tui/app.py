@@ -25902,6 +25902,11 @@ class OperatorApp(App[None]):
         could only ever be a no-op refresh. The rows are NOT rebuilt — the
         clock moved and nothing else did — which is also why the highlight
         cannot be re-derived from under the user.
+
+        A row inside its last minute therefore trails by up to one period
+        before it reads ``expiring``: that is ``ASK_COUNTDOWN_TICK_S``'s
+        documented trade, not an oversight — the alternative is repainting
+        every open surface every second for a word nothing acts on.
         """
         if self._ask_list is not None:
             self._ask_list.set_now(self._ask_now_ms())
@@ -26152,26 +26157,24 @@ class OperatorApp(App[None]):
 
         The list is a PLACE, so "next" is positional: the rows AFTER the
         answered one come first, and when it was the last of them the walk falls
-        back to the last outstanding row BEFORE it — the row the user was about
-        to reach moves up into the space the answered one leaves, so the cursor
-        staying put is what lands on it.
+        back to the last outstanding row BEFORE it — the row that moves up into
+        the space the answered one leaves is the row the user was about to
+        reach.
 
         ``answerable`` is the same predicate the bar, the list and the fold
         count with, so a row the user owes nothing on (timed out and dismissed,
         late, declined) is never handed over.
 
-        ``ask_id`` may already be gone from ``self._ask_rows`` — the snapshot
-        writer drops a settled row the moment the wire says so, and it can beat
-        this call — in which case the whole list is the candidate order, because
-        its successor has already slid into its index.
+        ``ask_id`` is guaranteed present in ``self._ask_rows``: the only caller
+        is the submit branch of ``_on_queue_ask_settle``, which found that very
+        row in the list to decide the answer complete, and nothing between the
+        two awaits. ``ids.index`` is therefore the honest lookup — a fallback
+        for a missing row would be a branch no caller can reach.
         """
         rows = self._ask_rows
         ids = [row.ask_id for row in rows]
-        if ask_id in ids:
-            at = ids.index(ask_id)
-            candidates = [*rows[at + 1 :], *reversed(rows[:at])]
-        else:
-            candidates = list(rows)
+        at = ids.index(ask_id)
+        candidates = [*rows[at + 1 :], *reversed(rows[:at])]
         return next((row for row in candidates if row.answerable), None)
 
     def _submit_ask_answer(self, text: str) -> None:

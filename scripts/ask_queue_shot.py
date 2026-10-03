@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,10 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 #: flag-ON surface, and the before-frames on `origin/main` are the flag-off app.
 policy.NONBLOCKING_ASK = True
 
+#: When the fixture's asks were created: a minute ago, so `created_at` precedes
+#: `expires_at` by roughly the deadline the row carries.
+_CREATED_AT = int(time.time() * 1000) - 60_000
+
 
 def _row(
     ask_id: str,
@@ -78,7 +83,12 @@ def _row(
 ) -> dict[str, Any]:
     return {
         "ask_id": ask_id,
-        "created_at": 1_700_000_000_000,
+        # CREATED BEFORE IT EXPIRES BY ABOUT ITS OWN TIMEOUT, because the list
+        # reserves the widest countdown a row can reach — derived from
+        # ``expires_at - created_at`` — and a fixture with a 2023 creation and
+        # a live deadline claims a three-year countdown, which reserves five
+        # digits of hours and steals question cells no real ask would lose.
+        "created_at": _CREATED_AT,
         # Overridable so a frame can show a deadline the client clock can still
         # measure; the fixed value is the "expiring" case, which is honest too.
         "expires_at": 1_700_003_600_000 if expires_at is None else expires_at,
@@ -116,8 +126,6 @@ _URGENT_MIN = 4
 
 
 def _deadline(minutes: int) -> int:
-    import time
-
     return int(time.time() * 1000) + minutes * 60_000
 
 

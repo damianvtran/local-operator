@@ -513,8 +513,9 @@ existing placeholder, unchanged.
 **Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
 opens the list/picker (TUI) or the sheet (others). Answering one advances to the **next
 outstanding ask** when it was picked out of a list — the TUI returns to that list at the row
-that takes the answered one's place, and the sheet surfaces stay open and advance — and
-collapses when there is nothing left to answer. (Audit of the merged TUI surface: the TUI
+that takes the answered one's place (the next outstanding row, or the last one before it when
+the answered ask was the last), and the sheet surfaces stay open and advance — and collapses
+when there is nothing left to answer. (Audit of the merged TUI surface: the TUI
 collapsed on every answer, so a queue of N cost N re-expands. A single ask's card still
 collapses — there was no list to return to.)
 
