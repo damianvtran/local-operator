@@ -55,6 +55,27 @@ from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
 
+
+@pytest.fixture(autouse=True)
+def _the_blocking_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Select the KILL-SWITCH arm for this file, and say why out loud.
+
+    The round trip asserted here is the BLOCKING one: the model calls ``ask``,
+    the host hook is awaited inside the turn, and the answer is read back from
+    the SAME turn's follow-up request. That is no longer the shipped default
+    (the queue is, since 2026-10-03), so the arm has to be selected explicitly
+    or the cells would quietly start describing a path the file does not test.
+
+    The queued path's assembled-app coverage lives in
+    ``tests/e2e/test_ask_queue_e2e.py``, which drives real sessions and a real
+    transcript; this file keeps the picker-and-hook half honest, which is the
+    #868 regression it was written for.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+
+
 SCREEN = (120, 40)
 BOUND_S = 60.0
 

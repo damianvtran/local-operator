@@ -668,6 +668,14 @@ description edits (§9) — i.e. the prompts change in the *same change that mak
 semantics live*. Alternative rejected: a long-lived integration branch (hot files
 `serving.py`, `app.py` [2.4 MB], `builtin.py` move under it daily).
 
+> **STATUS 2026-10-03 — F landed in part, and the deletion above is DEFERRED by the
+> operator's direction, not by drift.** F as executed (`feat/ask-flip-default`) flips the
+> default to the queue, rewrites the tests that pinned dark-by-default, and takes the §9
+> agent-facing text with it. It does **not** delete the blocking path: that path is what the
+> operator-facing KILL SWITCH (`LOP_ASK_NONBLOCKING=0`) selects, so it stays, stays tested,
+> and its text is byte-unchanged. A later PR may retire it once nobody needs the escape
+> hatch — until then, do not read the sentence above as the current spec for a deletion.
+
 | PR | Repo / branch | Scope | Depends on | Rounds | Release line |
 |---|---|---|---|---|---|
 | **A1** | core `feat/ask-queue-core` | `asks/` package (store, fold, policy, render); `AskParams.timeout`+receipt+caps; message types + all registrations (§2.3); `Session` queue, timer, `reconcile`, `deliver_ask_messages`; `ask_timeout` hidden wake row + `is_internal_wake_row`; `AskErrand`; ops `ask_respond/decline/dismiss` (server.py, handle, `attach_client`, `mobile/types.py` validation); retention/cleanup guards; flag-off default; **this design note** committed as `docs/design/ask-nonblocking.md`; new unit + real-runtime e2e | — | reviewer, QA | `Release: minor — dark: durable ask queue engine (no user-visible change until flip)` |
