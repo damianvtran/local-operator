@@ -15,6 +15,7 @@
  */
 import { useEffect, useId, useRef, type ReactNode, type RefObject } from "react";
 import { cn } from "../../lib/cn";
+import { columnBox, columnCap } from "../../lib/column";
 
 export function Sheet({
 	open,
@@ -187,14 +188,44 @@ export function Sheet({
 	};
 
 	if (!open) return null;
-	/* In-flow overlay, not a portal: the cmux screenshot surface is the
-	   phone column, and a body portal paints outside it. The session
-	   column is `relative` and no longer uses transform, so `absolute
-	   inset-0` covers exactly the column. */
+	/* VIEWPORT-ANCHORED, AND THAT IS THE WHOLE POINT OF THIS ELEMENT.
+
+	   `absolute inset-0` resolves against the nearest POSITIONED ancestor, and
+	   that is not always the column. The session view wraps its header in a
+	   `relative` div (so the session-health ladder can hang off that div's
+	   bottom, see `screens/session-view.tsx`), and the approvals sheet is
+	   mounted INSIDE that header. Measured on the real bundle at 390x844: the
+	   dialog's box was 390x53 — the header — so the bottom-anchored panel landed
+	   at top=-263/bottom=53: readable only as a 53px sliver at the top of the
+	   screen, cut mid-sentence, with its buttons and its ✕ 263px above the top
+	   of a screen that cannot scroll up to them.
+
+	   `fixed` takes the overlay off whatever happens to be positioned and puts it
+	   on the phone's viewport, wherever a caller mounts it. Two constraints are
+	   deliberately kept:
+
+	   1. NO PORTAL. The overlay still renders in place, inside the phone column:
+	      the cmux screenshot surface is that column, and a body portal paints
+	      outside it. `fixed` does not move the node; and the box is the column's
+	      own — same width, same centre (`--lo-column-max`, the var the column
+	      itself is capped by) — so the captured surface contains the sheet.
+	   2. THE VISUAL VIEWPORT, NOT THE LAYOUT ONE. A `fixed` box resolves against
+	      the LAYOUT viewport, which a virtual keyboard does not shrink
+	      (`resizes-visual`), so `inset-0` would hold the panel's foot under the
+	      keyboard. `columnBox()` reads the two numbers the column is itself
+	      pinned to (`--lo-vvh`, `--lo-vvh-top`, published by the same
+	      `visualViewport` handler in `screens/session-view.tsx`), so the overlay
+	      and the column are the same box by construction.
+
+	   Safe areas: the panel keeps the bottom inset as padding (it is the panel's
+	   foot that meets the home indicator). The top needs no term — the panel is
+	   bottom-anchored and capped at 85% of the visual viewport, so 15% of that
+	   viewport always stands above it, more than any phone's status bar. */
 	return (
 		<div
 			ref={dialogRef}
-			className="absolute inset-0 z-50"
+			className="fixed inset-x-0 z-50 mx-auto w-full max-w-[var(--lo-column-max,28rem)]"
+			style={columnBox()}
 			role="dialog"
 			aria-modal="true"
 			aria-labelledby={title ? titleId : undefined}
@@ -211,11 +242,20 @@ export function Sheet({
 			/>
 			<div
 				className={cn(
-					"lo-sheet-panel absolute right-0 bottom-0 left-0 max-h-[85dvh]",
+					"lo-sheet-panel absolute right-0 bottom-0 left-0",
 					"flex flex-col rounded-t-lg border-t border-control bg-elevated shadow-overlay",
 					/* The panel clears the home indicator; content sits above it. */
 					"pb-[env(safe-area-inset-bottom)]",
 				)}
+				/* COLUMN UNITS, never `85dvh` (`lib/column.ts` explains why): `dvh`
+				   does not follow the keyboard pin, and this cap used to be the one
+				   bounded region still written in it. Measured with the column pinned
+				   to a 480px visual viewport (the state the pin exists for, a 390x844
+				   phone with the keyboard up): the asks sheet's panel rendered 717px
+				   tall — 85dvh of an 844px layout viewport — so 237px of it sat above
+				   the top of the screen with the ✕ in that lost part. 0.85 is the
+				   fraction it always was; only the unit changes. */
+				style={columnCap(0.85)}
 			>
 				{title ? (
 					<div className="flex items-center justify-between px-3 pt-2 pb-1">
