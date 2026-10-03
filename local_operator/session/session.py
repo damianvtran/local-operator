@@ -8912,12 +8912,16 @@ class Session:
         The sanctioned exception to the one-way rule (design §10, #1936), and the
         only path allowed to change an answer the log already holds — a plain
         second :meth:`respond_ask` still refuses, in the same sentence as before.
-        Everything else about this call is :meth:`respond_ask`'s, including the
-        SECRET hop and the order it runs in: the value reaches the session's
-        memory-only store BEFORE anything is appended, and the log carries the KEY
-        NAME only. What differs is what it supersedes, and the bound on that —
-        DELIVERY — lives in :meth:`AskQueue.revise`, on the response row rather
-        than the sticky ``delivered`` hint.
+
+        THE ORDER IS :meth:`respond_ask`'s, and it is a contract rather than a
+        detail: the queue decides FIRST (``AskQueue.revision_refusal``), and only
+        a revision the queue will take reaches the SECRET hop. Without that, a
+        revision refused as delivered — or declined, or expired — would still
+        store the pasted value in the session's credential store and announce it
+        to later turns: a durable, user-visible effect from a path whose whole
+        contract is that the refusal IS the effect (agent review round 1, MAJOR
+        2). The hop itself is unchanged: the value reaches the memory-only store
+        before anything is appended, and the log carries the KEY NAME only.
 
         NO state-table refusal is consulted here, deliberately: for an answered
         ask the state table says "already answered by <surface>", and that is
@@ -8936,6 +8940,14 @@ class Session:
         record = queue.find(ask_id)
         if record is None:
             return {"ok": False, "error": _ask_refusal_copy(None)}
+        # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
+        # without writing; see the docstring for what doing it in the other order
+        # costs. Nothing can interleave between the two — this method is sync and
+        # runs on the session's loop, which is also the only writer of the row the
+        # probe tests — so the probe is not a weaker answer than the write's.
+        refusal = queue.revision_refusal(ask_id)
+        if refusal:
+            return {"ok": False, "error": refusal}
         merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
         if any(q.get("secret") for q in (record.get("questions") or ())):
             # The same hop and the same order as ``respond_ask``: the value is
