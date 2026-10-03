@@ -89,14 +89,38 @@ RETRY_CAP_S = 900.0
 #: than as one more routine retry line in a file nothing rotates.
 UNDELIVERED_AFTER_ATTEMPTS = 5
 
-#: States a record can carry. Both are RETRIED — the difference is what the
-#: operator is told, not whether the supervisor keeps trying.
+#: States a record can carry.
 #:
 #: ``retrying``: a recent failure, still inside the ordinary backoff run.
 #: ``undelivered``: :data:`UNDELIVERED_AFTER_ATTEMPTS` consecutive failures —
-#: the fire is stalled and is named as such on ``lop wake status``.
+#: the fire is stalled and is named as such on ``lop wake status``. Both of
+#: these are RETRIED — the difference between them is what the operator is
+#: told, not whether the supervisor keeps trying.
+#:
+#: ``live-stalled``: the OTHER shape entirely — a fire held behind a LIVE
+#: runtime that is not firing it. The no-live-record rule forbids the
+#: supervisor from engaging while the session answers, so nothing is retried
+#: while that lasts (deliberately: a second engage would be a second opinion
+#: about a schedule the live session owns). What the record buys is that the
+#: fire stays OWED and NAMED: engageable the moment the runtime stops being
+#: live — including past the staleness bound that refuses a wake nobody has
+#: tried — and visible on ``lop wake status`` meanwhile. See
+#: :func:`note_live_stall` and the live branch of ``supervisor._engage_one``.
 STATE_RETRYING = "retrying"
 STATE_UNDELIVERED = "undelivered"
+STATE_LIVE_STALLED = "live-stalled"
+
+#: Floor between ``live-stalled`` record writes while the condition stands.
+#:
+#: The supervisor writes the record at the warning's own throttle point (the
+#: escalation pass), so this floor has one job: collapse the initial BURST of
+#: escalation passes — three log lines seconds apart — into a single write,
+#: while steady-state refresh rides the heartbeat that already paces the
+#: warning. Re-asserting the condition on each escalating pass is otherwise
+#: fine: the two moving fields (``last_seen_ms``/``overdue_s``) are cheap to
+#: refresh, and the record's whole point is that the condition is STILL
+#: standing.
+LIVE_STALL_REFRESH_S = 60.0
 
 
 def deliveries_dir(config_dir: Path) -> Path:
@@ -275,6 +299,103 @@ def note_failure(
     }
     # ``write_delivery`` answers with the stored body or ``None``; the caller
     # needs to know which (see the docstring).
+    return write_delivery(config_dir, session_id, record)
+
+
+def note_live_stall(
+    config_dir: Path,
+    session_id: str,
+    occurrence_ms: int,
+    *,
+    overdue_s: float,
+    reason: str,
+    now_ms: int | None = None,
+) -> dict[str, Any] | None:
+    """Record that a fire is stalled behind a LIVE runtime that is not firing it.
+
+    The sibling of :func:`note_failure` for the one shape the supervisor cannot
+    engage its way out of: the session's record answers ``live``, so the
+    no-live-record rule skips it on every pass while its own scheduler fails to
+    fire the occurrence (diagnosed 2026-10-03: a one-shot re-armed by an
+    abandoned build drain, stranded in the index of a live session that never
+    restarted). Before this record the only trace was a throttled WARNING;
+    the fire itself was protected by nothing, and once the schedule aged past
+    the staleness bound it fell off every surface.
+
+    NO ``next_attempt_ms``, deliberately: there is no backoff to respect. The
+    no-live-record rule forbids attempting while the session answers, and the
+    moment the runtime stops answering the fire must be engaged IMMEDIATELY —
+    a fabricated next attempt would hold it behind arithmetic describing an
+    attempt nobody made. A missing ``next_attempt_ms`` is what the readers
+    already do the right thing with (``_due_sessions`` reads it as "no hold").
+
+    ATTEMPT HISTORY IS NOT THE LIVE RULE'S TO DISCARD. When a record for the
+    SAME occurrence is superseded — a retry run whose session came up live,
+    say — its ``attempts`` and ``first_attempt_ms`` are carried over, exactly
+    as ``note_failure`` reads its own priors: ``note_delivered`` reports that
+    count back, and losing it would turn "delivered after 3 failed attempts"
+    into "delivered after 0". Neither field is INVENTED when there is no prior
+    record — absent means "never attempted", which is the truth for the fresh
+    shape.
+
+    IDEMPOTENT AND LIGHT ON DISK. A record for the SAME occurrence and state is
+    returned as-is when its last write is younger than
+    :data:`LIVE_STALL_REFRESH_S`; anything else — a new occurrence, a changed
+    state, a missing or aged stamp — rewrites. ``first_stalled_ms`` is the age
+    anchor and is preserved across refreshes, exactly as ``first_attempt_ms``
+    is for a retry run.
+
+    Best-effort like its siblings: returns the record as stored (or as already
+    on disk when a rewrite was not due), or ``None`` when the ledger would not
+    take it — never raises.
+    """
+    moment = now_ms if now_ms is not None else _now_ms()
+    existing = read_delivery(config_dir, session_id)
+    attempts: int | None = None
+    first_attempt: int | None = None
+    if existing is not None and existing.get("occurrence_ms") == occurrence_ms:
+        prior_attempts = existing.get("attempts")
+        if isinstance(prior_attempts, int) and not isinstance(prior_attempts, bool):
+            attempts = prior_attempts
+        prior_first_attempt = existing.get("first_attempt_ms")
+        if isinstance(prior_first_attempt, int) and not isinstance(prior_first_attempt, bool):
+            first_attempt = prior_first_attempt
+        prior_seen = existing.get("last_seen_ms")
+        if (
+            existing.get("state") == STATE_LIVE_STALLED
+            and isinstance(prior_seen, int)
+            and not isinstance(prior_seen, bool)
+            and (moment - prior_seen) < int(LIVE_STALL_REFRESH_S * 1000)
+        ):
+            # The condition is already on disk and younger than the write
+            # floor: return the STORED record, so a caller describing this
+            # call is describing the file rather than an in-memory rewrite
+            # that did not happen.
+            return existing
+        prior_stalled = existing.get("first_stalled_ms")
+        first_stalled = (
+            prior_stalled
+            if existing.get("state") == STATE_LIVE_STALLED
+            and isinstance(prior_stalled, int)
+            and not isinstance(prior_stalled, bool)
+            else moment
+        )
+    else:
+        first_stalled = moment
+    record: dict[str, Any] = {
+        "occurrence_ms": occurrence_ms,
+        "state": STATE_LIVE_STALLED,
+        "first_stalled_ms": first_stalled,
+        "last_seen_ms": moment,
+        "overdue_s": overdue_s,
+        # Truncated for the same reason every other log-bound string here is:
+        # the field is rendered in a table and a status line.
+        "reason": reason[:400],
+    }
+    if attempts is not None:
+        record["attempts"] = attempts
+    if first_attempt is not None:
+        record["first_attempt_ms"] = first_attempt
     return write_delivery(config_dir, session_id, record)
 
 

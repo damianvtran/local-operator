@@ -642,6 +642,13 @@ async def test_a_live_skip_below_the_stall_bound_stays_informational(
     assert "live: skipping" in live[0].getMessage()
     assert "18000.0s overdue" in live[0].getMessage(), live[0].getMessage()
     assert not any("live-stalled" in r.getMessage() for r in caplog.records)
+    # AND NOTHING DURABLE: the bound may only ADD an escalation, and the record
+    # is the escalated branch's state — a merely-late skip stays a log line.
+    from local_operator.wakes import deliveries
+
+    assert (
+        deliveries.read_deliveries(tmp_path) == {}
+    ), "a merely-late live skip must not be recorded as a stall"
 
 
 @pytest.mark.asyncio
@@ -684,6 +691,82 @@ async def test_a_stalled_live_skip_escalates_to_a_warning(
     assert message.startswith("live-stalled:"), message
     assert "6.5 h overdue" in message, message
     assert "has not fired it" in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_live_skip_records_the_fire_as_owed(
+    tmp_path: Path, engagements, monkeypatch, caplog
+) -> None:
+    """THE DURABLE HALF. One pass past ``LIVE_STALL_WARN_S`` writes the
+    supervisor's own record of the fire, and the warning says so.
+
+    The 2026-10-03 strand was a live skip and nothing else: the WARNING was the
+    only artifact, so the fire aged off every surface silently. From this pass
+    the ledger carries it — state, occurrence, and NO invented attempt or
+    backoff (nothing was attempted; the engage must be immediate once the
+    runtime stops answering) — and `lop wake status` can name it.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes import supervisor as mod
+
+    async def _always_live(config_dir, session_id):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", _always_live)
+    overdue_s = int(mod.LIVE_STALL_WARN_S) + 1800
+    due = NOW_MS - overdue_s * 1000
+    write_entry(tmp_path, "sessionstall1", cwd=str(tmp_path), schedules=[_schedule(due)])
+
+    with caplog.at_level("INFO"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0 and engagements == []
+    record = deliveries.read_delivery(tmp_path, "sessionstall1")
+    assert record is not None, "a stalled live skip left no durable record"
+    assert record["state"] == deliveries.STATE_LIVE_STALLED
+    assert record["occurrence_ms"] == due
+    assert record["overdue_s"] == float(overdue_s)
+    assert "attempts" not in record and "next_attempt_ms" not in record
+
+    message = " ".join(r.getMessage() for r in caplog.records if "sessionstall1" in r.getMessage())
+    assert "recorded as owed" in message, message
+    assert "'lop wake status'" in message, message
+
+
+@pytest.mark.asyncio
+async def test_an_unwritable_ledger_is_not_claimed_as_recorded(
+    tmp_path: Path, engagements, monkeypatch, caplog
+) -> None:
+    """The copy may claim only the durability that landed (the review-round
+    rule ``_note_failure`` carries): a store whose delivery ledger refuses the
+    write must not hear "recorded as owed", and the refusal is named."""
+    from local_operator.wakes import supervisor as mod
+
+    async def _always_live(config_dir, session_id):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", _always_live)
+    # The deliveries DIRECTORY cannot exist (a file sits where it belongs),
+    # while the index itself is writable — the exact split the honesty rule is
+    # about: the fire is known, the record cannot land.
+    (tmp_path / "wakes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "wakes" / "deliveries").write_text("not a directory", encoding="utf-8")
+    overdue_s = int(mod.LIVE_STALL_WARN_S) + 1800
+    write_entry(
+        tmp_path,
+        "sessionstall2",
+        cwd=str(tmp_path),
+        schedules=[_schedule(NOW_MS - overdue_s * 1000)],
+    )
+
+    with caplog.at_level("INFO"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0 and engagements == []
+    message = " ".join(r.getMessage() for r in caplog.records if "sessionstall2" in r.getMessage())
+    assert "live-stalled:" in message, message
+    assert "recorded as owed" not in message, message
+    assert "not writable" in message, message
 
 
 @pytest.mark.asyncio
@@ -1689,6 +1772,79 @@ def test_a_dormant_session_keeps_its_owed_fire(tmp_path: Path) -> None:
     mod._reconcile_deliveries(tmp_path, index, loaded)
 
     assert deliveries.read_delivery(tmp_path, "dormant000001") is not None
+
+
+def test_a_live_stall_record_survives_reconcile_while_due_and_goes_when_advanced(
+    tmp_path: Path,
+) -> None:
+    """The same predicate as every other state: kept while its occurrence is a
+    due time in the index, dropped when the schedule moves on.
+
+    The record is derived state — the entry is the source of truth — so a live
+    stall the session has since advanced (or cancelled) must not linger on
+    ``lop wake status`` claiming an owed fire nobody owes; the two surfaces
+    disagreeing is the defect class this ledger exists to end.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes import supervisor as mod
+
+    due = NOW_MS - 5_000
+    write_entry(tmp_path, "livestallre1", cwd=str(tmp_path), schedules=[_schedule(due)])
+    deliveries.note_live_stall(
+        tmp_path, "livestallre1", due, overdue_s=90_000.0, reason="stalled", now_ms=NOW_MS
+    )
+
+    mod._reconcile_deliveries(tmp_path, read_index(tmp_path), deliveries.read_deliveries(tmp_path))
+    assert (
+        deliveries.read_delivery(tmp_path, "livestallre1") is not None
+    ), "a live-stall record for a still-due occurrence was reconciled away"
+
+    write_entry(tmp_path, "livestallre1", cwd=str(tmp_path), schedules=[_schedule(due + 60_000)])
+    mod._reconcile_deliveries(tmp_path, read_index(tmp_path), deliveries.read_deliveries(tmp_path))
+    assert (
+        deliveries.read_delivery(tmp_path, "livestallre1") is None
+    ), "a record the schedule has advanced past was kept"
+
+
+@pytest.mark.asyncio
+async def test_a_live_stalled_fire_is_engaged_the_moment_it_stops_being_live(
+    tmp_path: Path, engagements, no_live_runtimes
+) -> None:
+    """NOT SILENTLY DROPPED: the property that replaces the vanishing fire.
+
+    With the runtime no longer answering and the due time past
+    ``STALE_AFTER_S``, the very NEXT pass engages the session — no backoff is
+    respected (the record deliberately carries none; it would describe an
+    attempt nobody made) and the staleness bound does not refuse it (the
+    recorded occurrence keeps it fireable, the same rule every owed fire
+    rides). The handover then clears the record through the same
+    ``note_delivered`` path as any other delivery.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes import supervisor as mod
+
+    stale_due = NOW_MS - int(8 * 86400 * 1000)
+    write_entry(tmp_path, "livesstall01", cwd=str(tmp_path), schedules=[_schedule(stale_due)])
+    deliveries.note_live_stall(
+        tmp_path,
+        "livesstall01",
+        stale_due,
+        overdue_s=int(mod.LIVE_STALL_WARN_S) + 3600,
+        reason="a live runtime owns the wake and has not fired it",
+        now_ms=NOW_MS - 60_000,
+    )
+
+    assert _has_fireable_wakes(
+        read_index(tmp_path),
+        config_dir=tmp_path,
+        deliveries=deliveries.read_deliveries(tmp_path),
+    ), "a live-stalled fire past the staleness bound was treated as nothing to supervise"
+
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
+    assert [call["session_id"] for call in engagements] == ["livesstall01"]
+    assert (
+        deliveries.read_delivery(tmp_path, "livesstall01") is None
+    ), "the handover must clear the record"
 
 
 def test_an_owed_fire_is_engaged_even_beside_a_younger_due_sibling(tmp_path: Path) -> None:
