@@ -405,3 +405,58 @@ def test_append_creates_the_session_directory(tmp_path: Path):
     session = store.session_dir(tmp_path, "fresh")
     assert store.append_event(session, _queued())
     assert store.asks_log_path(session).exists()
+
+
+# ---------------------------------------------------------------------------
+# The outstanding set: ONE spelling of "the user can still act on this ask"
+# ---------------------------------------------------------------------------
+
+
+def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
+    """The rule the wire's tally, the index and every surface share.
+
+    It is the flip precondition for ``LOP_ASK_NONBLOCKING``: a timed-out but
+    UNANSWERED ask is still outstanding — a late answer reaches the agent
+    (design §2.2, the spec's item 3) — while a settled one is not.
+    """
+    assert store.is_outstanding(store.STATUS_OPEN)
+    assert store.is_outstanding(store.STATUS_TIMED_OUT)
+    for settled in (
+        store.STATUS_ANSWERED,
+        store.STATUS_LATE,
+        store.STATUS_DECLINED,
+        store.STATUS_DISMISSED,
+        store.STATUS_EXPIRED,
+    ):
+        assert not store.is_outstanding(settled)
+    # A status nobody can name is settled, never outstanding: a surface must not
+    # be told to offer an answer for an ask it cannot classify.
+    assert not store.is_outstanding(None)
+    assert not store.is_outstanding("")
+
+
+def test_outstanding_asks_and_pending_asks_are_one_set_by_construction():
+    """``pending_asks`` (notice owed) delegates to the outstanding set.
+
+    They coincide because an ask owes its timeout notice exactly while it is
+    outstanding; a second spelling of either rule is what produced the wrong
+    wire tally, so there is only one.
+    """
+    events = [_queued(at=BASE, timeout_s=3600)]
+    (record,) = store.fold(events, BASE + 3_600_001)
+    assert record["status"] == store.STATUS_TIMED_OUT
+    assert [row["ask_id"] for row in store.outstanding_asks([record])] == ["a-1"]
+    assert store.pending_asks([record]) == store.outstanding_asks([record])
+
+
+def test_open_asks_is_the_narrower_cap_set():
+    """The cap counts OPEN asks only; the display set counts outstanding ones.
+
+    A timed-out ask must not hold a slot a fresh question needs, and it must not
+    vanish from a surface either — two questions, two sets, one definition each.
+    """
+    events = [_queued(at=BASE, timeout_s=3600)]
+    (record,) = store.fold(events, BASE + 3_600_001)
+    assert record["status"] == store.STATUS_TIMED_OUT
+    assert store.open_asks([record]) == []
+    assert len(store.outstanding_asks([record])) == 1

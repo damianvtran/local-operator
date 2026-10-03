@@ -479,6 +479,25 @@ async def test_the_sidebar_mark_is_painted_for_the_current_session(enabled):
         assert sidebar._asking == (session.session_id, 0)
 
 
+async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
+    """A timed-out-but-answerable ask keeps the mark: it is OUTSTANDING.
+
+    The mark used to be painted from the OPEN count alone, so a queue of nothing
+    but timed-out asks dropped it to absence — even though the bar was still up
+    and every one of those asks was still answerable. The mark, the bar and the
+    wire's ``asks_open`` now read the same set (``store.OUTSTANDING_STATUSES``).
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?", status="timed_out")]))
+        await _settle(pilot)
+        sidebar = app._session_sidebar
+        assert sidebar._asking == (session.session_id, 1)
+        assert app._ask_bar.display is True
+
+
 def _response_details(status: str) -> dict[str, Any]:
     return {
         "ask_id": "a1",

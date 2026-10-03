@@ -834,3 +834,53 @@ def test_every_question_reaches_the_projection(tmp_path: Path, count: int):
     row = queue.projection()[0]
     assert len(row["questions"]) == count
     assert all("question" in question for question in row["questions"])
+
+
+# ---------------------------------------------------------------------------
+# the outstanding view of a timed-out ask (the flip precondition)
+# ---------------------------------------------------------------------------
+
+
+def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path: Path):
+    """A queue whose ONLY ask timed out must not read as empty.
+
+    The row stays (it is still answerable) and the outstanding tally is 1, not
+    0 — the defect was a surface tallying ``open`` alone, which dropped exactly
+    this row while the bar still offered it and a late answer still reached the
+    agent. Answering it late settles it and the outstanding set empties.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 120_001
+    rows = queue.projection()
+    assert [row["ask_id"] for row in rows] == [ask_id]
+    assert rows[0]["status"] == store.STATUS_TIMED_OUT
+    assert len(store.outstanding_asks(rows)) == 1
+
+    assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
+    late = queue.projection()
+    assert late[0]["status"] == store.STATUS_LATE
+    assert store.outstanding_asks(late) == []
+
+
+def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_path: Path):
+    """The derived index must not drop to absence for a timed-out-only queue.
+
+    That file is the COLD reader's view (the aggregate route, the phone's list)
+    of what the user can still answer, so a queue that folded to no outstanding
+    rows would hide the asks everywhere but the live bar.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 120_001
+    queue._refresh()
+    entry = store.read_entry(tmp_path, "s1")
+    assert entry is not None
+    assert [row["ask_id"] for row in entry["asks"]] == [ask_id]
+    assert store.outstanding_asks(entry["asks"])[0]["status"] == store.STATUS_TIMED_OUT
+    # ``now`` is injected so the reader's staleness sweep is judged at the SAME
+    # instant the fold was (the fixture clock is years behind the wall clock).
+    rows = store.index_asks(tmp_path, now=BASE + 120_001)
+    assert [row["ask_id"] for row in rows] == [ask_id]

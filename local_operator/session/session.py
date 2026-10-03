@@ -8696,8 +8696,10 @@ class Session:
         a Session owns the queue and the frontend state, but the MOBILE
         projection and the legacy single-slot card are built by whichever host
         is attached, and only that host can repaint them. The sink receives
-        ``(rows, open_count)`` — the frozen wire shape and its open tally — so a
-        host never re-derives the fold.
+        ``(rows, outstanding_count)`` — the frozen wire shape and its outstanding
+        tally (open + timed-out-and-answerable; see
+        ``asks.store.OUTSTANDING_STATUSES``) — so a host never re-derives the
+        fold.
         """
         self._ask_state_sink = sink
 
@@ -8707,7 +8709,7 @@ class Session:
         The ONE publication seam: the queue calls it on every change (see
         ``AskQueue._publish_state``), and ``refresh_from_session`` folds the same
         values into the periodic snapshot, so the two can never disagree about
-        which asks are open.
+        which asks are OUTSTANDING.
 
         PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
         not an empty list — whenever the queue is not there (the flag is off, or
@@ -8719,14 +8721,14 @@ class Session:
         """
         from local_operator.session.frontend_state import ask_wire
 
-        rows, open_count = ask_wire(self)
+        rows, outstanding_count = ask_wire(self)
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
-            store.mutate(asks=rows, asks_open=open_count)
+            store.mutate(asks=rows, asks_open=outstanding_count)
         sink = self._ask_state_sink
         if sink is not None:
             try:
-                sink(rows, open_count)
+                sink(rows, outstanding_count)
             except Exception:  # noqa: BLE001 — a repaint is never worth a turn
                 logger.debug("ask: the host's state sink failed", exc_info=True)
 

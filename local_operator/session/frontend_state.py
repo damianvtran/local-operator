@@ -2947,7 +2947,11 @@ class FrontendSessionState(BaseModel):
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     #: The session's queued asks, newest first with the OPEN ones in front, and
-    #: how many of them are still open.
+    #: how many of them are still OUTSTANDING — ``open`` or ``timed_out`` and
+    #: still answerable late (design §2.2; the rule lives in
+    #: ``asks.store.OUTSTANDING_STATUSES``). It is NOT "open asks": a timed-out
+    #: ask the user can still answer still counts, which is exactly the state a
+    #: queue of nothing but timed-out asks is in.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (design §4/N2, and the UI contract's own
     #: rule): both fields are ABSENT, not empty, unless queued asks are live in
@@ -3824,7 +3828,8 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
         return
     snapshot["asks"] = kept
     if dropped:
-        # ``asks_open`` keeps its meaning (the session's open asks); this says the
+        # ``asks_open`` keeps its meaning (how many of the session's asks are
+        # still OUTSTANDING — open or timed out and answerable); this says the
         # frame could not carry every row. Present only when true, so absence
         # reads as "nothing was dropped" — the additive-defaulted shape the rest
         # of this payload uses. The catalogue's ``model_catalogue_truncated`` is
@@ -7844,7 +7849,17 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     The single derivation every publisher uses (``Session.publish_ask_state``,
     ``refresh_from_session``, the aggregate routes through the index), so the
     frontend state, the projection and the list rows cannot disagree about which
-    asks are open.
+    asks are OUTSTANDING.
+
+    THE TALLY IS OUTSTANDING, NOT ``open`` — this is the fix for a queue whose
+    asks have all timed out: it used to fold to ``0`` (and, with no rows left in
+    the tally's own eye, could read as absence) while the ask bar still offered
+    the asks and a late answer still reached the agent. An ask is outstanding
+    while the user can still act on it — ``open`` OR ``timed_out``-and-unanswered
+    — and SETTLED once answered, declined or dismissed (design §2.2, the spec's
+    item 3). The statuses live in ONE place (``asks.store.OUTSTANDING_STATUSES``)
+    precisely because four surfaces read this rule; see that constant for why a
+    second spelling is what produced the wrong count here.
 
     Returns ABSENCE — ``None``, not ``[]`` — whenever the queue is not live in
     this process, which is the capability proxy the whole A2 wire turns on (see
@@ -7853,7 +7868,7 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     than re-derived: a second spelling of the gate is how the wire would ship
     the field while the enqueue path still blocked.
     """
-    from local_operator.asks import policy
+    from local_operator.asks import policy, store
 
     if not policy.enabled():
         return None, None
@@ -7898,8 +7913,8 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         # and a host that can show an ask — is what keeps a dark runtime from
         # looking merely quiet; see ``FrontendSessionState.asks``.
         return None, None
-    opens = sum(1 for row in rows if str(row.get("status") or "") == "open")
-    return rows, opens
+    outstanding = sum(1 for row in rows if store.is_outstanding(row.get("status")))
+    return rows, outstanding
 
 
 def _todo_state(session_id: str) -> list[TodoPhaseState]:
