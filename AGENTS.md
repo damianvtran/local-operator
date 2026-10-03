@@ -3196,6 +3196,38 @@ feel like wiring up. Using it to silence the failure defeats the guard: the
 whole point is that a registry default disagreeing with the code's default is a
 painted lie that nothing else reports.
 
+## The ask queue: `ask` is non-blocking by default
+
+`ask` queues. The call returns a receipt at once; the answer (or a timeout
+notice) arrives later as a turn of its own, and a late answer is still accepted
+and attributed. The BLOCKING path still exists and is what the operator's escape
+hatch selects: **`LOP_ASK_NONBLOCKING=0`** — the default is `True` when the
+variable is absent or empty, and only `0`/`false`/`no`/`off` (case- and
+whitespace-insensitively) turn the queue off. Semantics:
+`docs/design/ask-nonblocking.md`.
+
+Where the arm is chosen: `local_operator/asks/policy.py` owns the constant and
+`enabled()` is the single reader, so a test selects an arm by monkeypatching the
+module attribute or by setting the env var before import — never by adding a
+second read. A cell that pins the OLD (parking) behaviour must select that arm
+explicitly and say why; the shipped default is the queue.
+
+**The ask text is measured TWICE, and both ledgers move together.**
+`scripts/bench_context_budget.py`'s ceiling counts the `ask` tool description and
+`system.md`'s ask paragraph on the wire; `tests/unit/tools/test_tool_docs.py`'s
+`MEASURED_TOKENS` counts the `tool://ask` render, which is the description
+verbatim. Editing either tail without re-measuring both, on both arms, turns
+CI's `context-budget` job and that ledger test red for the same edit (queued
+tail 1205 tokens, blocking tail 948, as of the flip).
+
+Rendered evidence for the queued surfaces lives in
+`scripts/ask_queue_shot.py` (TUI: `bar`, `bar3`, `list`, `card`,
+`card-timeout`, `response`, `timeout` — one state per run, over a seeded
+transcript so a still shows a STATE and not an empty screen) and
+`scripts/mobile_asks_capture.py` (the phone sheet, headless Chrome over CDP).
+Both write SVGs/PNGs; see "Visual validation" above for how to look at what
+they produce.
+
 ## Credentials and the encrypted secret store
 
 Full agent-facing guidance is `guide://credentials` (packaged at
