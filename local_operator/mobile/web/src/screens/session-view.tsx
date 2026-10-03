@@ -37,7 +37,7 @@ import { SessionStatus } from "../components/session-status";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
-import { COLUMN_HEIGHT_VAR } from "../lib/column";
+import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
 import { navigate } from "../router";
 import { pinRefusalText } from "../lib/pin-refusal";
 import { resumeRefusalText } from "../lib/refusal";
@@ -585,8 +585,16 @@ export function SessionScreen({
 			   divergence this property exists to end. Consumers read it as
 			   `var(--lo-vvh, 100dvh)`, so a surface outside this column — or a
 			   browser without `visualViewport` — still gets the viewport-
-			   relative bound it had before. */
+			   relative bound it had before.
+
+			   The TOP is published beside the height for the sheets: a `fixed`
+			   overlay resolves against the LAYOUT viewport, and the keyboard
+			   shrinks only the VISUAL one, so an overlay anchored to the layout
+			   viewport would hold its foot under the keyboard. `lib/column.ts`'
+			   `columnBox()` reads both, which puts the overlay on exactly the
+			   box this column is pinned to. */
 			el.style.setProperty(COLUMN_HEIGHT_VAR, `${vv.height}px`);
+			el.style.setProperty(COLUMN_TOP_VAR, `${vv.offsetTop}px`);
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -597,6 +605,7 @@ export function SessionScreen({
 			el.style.height = "";
 			el.style.top = "";
 			el.style.removeProperty(COLUMN_HEIGHT_VAR);
+			el.style.removeProperty(COLUMN_TOP_VAR);
 		};
 	}, []);
 
