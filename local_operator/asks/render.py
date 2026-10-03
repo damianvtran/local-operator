@@ -339,6 +339,18 @@ def apply_secret_answers(
     implementation would be giving the secret two ways out. The context it
     expects is duck-typed (``.variables`` / ``.journal_credential``), so a few
     lines of shim is the whole adapter.
+
+    **ONLY THE CELLS THE CALLER SUPPLIED come back** (PRE-EXISTING defect found en
+    route in round 2, identical in ``respond_ask`` and fixed with the revision
+    contract). The delegated hop answers one cell for EVERY question id — ``[]``
+    for the ones the caller never supplied — because the blocking picker always
+    returned the whole set. Handed straight to ``AskQueue`` that fabricated cell
+    defeated the whole-ask COMPLETENESS check (§2.4): an omitted question was
+    recorded as "no answer" instead of being refused, so the model could be told
+    the user had skipped a question they were never shown. Filtering here rather
+    than in the hop keeps the tool layer's contract for the blocking path, and
+    covers every queued caller at once — ``respond_ask``, ``revise_ask`` and the
+    legacy per-tap mirror, which reads its one cell back out by key.
     """
     from local_operator.tools.builtin import _report_secret_answers
 
@@ -351,7 +363,12 @@ def apply_secret_answers(
     models = _question_models(list(questions))
     # The function duck-types its context (``.variables`` / ``.journal_credential``);
     # the cast is the adapter's whole purpose, so it is named rather than silenced.
-    return _report_secret_answers(models, {k: list(v) for k, v in answers.items()}, cast(Any, shim))
+    reported = _report_secret_answers(
+        models, {k: list(v) for k, v in answers.items()}, cast(Any, shim)
+    )
+    # The caller's OWN key set, so an omitted question stays omitted and the
+    # queue's completeness check can refuse it (see the docstring).
+    return {qid: cell for qid, cell in reported.items() if qid in answers}
 
 
 def _question_models(questions: Sequence[Any]) -> list[Any]:
