@@ -979,8 +979,9 @@ def test_agents_push_hub_id_public_republishes(
 ) -> None:
     _make_agent()
     hub.agent_rows["hub-pub-1"] = {
+        # The live public projection OMITS visibility (an org row carries
+        # visibility="org"); absence is the public shape.
         "tenant_id": "home-someone",
-        "visibility": "public",
         "name": "OrgCoder",
         "version": "2.0.0",
     }
