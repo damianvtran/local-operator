@@ -291,6 +291,48 @@ async def test_a_complete_map_with_a_secret_question_still_records_every_cell(
 
 
 @pytest.mark.asyncio
+async def test_a_supplied_empty_cell_survives_the_hop_filter(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """NIT 1 (round 3): a deliberate "no answer" keeps its key through the filter.
+
+    The filter discriminates on the caller's KEY SET, not on cell emptiness — an
+    explicit ``[]`` is how "no answer" is said (§2.4) and must survive, while an
+    omission has no key to survive on. Written as ``if cell`` instead of
+    ``if qid in answers``, the filter would drop the supplied ``[]`` and turn a
+    legitimate skip into the partial-map refusal.
+
+    THE ADAPTER'S OWN OUTPUT IS THE ONLY PLACE THIS IS VISIBLE, and that is why
+    the arm is written at that level: ``Session.respond_ask`` merges the hop's map
+    OVER the caller's own, so a dropped ``[]`` would still be present from the
+    caller's copy and a session-level cell could not discriminate — which is
+    exactly why nothing in the suite redded against that mutation. The second half
+    pins the whole-path behaviour the adapter assertion protects.
+    """
+    from local_operator.variables import VariableStore
+
+    session, queue = _ask_session(tmp_path)
+    session._variables = VariableStore(cwd=str(tmp_path))  # noqa: SLF001 — the store the hop writes
+
+    # (a) the adapter, directly: the supplied [] comes back WITH its key.
+    hopped = render.apply_secret_answers(
+        _secret_and_plain(),
+        {"API_KEY": ["API_KEY"], "q1": []},
+        variables=session.variables,
+    )
+    assert "q1" in hopped, hopped
+    assert hopped["q1"] == [], hopped
+
+    # (b) the whole path: the skip is accepted, and it is recorded as [].
+    ask_id = _enqueue(queue, _secret_and_plain())
+    outcome = session.respond_ask(ask_id, {"API_KEY": ["API_KEY"], "q1": []})
+    assert outcome["ok"] is True, outcome
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["answers"]["q1"] == [], record["answers"]
+
+
+@pytest.mark.asyncio
 async def test_a_revision_is_accepted_through_the_op_while_delivery_has_not_run(
     isolated_config: Path, tmp_path: Path
 ) -> None:

@@ -382,14 +382,25 @@ class AskQueue:
     def revision_refusal(self, ask_id: str, now_ms: int | None = None) -> str:
         """Why a revision of this ask would be REFUSED, or ``""`` if it would be taken.
 
-        The READ-ONLY half of :meth:`revise`'s admissibility decision, split out
-        for the one caller with a side effect it must not perform speculatively:
+        The READ-ONLY half of :meth:`revise`'s STATE decision, split out for the
+        one caller with a side effect it must not perform speculatively:
         :meth:`Session.revise_ask` stores a SECRET answer's value before the queue
-        sees the map, and a revision the queue is going to refuse must not be the
-        reason a pasted credential is stored and announced to later turns. The
-        decision itself is ``_revision_decision``, shared with the write path, so
-        the two can never disagree BY RULE — the sentence a caller sees here is
-        the sentence the write would return.
+        sees the map, and a revision the STATE window is going to refuse must not
+        be the reason a pasted credential is stored and announced to later turns.
+        The decision itself is ``_revision_decision``, shared with the write path,
+        so the two can never disagree BY RULE — the sentence a caller sees here is
+        the sentence the write's state decision would return.
+
+        THE STATE DECISION IS ALL OF WHAT THIS PROBE COVERS, and that limit is
+        worth stating here because it was claimed wider: the write path applies a
+        SECOND rule afterwards — the whole-ask map contract, which refuses a map
+        that omits a question — and this probe does not run it. A revision refused
+        for an INCOMPLETE map therefore still stores a secret the caller supplied
+        before the refusal. That is pre-existing and identical on
+        :meth:`Session.respond_ask`, it is recoverable (the resend lands) and no
+        value reaches a durable surface, and it is recorded as a DEFERRED finding
+        on PR #1954; the remedy is to consult the map contract here too, the same
+        shape as this probe. Do not read this docstring as covering it.
 
         THE CLOCK IS THE CALLER'S, and that is the one place they can part in
         fact: ``revise`` reads ``now`` again for its own fold, so a probe and a
