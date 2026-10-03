@@ -395,6 +395,7 @@ leave the composer:
 /network               this device's networks, peers and relay state, as a screen
 /network peers         which devices answer right now
 /network sessions --all-peers  what other devices are running: list, engage, stop
+/network approvals     onboarding cards: list, show, approve, deny
 /network status        relay health and the log path
 /network log           the recent mesh event trail
 ```
@@ -451,11 +452,13 @@ The device that will **hold** the conversation is the one that issues the move,
 so `--to <peer>` is this machine asking the peer to pull and `--to local` is
 this machine pulling; there is no push verb. A session with a turn in flight is
 refused rather than interrupted, and `--wait` re-checks a busy one every five
-seconds. Inside the TUI the same act is `/move <id> --to <peer|local>
-[--keep]`. `lop sessions sync <id>` keeps this machine's copy of a conversation
-a peer owns up to date without opening it, and `lop sessions move <id> --to
-local --from-replica` recovers that copy as a new session for when the device
-that held it is gone.
+seconds; `--queue` instead records the move to run by itself at the
+conversation's next safe point (`lop sessions move --cancel-queued <id>` calls
+it off before it starts). Inside the TUI the same act is `/move <id> --to
+<peer|local> [--keep] [--queue]`. `lop sessions sync <id>` keeps this machine's
+copy of a conversation a peer owns up to date without opening it, and
+`lop sessions move <id> --to local --from-replica` recovers that copy as a new
+session for when the device that held it is gone.
 
 <p align="center">
   <img src="./static/ui-mesh-recall.png" alt="The desktop app's Mesh tab with a peer's device panel open on the right — cloud-node-1's memberships, its conversations and an Invite to a network button — the whole tab dimmed behind a scrim, and over it the 'Recall to this device' dialog, whose subtitle reads 'The copy on cloud-node-1 is deleted once this device has it.' above a selected 'Recall to this device' choice and a 'Copy here, leave it there' alternative" width="720">

@@ -153,14 +153,20 @@ def test_argparse_does_not_own_a_verb_the_cli_lacks() -> None:
 
 @dataclass
 class _Recorder:
-    """A ``run_network`` stand-in: records argv, answers with a fixed line."""
+    """A ``run_network`` stand-in: records argv and budget, answers with a fixed line."""
 
     calls: list[list[str]] = field(default_factory=list)
+    #: The ``timeout`` kwarg per call, in call order — the other half of the
+    #: argv assertion. A verb wired to the wrong constant is invisible to argv
+    #: equality, and for `approvals approve` that difference is the key-agent
+    #: sheet's life (`network_cli.gesture_call_timeout`).
+    timeouts: list[Any] = field(default_factory=list)
     answer: str = "ok"
     returncode: int = 0
 
     def __call__(self, args: list[str], **kwargs: Any) -> NetworkRun:
         self.calls.append(list(args))
+        self.timeouts.append(kwargs.get("timeout"))
         return NetworkRun(tuple(args), self.returncode, stdout=self.answer + "\n")
 
     @property
@@ -335,6 +341,105 @@ async def test_read_verbs_run_the_cli_with_the_argv_the_design_names(
         await _submit(pilot, app, "/network rename devmesh My Fancy Name")
         await app.workers.wait_for_complete()
         assert run.argv == ["rename", "devmesh", "My Fancy Name"]
+
+
+@pytest.mark.asyncio
+async def test_approval_verbs_run_the_cli_with_the_argv_the_design_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval cards from the composer, one hop onto the CLI's own verbs.
+
+    Slice (e)'s TUI half (remote-onboarding §2.3): the badge reads (`list`,
+    `show`) and the two decisions (`approve`, `deny`) are the SAME verbs every
+    other surface runs — the store, the signature gate and the audit line are
+    the CLI's. This surface decides the argv and the budget, and BOTH are
+    asserted: `approve` must get the gesture-shaped budget (a shorter one reaps
+    the key-agent sheet mid-prompt), the reads and `deny` the quick one.
+    """
+    from local_operator.tui.network_cli import QUICK_TIMEOUT_S, gesture_call_timeout
+
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network approvals")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "list"]
+        assert run.timeouts == [QUICK_TIMEOUT_S]
+
+        run.calls.clear()
+        run.timeouts.clear()
+        await _submit(pilot, app, "/network approvals list")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "list"]
+        assert run.timeouts == [QUICK_TIMEOUT_S]
+
+        run.calls.clear()
+        run.timeouts.clear()
+        await _submit(pilot, app, "/network approvals show a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "show", "a_123"]
+        assert run.timeouts == [QUICK_TIMEOUT_S]
+
+        run.calls.clear()
+        run.timeouts.clear()
+        await _submit(pilot, app, "/network approvals approve a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "approve", "a_123"]
+        assert run.timeouts == [gesture_call_timeout()]
+
+        run.calls.clear()
+        run.timeouts.clear()
+        await _submit(pilot, app, "/network approvals deny a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "deny", "a_123"]
+        assert run.timeouts == [QUICK_TIMEOUT_S]
+
+
+def test_the_gesture_budget_is_derived_from_the_key_agents_own_bound() -> None:
+    """The budget tracks the key agent's bound — derived, never restated.
+
+    If ``SIGN_TIMEOUT_SECONDS`` moves, this budget moves with it; a regression
+    that hard-coded the sum (or swapped in ``QUICK_TIMEOUT_S``) fails here even
+    where no executor is in play.
+    """
+    from local_operator.operator.macos.keyagent import SIGN_TIMEOUT_SECONDS
+    from local_operator.tui.network_cli import gesture_call_timeout
+
+    assert gesture_call_timeout() == SIGN_TIMEOUT_SECONDS + 60.0
+    assert gesture_call_timeout() > SIGN_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_approval_words_this_surface_does_not_carry_read_the_usage_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`request`/`run` stay the agent's path; a half-typed sub-verb reads the
+    surface's own usage line, not argparse's sentence from one hop down."""
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network approvals request --host 10.0.0.9")
+        await pilot.pause()
+        assert run.calls == []
+        assert any("Use /network approvals list" in text for text in _notices(app))
+
+        await _submit(pilot, app, "/network approvals run")
+        await pilot.pause()
+        assert run.calls == []
+
+        await _submit(pilot, app, "/network approvals show")
+        await pilot.pause()
+        assert run.calls == []
+
+        await _submit(pilot, app, "/network approvals list extra")
+        await pilot.pause()
+        assert run.calls == []
 
 
 @pytest.mark.asyncio

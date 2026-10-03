@@ -283,6 +283,7 @@ from local_operator.tui.network_cli import (
     QUICK_TIMEOUT_S,
     NetworkRun,
     created_session_id,
+    gesture_call_timeout,
     run_network,
     tui_spelling,
 )
@@ -31582,7 +31583,7 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_move_session(self, request: "MoveTo", notice: NoticeFn) -> None:
-        """``/move [<id>] --to <peer|local> [--keep]`` — move a SESSION between devices.
+        """``/move [<id>] --to <peer|local> [--keep] [--queue]`` — move a SESSION.
 
         THE CLI OWNS THE PROTOCOL (``lop sessions move … --json``, slice M's
         frozen ``session_move`` contract) and this surface renders it: the phase
@@ -31600,6 +31601,13 @@ class OperatorApp(App[None]):
         that was never going to happen. On ``committed`` the moved session is
         reopened where it now lives: attached-remote for ``--to <peer>``, local
         for ``--to local``.
+
+        ``--queue`` IS THE TWO GUARDS' OWN REMEDY (design §5.4): a turn in
+        flight and a viewer parked elsewhere are exactly the blockers the queued
+        move waits out — the merged queue path records the intent durably and
+        announces attached clients at the safe point instead of refusing — so a
+        request carrying the flag must not be refused here for the conditions
+        the queue exists to wait for.
         """
         current = str(getattr(self._session, "session_id", "") or "")
         target_id = request.session_id or current
@@ -31614,7 +31622,13 @@ class OperatorApp(App[None]):
             self._system_notice("a move is already running.", "warning")
             return
         leaving = target_id == current
-        if leaving and self._turn_is_live():
+        # ``--queue`` STANDS BOTH GUARDS BELOW DOWN (§5.4): they exist to avoid a
+        # leave-then-refuse dead end on exactly the two blockers the queue was
+        # built to wait out — a turn in flight, and an attached viewer — and the
+        # merged queue path converts both into a durable intent
+        # (``mobility._source_prepare``'s enqueue branch). A queued request
+        # refused here would be answered with the wait it asked to schedule.
+        if leaving and self._turn_is_live() and not request.queue:
             self._system_notice(
                 f"Could not move {target_id}: a turn is still running. Nothing changed. "
                 "esc first, or wait for it to finish.",
@@ -31627,7 +31641,7 @@ class OperatorApp(App[None]):
         # terminal" — this one. Refused here in words that say which terminal,
         # before anything moves; the relay-side backstop covers every other holder.
         held = self._sidebar_sources.get(target_id)
-        if not leaving and held is not None and not held.retired:
+        if not leaving and held is not None and not held.retired and not request.queue:
             self._system_notice(
                 f"Could not move {target_id}: this terminal is still holding it open in the "
                 "sidebar. Open it and run /move --to from inside it, or wait a moment for "
@@ -31649,7 +31663,11 @@ class OperatorApp(App[None]):
                     # `_retire_unused_runtime`).
                     await self._leave_for_move()
                 result = await asyncio.to_thread(
-                    run_session_move, target_id, request.to, keep=request.keep
+                    run_session_move,
+                    target_id,
+                    request.to,
+                    keep=request.keep,
+                    queue=request.queue,
                 )
             finally:
                 self._move_in_flight = False
@@ -31723,6 +31741,12 @@ class OperatorApp(App[None]):
                 tail = " Nothing changed."
             message = str(result.get("message") or "the move was refused")
             text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
+            if str(result.get("code") or "") == "viewed_elsewhere":
+                # THE BLOCKER A WAIT CANNOT CLEAR (``mobility``'s taxonomy split,
+                # design §5.4): seen in another window or app, the queue is the
+                # route that works — the producer's own sentence says "queue the
+                # move", and this line carries the spelling THIS surface runs.
+                text += f" To queue it from here: /move {session_id} --to {request.to} --queue."
             if reached in MOVE_PHASE_ORDER:
                 # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
                 # the fact the user needs to know what state the two devices are in.
@@ -31743,6 +31767,70 @@ class OperatorApp(App[None]):
                 # them moves it. Reopening where it LIVES is the one answer that
                 # covers both placements the pick knows: a peer's id opens
                 # attached-remote, a local id resumes.
+                self._reopen_where_the_session_lives(session_id)
+            return
+        if isinstance(result.get("queue"), dict):
+            # THE QUEUED RECEIPT (design §5.4): a success, but nothing has moved
+            # yet — the intent is durable on the source and runs by itself at
+            # the next safe point. ONE sentence, like a pre-phase refusal (there
+            # is no move-phase row to track, and the phases below are the
+            # QUEUE's own vocabulary); the glosses speak product words, the same
+            # mapping the CLI's receipt uses, and the cancel hint is PHASE-AWARE
+            # because it is a lie once the move has started
+            # (``move_queue.cancel`` answers ``too_late`` from ``paused`` on).
+            queue_block = result["queue"]
+            phase = str(result.get("phase") or queue_block.get("phase") or "queued")
+            target = str(
+                queue_block.get("to_name")
+                or (result.get("to_device") or {}).get("name")
+                or request.to
+                or "another device"
+            )
+            notes = {
+                "queued": "waiting for a safe point",
+                "finishing": (
+                    "waiting for the current step to finish (a pending approval holds " "this up)"
+                ),
+                "paused": "the move has started",
+                "copying": "the move has started",
+                "resumed": f"it has arrived on {target}",
+            }
+            note = notes.get(phase, "")
+            head = f"Queued a move of {session_id} to {target}"
+            head += f" — {note}." if note else "."
+            if phase == "resumed":
+                text = head + " It is no longer running on this device."
+            elif phase in ("paused", "copying"):
+                text = head + (
+                    f" It can no longer be cancelled; the conversation continues on {target}."
+                )
+            else:
+                # THE CANCEL CLAUSE NAMES A PRODUCT ACTION, NEVER A TERMINAL
+                # COMMAND (design §2.9, frozen; design review round 1, D1): the
+                # composer carries no cancel verb (slice (e) scope), so a clause
+                # naming the CLI's `--cancel-queued` would hand its reader a
+                # spelling this surface refuses — it points at the product's own
+                # route instead, the register the anchor remedies already use.
+                text = (
+                    head + " Windows open on it are told first and get a moment to follow; any "
+                    "that can't will be disconnected, and the conversation continues on "
+                    f"{target}. It can still be cancelled before it starts — ask Local Operator "
+                    "to cancel the queued move."
+                )
+            if phase_notice.is_attached:
+                self._transcript_view().remove_block(phase_notice)
+            # `note`, not `info` (design review round 1, D2): these are multi-line
+            # prose receipts answering the request the user just made, and
+            # `info`'s `dim` token is #837c6d on BOTH ramps — 3.77:1 on light
+            # paper, under the 4.5:1 AA floor. `note` rides `muted` (7.18:1
+            # light, 8.62:1 dark), which is what transcript.py's docstring names
+            # for a receipt the user is actively reading.
+            self._system_notice(text, "note")
+            if left:
+                # THE QUEUED REQUEST STILL LEFT THE SESSION, and the conversation
+                # has NOT moved — reopen where it lives, the same way back every
+                # refusal after a leave owes; the safe point's announce-then-
+                # proceed path is what hands the conversation over later.
                 self._reopen_where_the_session_lives(session_id)
             return
         phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
@@ -45860,6 +45948,21 @@ class OperatorApp(App[None]):
             argv = ["doctor"] + (["--peer", rest[0]] if rest else [])
             self._dispatch_network_cli(rest[:1], argv, notice, verb="doctor")
             return
+        if verb == "approvals":
+            # THE APPROVAL CARDS (remote-onboarding §2.3; slice (e): "TUI cards
+            # for approvals"). The operator's own surface reads the
+            # device-local store and answers from here — `list` is the badge
+            # read, `show` one record, `approve`/`deny` the decision — through
+            # the CLI's own verbs, so the record, the signature gate and the
+            # audit line all live where they already live. `approve` runs the
+            # SAME presence-gated signing call every other surface runs
+            # (`approval_store.sign_decision` IS the `lop operator sign` path),
+            # so the gesture is the OS key agent's, not this terminal's.
+            # `request`/`run` are deliberately not carried (§2.3): filing and
+            # executing are the agent's path, and the helper's usage line names
+            # what this surface runs.
+            self._network_approvals(rest, notice)
+            return
         if verb == "sessions":
             # The session plane, from the composer: what `/new remote <peer>`
             # created is otherwise invisible on every surface (review round 4,
@@ -46253,6 +46356,41 @@ class OperatorApp(App[None]):
             )
             return
         self._run_network_cli(["panic", network_arg], notice)
+
+    def _network_approvals(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network approvals [list|show <id>|approve <id>|deny <id>]``.
+
+        ONE LIST, ONE STORE READER (design §2.3): these are the CLI's own verbs
+        — the badge read (`list`/`show`) and the two decisions — so the record,
+        the signature gate and the audit line all live where they already live.
+        This method decides only the argv and the budget, and `approve` gets
+        the GESTURE budget because its signing call raises the OS key agent's
+        prompt (``network_cli.gesture_call_timeout()`` derives it from the key
+        agent's own bound, so a budget that could reap the child mid-prompt
+        cannot drift in).
+
+        ``request`` AND ``run`` ARE DELIBERATELY ABSENT (§2.3): filing a card
+        names a host, a user and a credential reference — the agent's first
+        step — and ``run`` executes credentialed, long install work on another
+        machine, the agent's execution path. A composer keystroke is the wrong
+        surface for either, so an unrecognised sub-verb reads the usage line
+        rather than being passed through.
+        """
+        usage = (
+            "Use /network approvals list, /network approvals show <id>, "
+            "/network approvals approve <id>, or /network approvals deny <id>"
+        )
+        sub = rest[0].casefold() if rest else "list"
+        if sub == "list" and len(rest) <= 1:
+            self._run_network_cli(["approvals", "list"], notice, verb="approvals")
+            return
+        if sub in ("show", "approve", "deny") and len(rest) == 2:
+            timeout = gesture_call_timeout() if sub == "approve" else QUICK_TIMEOUT_S
+            self._run_network_cli(
+                ["approvals", sub, rest[1]], notice, verb="approvals", timeout=timeout
+            )
+            return
+        self._system_notice(usage, "warning")
 
     def _network_join_notice(self, rest: list[str]) -> None:
         """``/network join`` cannot run here, and says so instead of half-running.

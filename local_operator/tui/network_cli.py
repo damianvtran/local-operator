@@ -68,6 +68,32 @@ PEER_CALL_TIMEOUT_S = 260.0
 #: and it tears a viewer down on the way out.
 PILOT_CALL_TIMEOUT_S = PILOT_ACT_TIMEOUT_S + 60.0
 
+
+def gesture_call_timeout() -> float:
+    """The budget for a verb that WAITS ON A HUMAN GESTURE — ``approvals approve``.
+
+    The store's signing call (``approval_store.sign_decision``, which IS the
+    ``lop operator sign`` path) raises the OS key agent's sheet and blocks for
+    as long as it is up; ``sign_message`` runs it with no timeout of its own, so
+    the bound the gesture carries is the key agent's
+    (``keyagent.SIGN_TIMEOUT_SECONDS``). DERIVED from it rather than restated,
+    for the reason ``PILOT_CALL_TIMEOUT_S`` above is derived: a budget written
+    by hand under the gesture's own bound would reap this child mid-prompt and
+    report a timeout about a question the operator was still answering.
+
+    The slack on top covers what that constant does not: a fresh interpreter
+    importing the application before the sheet appears, and the store's
+    cross-process lock around the decision write.
+
+    The import is FUNCTION-LOCAL on purpose: this module is imported at
+    ``app.py``'s module scope and pulls in only the stdlib, so the operator
+    package stays off that path until a verb here actually raises a gesture.
+    """
+    from local_operator.operator.macos.keyagent import SIGN_TIMEOUT_SECONDS
+
+    return SIGN_TIMEOUT_SECONDS + 60.0
+
+
 #: The refusal sentences ``network/cli.py`` prints are ANSI-coloured for a human
 #: watching a terminal. A notice is the wrong place for an escape sequence — a
 #: captured string must be the sentence, not the sentence plus paint.
