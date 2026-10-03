@@ -1308,13 +1308,23 @@ installs and starts the destination's wake supervisor (idempotent;
 is not a schedule that FIRES: the carried-wake drill (2026-10-03, two real devices)
 moved a daily wake to a destination whose supervisor sat loaded-but-stopped, and the
 overdue wake fired only after a hand-run `lop wake install`. The move's receipt now
-reports the outcome: `carry.supervisor` is `running` when verified, and when it is
-not, `carry.notice` says exactly "N wakes carried; supervisor not running on
-<device> — run `lop wake install`". **Monitor state does not travel with a move**: a
-monitor's counters and snapshots are device-local observations, so the destination
-re-baselines them on its first check and the move itself never fires an alert — the
-spec rows do ride the transcript, but what a monitor has SEEN stays behind (the
-origin's own count renders as `carry.monitors_notice` on the receipt).
+reports the outcome: `carry.supervisor` is the machine token `running` /
+`not_running`; the running half adds `carry.running_notice` ("N wake(s) carried —
+supervisor running on <device>" — design round 1: a carried-and-live wake must not
+read as no wake at all); when it is NOT running, `carry.notice` says exactly
+"N wake(s) carried; supervisor not running on <device> — run 'lop wake install' on
+<device>" — the command anchored to the named device, because `lop wake install`
+installs on the machine it runs on and a reader on the source must not repair the
+wrong one. (A QUEUED move records the block but renders nothing yet: its record is
+write-once and folds to `resumed` at the commit, before the destination's `done`
+frame exists — rendering the block on the queue's own surface is a named follow-up,
+so the queued path is the one place this silence is known and tracked.) **Monitor
+state does not travel with a move**: a monitor's counters and snapshots are
+device-local observations, so the destination re-baselines them on its first check
+and the move itself never fires an alert — the spec rows do ride the transcript, but
+what a monitor has SEEN stays behind (the receipt says it in plain words: "N
+monitor(s) here: their state does not travel — their checks start fresh on the
+destination", rendered from the origin's own count as `carry.monitors_notice`).
 
 **The lists are checked against the product, and a gap FAILS CLOSED.** Two tests and
 one runtime guard, because a file list cannot notice a file type nobody told it

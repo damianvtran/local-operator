@@ -453,12 +453,13 @@ transcripts diverge from there.
 
 WHAT TRAVELS OF A SESSION'S SCHEDULED STATE. A wake travels with the conversation,
 and the destination installs and starts its wake supervisor for it as part of the
-move, so the schedule fires there with nothing open; if that device cannot run a
-supervisor, the move's receipt says so in one line and names `lop wake install`.
-**Monitor state does not travel with a move**: a monitor's counters and snapshots
-are device-local observations, so the destination re-baselines them on the first
-check and the move itself never fires an alert. Watch the receipt's `carry` block
-on `--json` for both halves.
+move — the receipt confirms it ("supervisor running on <device>") — so the schedule
+fires there with nothing open; if that device cannot run a supervisor, the receipt
+says so in one line and names the fix to run ON THAT DEVICE (`lop wake install`),
+so the right machine gets repaired. **Monitor state does not travel with a move**: a
+monitor's counters and snapshots are device-local observations, so their checks
+start fresh on the destination and the move itself never fires an alert. Watch the
+receipt's `carry` block on `--json` for both halves.
 
 OTHER FLAGS. `--wait [SECONDS]` re-checks a conversation whose turn is in flight
 every five seconds, up to the design's thirty minutes (a bare `--wait`). A session

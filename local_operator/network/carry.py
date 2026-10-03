@@ -376,7 +376,14 @@ def ensure_supervisor(config_dir: Path) -> dict[str, Any]:
         return {"installed": False, "running": False, "detail": f"failed: {exc}"}
     try:
         state = supervisor_state(Path(config_dir))
-        running = bool(state.running)
+        # FAIL-CLOSED, the same conjunct the status surface applies
+        # (``cli.py``'s ``wake status``: ``state.running and state.verifiable``):
+        # ``verifiable=False`` means the probe addressed a DIFFERENT store — the
+        # global label, not this one — so nothing about it may read as this
+        # store's supervisor running. Today every ``verifiable=False`` return also
+        # carries ``running=False``; the conjunct is what keeps that a guarantee
+        # rather than a coincidence (review round 1, R-MINOR).
+        running = bool(state.running and state.verifiable)
         detail = str(state.detail or "") or str(outcome.reason or "")
     except Exception as exc:  # noqa: BLE001 — an unverifiable supervisor is not a running one
         logger.warning("carry: could not verify the wake supervisor", exc_info=True)
@@ -387,42 +394,72 @@ def ensure_supervisor(config_dir: Path) -> dict[str, Any]:
 def supervisor_notice(wakes: int, device: str) -> str:
     """The LOUD fallback sentence for a move that carried wakes it cannot fire.
 
-    THE COPY IS A CONTRACT: the carried-wake drill requires exactly this sentence
-    on the receipt — "N wakes carried; supervisor not running on <device> — run
-    `lop wake install`" — because it is the one line that turns a silent stopped
-    supervisor into a next step. Named here so the exact wording exists once and
-    is pinned by tests, not concatenated at two call sites.
+    THE COPY IS A CONTRACT, and design round 1 re-rendered it (D1/D2/D7):
+
+      "1 wake carried; supervisor not running on <device> — run 'lop wake install' on <device>"
+
+    Three deliberate properties: the noun pluralises with the count (the drill's
+    own measured case is ONE daily wake); the command is anchored to the device
+    NAMED IN THE SENTENCE, because ``lop wake install`` has no peer selector and
+    a reader on the source who ran it there would fix the wrong machine — the
+    exact silent-stopped outcome this line exists to prevent; and the command is
+    single-quoted, the family's canonical spelling for a copy-pasteable remedy
+    (``cli.py``'s ``wake status`` convention: a quoted command is one token).
     """
-    return f"{wakes} wakes carried; supervisor not running on " f"{device} — run `lop wake install`"
+    word = "wake" if wakes == 1 else "wakes"
+    return (
+        f"{wakes} {word} carried; supervisor not running on {device} — "
+        f"run 'lop wake install' on {device}"
+    )
+
+
+def wake_running_notice(wakes: int, device: str) -> str:
+    """The quiet success line: carried wakes whose supervisor was VERIFIED running.
+
+    Design round 1's D4: the loud half alone left a carried-and-live wake
+    indistinguishable from no wake at all — the receipt said nothing when things
+    were fine. This is the other half, rendered only when ``running`` is the
+    verified fact (never on the not-running path, which has the loud sentence).
+    """
+    word = "wake" if wakes == 1 else "wakes"
+    return f"{wakes} {word} carried — supervisor running on {device}"
 
 
 def monitors_notice(count: int) -> str:
     """The up-front monitors statement for a move whose origin holds monitors.
 
-    One sentence, and it says exactly what does not travel: the monitor's STATE
-    (counters/snapshots are device-local observations), not the monitor itself —
-    the spec rows ride the transcript and the destination rebuilds its index at
-    promote, but the first check there re-baselines. The drill's finding was that
-    nothing in the product ever said so; this is that line.
+    DESIGN ROUND 1 RE-CUT THIS SENTENCE (D3/D6), and the two stumbles it fixes are
+    worth keeping named: the old copy ("N monitors here will not travel with their
+    state") made THE MONITORS the subject of "not travel", which garden-paths as
+    "your monitors were dropped" — the opposite of the fact, since the spec rows
+    ride the transcript and the destination rebuilds their index. Here the subject
+    of the negative is the STATE, matching the design note's "Monitor state does
+    not travel with a move", and the continuation says in plain words what happens
+    instead ("their checks start fresh on the destination") rather than meeting the
+    reader with the codebase's internal "re-baseline" — which stays the term of
+    art in the design note (``docs/design/mesh-session-mobility.md`` §7.2), not at
+    the point of first contact.
     """
+    noun = "monitor" if count == 1 else "monitors"
     return (
-        f"{count} monitors here will not travel with their state — "
-        "the destination re-baselines them"
+        f"{count} {noun} here: their state does not travel — "
+        "their checks start fresh on the destination"
     )
 
 
 def move_carry_block(config_dir: Path, wakes: int, device: str) -> dict[str, Any]:
     """The receipt's scheduled-state block for a promote that carried ``wakes``.
 
-    THE §5.3 ``ensure`` STEP'S WHOLE OUTCOME, in one function, so the one copy of
-    the loud fallback sentence has a single definition and the promote only has to
-    report it: install/start the supervisor, VERIFY it is running, and when it is
-    not — including an ensure that answered a shape this module did not expect
-    (measured 2026-10-03: a stub on the old string shape raised from inside the
-    fallback logging and failed a whole move) — say so in the exact sentence the
-    drill lane requires. Never raises: a promote must not fail here, and there is
-    no path through this function that ends in silence. The WHY stays in this
-    device's relay log; the one actionable line on the receipt is the notice.
+    THE §5.3 ``ensure`` STEP'S WHOLE OUTCOME, in one function, so the copy of the
+    fallback sentence has a single definition (``supervisor_notice`` states it) and
+    the promote only has to report it: install/start the supervisor, VERIFY it is
+    running, and when it is not — including an ensure that answered a shape this
+    module did not expect (measured 2026-10-03: a stub on the old string shape
+    raised from inside the fallback logging and failed a whole move) — say so. The
+    running case is NOT silent either (design round 1, D4): ``running_notice`` is
+    the quiet confirmation, so a carried-and-live wake cannot read as no wake at
+    all. Never raises: a promote must not fail here. The WHY stays in this device's
+    relay log; the actionable line on the receipt is the notice.
     """
     running = False
     detail: Any = None
@@ -432,8 +469,13 @@ def move_carry_block(config_dir: Path, wakes: int, device: str) -> dict[str, Any
         detail = supervision.get("detail")
     except Exception:  # noqa: BLE001 — the sentence below must still be said
         logger.warning("carry: could not ensure the wake supervisor", exc_info=True)
-    block: dict[str, Any] = {"wakes": wakes, "supervisor": "running" if running else "not running"}
-    if not running:
+    block: dict[str, Any] = {"wakes": wakes, "supervisor": "running" if running else "not_running"}
+    if running:
+        # The quiet half (design round 1, D4): the block alone left the rendered
+        # receipt silent on success, so a carried-and-live wake could not be told
+        # from no wake at all. Rendered only when ``running`` is verified.
+        block["running_notice"] = wake_running_notice(wakes, device)
+    else:
         block["notice"] = supervisor_notice(wakes, device)
         logger.warning(
             "carry: wake supervisor not running for %s after %d carried wake(s): %s",

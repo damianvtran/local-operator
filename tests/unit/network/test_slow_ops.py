@@ -553,11 +553,14 @@ def test_the_session_move_contract_is_frozen() -> None:
     # destination's wake/supervisor half rides the ``done`` frame; the source's
     # monitors half is added where the count was read). ``total=False`` for the
     # same reason as the queue's: an older peer sends none of it, and a move that
-    # carried nothing must print exactly the document it always did.
+    # carried nothing must print exactly the document it always did. The wake
+    # half is BOTH-OR since design round 1's D4: ``running_notice`` when the
+    # supervisor verified running, ``notice`` when it did not — never both.
     assert set(mobility.MoveCarryBlock.__annotations__) == {
         "wakes",
         "monitors",
         "supervisor",
+        "running_notice",
         "notice",
         "monitors_notice",
     }

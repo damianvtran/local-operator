@@ -31,7 +31,7 @@ import json
 import shutil
 import threading
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -106,7 +106,9 @@ def test_an_unconfirmed_commit_is_refused_with_the_route_home(
     # right — it only stops the cell sitting out the full thirty seconds.
     monkeypatch.setattr(mobility, "OFFLOAD_CONFIRM_WAIT_S", 0.5)
 
-    def _die(*args: Any, **kwargs: Any) -> bool:
+    def _die(*args: Any, **kwargs: Any) -> NoReturn:
+        # NoReturn, not the old ``-> bool``: this stub stands in for ``_promote``
+        # (now ``mobility._PromoteOutcome``) and always raises.
         raise RuntimeError("the receiver died before its promote (the crash window)")
 
     monkeypatch.setattr(mobility, "_promote", _die)

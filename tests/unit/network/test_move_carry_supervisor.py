@@ -85,6 +85,7 @@ def _fake_installer(
     reason: str = "installed",
     running: bool = True,
     detail: str = "active/running",
+    verifiable: bool = True,
     ensure_raises: Exception | None = None,
 ) -> list[Path]:
     """Fake the installer seams, record ensure calls, and answer the verify shape."""
@@ -97,7 +98,9 @@ def _fake_installer(
         return wakes_install.InstallOutcome(installed=installed, reason=reason)
 
     def fake_state(config_dir: Path) -> wakes_install.SupervisorState:
-        return wakes_install.SupervisorState(loaded=True, running=running, detail=detail)
+        return wakes_install.SupervisorState(
+            loaded=True, running=running, detail=detail, verifiable=verifiable
+        )
 
     monkeypatch.setattr(wakes_install, "ensure_supervisor_installed", fake_installed)
     monkeypatch.setattr(wakes_install, "supervisor_state", fake_state)
@@ -128,8 +131,13 @@ def test_a_promote_that_carries_wakes_ensures_and_reports_the_running_supervisor
     # The carried schedule is live on this device: the rebuilt index holds the row.
     entry = wake_store.read_entry(root, SESSION)
     assert entry is not None and len(entry["schedules"]) == 1
-    # And the receipt's half: verified running, no loud line needed.
-    assert outcome.carry == {"wakes": 1, "supervisor": "running"}
+    # And the receipt's half: verified running, with the QUIET confirmation line
+    # (design round 1, D4 — the success path is no longer silent).
+    assert outcome.carry == {
+        "wakes": 1,
+        "supervisor": "running",
+        "running_notice": "1 wake carried — supervisor running on dest-device",
+    }
 
 
 def test_a_supervisor_that_is_not_running_produces_the_exact_fallback_copy(
@@ -157,12 +165,17 @@ def test_a_supervisor_that_is_not_running_produces_the_exact_fallback_copy(
     assert outcome.ok is True
     assert outcome.carry is not None
     assert outcome.carry["wakes"] == 1
-    # ``supervisor`` is the machine answer (verified or not); ``notice`` is the
-    # loud line — byte for byte the copy the drill requires, and the one thing
-    # that turns a silent stopped supervisor into a next step.
-    assert outcome.carry["supervisor"] == "not running"
+    # ``supervisor`` is the machine token (underscored, design round 1's D8);
+    # ``notice`` is the loud line — the drill lane's sentence as re-rendered by
+    # design round 1: pluralised, the command in the family's canonical
+    # single-quoted form, and ANCHORED TO THE NAMED DEVICE (``lop wake install``
+    # installs where it runs, so a reader on the source must not fix the wrong
+    # machine).
+    assert outcome.carry["supervisor"] == "not_running"
+    assert "running_notice" not in outcome.carry
     assert outcome.carry["notice"] == (
-        "1 wakes carried; supervisor not running on dest-device — run `lop wake install`"
+        "1 wake carried; supervisor not running on dest-device — "
+        "run 'lop wake install' on dest-device"
     )
 
 
@@ -180,9 +193,10 @@ def test_an_ensure_that_raises_still_produces_the_loud_line(
     assert outcome.ok is True
     assert outcome.carry is not None
     assert outcome.carry["wakes"] == 1
-    assert outcome.carry["supervisor"] == "not running"
+    assert outcome.carry["supervisor"] == "not_running"
     assert outcome.carry["notice"] == (
-        "1 wakes carried; supervisor not running on dest-device — run `lop wake install`"
+        "1 wake carried; supervisor not running on dest-device — "
+        "run 'lop wake install' on dest-device"
     )
 
 
@@ -204,7 +218,8 @@ def test_a_catastrophic_ensure_failure_still_produces_the_loud_line(
     assert outcome.ok is True
     assert outcome.carry is not None
     assert outcome.carry["notice"] == (
-        "1 wakes carried; supervisor not running on dest-device — run `lop wake install`"
+        "1 wake carried; supervisor not running on dest-device — "
+        "run 'lop wake install' on dest-device"
     )
 
 
@@ -228,9 +243,10 @@ def test_an_unexpected_ensure_answer_still_produces_the_loud_line(
 
     assert outcome.ok is True
     assert outcome.carry is not None
-    assert outcome.carry["supervisor"] == "not running"
+    assert outcome.carry["supervisor"] == "not_running"
     assert outcome.carry["notice"] == (
-        "1 wakes carried; supervisor not running on dest-device — run `lop wake install`"
+        "1 wake carried; supervisor not running on dest-device — "
+        "run 'lop wake install' on dest-device"
     )
 
 
@@ -268,6 +284,41 @@ def test_the_verify_half_reports_a_stopped_supervisor_even_when_the_installer_cl
     assert result["running"] is False
 
 
+def test_an_unverifiable_supervisor_never_reads_as_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 (R-MINOR): the fail-closed conjunct the status surface applies.
+
+    ``verifiable=False`` means the probe addressed a DIFFERENT store — the global
+    label, not this one — so even a running report may not read as this store's
+    supervisor being up (``cli.py``'s ``wake status``: ``running and verifiable``).
+    """
+    _fake_installer(monkeypatch, running=True, verifiable=False)
+    root = tmp_path / "dest"
+    root.mkdir()
+
+    result = carry.ensure_supervisor(root)
+
+    assert result["running"] is False
+
+
+def test_the_notice_pluralises_with_the_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 1 (D1): the drill's own case is ONE wake, so '1 wake carried'
+    is the common rendering — and two must not read '2 wake carried'."""
+    _fake_installer(monkeypatch, running=False)
+    root = tmp_path / "dest"
+    root.mkdir()
+
+    block = carry.move_carry_block(root, 2, "dest-device")
+
+    assert block["notice"] == (
+        "2 wakes carried; supervisor not running on dest-device — "
+        "run 'lop wake install' on dest-device"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (c) the monitors statement — where the contract lives, and how it renders
 # ---------------------------------------------------------------------------
@@ -280,13 +331,23 @@ def test_the_monitors_statement_is_written_where_the_carry_contract_lives() -> N
     network guide); the receipt's own rendering is the cell below.
     """
     statement = "Monitor state does not travel with a move"
-    design = (REPO / "docs/design/mesh-session-mobility.md").read_text(encoding="utf-8")
-    guide = (REPO / "local_operator/guides/network/GUIDE.md").read_text(encoding="utf-8")
+    # Whitespace-normalised: a prose pin must survive a legitimate re-wrap of the
+    # paragraph, and this phrase IS the contract line both documents must carry.
+    design = " ".join(
+        (REPO / "docs/design/mesh-session-mobility.md").read_text(encoding="utf-8").split()
+    )
+    guide = " ".join(
+        (REPO / "local_operator/guides/network/GUIDE.md").read_text(encoding="utf-8").split()
+    )
     assert statement in design
     assert statement in guide
-    # And the remedy is named beside it: re-baselining, not recreation (the spec rows
-    # ride the transcript; telling someone to recreate them would double the monitor).
-    assert "re-baselines" in design and "re-baselines" in guide
+    # And the remedy is named beside it, in each surface's own register: the design
+    # note keeps the term of art ("re-baselines"), the guide says it in plain words
+    # ("their checks start fresh") — the same wording the receipt renders (design
+    # round 1, D3/D6). Telling someone to recreate a monitor would double it: the
+    # spec rows ride the transcript.
+    assert "re-baselines" in design
+    assert "their checks start fresh" in guide
 
 
 def test_the_monitors_line_renders_on_the_move_receipt(tmp_path: Path) -> None:
@@ -305,7 +366,13 @@ def test_the_monitors_line_renders_on_the_move_receipt(tmp_path: Path) -> None:
 
     sentence = carry.monitors_notice(2)
     assert sentence == (
-        "2 monitors here will not travel with their state — the destination re-baselines them"
+        "2 monitors here: their state does not travel — "
+        "their checks start fresh on the destination"
+    )
+    # Singular renders as a singular (the same D1 principle as the wake noun).
+    assert carry.monitors_notice(1) == (
+        "1 monitor here: their state does not travel — "
+        "their checks start fresh on the destination"
     )
     result = {
         "ok": True,
@@ -320,6 +387,17 @@ def test_the_monitors_line_renders_on_the_move_receipt(tmp_path: Path) -> None:
     }
     lines = cli._sessions_move_words(result, session_id=SESSION, to="dest-device")
     assert sentence in lines
+    # The quiet success line renders too (design round 1, D4): a carried wake with
+    # a verified supervisor is visible on the receipt, not silence.
+    running_result = dict(result)
+    running_result["carry"] = {
+        "wakes": 1,
+        "supervisor": "running",
+        "running_notice": "1 wake carried — supervisor running on dest-device",
+    }
+    assert "1 wake carried — supervisor running on dest-device" in cli._sessions_move_words(
+        running_result, session_id=SESSION, to="dest-device"
+    )
     # A move with no carry block renders exactly the lines it always did.
     bare = cli._sessions_move_words(
         {key: value for key, value in result.items() if key != "carry"},

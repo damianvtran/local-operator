@@ -410,17 +410,27 @@ class MoveCarryBlock(TypedDict, total=False):
 
     wakes: int
     monitors: int
-    #: ``"running"`` when the destination VERIFIED a live supervisor for the
-    #: carried wakes; ``"not running"`` otherwise — the why stays in the
-    #: destination's relay log, and the loud, actionable half is ``notice``.
+    #: The machine token: ``"running"`` when the destination VERIFIED a live
+    #: supervisor for the carried wakes; ``"not_running"`` otherwise.
+    #: Underscored rather than spaced — a consumer branches on this value, and
+    #: the family's machine vocabulary is tokens (design round 1, D8); the
+    #: device's own state detail stays in its relay log.
     supervisor: str
+    #: The quiet success line, present only when ``supervisor`` verified
+    #: running: "N wake(s) carried — supervisor running on <device>". Design
+    #: round 1 (D4): without it the receipt could not tell a carried-and-live
+    #: wake from no wake at all.
+    running_notice: str
     #: The loud fallback, present only when wakes were carried and the
-    #: destination's supervisor is not running: "N wakes carried; supervisor not
-    #: running on <device> — run `lop wake install`".
+    #: destination's supervisor is not running: "N wake(s) carried; supervisor
+    #: not running on <device> — run 'lop wake install' on <device>" — the
+    #: command anchored to the named device (``lop wake install`` installs on
+    #: the machine it runs on) and in the family's canonical single-quoted form.
     notice: str
     #: The monitors statement, present only when the source held monitors for the
-    #: session: "N monitors here will not travel with their state — the destination
-    #: re-baselines them".
+    #: session: "N monitor(s) here: their state does not travel — their checks
+    #: start fresh on the destination". Subject of the negative is the STATE —
+    #: the spec rows do ride the transcript (design round 1, D3/D6).
     monitors_notice: str
 
 
@@ -1955,8 +1965,9 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
 
     A TARGET IN THE WAY REFUSES — EXCEPT A BARE REMNANT. An id that already has a
     directory here is the one thing a promote must never write over, so a real
-    session (or anything that could be one) returns False and the caller words
-    the refusal. The single exception is the corpse ``_bare_remnant`` describes:
+    session (or anything that could be one) answers ``_PROMOTE_REFUSED`` and the
+    caller words the refusal. The single exception is the corpse ``_bare_remnant``
+    describes:
     a reader's leftover holding no conversation, whose strict-predicate match is
     the ONLY license this function has to clear it (measured 2026-09-29; the
     recall stranded on exactly that remnant).

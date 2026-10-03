@@ -5237,24 +5237,24 @@ def sessions_resume_command(args: argparse.Namespace) -> int:
 def _carry_lines(result: dict[str, Any]) -> list[str]:
     """The scheduled-state lines a move reports when it carried any (§ ``MoveCarryBlock``).
 
-    Two sentences and no more, because each is a fact about a different half: the
-    wake ``notice`` is the LOUD fallback — wakes arrived and the supervisor that
-    would fire them is not running, so the line names the one command that fixes it
-    (`lop wake install` on the named device); the monitor line is the up-front
-    statement that a monitor's state does not travel (its observations are
-    device-local; the destination re-baselines them). Absent keys print nothing: a
-    move that carried nothing new parses and prints exactly as before.
+    Up to three sentences, each a fact about a different half, and the wake half
+    is BOTH-OR (design round 1, D4): the quiet ``running_notice`` confirms a
+    carried wake whose supervisor was verified running, so a live schedule is not
+    indistinguishable from no schedule; the loud ``notice`` is its complement —
+    wakes arrived and the supervisor that would fire them is not running, so the
+    line names the command and the device it must run on ('lop wake install' on
+    the named device). The monitor line says what does not travel (the state) and
+    what happens instead (its checks start fresh on the destination). Absent keys
+    print nothing: a move that carried nothing new prints exactly as before.
     """
     carry = result.get("carry")
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    notice = carry.get("notice")
-    if isinstance(notice, str) and notice:
-        lines.append(notice)
-    monitors_notice = carry.get("monitors_notice")
-    if isinstance(monitors_notice, str) and monitors_notice:
-        lines.append(monitors_notice)
+    for key in ("running_notice", "notice", "monitors_notice"):
+        text = carry.get(key)
+        if isinstance(text, str) and text:
+            lines.append(text)
     return lines
 
 

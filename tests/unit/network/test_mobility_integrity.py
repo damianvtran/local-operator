@@ -922,7 +922,7 @@ def test_a_promote_that_landed_and_then_failed_can_still_be_opened(
     """
     import os
     from pathlib import Path
-    from typing import Any
+    from typing import Any, NoReturn
 
     from local_operator.session.placement import handoff_guard_refusal
 
@@ -934,7 +934,11 @@ def test_a_promote_that_landed_and_then_failed_can_still_be_opened(
     class Died(BaseException):
         """The promote lands and the process stops before anything after it."""
 
-    def promote_then_die(server: Any, staging: Path, target_id: str) -> bool:
+    def promote_then_die(server: Any, staging: Path, target_id: str) -> NoReturn:
+        # NoReturn, not the old ``-> bool``: this stub stands in for ``_promote``
+        # (now ``mobility._PromoteOutcome``) and ALWAYS raises — the annotation
+        # says so, so a later edit that lets it return reddens in pyright instead
+        # of silently skipping the crash the cell exists to simulate.
         target = Path(server.root) / "sessions" / target_id
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(str(staging), str(target))
