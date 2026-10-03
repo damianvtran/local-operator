@@ -31679,15 +31679,27 @@ class OperatorApp(App[None]):
                     f" It can no longer be cancelled; the conversation continues on {target}."
                 )
             else:
+                # THE CANCEL CLAUSE NAMES A PRODUCT ACTION, NEVER A TERMINAL
+                # COMMAND (design §2.9, frozen; design review round 1, D1): the
+                # composer carries no cancel verb (slice (e) scope), so a clause
+                # naming the CLI's `--cancel-queued` would hand its reader a
+                # spelling this surface refuses — it points at the product's own
+                # route instead, the register the anchor remedies already use.
                 text = (
                     head + " Windows open on it are told first and get a moment to follow; any "
                     "that can't will be disconnected, and the conversation continues on "
-                    f"{target}. Cancel the queued move before it starts with "
-                    f"`lop sessions move --cancel-queued {session_id}`."
+                    f"{target}. It can still be cancelled before it starts — ask Local Operator "
+                    "to cancel the queued move."
                 )
             if phase_notice.is_attached:
                 self._transcript_view().remove_block(phase_notice)
-            self._system_notice(text, "info")
+            # `note`, not `info` (design review round 1, D2): these are multi-line
+            # prose receipts answering the request the user just made, and
+            # `info`'s `dim` token is #837c6d on BOTH ramps — 3.77:1 on light
+            # paper, under the 4.5:1 AA floor. `note` rides `muted` (7.18:1
+            # light, 8.62:1 dark), which is what transcript.py's docstring names
+            # for a receipt the user is actively reading.
+            self._system_notice(text, "note")
             if left:
                 # THE QUEUED REQUEST STILL LEFT THE SESSION, and the conversation
                 # has NOT moved — reopen where it lives, the same way back every
