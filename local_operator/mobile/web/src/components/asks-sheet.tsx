@@ -36,7 +36,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
-import { isAnswerable, orderedForDisplay, outstandingAsks } from "../lib/asks";
+import { isAnswerable, isDeadConversation, orderedForDisplay, outstandingAsks } from "../lib/asks";
 import { useAsksRevision, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -209,7 +209,7 @@ export function AsksSheet({
 									<span className="min-w-0 truncate">
 										{named?.name ?? sessionId}
 									</span>
-									{onOpenConversation && row.durable !== false ? (
+									{onOpenConversation && !isDeadConversation(row) ? (
 										/* THE PARENT OWNS THE WHOLE TRANSITION (agent review round 2,
 										   M1). This control used to navigate and THEN close itself, and
 										   closing gives the sheet's history entry back with
@@ -241,15 +241,18 @@ export function AsksSheet({
 							    `runtime_live` widened it to the merely-not-running conversation
 							    the operator actually hits.
 
-							    DURABLE, because `runtime_live === false` is ALSO true of a
-							    conversation with no transcript at all — where every op is a
-							    terminal refusal, and the promise of a ~30 s bring-up is a claim
+							    DURABILITY, because `runtime_live === false` is ALSO true of a
+							    conversation with no transcript at all — where the op is a
+							    terminal refusal and the promise of a ~30 s bring-up is a claim
 							    about a backend that does not exist (design round 2, D6). On
 							    those rows the strip goes silent and the card states the truth
 							    it already knows, so the sheet and the card cannot contradict
-							    each other one element apart. */}
+							    each other one element apart. It is `isDeadConversation`, the
+							    CONJUNCTION of the two fields — not `durable` alone, which would
+							    silence the strip on a live conversation that answers fine
+							    (design round 3, D7). */}
 							{isAnswerable(String(row.status || "open")) &&
-							row.durable !== false &&
+							!isDeadConversation(row) &&
 							(named?.ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">
 									{named?.ended
@@ -261,8 +264,6 @@ export function AsksSheet({
 								row={row}
 								sessionId={sessionId}
 								nowMs={nowMs}
-								runtimeLive={row.runtime_live}
-								durable={row.durable}
 								onSettled={() => void load()}
 							/>
 						</div>

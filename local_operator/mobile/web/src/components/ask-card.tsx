@@ -36,7 +36,7 @@
 import { useMemo, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
-import { answeredPairs, askStateLine, isAnswerable, unansweredQuestions } from "../lib/asks";
+import { answeredPairs, askStateLine, isAnswerable, isDeadConversation, unansweredQuestions } from "../lib/asks";
 import { clearAskDraft, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
@@ -55,17 +55,21 @@ function refusalText(error: unknown): string {
 }
 
 /** The sentence a row shows when the aggregate ALREADY reports its conversation
- *  as having no durable transcript (`durable: false`) — the state the daemon
- *  refuses every op on with `ask_session_gone` (design round 2, D6).
+ *  as DEAD (`isDeadConversation`: no durable transcript AND nothing live to
+ *  deliver to) — the state the daemon refuses every op on with
+ *  `ask_session_gone` (design round 2, D6).
  *
- *  IT MIRRORS `daemon._ASK_GONE_HANDOFF` rather than waiting for the refusal,
+ *  IT MIRRORS `daemon._ASK_GONE_RESPONSE` rather than waiting for the refusal,
  *  and that duplication is the point of a pre-emptive state: fetching the
  *  sentence would mean buying the guaranteed 409 the state exists to avoid. It
- *  is the HANDOFF wording (the ask can never be read, no remedy addressed to a
- *  question nobody asked) because this branch cannot know which op the user
- *  would have chosen — and for the two ops that carry their own sentence
- *  (a full answer, a dismissal) the card is not offering a control at all. */
-const CONVERSATION_GONE_COPY = "this conversation no longer exists — the ask can never be read.";
+ *  is the ANSWER's wording, remedy included (design round 3, D7's NIT: one
+ *  voice), because the card offers no control at all — so the sentence that fits
+ *  is the one the primary control would have produced, and `start a new
+ *  conversation and ask again` is the user's actual next move. The ops that
+ *  carry their own sentence (a dismissal, a handed-over decision) are only told
+ *  apart when the refusal comes FROM THE WIRE, which this branch never does. */
+const CONVERSATION_GONE_COPY =
+	"this conversation no longer exists — the ask can never be read; start a new conversation and ask again.";
 
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
@@ -174,8 +178,6 @@ export function AskCard({
 	row,
 	sessionId,
 	nowMs,
-	runtimeLive,
-	durable,
 	onSettled,
 }: {
 	row: PendingAsk;
@@ -183,17 +185,6 @@ export function AskCard({
 	/** The client's clock, for the deadline line (§5: the countdown is rendered
 	    from `expires_at` locally, never from a server-computed at-push string). */
 	nowMs: number;
-	/** Whether the relay can deliver to this conversation right now
-	    (`PendingAsk.runtime_live`, aggregate rows only). `false` is the COLD case
-	    the card must size its wait for (design round 1, D1 = UX U1); `undefined`
-	    is an older daemon and promises nothing. */
-	runtimeLive?: boolean;
-	/** Whether this ask's conversation still has a durable transcript at all
-	    (`PendingAsk.durable`). `false` means every op on this row is a terminal
-	    refusal, so the card must state that instead of offering a tap (design
-	    round 2, D6 + UX U7). `undefined` is an older daemon and withholds
-	    nothing. */
-	durable?: boolean;
 	/** Called after this surface settles, declines or dismisses the ask, so an
 	    aggregate list can re-read the index rather than guess the new state. */
 	onSettled?: () => void;
@@ -220,22 +211,29 @@ export function AskCard({
 	   `runtime_live === false` means the relay will have to bring the conversation
 	   up before the op can land, which is a ~30 s envelope against a warm
 	   answer's 1–3 s. `undefined` (an older daemon, or a row from a projection)
-	   promises nothing and keeps the bare `…`. */
-	const cold = runtimeLive === false;
+	   promises nothing and keeps the bare `…`.
+
+	   BOTH FACTS ARE READ OFF THE ROW, not passed as props: they are the
+	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
+	   second copy of them on the component was exactly the drift D7 was made of. */
+	const cold = row.runtime_live === false;
 
 	const state = askStateLine(row, nowMs);
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 
 	/* A ROW THE AGGREGATE ALREADY KNOWS IS DEAD IS TERMINAL BEFORE THE TAP
-	   (design round 2, D6 + UX U7). `durable: false` is the same predicate the
-	   route refuses on, so the sentence the user would have got from a 409 is
-	   known in advance: rendering it pre-emptively keeps the guarantee the
-	   refusal makes WITHOUT buying a refused request, and it is the only way the
-	   sheet's strip and the card can agree — the strip goes silent on exactly
-	   these rows (see `asks-sheet.tsx`). Gated on `answerable`: a SETTLED row in a
-	   dead conversation is a receipt, not a dead end, and must keep its receipt. */
-	const goneFromWire = durable === false && answerable;
+	   (design round 2, D6 + UX U7), and DEAD IS A CONJUNCTION (design round 3,
+	   D7). `isDeadConversation` is the route's own two facts: no durable
+	   transcript to read AND nothing live to deliver to. Gating on `durable`
+	   alone made the client MORE PESSIMISTIC THAN THE SERVER — a live row with no
+	   transcript was shown as a dead end while `ask_respond` on it returned
+	   `200 {"ok": true, "detail": "answered"}` — the same class of lie in the
+	   other direction, and the reason the predicate lives in `lib/asks.ts` and is
+	   shared by this card, the sheet's strip and its `open` control. Gated
+	   further on `answerable`: a SETTLED row in a dead conversation is a receipt,
+	   not a dead end, and must keep its receipt. */
+	const goneFromWire = isDeadConversation(row) && answerable;
 	const terminal = gone || goneFromWire;
 	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
 	   accepts no other status (`asks/queue.py`), and the design states the rule twice
