@@ -948,15 +948,15 @@ async def _engage_one(
                         _note_live_stall, config_dir, session_id, due_ms, overdue_s
                     )
                     logger.warning(
-                        "live-stalled: %s — a live runtime owns its wake and has not "
-                        "fired it; the wake is %.1f h overdue.%s A healthy live session "
-                        "fires its own wakes within seconds of due, so check this "
+                        "live-stalled: %s — a live runtime owns its wake and is not "
+                        "firing it; the wake is %.1f h overdue.%s A healthy live session "
+                        "fires its own wakes within seconds of due, so check that "
                         "session's runtime ('lop sessions')",
                         session_id,
                         overdue_s / 3600.0,
                         (
                             " The fire is recorded as owed (named on 'lop wake "
-                            "status'); reopening or restarting this session delivers "
+                            "status'); reopening or restarting that session delivers "
                             "it."
                             if record is not None
                             else ""
@@ -1187,7 +1187,7 @@ def _note_live_stall(
         session_id,
         due_ms,
         overdue_s=overdue_s,
-        reason="a live runtime owns the wake and has not fired it",
+        reason="a live runtime owns the wake and is not firing it",
     )
     if record is None and _skip_log.should_log(session_id, "ledger"):
         # The SAME throttle bucket as `_note_failure`'s refusal, deliberately:

@@ -660,6 +660,12 @@ def test_status_reports_a_live_stalled_fire(
     assert payload["deliveries"][0]["state"] == deliveries.STATE_LIVE_STALLED
     assert payload["deliveries"][0]["session_name"] == "Local Operator Mobile App Plan"
     assert payload["deliveries"][0]["attempts"] is None
+    # THE STALL ANCHOR (design round 1, D2 / QA Q2): the machine-readable age,
+    # not four nulls — a consumer can tell a stall that began seconds ago from
+    # one stranded since last week.
+    assert payload["deliveries"][0]["first_stalled_ms"] == NOW_MS, payload["deliveries"][0]
+    age = payload["deliveries"][0]["owed_age_s"]
+    assert age is not None and age >= 0.0, payload["deliveries"][0]
 
 
 def test_list_marks_a_live_stalled_fire_and_explains_it(
@@ -1328,6 +1334,71 @@ def test_a_long_status_line_folds_at_the_surfaces_indent(
     assert not continuations, f"a continuation broke the 13-column indent: {continuations}"
 
 
+def test_continuations_follow_the_rendered_head_at_every_label_and_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/F1/Q1: the hanging indent follows the RENDERED head, not the column
+    constant.
+
+    `live-stalled:` is exactly as wide as `_STATUS_LABEL_W`, so its explicit
+    separating space pushes the head text one column past a constant-width
+    indent — the wrapped block hung one column left of its own first line
+    (measured col 15 vs 14 by the design round, the reviewer and QA, at every
+    width; it is the label's length, not a width edge). Walked over the REAL
+    label set at the widths they measured; every shorter label keeps its
+    historical 13-column render byte-for-byte.
+    """
+    import re
+    import shutil
+
+    from local_operator.cli import _wrap_status
+
+    labels = [
+        "supervisor:",
+        "next:",
+        "overdue:",
+        "undelivered:",
+        "retrying:",
+        "live-stalled:",  # exactly _STATUS_LABEL_W wide — the ragged-edge case
+        "spooled:",
+        "stale:",
+        "ghost:",
+        "wedged:",
+    ]
+    text = (
+        "its wake is twenty three hours overdue and a live runtime is not firing "
+        "it; reopening or restarting that session delivers it"
+    )
+    for width in (37, 40, 60, 80, 100):
+        monkeypatch.setattr(
+            shutil,
+            "get_terminal_size",
+            lambda _default=None, w=width: os.terminal_size((w, 24)),
+        )
+        for label in labels:
+            wrapped = _wrap_status(text, label)
+            lines = wrapped.split("\n")
+            assert len(lines) >= 2, f"{label!r} at {width} did not wrap: {wrapped!r}"
+            # Where the head's text begins, read off the render itself.
+            match = re.match(rf"{re.escape(label)}( +)(\S)", lines[0])
+            assert match is not None, (label, width, lines[0])
+            text_col = match.end(2) - 1
+            for continuation in lines[1:]:
+                assert continuation.startswith(" " * text_col), (label, width, continuation)
+                assert continuation[text_col:].strip(), (label, width, continuation)
+            if len(label) < 13:
+                # Unchanged for the historical labels: head 13, indent 13.
+                assert lines[0].startswith(f"{label:<13}"), (label, width, lines[0])
+                assert text_col == 13, (label, width, text_col)
+            else:
+                assert lines[0].startswith(f"{label} "), (label, width, lines[0])
+                assert text_col == 14, (label, width, text_col)
+    # And a genuine tie to the surface, through the same helper: the
+    # live-stalled line continues at 14 while `overdue:` continues at 13.
+    assert _wrap_status(text, "live-stalled:").split("\n")[1].startswith(" " * 14)
+    assert _wrap_status(text, "overdue:").split("\n")[1].startswith(" " * 13)
+
+
 def test_a_remedy_command_is_never_split_across_lines(
     tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -1534,7 +1605,7 @@ def test_status_says_the_owed_fires_are_part_of_the_overdue_count(
     assert wake_command(_args()) == 0
     out = capsys.readouterr().out
     overdue_line = _status_block(out, "overdue:")
-    assert "— 1 retrying, 1 undelivered" in overdue_line, overdue_line
+    assert "— 1 retrying, 1 undelivered, 0 live-stalled" in overdue_line, overdue_line
 
     assert wake_command(_args(json=True)) == 0
     payload = json.loads(capsys.readouterr().out)

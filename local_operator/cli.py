@@ -6247,14 +6247,15 @@ def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
 
     The ledger's ``first_attempt_ms`` is when the supervisor first failed to
     hand this occurrence to a runtime, so the difference is the age of the
-    OWED fire rather than the age of the schedule. A ``live-stalled`` record
-    has no attempt to date from — nothing was attempted — so it falls back to
-    ``first_stalled_ms``, the stamp of the first observation of the stall:
-    same question (how long has this been owed), asked of the one anchor the
-    record has. Rendered in the row tail (design round 1, D2): the state words
-    alone cannot separate a wake four minutes late from one stuck since last
-    week, and below 69 columns the WHEN column is gone, so the row had no age
-    of any kind.
+    OWED fire rather than the age of the schedule. When a record has no
+    attempt to date from — the fresh live stall, where nothing was attempted —
+    it falls back to ``first_stalled_ms``, the stamp of the first observation
+    of the stall (a stall carried over a retry run keeps dating from
+    ``first_attempt_ms`` instead): same question (how long has this been
+    owed), asked of the anchors the record has. Rendered in the row tail
+    (design round 1, D2): the state words alone cannot separate a wake four
+    minutes late from one stuck since last week, and below 69 columns the WHEN
+    column is gone, so the row had no age of any kind.
     """
     if not record:
         return None
@@ -6838,7 +6839,7 @@ def wake_command(args: argparse.Namespace) -> int:
                 (
                     "live-stalled",
                     "a live runtime owns these and is not firing them; reopening "
-                    "or restarting their session delivers them",
+                    "or restarting that session delivers them",
                 )
             )
         if any(
@@ -7149,7 +7150,12 @@ def wake_command(args: argparse.Namespace) -> int:
             # live-stall record keeps parsing every key above. This is the
             # third shape of owing — a fire held behind a live runtime, not
             # being retried — and its row is held fireable past the staleness
-            # bound, so it too stays inside `overdue` by construction.
+            # bound, so it too stays inside `overdue` by construction. The KEY
+            # is snake_case like its siblings while the VALUE keeps the
+            # supervisor log's `live-stalled` spelling, deliberately: state
+            # values are the surface words (`retrying`/`undelivered` are words
+            # too, they just happen to need no separator), not key-normalised
+            # tokens (design round 1, D3).
             "live_stalled": len(live_stalled),
         },
         # THE SPOOLED FIRES, additive like the blocks above (a consumer that
@@ -7173,12 +7179,22 @@ def wake_command(args: argparse.Namespace) -> int:
                 "message": row["message"],
                 "wake_id": row["wake_id"],
                 "occurrence_ms": row["delivery"].get("occurrence_ms"),
+                # THE STALL ANCHOR (design round 1, D2 / QA Q2): the record's
+                # own first observation, so a machine consumer can tell a
+                # stall that began seconds ago from one stranded since last
+                # week — the distinction the human line's age makes. Null for
+                # the retry states, whose anchors are the attempt stamps.
+                "first_stalled_ms": row["delivery"].get("first_stalled_ms"),
                 "state": row["delivery"].get("state"),
                 "attempts": row["delivery"].get("attempts"),
                 "first_attempt_ms": row["delivery"].get("first_attempt_ms"),
                 "last_attempt_ms": row["delivery"].get("last_attempt_ms"),
                 "next_attempt_in_s": _next_attempt_s(row),
                 "last_error": row["delivery"].get("last_error"),
+                # The derived age of the owing — same name and derivation as
+                # the `wake list` row root, so one number reads off both
+                # surfaces (design round 1, D2's parity ask).
+                "owed_age_s": row["owed_age_s"],
             }
             for row in owed
         ],
@@ -7288,12 +7304,17 @@ def wake_command(args: argparse.Namespace) -> int:
             # designer's store). One clause, on the line a reader is already
             # doing the arithmetic against.
             #
-            # EVERY delivery state is itemised, or the arithmetic this clause
-            # exists for breaks: a store whose only owed fire is live-stalled
-            # printed "0 retrying, 0 undelivered" beside `owed`'s own total.
-            parts = [f"{len(retrying)} retrying", f"{len(stalled)} undelivered"]
-            if live_stalled:
-                parts.append(f"{len(live_stalled)} live-stalled")
+            # EVERY delivery state is itemised — IN A STABLE SHAPE (design
+            # round 1, D4): all three terms print even when zero, the way
+            # `retrying`/`undelivered` always have, so the clause cannot change
+            # shape per store. Every owed fire is overdue by construction, so
+            # the operator adding these against `overdue` must be able to
+            # reconcile the counts without guessing which terms were omitted.
+            parts = [
+                f"{len(retrying)} retrying",
+                f"{len(stalled)} undelivered",
+                f"{len(live_stalled)} live-stalled",
+            ]
             summary += f" — {', '.join(parts)}"
         print(_wrap_status(summary, "overdue:"))
     if stalled:
@@ -7931,12 +7952,19 @@ def _wrap_status(text: str, label: str = "") -> str:
     import textwrap
 
     width = max(shutil.get_terminal_size((80, 24)).columns, _STATUS_LABEL_W + 24)
-    indent = " " * _STATUS_LABEL_W
-    # ONE SPACE BETWEEN LABEL AND TEXT, ALWAYS. The padding alone guarantees it
-    # for every label shorter than the column; splitting the space out carries
-    # the longest label this surface gained (`live-stalled:`, exactly 13) — a
-    # `{label:<13}` head ran the count straight into the colon there.
-    first = f"{label:<{_STATUS_LABEL_W - 1}} {text}" if label else f"{indent}{text}"
+    # ONE SPACE BETWEEN LABEL AND TEXT, ALWAYS, AND THE CONTINUATIONS FOLLOW
+    # THE RENDERED HEAD (design round 1, D1; agent review F1; QA Q1). The
+    # padding alone guarantees the space for every label shorter than the
+    # column; splitting it out carries the longest label this surface gained
+    # (`live-stalled:`, exactly as wide as the column) — and that head is one
+    # column wider than the old fixed indent, so a `{:13}` continuation would
+    # sit one column left of its own text (measured col 15 vs 14, at every
+    # width; the head's width is the label's, not the terminal's). The indent
+    # is therefore derived from the head itself; every shorter label renders
+    # byte-identically to before (head 13, indent 13).
+    head = f"{label:<{_STATUS_LABEL_W - 1}} " if label else ""
+    indent = " " * max(_STATUS_LABEL_W, len(head))
+    first = f"{head}{text}" if label else f"{indent}{text}"
 
     # A QUOTED COMMAND IS ONE TOKEN. Every remedy on this surface is a command
     # the operator copies — `'lop wake install'`, `'lop stop --pid 4242'` — and

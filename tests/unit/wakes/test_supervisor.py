@@ -662,7 +662,7 @@ async def test_a_stalled_live_skip_escalates_to_a_warning(
     figure past the bound is the delivery path having stopped — and the INFO
     line ("a live runtime owns it") was the only trace the 2026-10-01/02 leak
     ever left. The WARNING says what the INFO cannot: the wake is old, the
-    runtime owning it has not fired it, and where to look.
+    runtime owning it is not firing it, and where to look.
     """
     from local_operator.wakes import supervisor as mod
 
@@ -690,7 +690,7 @@ async def test_a_stalled_live_skip_escalates_to_a_warning(
     message = stalled[0].getMessage()
     assert message.startswith("live-stalled:"), message
     assert "6.5 h overdue" in message, message
-    assert "has not fired it" in message, message
+    assert "is not firing it" in message, message
 
 
 @pytest.mark.asyncio
