@@ -653,8 +653,10 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
     """``--queue`` travels, and the receipt is the queue's own (§5.4).
 
     The queued answer is a SUCCESS that commits nothing: the notice must say the
-    move runs at the next safe point, name the cancel route, and must NOT paint
-    the move's phase row as if steps had been walked.
+    move runs at the next safe point, name a PRODUCT cancel route (design review
+    round 1, D1 — the composer carries no cancel verb, so the receipt says "ask
+    Local Operator" rather than a terminal command this surface would refuse),
+    and must NOT paint the move's phase row as if steps had been walked.
     """
     fake = _QueuedFake()
     monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
@@ -673,7 +675,22 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
         ]
         shown = " ".join(_notices(app))
         assert "Queued a move of other1 to pixel-8 — waiting for a safe point." in shown, shown
-        assert "lop sessions move --cancel-queued other1" in shown, shown
+        assert "ask Local Operator to cancel the queued move" in shown, shown
+        # THE RETIRED SHAPE (design review round 1, D1): the receipt used to
+        # hand the reader the CLI's own ``--cancel-queued`` line — a spelling
+        # belonging to another surface's vocabulary (design §2.9).
+        assert "cancel-queued" not in shown, shown
+        # And the paint (design review round 1, D2): a multi-line receipt rides
+        # `note`/`muted`, never `info`/`dim` — 3.77:1 on light paper, under the
+        # 4.5:1 AA floor.
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        receipt = next(
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "Queued a move of other1" in block.text()
+        )
+        assert receipt._token == "muted", receipt._token
         assert reopened == []
         # No phase row: a queued move has walked no move phase yet.
         assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)

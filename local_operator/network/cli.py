@@ -6025,11 +6025,35 @@ def _approval_step_runner(record: Mapping[str, Any]) -> Any | None:
     return runner(record)
 
 
+#: The state's GLYPH CUE (design review round 1, D4): "which of these is waiting
+#: on me" must be answerable without reading every word. The glyphs are the
+#: notice family's own (``transcript.NOTICE_GLYPHS``), grouped into three
+#: meanings — waiting (``·``), settled-good (``✓``), closed-not-usable (``✗``).
+#: The WORD keeps the exact state (``expired`` still reads differently from
+#: ``denied``); the cue only groups. Keys are pinned against ``approvals.STATES``
+#: by ``tests/unit/network/test_approvals_cli.py``, so a new state cannot ship
+#: without a decision here.
+_STATE_GLYPHS: dict[str, str] = {
+    "requested": "·",
+    "approved": "✓",
+    "connecting": "·",
+    "connected": "✓",
+    "denied": "✗",
+    "expired": "✗",
+    "failed": "✗",
+}
+
+
 def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     """The human half of the same read, in the card's own order: what / where / who."""
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
-    lines = [f"approval {record.get('approval_id')} — {record.get('state')}"]
+    state = str(record.get("state") or "")
+    # An unknown (future) state keeps the word alone rather than gaining a wrong
+    # cue; the totality test over ``approvals.STATES`` is what stops that
+    # silently becoming the shipped look for a state nobody cued.
+    cue = f"{_STATE_GLYPHS[state]} " if state in _STATE_GLYPHS else ""
+    lines = [f"approval {record.get('approval_id')} — {cue}{state}"]
     where = " ".join(
         part
         for part in (
@@ -6047,8 +6071,12 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
         name
         for name, present in (
             ("connect", what.get("connect")),
-            ("install", what.get("install")),
-            ("install operator anchor", what.get("anchor")),
+            # `install build` / `install anchor` (design review round 1, D7):
+            # "install, install operator anchor" read adjacent in the rendered
+            # card, and the pair is a real distinction — the operator anchor is
+            # the privileged half.
+            ("install build", what.get("install")),
+            ("install anchor", what.get("anchor")),
             (
                 (
                     f"join {what.get('network_id')} as {what.get('role') or '?'}"
@@ -6058,7 +6086,13 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
                 what.get("network_id"),
             ),
             ("trust unattended sessions", what.get("unattended")),
-            ("".join(f"grant {g} " for g in what.get("grant") or []), what.get("grant")),
+            # One `grant: a, b` item, not a per-item "grant x " concatenation:
+            # the old join repeated its own verb per grant and left a trailing
+            # space when it was not last (design review round 1, D7).
+            (
+                "grant: " + ", ".join(str(g) for g in what.get("grant") or []),
+                what.get("grant"),
+            ),
         )
         if present and name
     ]
@@ -6197,9 +6231,15 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
     if verb == "list":
         rows = approval_store.list_records()
         payload = {"ok": True, "approvals": [approval_store.badge_row(row) for row in rows]}
-        # ONE BLOCK PER RECORD, FLATTENED: the card's own read for each, in order —
-        # the JSON half above is what a script parses; this is what a person scans.
-        lines = [line for row in rows for line in _approval_lines(row)]
+        # ONE BLOCK PER RECORD, FLATTENED — with a blank row BETWEEN records
+        # (design review round 1, D3): record 2's header sitting on record 1's
+        # last row read as one block. The JSON half above is what a script
+        # parses; this is what a person scans.
+        lines: list[str] = []
+        for row in rows:
+            if lines:
+                lines.append("")
+            lines.extend(_approval_lines(row))
         return _emit(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)

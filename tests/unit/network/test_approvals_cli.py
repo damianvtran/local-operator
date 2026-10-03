@@ -106,6 +106,52 @@ def test_request_answers_the_frozen_card_shape(
     assert row["approval_id"] == payload["approval_id"]
 
 
+def test_the_human_list_cues_states_and_separates_records(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The prose half of `list` (design review round 1, D3/D4/D7).
+
+    Two records must not read as one block: a blank row sits between them. The
+    state word carries its family glyph, and the scope list spells the two
+    installs apart ("install build" / "install anchor") with the grants as one
+    `grant: approve` item instead of a repeated bare verb.
+    """
+    _make_key(root)
+    _request(root, capsys)
+    _request(root, capsys, host="192.0.2.9", user="devon", name="devon-laptop")
+    rc = net_cli.main(Namespace(network_command="approvals", approvals_command="list", json=False))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    # D4 — the state cue, from the notice family's own glyph set.
+    assert " — · requested" in out, out
+    # D3 — a blank row between the two blocks.
+    lines = out.splitlines()
+    headers = [index for index, line in enumerate(lines) if line.startswith("approval ")]
+    assert len(headers) == 2, lines
+    assert lines[headers[1] - 1] == "", lines
+    # D7 — the scope wording.
+    assert "install build, install anchor," in out, out
+    assert "grant: approve" in out, out
+    assert "install, install" not in out, out
+
+
+def test_state_word_carries_its_glyph_and_an_unknown_state_stays_plain() -> None:
+    from local_operator.network.cli import _approval_lines
+
+    base: dict[str, Any] = {"approval_id": "ap_x", "state": "approved", "what": {}}
+    assert _approval_lines(base)[0] == "approval ap_x — ✓ approved"
+    # An unknown (future) state must not gain a wrong cue.
+    plain = _approval_lines({**base, "state": "queued_future"})[0]
+    assert plain == "approval ap_x — queued_future", plain
+
+
+def test_every_store_state_has_a_glyph_cue() -> None:
+    from local_operator.network import approvals as store
+    from local_operator.network.cli import _STATE_GLYPHS
+
+    assert set(_STATE_GLYPHS) == set(store.STATES)
+
+
 def test_approve_signs_with_the_local_key_and_its_key_id_round_trips(
     root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
