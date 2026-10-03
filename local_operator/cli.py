@@ -9446,11 +9446,13 @@ def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
     from local_operator.hub_sync import service as svc
 
     config_manager = ConfigManager(base_dir)
-    ctx = svc.HubSyncContext(
-        config_dir=config_manager.config_dir,
-        config_manager=config_manager,
-        client_for_tenant=lambda _tenant: None,
-    )
+    # ``sync_context`` RESOLVES the credential, so the ``login ok|none`` this
+    # prints is a checked fact. Building a bare context here left the dataclass
+    # default ("ok") in place, so the command claimed a login that the same
+    # root's ``login-status`` denied (QA round 1 on #1943, Q-4). The clients it
+    # also builds are unused by a store read, but they cost nothing and are how
+    # every other surface answers the same question.
+    ctx = svc.sync_context(config_manager)
     snapshot = svc.status_snapshot(ctx)
     if getattr(args, "json", False):
         print(_json.dumps(snapshot, indent=2))

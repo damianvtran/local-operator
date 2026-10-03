@@ -159,25 +159,32 @@ def test_every_guide_cross_reference_resolves() -> None:
 
 
 def test_a_guide_section_named_by_another_guide_exists() -> None:
-    """A guide may send a reader to another guide BY SECTION NAME, and must land.
+    """A guide that sends a reader to another guide's section must land there.
 
     ``guides/teams/GUIDE.md`` closes its hub paragraph with "see the agents
-    guide, \"Agent Hub: pull, push, update\", for the FAQ". The walk above only
-    checks ``guide://<name>`` targets, so it stayed green while that section did
-    not exist: the reader who followed the pointer found no such heading (found
-    2026-10-03 — the section the hub-auto-update design's B7 planned had never
-    been written). Pin the named heading so the pointer cannot dangle again
-    without a red test. Scoped to the one named reference the corpus carries;
-    this is a dead-end guard, not a general markdown link checker.
+    guide, \"Agent Hub: pull, push, update\", for the FAQ". The ``guide://<name>``
+    walk above cannot see a BY-SECTION reference, so it stayed green while that
+    section did not exist: the reader who followed the pointer found no such
+    heading (found 2026-10-03 — the section the hub-auto-update design's B7
+    planned had never been written).
+
+    The pointer is read from the routing guide itself rather than hardcoded, so
+    a legitimate reword that renames the target or the section is followed
+    instead of reddening here. What this pins is exactly one thing: the named
+    LEVEL-2 heading exists in the guide the sentence names. A section moved to
+    another level, or a reference this regex does not recognise, is outside
+    what it guarantees — it is a dead-end guard, not a markdown link checker.
     """
     guides = {guide.name: guide for guide in discover_guides()}
     teams_body = guides["teams"].file_path.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r'the agents guide, "([^"]+)"', teams_body)
-    assert match, "the teams guide no longer names an agents-guide section to check"
-    agents_body = guides["agents"].file_path.read_text(encoding="utf-8", errors="replace")
-    assert f"## {match.group(1)}" in agents_body, (
-        f"the teams guide points at the agents guide's {match.group(1)!r}, "
-        "but the agents guide has no such section"
+    match = re.search(r'the (?P<guide>[a-z-]+) guide, "(?P<section>[^"]+)"', teams_body)
+    assert match, "the teams guide no longer names another guide's section to check"
+    target, heading = match.group("guide"), match.group("section")
+    assert target in guides, f"the teams guide points at a {target!r} guide, which does not exist"
+    body = guides[target].file_path.read_text(encoding="utf-8", errors="replace")
+    assert re.search(rf"^## {re.escape(heading)}$", body, re.M), (
+        f"the teams guide points at the {target} guide's {heading!r}, "
+        "but that guide has no such level-2 section"
     )
 
 
