@@ -48,8 +48,8 @@ pattern can invalidate any of them, and each has a test here):
    substitution — asserted directly, template by template, over the corpus.
 
 **Where the corpus comes from.** ``tests/unit/secrets/credential_shape_corpus``
-is the shipped specification of what MUST be masked and what MUST survive (303
-positives, 194 negatives, and the type-annotation halves), and it is the same
+is the shipped specification of what MUST be masked and what MUST survive (313
+positives, 214 negatives, and the type-annotation halves), and it is the same
 corpus the surface-parametrised suite in ``test_credential_shapes.py`` runs. The
 generated half below joins and mutates those texts, which is where cross-rule
 interaction shows up: a later rule sees the earlier rule's MASK, so a merge that
