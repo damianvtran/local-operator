@@ -624,7 +624,13 @@ Diagnose in this order, and stop at the first answer that explains it:
      to approval; never proceed on the wrong facts.
      Filing needs an operator key on THIS machine to name on the card, so on a
      fresh machine the local bullet above comes first.
-   Denying a parked session works from any attached viewer.
+   Denying a parked session works from any attached viewer. An ALLOW does not
+   ride the slash: `/approvals` is terminal-only from a remote surface — the
+   answer that reaches the owner is an `approval_answer` from the session's
+   approval card, the same card any attached viewer shows, and a paired phone
+   answers that card from its approvals panel (`Approvals in this session`).
+   The `lop network approvals` cards are a different family — a device's
+   onboarding request, answered with those verbs — not this card.
 
 Two things that look like failures and are not: a peer that is unreachable is
 **not** an error and its sessions are simply not reachable from here; a network
