@@ -277,6 +277,61 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     server_b.stop()
 
 
+def test_doctors_dead_endpoint_row_is_informational_once_a_handshake_succeeds(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The doctor half of the drill's false negative, driven live.
+
+    The node's real state: one advertised endpoint dead (the VPC-private one),
+    another answering a handshake. ``doctor`` must report the dead address
+    informationally once the handshake VERIFIED the member — and keep failing
+    when nothing verified, which is the honest negative. The credential-repair
+    rows are a different check and are not this cell's subject.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, ["127.0.0.1:1", live])
+
+    findings = server_a.doctor()["checks"]
+    mine = [row for row in findings if row.get("device_id") == server_b.identity.device_id]
+    # Doctor's own dialect: the winner's row is the ``handshake`` row; the dead
+    # address is a ``reachability`` row.
+    handshakes = [row for row in mine if row.get("check") == "handshake"]
+    assert handshakes and handshakes[0]["ok"] is True
+    assert handshakes[0]["endpoint"] == live
+    dead = [
+        row
+        for row in mine
+        if row.get("check") == "reachability" and row.get("endpoint") == "127.0.0.1:1"
+    ]
+    assert len(dead) == 1
+    dead = dead[0]
+    assert dead["ok"] is True  # informational: the handshake verified the member
+    assert dead["observed"]["informational"] is True
+    assert dead["observed"]["usable_elsewhere"] == [live]
+    assert readiness.informational_clause(dead) == (
+        f" — not remote-usable from this device; the peer is reachable at {live}"
+    )
+
+    # NOTHING VERIFIED: with both declared addresses dead, every row keeps
+    # failing — a report must never turn healthy because its addresses LOOK
+    # unusable.
+    _set_peer_endpoints(
+        server_a, record, server_b.identity.device_id, ["127.0.0.1:1", "127.0.0.1:2"]
+    )
+    findings = server_a.doctor()["checks"]
+    mine = [row for row in findings if row.get("device_id") == server_b.identity.device_id]
+    reach = [row for row in mine if row.get("check") == "reachability"]
+    assert reach and all(row["ok"] is False for row in reach)
+    assert all("observed" not in row for row in reach)
+    assert all(row["ok"] is False for row in mine if row.get("check") == "handshake")
+    server_b.stop()
+
+
 def test_a_non_peer_listener_is_never_reported_as_the_peer(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,

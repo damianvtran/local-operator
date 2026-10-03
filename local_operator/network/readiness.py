@@ -1958,34 +1958,83 @@ def _reachability_remedies(
 
 
 def _identified_endpoints(rows: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The addresses this report IDENTIFIED an answer at.
+    """The addresses this report IDENTIFIED an answer at — both row dialects.
 
     ``connected`` handshaked THIS run; ``connected_link`` is the live link's own
     declared address. ``connected_unpinned`` is excluded on purpose — a live
     link with no pinnable address is a real answer that names nothing, so it
-    cannot vouch for another row (round 4's whole distinction).
+    cannot vouch for another row (round 4's whole distinction). DOCTOR'S
+    DIALECT counts a ``handshake`` row that came back ok: that row IS the
+    verification at its endpoint, and a connected accept whose handshake the
+    budget never ran (the ``handshake_not_attempted`` row) is not one — the
+    same "an accept nobody identified must not vouch" rule, one row shape over.
     """
-    return [
-        str(row["endpoint"])
-        for row in rows
-        if str((row.get("observed") or {}).get("outcome") or "") in ("connected", "connected_link")
-    ]
+    usable: list[str] = []
+    for row in rows:
+        outcome = str((row.get("observed") or {}).get("outcome") or "")
+        if outcome in ("connected", "connected_link"):
+            usable.append(str(row["endpoint"]))
+        elif row.get("check") == "handshake" and row.get("ok") and row.get("endpoint"):
+            usable.append(str(row["endpoint"]))
+    return usable
 
 
-def _mark_informational(rows: list[dict[str, Any]]) -> None:
+def _did_not_lead(row: Mapping[str, Any]) -> bool:
+    """Whether this reachability row is an address that did not lead to the peer.
+
+    The two dialects carry their facts in different fields and both are read
+    here rather than normalized: the readiness row's ``observed.outcome`` (the
+    closed set above) and the doctor row's ``detail`` — the probe's own codes,
+    read through the PRODUCER's constants so a rename cannot drift this
+    classifier away from the strings the probe writes. ``not_attempted`` is in
+    neither family: unproven is not a fact about the address.
+    """
+    outcome = str((row.get("observed") or {}).get("outcome") or "")
+    if outcome:
+        return outcome in _INFORMATIONAL_OUTCOMES
+    detail = str(row.get("detail") or "")
+    if not detail:
+        return False
+    from local_operator.network import relay as relay_mod
+
+    return detail in (
+        relay_mod.DETAIL_NO_ANSWER,
+        relay_mod.DETAIL_BAD_ENDPOINT,
+    ) or detail.startswith(relay_mod.CONNECT_FAILED_PREFIX)
+
+
+def informational_clause(row: Mapping[str, Any]) -> str:
+    """The suffix an informational row adds to a DOCTOR line — the address that
+    works, named — or ``""`` for every other row.
+
+    Doctor's two renderers build their own lines (``cli._cmd_doctor`` and the
+    agent digest in ``network/tool.py``), so the clause lives here, beside the
+    flip that sets the marker, rather than spelled twice.
+    """
+    observed = row.get("observed")
+    if not isinstance(observed, Mapping) or not observed.get("informational"):
+        return ""
+    usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
+    return f" — not remote-usable from this device; the peer is reachable at {usable}"
+
+
+def mark_informational(rows: list[dict[str, Any]]) -> None:
     """Mark "did not lead to the peer from here" rows informational, in place.
 
-    INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): a declared address
-    that did not lead to the peer from here is a fact about the ADDRESS, not
-    about the member, once the member answers at an address this run identified
-    — the relay advertises the host's own interface addresses (on EC2, the
-    VPC-private one), and that kind of address is not evidence about the peer's
-    health. THE FLIP REQUIRES A VERIFIED ANSWER: with none, every row keeps
-    failing — the honest negative (a member nothing answers for must never read
-    healthy), and the reason an accept nobody identified is not in the set. The
-    flipped row keeps its observed facts and gains ``informational`` plus the
-    addresses that ARE usable; its remedies are cleared because action items
-    under an ok row misread — the reading names the address to use instead.
+    ONE SEMANTICS, TWO PRODUCERS (drill finding, 2026-10-03): ``ready``'s
+    ``_reachability_rows`` and ``doctor``'s ``RelayServer._probe_member`` emit
+    different row shapes for the same fact — a declared address that did not
+    lead to the peer from here — and both must report it as INFORMATION when
+    the member answers at an address this report identified: the relay
+    advertises the host's own interface addresses (on EC2, the VPC-private
+    one), and that kind of address is not evidence about the peer's health. THE
+    FLIP REQUIRES A VERIFIED ANSWER: with none, every row keeps failing — the
+    honest negative (a member nothing answers for must never read healthy).
+    Capability rows and the doctor's credential-repair rows are different
+    checks and are never touched. The flipped row keeps its observed facts and
+    gains ``informational`` plus the addresses that ARE usable; readiness
+    remedies are cleared because action items under an ok row misread — the
+    reading names the address to use instead.
     """
     usable = _identified_endpoints(rows)
     if not usable:
@@ -1993,12 +2042,16 @@ def _mark_informational(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         if row["ok"]:
             continue
-        if str((row.get("observed") or {}).get("outcome") or "") not in _INFORMATIONAL_OUTCOMES:
+        if str(row.get("check") or "") != "reachability":
+            continue
+        if not _did_not_lead(row):
             continue
         row["ok"] = True
-        row["observed"]["informational"] = True
-        row["observed"]["usable_elsewhere"] = list(usable)
-        row["remedies"] = []
+        observed = row.setdefault("observed", {})
+        observed["informational"] = True
+        observed["usable_elsewhere"] = list(usable)
+        if "remedies" in row:
+            row["remedies"] = []
 
 
 def _reachability_rows(
@@ -2223,7 +2276,7 @@ def _reachability_rows(
                 ),
             }
         )
-    _mark_informational(rows)
+    mark_informational(rows)
     return rows, link
 
 

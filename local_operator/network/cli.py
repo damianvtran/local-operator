@@ -5488,6 +5488,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     # state the listing's own round-10 fix exists for — the endpoint address on a
     # human line. These lines are the human register; the raw strings are unchanged
     # and still ride in ``checks[].detail`` of the payload ``--json`` prints.
+    from local_operator.network import readiness as readiness_mod
     from local_operator.resume import doctor_detail_words
 
     lines = []
@@ -5497,6 +5498,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
             f"{check.get('endpoint', '')} {doctor_detail_words(str(check.get('detail', '')))}"
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
+            + readiness_mod.informational_clause(check)
         )
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
