@@ -1218,3 +1218,33 @@ def test_teams_pull_public_by_hex_id_skips_the_listing(
     out = capsys.readouterr().out
     assert "Successfully pulled team 'open-crew'" in out
     assert hub.get_team_calls == [("a" * 24, False)]
+
+
+def test_teams_pull_public_by_uuid_id_skips_the_listing(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The live hub's team ids are UUIDs: a UUID-shaped arg is an ID, not a name.
+
+    The evidence run caught the first classifier accepting only 24-hex ObjectIds,
+    which sent `teams pull <uuid>` down the NAME search ("no public team named
+    '<uuid>'"). Both shapes must address the row directly.
+    """
+    uuid_id = "60227dfb-007b-47ff-9187-542bfc41c9f6"
+    hub.team_rows[uuid_id] = {
+        "id": uuid_id,
+        "tenant_id": "home-someone",
+        "name": "open-crew",
+        "description": "Open.",
+        "manager": "manager",
+        "members": [],
+        "instructions": "You ship.",
+        "project": "",
+        "version": "1.0.0",
+    }
+    monkeypatch.setattr("sys.argv", ["program", "teams", "pull", uuid_id])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "Successfully pulled team 'open-crew'" in out
+    assert hub.get_team_calls == [(uuid_id, False)]
