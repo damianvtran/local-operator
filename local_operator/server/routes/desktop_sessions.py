@@ -1234,7 +1234,7 @@ class Answer(Input):
             # shape that carries no answers and no decline is malformed, and the
             # refusal must happen HERE (422) rather than at the queue (409).
             if self.decline is not True and not self.answers:
-                raise ValueError("A queued-ask answer needs answers, or a decline or revise")
+                raise ValueError("A queued-ask answer needs answers, or a decline")
             if self.decline is True and self.answers is not None:
                 # Contradictory rather than merely redundant: "here are the
                 # answers" and "no answer, decide yourself" cannot both settle

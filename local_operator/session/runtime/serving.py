@@ -4952,6 +4952,7 @@ class ServingSessionHandle(SessionHandle):
         await self._session.reconcile_asks()
         return "answered"
 
+    @_on_session_loop
     async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
         """REVISE a queued ask's recorded answer before it is delivered (design §10).
 
@@ -4962,6 +4963,14 @@ class ServingSessionHandle(SessionHandle):
         where a second ``ask_respond`` refuses on the first recorded answer. The
         caller must say REVISE in those words; no layer infers it from comparing
         values (design §10).
+
+        THE HOP IS PART OF THE CONTRACT, not boilerplate: ``AskQueue.revise``
+        justifies accepting on the ground that the response-row check and the log
+        append run on the session's own loop — the only writer of that row — so
+        this body MUST run there too. Without it, a relay/desktop call would read
+        the fold and write the log on the caller's thread, concurrently with
+        ``reconcile`` on the loop, which is exactly the accepted-and-then-dropped
+        interleaving §10 forbids.
         """
         outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
         if not outcome.get("ok"):

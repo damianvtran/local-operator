@@ -341,31 +341,23 @@ class AskQueue:
         to the plain first answer, with ``revised: False`` on the verdict: the
         ``revised`` kind exists only to supersede, so with nothing to name the
         ask settles on one ``answered`` row and no revision event.
+
+        THE RULE LIVES IN ``_revision_decision``, and :meth:`revision_refusal`
+        exposes it read-only: a caller that must do work the refusal should
+        suppress — ``Session.revise_ask`` stores a SECRET's value before the queue
+        sees the map — asks the probe first rather than doing it speculatively for
+        a revision this path is about to turn down.
         """
         now = self._now()
-        # ONE read: the fold for the record and the row-presence set the window
-        # is decided on. ``find`` would read the log again for the same answer.
-        records, present = self._fold_state(now)
-        record = next((item for item in records if item["ask_id"] == ask_id), None)
-        if record is None:
-            return {"ok": False, "error": render.refusal_copy(None)}
-        status = record.get("status")
-        if status in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
+        record, refusal = self._revision_decision(ask_id, now)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        assert record is not None  # ``_revision_decision`` returns one with no refusal
+        if record.get("status") in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
             outcome = self.respond(ask_id, answers, by=by, tool_call_id=tool_call_id)
             if outcome.get("ok"):
                 outcome["revised"] = False
             return outcome
-        if status not in (store.STATUS_ANSWERED, store.STATUS_LATE):
-            # declined / dismissed / expired: the state table's own sentence,
-            # byte-for-byte the one every other path gives for that state.
-            return {"ok": False, "error": render.refusal_copy(record)}
-        if store.response_row_id(ask_id) in present:
-            # The row IS the delivery marker (this module's docstring), so this is
-            # the one check that means "the agent has been handed the answer" —
-            # and it is also the reason an accepted revision can never be dropped
-            # after the fact: the check and the append run on this session's own
-            # loop, which is the only writer of that row (:meth:`reconcile`).
-            return {"ok": False, "error": render.REVISED_ALREADY_DELIVERED}
         cleaned, map_refusal = self._whole_ask_cells(record, answers)
         if map_refusal:
             return {"ok": False, "error": map_refusal}
@@ -386,6 +378,59 @@ class AskQueue:
             return {"ok": False, "error": "the revision could not be recorded."}
         self._settled(ask_id)
         return {"ok": True, "revised": True}
+
+    def revision_refusal(self, ask_id: str, now_ms: int | None = None) -> str:
+        """Why a revision of this ask would be REFUSED, or ``""`` if it would be taken.
+
+        The READ-ONLY half of :meth:`revise`'s admissibility decision, split out
+        for the one caller with a side effect it must not perform speculatively:
+        :meth:`Session.revise_ask` stores a SECRET answer's value before the queue
+        sees the map, and a revision the queue is going to refuse must not be the
+        reason a pasted credential is stored and announced to later turns. The
+        decision itself is ``_revision_decision``, shared with the write path, so
+        a probe that disagreed with the answer would be impossible rather than
+        merely unlikely.
+
+        It writes nothing and delivers nothing: the fold the write path reads, and
+        the sentence it would return.
+        """
+        _record, refusal = self._revision_decision(
+            ask_id, self._now() if now_ms is None else now_ms
+        )
+        return refusal
+
+    def _revision_decision(self, ask_id: str, now_ms: int) -> tuple[dict[str, Any] | None, str]:
+        """``(the folded record, the refusal sentence or "")`` for a revision.
+
+        THE ONE ADMISSIBILITY RULE (design §10): an ask that already carries an
+        answer (``answered``/``late``) with no ``ask-response-<ask_id>`` row yet
+        is admissible, from ANY surface — a revision is not a race, so the
+        single-winner rule is not a surface gate. A delivered one is refused in
+        the revision path's own words; ``declined``/``dismissed``/``expired`` keep
+        the state table's sentences; an ask with no answer yet (``open``/
+        ``timed_out``) is admissible as a plain first answer.
+
+        The row check is the window term and NOT ``delivered``'s sticky hint —
+        see :meth:`revise` for why that is the honest bound — and it is the check
+        whose interleaving with :meth:`reconcile` the session-loop hop on the
+        serving handle exists to prevent.
+        """
+        records, present = self._fold_state(now_ms)
+        record = next((item for item in records if item["ask_id"] == ask_id), None)
+        if record is None:
+            return None, render.refusal_copy(None)
+        status = record.get("status")
+        if status in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
+            return record, ""
+        if status not in (store.STATUS_ANSWERED, store.STATUS_LATE):
+            # declined / dismissed / expired: the state table's own sentence,
+            # byte-for-byte the one every other path gives for that state.
+            return record, render.refusal_copy(record)
+        if store.response_row_id(ask_id) in present:
+            # The row IS the delivery marker (this module's docstring), so this is
+            # the one check that means "the agent has been handed the answer".
+            return record, render.REVISED_ALREADY_DELIVERED
+        return record, ""
 
     def _whole_ask_cells(
         self, record: Mapping[str, Any], answers: Mapping[str, Sequence[str]]

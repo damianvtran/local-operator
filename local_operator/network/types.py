@@ -568,10 +568,10 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # default (review round 1, BLOCKER 1).
     "ask_respond": "prompt",
     # ``ask_revise`` rides the SAME capability as its three siblings: a surface
-    # that may answer an ask one way must not be refused the amend window for it,
-    # which is the identical argument that put the other three rows here — while
-    # this op had no row it fell to the refuse-closed default and a relayed viewer
-    # could not revise an undelivered answer at all (design §10, #1936).
+    # that may answer an ask one way must not be refused the amend window for it.
+    # That is the argument that put the other three rows here, and it applies
+    # unchanged to the fourth — the alternative is a relayed viewer whose answer
+    # can be given but never revised.
     "ask_revise": "prompt",
     "ask_decline": "prompt",
     "ask_dismiss": "prompt",
