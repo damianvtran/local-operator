@@ -842,3 +842,191 @@ async def test_an_owner_lost_verdict_leaves_no_session_directory_on_the_viewing_
             await viewer.dispose()
     finally:
         await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_the_remote_client_mirrors_the_operator_signature_gate(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote dial resolves ``operator-signature-v1`` from the OWNER's record.
+
+    WHY THIS PIN CAN FAIL, the same way its input-mode sibling can: the
+    flag is read only through ``getattr(..., False)`` at
+    ``_present_operator_signature``, so dropping the mirror leaves every other
+    test green while a mesh viewer silently answers authority-increasing frames
+    — an allow, a loosening slash — UNSIGNED. That is worse than a viewer with
+    no signature route at all: the frame goes out, the runtime refuses it for
+    want of a signature, and the surface that could have asked for one reads as
+    complete.
+
+    Both directions over a real pair, because the flag gates both: an owner
+    that advertises it lets the frame through to the signing path (reached
+    here WITHOUT touching the operator's key — the signing call itself is
+    stubbed, and what is pinned is which ``(action, request_id)`` the signing
+    path is asked for); an owner whose record carries no token this build
+    gates on must fail closed, leaving the frame byte-identical to an older
+    build's.
+    """
+    from local_operator.network import projection as projection_mod
+    from local_operator.session.runtime.types import OPERATOR_SIGNATURE_CAPABILITY
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="signature-mirror",
+        prompt="",
+    )
+    try:
+        viewer = await _open(created, monkeypatch)
+        try:
+            await viewer.bind_runtime()
+            client = viewer._client
+            assert client is not None, "the remote viewer bound no client"
+            # The rig's owner MUST advertise the token, or the second direction
+            # could pass for a reason this cell is not about.
+            assert (
+                OPERATOR_SIGNATURE_CAPABILITY in client._facts.capabilities
+            ), client._facts.capabilities
+            assert client._operator_signature_supported is True, (
+                "the remote mirror missed the owner's advertisement: every "
+                "authority-increasing frame from this viewer goes out unsigned"
+            )
+
+            calls: list[tuple[str, str]] = []
+
+            async def spy(action: str, request_id: str) -> Any:
+                calls.append((action, request_id))
+                return None
+
+            monkeypatch.setattr(client, "_operator_signature", spy)
+            frame = {"op": "approval_answer", "approved": True, "request_id": "card-1", "req": 9}
+            out = await client._present_operator_signature(dict(frame))
+            assert calls == [("approve", "card-1")], calls
+            assert out == frame, "a failed signing call must leave the frame unchanged"
+        finally:
+            await viewer.dispose()
+
+        # THE OTHER DIRECTION — the owner's record carries no token THIS client
+        # gates on (the shape of a viewer built before the capability existed):
+        # False, and the consumer does not even ask.
+        monkeypatch.setattr(
+            projection_mod, "OPERATOR_SIGNATURE_CAPABILITY", "operator-signature-v1-not-advertised"
+        )
+        stripped_viewer = await _open(created, monkeypatch)
+        try:
+            await stripped_viewer.bind_runtime()
+            stripped_client = stripped_viewer._client
+            assert stripped_client is not None
+            assert OPERATOR_SIGNATURE_CAPABILITY in stripped_client._facts.capabilities
+            assert stripped_client._operator_signature_supported is False, (
+                "an unadvertised token must fail closed: a mirror that signs anyway "
+                "presents to an owner whose record never promised it checks one"
+            )
+            asked: list[tuple[str, str]] = []
+
+            async def spy_stripped(action: str, request_id: str) -> Any:
+                asked.append((action, request_id))
+                return None
+
+            monkeypatch.setattr(stripped_client, "_operator_signature", spy_stripped)
+            frame = {"op": "approval_answer", "approved": True, "request_id": "card-2", "req": 10}
+            assert await stripped_client._present_operator_signature(dict(frame)) == frame
+            assert asked == [], "the signing path was reached without the owner's advertisement"
+        finally:
+            await stripped_viewer.dispose()
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+def _viewer_pending(viewer: Any) -> Any:
+    """The viewer's pending gate, or ``None`` before its state synchronizes."""
+    try:
+        return viewer.pending_gate
+    except RuntimeError:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_gate_parked_on_the_owner_reaches_a_bound_remote_viewer(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-2 trace pin: a gate parked on the owner must reach the viewer's card state.
+
+    The origin-e2e defect (netpass F-5 / e2e-final F-2) reported that an
+    attached viewer's surface says "Its gate card has not reached this view" —
+    the viewer's canonical state never carried the pending gate. This cell
+    drives the whole delivery path below the TUI — the owner's REAL gate
+    installer (nothing here fakes the card), the relay passthrough, the
+    viewer's client pump and facade, the bridge, and the deny travelling back
+    — for BOTH attach orders. It exists so no layer on that path can silently
+    regress while the live-side localization in the PR's F-2 section is
+    carried out; a card that stops arriving at any of these seams fails it.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="parked-card",
+        prompt="",
+    )
+    parked: Any = None
+    try:
+        viewer = await _open(created, monkeypatch)
+        try:
+            await viewer.bind_runtime()
+            assert (
+                _viewer_pending(viewer) is None
+            ), "a gate was already pending before this cell parked one"
+            served = created.owner
+            # Park on the owner's OWN loop; the schedule call returns a
+            # concurrent future without waiting on the gate, and teardown
+            # denies whatever is still parked (``dispose``) even if this
+            # cell's cancel loses the race.
+            parked = asyncio.run_coroutine_threadsafe(
+                served.handle._approval_gate("bash", "rm -rf build/"),  # noqa: SLF001
+                served._loop,  # noqa: SLF001
+            )
+            assert await _wait(
+                lambda: served.handle._fold.projection.pending is not None, timeout_s=15.0
+            ), "the fixture did not park a gate on the owner"
+            assert await _wait(
+                lambda: _viewer_pending(viewer) is not None, timeout_s=15.0
+            ), "the owner parked a gate the long-lived viewer's state never carried"
+            gate = _viewer_pending(viewer)
+            assert gate is not None and gate.kind == "approval", gate
+            assert gate.title == "bash", gate
+        finally:
+            await viewer.dispose()
+
+        # THE FRESH RE-ATTACH (netpass F-5's second shape): a viewer that binds
+        # for the first time while the gate is ALREADY parked must receive it
+        # WITH its actionable state — the bridge reaches the host, whose deny
+        # then travels back and resolves the owner's gate.
+        fresh = await _open(created, monkeypatch)
+        try:
+            answered: list[str] = []
+
+            async def handler(tool_name: str, description: str) -> bool:
+                answered.append(tool_name)
+                return False
+
+            fresh.set_approval_handler(handler)
+            await fresh.bind_runtime()
+            assert await _wait(
+                lambda: _viewer_pending(fresh) is not None, timeout_s=15.0
+            ), "a viewer binding during a live park never received the gate"
+            assert await _wait(
+                lambda: bool(answered), timeout_s=15.0
+            ), "the gate reached the facade but never its host bridge"
+            assert parked is not None
+            assert await _wait(
+                lambda: parked.done(), timeout_s=15.0
+            ), "the pane's deny never reached the owner's parked gate"
+            assert parked.result() is False, "the deny did not resolve the gate as denied"
+        finally:
+            await fresh.dispose()
+    finally:
+        if parked is not None and not parked.done():
+            parked.cancel()
+        await asyncio.to_thread(created.stop)
