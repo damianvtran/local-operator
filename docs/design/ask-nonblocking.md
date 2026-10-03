@@ -928,24 +928,31 @@ between the answer's recording and its delivery.
 
 - **The window is bounded by DELIVERY, not by status alone.** A revision is accepted iff,
   when it is serialised against the log, the fold shows an answer not yet delivered —
-  status `answered` or `late` with `delivered: false` — and it comes from the surface that
-  owns `answered_by`. Successive revisions are allowed while that window is open; the
-  latest accepted one is effective. Against an ask with no recorded answer yet
+  status `answered` or `late` with `delivered: false`; `delivered` means "the agent has
+  been handed the answer" (for `late`, both the timeout and the response row exist, so
+  the model has been told). Successive revisions are allowed while that window is open;
+  the latest accepted one is effective. Against an ask with no recorded answer yet
   (`open`/`timed_out`) the intent degrades to the plain first answer: one `answered`
   event, no `revised` — the `revised` event exists only to supersede.
 
-- **Single-winner arbitration is preserved in full.** A revision does not open a second
-  winner: one from any surface other than `answered_by`'s is refused with the same
-  sentence a competing answer gets — `already answered by <surface>` — so a cross-surface
-  race reads the same way it does today.
+- **A revision is not a race; the winner rule governs races, not revisions.** While the
+  ask is undelivered, a deliberate revision from ANY surface of the session is accepted
+  and supersedes — the surface is not a permission, and no layer may "restore" a surface
+  gate as a safety measure. Single-winner arbitration stays for the cases it exists for:
+  two submissions actually in flight, and a plain non-revise second `respond` — the loser
+  still reads `already answered by <surface>`. If the code cannot cheaply tell an
+  in-flight race from a sequential revision, the honest rule is explicit: plain
+  `ask_respond` keeps the winner rule; `ask_revise` supersedes while undelivered
+  regardless of surface.
 
 - **Refusals, one sentence per state (from `asks/render.py`, so every surface shows the
-  same words).** In-window revision → accepted; **once the response row exists →
+  same words).** In-window revision → accepted, from any surface; **once the response row
+  exists →
   `already delivered — send a new message`** — no silent overwrite, ever: the row pins
   what the model was told. `declined`/`dismissed` → "you already declined this.";
-  `expired` → "this ask expired 7 days ago — ask again if it is still needed."; a
-  revision from a non-owner surface → "already answered by <surface>." The repeat tap on
-  the current gate keeps today's exact wording.
+  `expired` → "this ask expired 7 days ago — ask again if it is still needed."; a race's
+  loser → "already answered by <surface>." The repeat tap on the current gate keeps
+  today's exact wording.
 
 - **The log records an EVENT, not a replacement.** New kind `revised`:
   `{v, ask_id, at, by:{surface}, answers}` plus the `at` of the write it supersedes,
@@ -979,6 +986,7 @@ between the answer's recording and its delivery.
   **Running it was deferred under host pressure** (free pages fell to ≈145 MB; no-builds
   policy) — the repro file and its exact bounded run command are in the PR thread, and
   the code PR re-derives it against this text with the §7-style matrix: revision accepted
-  before delivery; refused after delivery with the new copy; non-owner surface refused;
-  second `respond` and repeated `answer_one` byte-unchanged; the log shows
-  `answered`+`revised` with ONE response row; kill-switch refusal without a queue.
+  before delivery (including from another surface); refused after delivery with the new
+  copy; a race's loser keeps `already answered by <surface>`; second `respond` and
+  repeated `answer_one` byte-unchanged; the log shows `answered`+`revised` with ONE
+  response row; kill-switch refusal without a queue.
