@@ -1887,9 +1887,11 @@ def test_the_membership_table_speaks_in_words_too() -> None:
         assert leaked not in sentence, (leaked, sentence)
     assert "nothing is connected to it" in sentence, sentence
     # AND THE LINE NAMES THE READ AND THE RETRY (the "contradiction" class): an
-    # un-dated "no peer answered" beside `peers`' fresh probe read as a verdict,
-    # while the next pass asks again.
-    assert "no peer answered the last table read" in sentence, sentence
+    # un-dated failure beside `peers`' fresh probe read as a verdict, while the
+    # next pass asks again — and the headline claims no ask (design round 1, D1:
+    # a no-live-link peer was never asked).
+    assert "no table came back in the last read" in sentence, sentence
+    assert "no peer answered" not in sentence, sentence
     assert "— retrying" in sentence, sentence
 
     row = {

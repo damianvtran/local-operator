@@ -555,6 +555,36 @@ def test_the_status_command_asks_the_relay_for_a_fresh_read(
     assert seen and seen[0].get("refresh") is True, seen
 
 
+def test_the_show_member_line_does_not_say_members_twice() -> None:
+    """ONE "members" at the seam (design round 1, N4).
+
+    ``_show_lines`` prefixes the table line with "members: ", and the sentence it
+    wraps begins with the same subject — the screen read "members: members NOT
+    verified: …". The sentence keeps its subject for the readers that render it
+    WITHOUT the prefix (`--json`, the agent digest), and this line drops the
+    duplicate instead: the one place that would double it is the one place that
+    removes it.
+    """
+    payload = {
+        "name": "devmesh",
+        "network_id": "n_" + "a" * 22,
+        "epoch": 1,
+        "trust": "active",
+        "members": 2,
+        "membership": {
+            "sentence": "this device is an active member of devmesh",
+            "remedies": [],
+            "table": {
+                "sentence": "members NOT verified: no table read has completed yet — retrying"
+            },
+        },
+        "members_detail": [],
+    }
+    lines = net_cli._show_lines(payload)  # noqa: SLF001
+    seam = next(line for line in lines if line.startswith("  members: "))
+    assert seam == "  members: NOT verified: no table read has completed yet — retrying", seam
+
+
 def test_doctor_reports_identity_missing_rather_than_claiming_reachability(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

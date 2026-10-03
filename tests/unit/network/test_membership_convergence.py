@@ -1126,23 +1126,39 @@ def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
     questions at different instants, made to look contradictory by a wording with
     no date and no next step. The sentence (`show`) and the marker (`ls`, the
     agent digest) now carry the read's age and "— retrying"; a row NO read has
-    fed says so instead of borrowing the failure's words.
+    fed says so instead of borrowing the failure's words, and the failure
+    headline itself claims no ask (design round 1, D1) because a member with no
+    live link was never asked.
     """
     device = "d_" + "1" * 32
     report = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=time.time() - 42.0)
     report.silent.append({"device_id": device, "reason": "no_table:no_answer"})
     sentence = report.sentence()
-    assert "no peer answered the last table read" in sentence, sentence
+    assert "no table came back in the last read" in sentence, sentence
+    assert "no peer answered" not in sentence, sentence
     assert ("42s ago" in sentence) or ("43s ago" in sentence), sentence
     assert sentence.endswith(
-        "— retrying — d_1111111111 (it did not answer the table read)"
+        "— retrying: d_1111111111 (it did not answer the table read)"
     ), sentence
 
     row = {"members": 2, "membership": {"table": report.to_json()}}
     marker = relay.membership_marker(row)
-    assert "no peer answered the last table read" in marker, marker
+    assert "no table came back in the last read" in marker, marker
     assert ("42s ago" in marker) or ("43s ago" in marker), marker
     assert marker.endswith("— retrying: d_1111111111 (it did not answer the table read)]"), marker
+
+    # THE HEADLINE CLAIMS NO ASK (design round 1, D1): a member with NO LIVE LINK
+    # was never asked, so "no peer answered" would contradict its own reason
+    # ("nothing is connected to it") — the placeholder arm's defect, one case
+    # over. Both surfaces say only what every silent case shares.
+    stalled = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=time.time() - 8.0)
+    stalled.silent.append({"device_id": device, "reason": "no_live_link"})
+    stalled_sentence = stalled.sentence()
+    assert "no table came back in the last read" in stalled_sentence, stalled_sentence
+    assert "no peer answered" not in stalled_sentence, stalled_sentence
+    assert stalled_sentence.endswith(
+        "— retrying: d_1111111111 (nothing is connected to it)"
+    ), stalled_sentence
 
     # A row built by an older build (no stamps) OMITS the age rather than inventing
     # one, and still says the retry the cadence performs.
@@ -1158,7 +1174,8 @@ def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
             },
         }
     )
-    assert "no peer answered the last table read — retrying" in bare, bare
+    assert "no table came back in the last read — retrying" in bare, bare
+    assert "no peer answered" not in bare, bare
     assert "s ago" not in bare and "just now" not in bare, bare
 
     # A row NO read has fed says that — "no peer answered" about a read nobody ran
@@ -1170,7 +1187,34 @@ def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
             "membership": {"table": {"complete": False, "answered": [], "not_answered": []}},
         }
     )
-    assert unread == "  [members NOT verified: no table read has completed yet]", unread
+    assert unread == "  [members NOT verified: no table read has completed yet — retrying]", unread
+
+    # THE PARTIAL ARM NAMES THE MISSING PEER TOO (design round 1, D4): "1 of 2" hid
+    # WHICH member was missing, while the no-answer arm and the long form both name
+    # theirs — the list now says who, and why, on both short and long forms.
+    partial = relay.membership_marker(
+        {
+            "members": 3,
+            "membership": {
+                "table": {
+                    "complete": False,
+                    "answered": [device],
+                    "not_answered": [{"device_id": "d_" + "2" * 32, "reason": "no_live_link"}],
+                    "oldest_answer_age_s": 3.2,
+                }
+            },
+        }
+    )
+    assert partial == (
+        "  [members verified with 1 of 2 peer(s) (3s ago); "
+        "NOT verified with d_2222222222 (nothing is connected to it)]"
+    ), partial
+
+    # AGES STOP BEING SECONDS once they are stale — the case the age exists for
+    # (design round 1, N3).
+    assert relay._age_words(3600.0) == "1h ago", relay._age_words(3600.0)
+    assert relay._age_words(7200.0) == "2h ago", relay._age_words(7200.0)
+    assert relay._age_words(172800.0) == "2d ago", relay._age_words(172800.0)
 
     # THE SOLO-NETWORK ARM: a pass that had nobody to ask says so — its `--json`
     # sentence used to claim "no peer answered" about a network with no peers.
@@ -1245,10 +1289,9 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     """The read's wait is BOUNDED: a pass stuck in a pull must not hold the command.
 
     The fallback is the last completed pass — reported with its own age, never
-    dressed as fresh — and the call returns on its own clock
-    (``MEMBERSHIP_READ_WAIT_S``) instead of waiting out the peer's pull. The
-    injected hang is long enough that an unbounded implementation cannot pass the
-    elapsed assertion, and a release in ``finally`` leaves nothing waiting.
+    dressed as fresh — and the call returns while the kicked pass is STILL IN
+    FLIGHT (asserted on the completion sequence, not on a clock), instead of
+    waiting out the peer's pull. A release in ``finally`` leaves nothing waiting.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
     a = _make(devices, "a", mode=HUB)
@@ -1270,15 +1313,23 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     a_link.member_pulled_at = 0.0
     release = threading.Event()
 
+    entered = threading.Event()
+
     def _hang(link: Any) -> str:
+        entered.set()
         release.wait(10.0)
         return "no_answer"
 
     monkeypatch.setattr(a.server, "_pull_members", _hang)
-    started = time.monotonic()
+    seq_before = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
+    inflight = False
     try:
         payload = a.server.status(refresh=True)  # noqa: SLF001
-        elapsed = time.monotonic() - started
+        # STRUCTURAL, NOT A CLOCK (agent review round 1, NIT): the hung pass cannot
+        # have completed, so an unchanged completion sequence at the moment the
+        # read returns proves it returned WITH the pass still in flight — whatever
+        # the scheduler did to wall times.
+        inflight = a.server._membership_seq == seq_before  # noqa: SLF001
     finally:
         release.set()  # let the loop's pass finish; nothing may be left waiting
 
@@ -1289,8 +1340,10 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     assert table["answered"] == [b.device_id], table
     assert table["complete"] is True
     assert ("just now" in table["sentence"]) or ("s ago" in table["sentence"]), table["sentence"]
-    assert elapsed >= 1.0, elapsed
-    assert elapsed < 5.0, elapsed
+    assert net_fixtures.wait_for(
+        entered.is_set, timeout_s=10.0
+    ), "the kicked pass never entered the pull"
+    assert inflight, "the read waited the hung pass out instead of returning with it in flight"
 
 
 def test_a_row_no_read_has_fed_says_so_on_every_surface(
@@ -1314,7 +1367,7 @@ def test_a_row_no_read_has_fed_says_so_on_every_surface(
     assert "no table read has completed yet" in table["sentence"], table
     assert "no peer answered" not in table["sentence"], table
     marker = relay.membership_marker(row)
-    assert marker == "  [members NOT verified: no table read has completed yet]", marker
+    assert marker == "  [members NOT verified: no table read has completed yet — retrying]", marker
 
     # The CLI's own fallback (the relay did not answer `net_ls`/`net_show`) says
     # the same about its half: the read never completed, because the relay was

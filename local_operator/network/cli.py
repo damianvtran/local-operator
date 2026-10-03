@@ -1219,7 +1219,13 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
     # thing an operator reads and acts on, so what it rests on comes first.
     table = (payload.get("membership") or {}).get("table") or {}
     if int(payload.get("members") or 0) > 1 and table.get("sentence"):
-        lines.append(f"  members: {table['sentence']}")
+        # ONE "members", NOT TWO (design round 1, N4): this line's own prefix is
+        # "members: ", and every sentence starts with the same subject, so the
+        # seam read "members: members NOT verified: …". The sentence keeps its
+        # subject for the readers that render it WITHOUT this prefix (`--json`,
+        # the agent digest), so the drop happens here, at the one place that
+        # earns it.
+        lines.append(f"  members: {str(table['sentence']).removeprefix('members ')}")
     lines.extend(membership_lines(payload))
     for member in payload.get("members_detail") or []:
         mark = "active" if member["active"] else "REMOVED"

@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import math
 import os
 import plistlib
 import queue
@@ -1885,10 +1886,25 @@ def _age_words(age_s: float | None) -> str:
     was just assembled). A caller that must OMIT an unknown age — the row marker,
     which can be handed a table from an older relay — gates on the value before
     calling rather than leaning on this fallback.
+
+    A NON-FINITE age is treated as an absent one rather than raised out of a line
+    renderer: ``inf``/``NaN`` are not times, nothing here produces them, and a
+    crafted row must not turn a listing into an ``OverflowError``/``ValueError``
+    traceback (agent review round 1, MINOR).
+
+    COARSE ABOVE A MINUTE, because the age exists for exactly the stale cases: a
+    table an hour old matters ("1h ago") and its seconds do not.
     """
-    if age_s is None or age_s < 1.5:
+    if age_s is None or not math.isfinite(age_s) or age_s < 1.5:
         return "just now"
-    return f"{int(age_s)}s ago"
+    seconds = int(age_s)
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 @dataclass
@@ -1949,9 +1965,11 @@ class MembershipReport:
         answered" read as a permanent verdict (see :meth:`sentence`).
 
         A ``refreshed_at`` of zero (the shape a hand-built report has) is "no
-        stamp" and stays unknown rather than becoming 1970.
+        stamp" and stays unknown rather than becoming 1970; a NON-FINITE stamp is
+        the same "no stamp" (agent review round 1, MINOR — the guard lives here,
+        where the age is produced, rather than at any one renderer).
         """
-        if not self.refreshed_at or self.refreshed_at <= 0:
+        if not self.refreshed_at or not math.isfinite(self.refreshed_at) or self.refreshed_at <= 0:
             return None
         return max(0.0, time.time() - self.refreshed_at)
 
@@ -1988,6 +2006,14 @@ class MembershipReport:
         read late reports its age rather than the freshness it had when assembled,
         and "— retrying" is the documented behaviour: the next pass asks again.
 
+        THE FAILURE HEADLINE CLAIMS NO ASK (design round 1, D1) and uses ONE
+        punctuation on both surfaces (N1). The old "no peer answered" said a peer
+        was asked and did not answer, while a member with no live link
+        (``no_live_link``) was never asked — the clause right after it said so.
+        What every covered case shares is that no table came back
+        (:data:`_NO_TABLE_CAME_BACK`), and the silent peers follow it after a
+        colon, exactly as the row marker prints them.
+
         THE SILENT MEMBERS ARE NAMED IN WORDS (round 11, Step 1's enumeration). This
         line goes to `lop network show`'s screen AND into the ``--json`` payload, and
         it used to render each silent member's raw table reason — ``no_live_link``,
@@ -2019,10 +2045,10 @@ class MembershipReport:
         if not self.answered:
             read_age = self.read_age_s
             return (
-                "members NOT verified: no peer answered the last table read"
+                f"members NOT verified: {_NO_TABLE_CAME_BACK}"
                 + (f" ({_age_words(read_age)})" if read_age is not None else "")
                 + " — retrying"
-                + (f" — {detail}" if detail else "")
+                + (f": {detail}" if detail else "")
             )
         return (
             f"members verified with {len(self.answered)} of "
@@ -2225,10 +2251,12 @@ def _known_age_words(value: Any) -> str:
     """An age a row carries IN SECONDS, in words — or ``""`` when it carries none.
 
     The row JSON is a boundary an older build's dict (or a hand-built fixture) can
-    cross without these keys, so a missing or non-numeric value renders as NOTHING,
-    never as "just now", which would be a claim the row cannot support.
+    cross without these keys, so a missing, non-numeric or NON-FINITE value (agent
+    review round 1, MINOR: a crafted ``inf``/``NaN`` crossed the numeric guard)
+    renders as NOTHING, never as "just now", which would be a claim the row cannot
+    support.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return ""
     return _age_words(max(0.0, float(value)))
 
@@ -2238,11 +2266,31 @@ def _stamp_age_words(stamp: Any) -> str:
 
     Same boundary as :func:`_known_age_words`, but the value here is a wall-clock
     stamp (``refreshed_at``), so the age is measured at RENDER time: the moment the
-    reader looks is the moment the claim is about.
+    reader looks is the moment the claim is about. A non-finite stamp (agent review
+    round 1, MINOR) is "no stamp": it rendered as "just now" before, which is a
+    freshness claim a ``NaN`` cannot support.
     """
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or stamp <= 0:
+    if (
+        isinstance(stamp, bool)
+        or not isinstance(stamp, (int, float))
+        or not math.isfinite(stamp)
+        or stamp <= 0
+    ):
         return ""
     return _age_words(max(0.0, time.time() - float(stamp)))
+
+
+#: The failure headline for a read that brought nothing back — ONE home, because
+#: two surfaces render it (the sentence and the row marker) and a second copy
+#: would be free to drift.
+#:
+#: IT DOES NOT SAY "ANSWERED" (design round 1, D1): a member with no live link
+#: (``no_live_link``, :meth:`RelayServer.refresh_membership`) was never asked, so a
+#: headline claiming an answer that did not come contradicts the very next clause
+#: ("nothing is connected to it"). What is true in EVERY case this arm covers —
+#: asked-and-silent, unaskable, budget-expired — is that no table came back; each
+#: peer's own reason follows in the list.
+_NO_TABLE_CAME_BACK = "no table came back in the last read"
 
 
 def membership_marker(row: dict[str, Any]) -> str:
@@ -2261,49 +2309,57 @@ def membership_marker(row: dict[str, Any]) -> str:
 
     EVERY ARM CARRIES ITS AGE, AND A FAILED READ SAYS IT IS RETRIED. The verified
     arms name the OLDEST answer among the peers that answered (the weakest evidence
-    in the argument), and the no-answer arm names when the read ran and that the
-    relay asks again — "no peer answered", with no date and no next step, read as a
-    verdict while it is a four-second pull timeout the cadence re-tries
-    (:data:`MEMBERSHIP_PULL_TIMEOUT_S`; the "contradiction" against `peers`'
-    reachability probe). A row that NO read has fed says that instead — "no table
-    read has completed yet" — because claiming "no peer answered" about a read
-    nobody ran is the same lie in the other direction, and that is the shape every
-    `status` row had before the read learned to ask (see
-    ``RelayServer._fresh_membership_read``).
+    in the argument); the failure arm carries when the read ran and names the next
+    pass, and it does NOT say "answered" (design round 1, D1 — a member with no
+    live link was never asked, and its own reason follows; :data:`_NO_TABLE_CAME_BACK`
+    is the one home for the headline). A row that NO read has fed says that instead
+    — "no table read has completed yet — retrying": claiming "no peer answered"
+    about a read nobody ran is the same lie in the other direction, and the retry
+    is named there too (N2), like every sibling NOT-verified arm.
 
-    THE PEERS THAT SAID NOTHING ARE NAMED IN WORDS (round 11, Step 1's enumeration).
-    The no-answer branch used to append each silent member's raw table reason
-    (``no_live_link``, ``no_table:error``) beside a 34-character device id, on a line
-    both `lop network ls` and the agent tool's digest print. The gloss is the table's
-    own (``resume.table_reason_words``) and the id is abbreviated; the raw rows stay in
-    ``membership.table.not_answered``, which is the machine register.
+    THE PEERS THAT SAID NOTHING ARE NAMED IN WORDS (round 11, Step 1's
+    enumeration) — on BOTH not-verified arms (design round 1, D4: the partial arm
+    used to drop the list, so a short count never showed which member was
+    missing). The branch used to append each silent member's raw table reason
+    (``no_live_link``, ``no_table:error``) beside a 34-character device id, on a
+    line both `lop network ls` and the agent tool's digest print. The gloss is the
+    table's own (``resume.table_reason_words``) and the id is abbreviated; the raw
+    rows stay in ``membership.table.not_answered``, which is the machine register.
     """
     if int(row.get("members") or 0) <= 1:
         return ""
     table = (row.get("membership") or {}).get("table") or {}
     answered = len(table.get("answered") or [])
     pending = len(table.get("not_answered") or [])
+    states = ""
+    if pending:
+        from local_operator.resume import short_device_id, table_reason_words
+
+        states = ", ".join(
+            f"{short_device_id(str(item.get('device_id') or ''))} "
+            f"({table_reason_words(str(item.get('reason') or ''))})"
+            for item in (table.get("not_answered") or [])
+        )
     answered_age = _known_age_words(table.get("oldest_answer_age_s"))
     aged = f" ({answered_age})" if answered_age else ""
     if table.get("complete"):
         return f"  [members verified with all {answered} peer(s){aged}]"
     if answered:
-        return f"  [members verified with {answered} of {answered + pending} peer(s){aged}]"
+        # THE MISSING PEERS ARE NAMED HERE TOO (design round 1, D4): the long form
+        # says "NOT verified with …" and the sibling arm below names its peers, so
+        # a short count with the missing member unnamed was the one arm a reader
+        # could not act on.
+        named = f"; NOT verified with {states}" if states else ""
+        return f"  [members verified with {answered} of {answered + pending} peer(s){aged}{named}]"
     if not pending:
         # NO COMPLETED READ FED THIS ROW — the count is this device's own record.
         # "No peer answered" here would claim an ask that never happened (the
-        # defect this sentence exists for); the relay re-reads on its cadence.
-        return "  [members NOT verified: no table read has completed yet]"
-    from local_operator.resume import short_device_id, table_reason_words
-
-    states = ", ".join(
-        f"{short_device_id(str(item.get('device_id') or ''))} "
-        f"({table_reason_words(str(item.get('reason') or ''))})"
-        for item in (table.get("not_answered") or [])
-    )
+        # defect this arm exists for); the relay re-reads on its cadence, and the
+        # arm names the next step like its sibling (design round 1, N2).
+        return "  [members NOT verified: no table read has completed yet — retrying]"
     read_age = _stamp_age_words(table.get("refreshed_at"))
     return (
-        "  [members NOT verified: no peer answered the last table read"
+        f"  [members NOT verified: {_NO_TABLE_CAME_BACK}"
         + (f" ({read_age})" if read_age else "")
         + " — retrying"
         + (f": {states}" if states else "")
