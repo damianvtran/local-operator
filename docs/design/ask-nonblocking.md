@@ -595,8 +595,14 @@ collapses — there was no list to return to.)
   dock **and** composer; **minimized bar (1 and 3 asks), expanded, both placeholder variants,
   and the chat-list outstanding-asks row (light+dark)**; live-app composer frames via
   `renderer-driver` (state window mode);
-  `pnpm check-themes`, contrast rows; `docs/evidence/manifest.json` re-stamp in its own
-  docs-only commit after each fold. **Conflict watch:** #615 (dock mount, answer path,
+  `pnpm check-themes`, contrast rows; `docs/evidence/manifest.json` re-stamp after each
+  fold - one command, `pnpm evidence:fold`, which resolves the manifest per field,
+  re-derives the stamps and counts from the merged tree, runs the evidence guards and
+  stages the result, so the re-stamp is a step ON the fold rather than a per-field
+  re-lay in a second docs-only commit. Run it after the merge has committed and before
+  pushing (it amends the merge tip); the driver it installs resolves a MERGE only, so a
+  rebase or cherry-pick onto a moved `main` still stops on the manifest.
+  **Conflict watch:** #615 (dock mount, answer path,
   composer props, `desktop-contract.ts`), #705 (composer moves to `shared/components/composer/`),
   #708 (transcript rows/working line), #689 (`desktop-notifier.ts`, other author). Hence the
   C1/C2 split (§6): C1 touches contract/store/answer lifecycle only; C2 (views) lands after
