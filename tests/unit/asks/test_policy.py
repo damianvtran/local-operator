@@ -71,22 +71,32 @@ def test_the_floor_is_at_least_two_wake_ticks():
     assert policy.MIN_TIMEOUT_S * 1000 >= 2 * MAX_ARM_MS
 
 
-def test_the_flag_defaults_off_and_the_env_seam_reads_truthy_values(monkeypatch):
-    """Dark by default; ``LOP_ASK_NONBLOCKING=1`` is the QA/evidence seam."""
+def test_the_flag_defaults_on_and_the_env_var_is_a_kill_switch(monkeypatch):
+    """The queue is the DEFAULT; ``LOP_ASK_NONBLOCKING=0`` is the escape hatch.
+
+    The DIRECTION of the membership test matters as much as the set: a variable
+    that is ABSENT — or present but empty — must leave the shipped default, so
+    the kill set is named explicitly and everything outside it (including a
+    typo) leaves the queue on. A kill switch a typo could arm would fail in the
+    one direction that hurts the operator it exists for.
+    """
     import importlib
 
-    for value in ("1", "true", "YES", "on"):
+    for value in ("0", "false", "no", "off", "OFF", " false "):
         monkeypatch.setenv("LOP_ASK_NONBLOCKING", value)
         module = importlib.reload(policy)
-        assert module.NONBLOCKING_ASK is True
-        assert module.enabled() is True
-    for value in ("", "0", "false", "no", "off"):
+        assert module.NONBLOCKING_ASK is False, value
+        assert module.enabled() is False
+    for value in ("", "1", "true", "YES", "on", "maybe"):
         monkeypatch.setenv("LOP_ASK_NONBLOCKING", value)
         module = importlib.reload(policy)
-        assert module.NONBLOCKING_ASK is False
+        assert module.NONBLOCKING_ASK is True, value
     monkeypatch.delenv("LOP_ASK_NONBLOCKING", raising=False)
     module = importlib.reload(policy)
-    assert module.NONBLOCKING_ASK is False
+    assert module.NONBLOCKING_ASK is True
+    # Leave the module on the shipped default: the reload above is the last
+    # word on the attribute, and monkeypatch only restores the ENV.
+    assert module.enabled() is True
 
 
 def test_enabled_follows_the_module_attribute(monkeypatch):

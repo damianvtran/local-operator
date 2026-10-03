@@ -561,9 +561,12 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
 
     # last block: the skills listing verbatim, and then the interactivity block
     # — which now rides the tail for an ATTACHED session too, so this pins both
-    # the verbatim listing and the order they appear in.
+    # the verbatim listing and the order they appear in. The body is the QUEUED
+    # one because that is the shipped default since 2026-10-03: a session built
+    # without touching the flag runs the queue, so that is the composition a real
+    # session pays for. (The blocking arm is pinned in the pair test below.)
     assert skills.startswith(SKILLS)
-    assert skills == f"{SKILLS}\n\n{ATTACHED_INTERACTIVITY}"
+    assert skills == f"{SKILLS}\n\n{ATTACHED_INTERACTIVITY_QUEUED}"
 
 
 def test_model_label_rides_the_env_block_not_the_stable_head() -> None:
@@ -606,7 +609,7 @@ def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     assert len(blocks) == 4
     assert "- bash" in blocks[1]
     assert blocks[2].startswith(f"Today is {DATE}.")
-    assert blocks[3] == f"<skills/>\n\n{ATTACHED_INTERACTIVITY}"
+    assert blocks[3] == f"<skills/>\n\n{ATTACHED_INTERACTIVITY_QUEUED}"
 
 
 def test_block_zero_and_one_are_byte_stable_across_turns() -> None:
@@ -1192,7 +1195,7 @@ def test_a_detached_session_is_not_told_the_operator_is_unavailable() -> None:
         [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
     )
 
-    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY)
+    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY_QUEUED)
     # Belt and braces on the two claims this block may never make again, in
     # either casing: a reader of this file should not have to diff literals to
     # find out that the text says nothing about a screen.
@@ -1215,7 +1218,7 @@ def test_an_attached_session_is_told_a_question_will_be_presented() -> None:
         [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
     )
 
-    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
     # The positive text says the question WAITS; it never claims the operator is
     # looking at this moment, which is the fact the block cannot know.
     assert "screen" not in attached[-1].lower()
@@ -1244,12 +1247,42 @@ def test_the_queued_interactivity_bodies_replace_the_blocking_claim(
     assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY_QUEUED)
     assert "parked for hours" not in attached[-1]
     assert "may block for hours" not in detached[-1]
-    # And the dark default still ships today's bytes: the flip is the change
-    # that makes the queued claim true, so until then the shipped arm is the
-    # blocking one, not both and not the new one.
+    # The KILL-SWITCH arm still ships the old bytes, byte for byte: the switch
+    # is real (an operator who needs the blocking path back reads text that
+    # describes it), so the other arm must remain reachable and unchanged.
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
     inline = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)
     assert inline[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    # ...and the DETACHED body on the same arm, so neither blocking literal is
+    # left unpinned once the queued pair becomes the default: the kill switch
+    # has to restore BOTH, or an operator who takes it gets half the old voice.
+    inline_detached = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
+    )
+    assert inline_detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY)
+
+
+def test_the_shipped_default_renders_the_queued_arm() -> None:
+    """The DEFAULT IS THE QUEUE, asserted WITHOUT touching the flag.
+
+    Deliberately monkeypatch-free: a test that set the flag explicitly would
+    pass under either default, which is exactly what the flip must not be able
+    to do. This is the cell that fails if anyone flips the constant back, and
+    it fails by naming the fact rather than the render, so the reader knows
+    which direction moved.
+    """
+    from local_operator.asks import policy
+
+    assert policy.enabled() is True, (
+        "the queued ask is the SHIPPED default (asks.policy.NONBLOCKING_ASK, "
+        "flipped 2026-10-03): LOP_ASK_NONBLOCKING=0 is the kill switch, and "
+        "tests/conftest.py scrubs it, so this module must read True here."
+    )
+    text = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)[
+        -1
+    ]
+    assert text.endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert "parked for hours" not in text
 
 
 def test_the_queue_does_not_move_the_hub_or_no_channel_bodies(
@@ -1306,15 +1339,29 @@ def test_system_md_ships_the_ask_paragraph_for_the_process_mode(
         assert "Deciding is your job; `ask` is the exception" in text
 
 
-def test_the_ask_flag_pair_refuses_both_members() -> None:
-    """Both arms true is the one impossible state, and it is refused loudly.
+def test_the_ask_flag_pair_refuses_both_members_and_stating_neither_true() -> None:
+    """Both arms true is the one impossible state, and SO IS NEITHER TRUE.
 
     ``{{#if}}`` has no ``else``, so a half-supplied pair fails SILENTLY in both
     directions; this pair's failure mode is the worst of the three, because the
-    two bodies contradict each other rather than merely omitting prose.
+    two bodies contradict each other rather than merely omitting prose. The
+    both-false case is its mirror image and was open until this change: it
+    rendered NEITHER body, dropping the whole paragraph that tells the model
+    what a call to ``ask`` does and when the answer arrives — a prompt with no
+    ask instruction at all, and only a length delta to notice it by. The
+    browser and console pairs keep both-false as a legitimate third state (a
+    role whose allowlist omits the tool); this pair has no such state, so the
+    refusal belongs to the ask pair alone.
     """
     with pytest.raises(ValueError, match="ask_queued and ask_inline"):
         render_template("system.md", {"ask_queued": True, "ask_inline": True})
+    with pytest.raises(ValueError, match="cannot both be false"):
+        render_template("system.md", {"ask_queued": False, "ask_inline": False})
+    # The pair still derives from one member, and an omitted pair still comes
+    # from the process mode: neither of those may start raising.
+    inline = render_template("system.md", {"ask_inline": True})
+    assert "If the user answers nothing" in inline
+    assert "Treat every `ask` as QUEUED" not in inline
 
 
 def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
@@ -1351,7 +1398,7 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
     )
 
     assert attached_last == attached_first
-    assert attached_last[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    assert attached_last[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
 
 
 #: The child's two bodies, VERBATIM, for the same reason as the pair above.
@@ -1512,7 +1559,7 @@ def test_an_unstated_channel_is_read_off_the_tool_inventory() -> None:
     with_ask = build_system_blocks(
         [_tool("ask", "Ask the user.")], "", "env", "2026-01-01", interactive=True
     )
-    assert with_ask[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    assert with_ask[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
 
     parent_with_hub = build_system_blocks(
         [_tool("hub", "Message a subagent.")], "", "env", "2026-01-01", interactive=True

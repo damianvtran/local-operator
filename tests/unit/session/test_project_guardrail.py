@@ -617,10 +617,20 @@ async def test_a_mixed_todos_and_projects_batch_reenters_exactly_once(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_no_nudge_fires_while_the_turn_is_parked_on_an_ask(tmp_path) -> None:
+async def test_no_nudge_fires_while_the_turn_is_parked_on_an_ask(tmp_path, monkeypatch) -> None:
     """The ``ask`` interaction. A parked question means the loop has not
     reached a yield, so no nudge can fire while the turn waits on the user;
-    once the question settles, the boundary nudge still works."""
+    once the question settles, the boundary nudge still works.
+
+    PARKING IS THE KILL-SWITCH ARM: the queued ask (the shipped default since
+    2026-10-03) returns a receipt and the turn carries on, so there is no parked
+    turn for this cell to assert about. Selecting the blocking arm explicitly is
+    what keeps the pinned property pinned — it is a property of the arm that
+    stops the loop, not of ``ask`` in general.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
     entered = asyncio.Event()
     release = asyncio.Event()
 

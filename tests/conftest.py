@@ -70,12 +70,15 @@ _AMBIENT_VARS = (
     # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
     # assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
-    # The queued-ask flag's escape hatch (``asks/policy.NONBLOCKING_ASK``, read
-    # from ``LOP_ASK_NONBLOCKING``). The same ESCAPE-HATCH class as the two
-    # above: an operator or a QA rig that exported it would silently switch
-    # every blocking-ask cell in the suite onto the queued path, and the cells
-    # that PIN today's behaviour would go green while asserting nothing. The
-    # e2e cells that want it on set it through ``monkeypatch`` explicitly.
+    # The queued-ask KILL SWITCH (``asks/policy.NONBLOCKING_ASK``, read from
+    # ``LOP_ASK_NONBLOCKING``). The same ESCAPE-HATCH class as the two above,
+    # and it scrubs for the opposite reason since the flip (2026-10-03): the
+    # queue is the DEFAULT now, so an operator or a QA rig that exported a kill
+    # value would silently move every queued-ask cell in the suite onto the
+    # blocking path — the cells that pin the shipped behaviour would go green
+    # while asserting the arm nobody runs. The blocking cells that DO mean it
+    # set it through ``monkeypatch`` explicitly, which is also where the reason
+    # is written down.
     "LOP_ASK_NONBLOCKING",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value

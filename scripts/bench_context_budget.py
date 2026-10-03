@@ -1105,7 +1105,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: way ``team create``/``update`` already can, and with its description trimmed
 #: to the 39-char minimum the head still lands on the old ceiling. The tighten
 #: band (1,200) is nowhere near tripped.
-BUDGET_BILLED_TOKENS = 35_150
+#:
+#: RAISED 35,150 -> 35,874 for the ASK FLIP (``feat/ask-flip-default``):
+#: ``asks.policy.NONBLOCKING_ASK`` now defaults ON, so the QUEUED ask text is
+#: what every session renders and the blocking text is what the operator's kill
+#: switch (``LOP_ASK_NONBLOCKING=0``) selects. NO WORDING MOVED in this PR — the
+#: two arms already existed, selected by the flag — so the raise is exactly the
+#: measured DIFFERENCE between the arms, which is what the flip makes permanent.
+#:
+#: Both arms measured with THIS script on the same tree, on the CLEAN arm (an
+#: isolated HOME and config dir, which is what CI renders — a machine with
+#: ``values.subagents`` tiers configured reads 762 chars larger in
+#: ``tool_schemas``, the config dependence the ``tool://`` entry above
+#: explains):
+#:
+#:   arm                        chars      billed (2.78)
+#:   kill switch / blocking     97,545     ~35,088  (today's main head, 62 left)
+#:   shipped default / queued   99,557     ~35,812
+#:   delta                       2,012        ~724
+#:
+#: The delta is entirely OUR text, so it renders identically here and on CI, and
+#: it decomposes exactly into the three surfaces the flip moves: +671 chars in
+#: the instructions block (``system.md``'s ask paragraph), +248 in the tail (the
+#: ``<interactivity>`` body), +1,093 in ``tool_schemas`` (the ``ask`` tool's
+#: description). 671 + 248 + 1,093 = 2,012 chars = ~724 billed, and
+#: 35,150 + 724 = 35,874 — the arithmetic the guard exists to force.
+#:
+#: Cross-checked against the real CI log for ``main`` at ``e5a7a63b7`` (run
+#: 37092370975, job 111115267258), which read 97,545 chars = ~35,088 billed with
+#: all four non-schema counters byte-identical to CI's. So the ceiling leaves CI
+#: 62 tokens of headroom on the SHIPPED DEFAULT — the same 62 main carries today
+#: on the blocking one: the flip is paid for and not a token more. The
+#: tiers-configured machine reads 100,319 = ~36,086 on the shipped default, 212
+#: over this ceiling, which is the recorded config dependence rather than this
+#: change; CI remains the binding reading.
+BUDGET_BILLED_TOKENS = 35_874
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

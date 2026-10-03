@@ -253,13 +253,15 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
 
     The ask pair is completed here for the same reason and is the one pair whose
     state is NOT the caller's to state: whether ``ask`` queues is a PROCESS fact
-    (``asks.policy``, read once at import), and the blocking arm is what the
-    deployed default renders. It is therefore seeded from the mode — rather than
-    left to ``_complete_flag_pair``'s absent-pair default, which happens to agree
-    while the queue is dark — so a process with the flip on cannot render the
-    paragraph that says the tool parks on a human. A caller may still pass the
-    pair explicitly (a test rendering the other arm); passing both members is
-    still refused.
+    (``asks.policy``, read once at import), and the QUEUED arm is what the
+    deployed default renders (the flip landed 2026-10-03; ``LOP_ASK_NONBLOCKING=0``
+    is the kill switch back to blocking). It is therefore seeded from the mode —
+    rather than left to ``_complete_flag_pair``'s absent-pair default, which would
+    only coincide with the mode by luck — so a process in either mode renders the
+    paragraph that is true of it and never the other one. A caller may still pass
+    the pair explicitly (a test rendering the other arm); passing both members
+    TRUE is refused, and so is stating both FALSE — see the guard below, which
+    exists because this pair has TWO states where browser and console have three.
     """
     seed = dict(data)
     if "ask_queued" not in seed and "ask_inline" not in seed:
@@ -301,6 +303,25 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
             ),
         ),
     }
+    # ...AND NEITHER MAY BOTH BE FALSE, which the shared helper above cannot
+    # refuse for us: it is written for the browser/console pairs, which have a
+    # THIRD legitimate state (a role whose allowlist omits the tool has neither
+    # the tool nor a backendless host) and therefore pass both-false straight
+    # through. The ask pair has no such arm — a session either queues an ask or
+    # blocks on it — so both-false renders NEITHER `{{#if}}` body: the paragraph
+    # that tells the model what a call to `ask` does, when the answer comes back
+    # and what a receipt is not simply vanishes, with no marker (measured on the
+    # unfixed tree: 132 characters of ask instruction, and only a length delta
+    # to show for it). Refused as loudly as both-true, and the message names the
+    # way out rather than only the fault.
+    if not resolved["ask_queued"] and not resolved["ask_inline"]:
+        raise ValueError(
+            "system.md: ask_queued and ask_inline cannot both be false — that "
+            "drops BOTH ask paragraphs, so the prompt describes neither the "
+            "queued nor the blocking call and a model reading it learns nothing "
+            "about `ask`. State the mode you mean, or omit the pair: "
+            "asks.policy seeds it from this process's mode."
+        )
     return resolved
 
 
