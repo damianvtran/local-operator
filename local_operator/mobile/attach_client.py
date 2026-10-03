@@ -2490,6 +2490,69 @@ class AttachClient:
                 pass
 
 
+async def engage_session_client(
+    config_dir: Path,
+    session_id: str,
+    work: Any,
+    *,
+    deadline_s: float = ACK_TIMEOUT_S,
+    on_projection: Callable[[SessionProjection], None] | None = None,
+) -> tuple[AttachClient, str]:
+    """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    THE ONE ENGAGE-AND-DIAL SEAM. Every surface that must turn "no runtime" into
+    "a runtime and a live connection" comes through here, so the engagement it
+    performs is ``engage_runtime``'s — the single arbitration point, whose lease
+    rather than any pre-spawn check decides which process owns the transcript
+    (see :func:`session.runtime.launch.engage_runtime`). A caller never spawns or
+    polls for itself: two of those implementations is how they drift, and this
+    function's own ancestor was one of them.
+
+    ``work`` is the ERRAND (``PromptErrand`` for a retained prompt, ``AskErrand``
+    for a queued ask's cold answer); each errand type knows what it delivers, and
+    the ones that deliver nothing do it by design — see their dataclasses. The
+    engaged runtime's boot reconcile is what actually delivers an ask.
+
+    Raises ``TimeoutError`` with the phone-shaped sentence when no record is
+    live after the engage (a runtime that died in the gap) or the dial fails —
+    the same class ``continue_command``'s callers already handle.
+    """
+    from local_operator.session.runtime.launch import engage_runtime
+
+    outcome = await engage_runtime(
+        session_id,
+        str(Path.home()),
+        work,
+        config_dir=config_dir,
+        deadline_s=deadline_s,
+    )
+    # The errand was admitted; what remains is the caller's live view of the work
+    # it started. A record must exist now (engage_runtime only returns once one
+    # answered), so a miss here is a runtime that died in the gap.
+    #
+    # THE RECEIPT IS THE ENGAGE'S OWN DETAIL, never a hardcoded sentence. On a
+    # draining owner the runtime spools the message for the build that replaces
+    # it, and its answer is ``inbox.SPOOL_RECEIPT_PROMPT`` — a deferral. This
+    # used to return the literal "prompt admitted" over whatever the runtime
+    # said, so the phone was told the owner had the message and waited for a
+    # reply only another process would produce, after this one exited (agent
+    # review round 1, R2).
+    admitted_detail = outcome.detail or "prompt admitted"
+    record, _ = await asyncio.to_thread(find_runtime_record, config_dir, session_id)
+    if record is None:
+        raise TimeoutError("Couldn’t continue this conversation. Try again.")
+    client = AttachClient(
+        on_projection or (lambda projection: None),
+        lambda reason: None,
+    )
+    try:
+        await client.connect(record, session_id)
+    except (ConnectionError, RuntimeError, TimeoutError) as exc:
+        client.close()
+        raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
+    return client, admitted_detail
+
+
 async def continue_command(
     config_dir: Path,
     command: ContinuationCommand,
@@ -2509,12 +2572,15 @@ async def continue_command(
     than left as a second implementation that could drift. The phone keeps its
     connected :class:`AttachClient` (it streams the reply), so the dial happens
     here after the engage guarantees a runtime exists.
-    """
-    from local_operator.session.runtime.launch import PromptErrand, engage_runtime
 
-    outcome = await engage_runtime(
+    A thin spelling of :func:`engage_session_client` with a ``PromptErrand``:
+    the prompt path and the queued-ask cold-answer path share that one seam.
+    """
+    from local_operator.session.runtime.launch import PromptErrand
+
+    return await engage_session_client(
+        config_dir,
         command.session_id,
-        str(Path.home()),
         PromptErrand(
             text=command.text,
             images=list(command.images),
@@ -2522,32 +2588,6 @@ async def continue_command(
             input_mode=command.input_mode,
             input_path=command.input_path,
         ),
-        config_dir=config_dir,
         deadline_s=deadline_s,
+        on_projection=on_projection,
     )
-    # The command is admitted; what remains is the phone's live view of the
-    # turn it started. A record must exist now (engage_runtime only returns
-    # once one answered), so a miss here is a runtime that died in the gap and
-    # is reported as the same timeout the caller already handles.
-    #
-    # THE RECEIPT IS THE ENGAGE'S OWN DETAIL, never a hardcoded sentence. On a
-    # draining owner the runtime spools the message for the build that replaces
-    # it, and its answer is ``inbox.SPOOL_RECEIPT_PROMPT`` — a deferral. This
-    # used to return the literal "prompt admitted" over whatever the runtime
-    # said, so the phone was told the owner had the message and waited for a
-    # reply only another process would produce, after this one exited (agent
-    # review round 1, R2).
-    admitted_detail = outcome.detail or "prompt admitted"
-    record, _ = await asyncio.to_thread(find_runtime_record, config_dir, command.session_id)
-    if record is None:
-        raise TimeoutError("Couldn’t continue this conversation. Try again.")
-    client = AttachClient(
-        on_projection or (lambda projection: None),
-        lambda reason: None,
-    )
-    try:
-        await client.connect(record, command.session_id)
-    except (ConnectionError, RuntimeError, TimeoutError) as exc:
-        client.close()
-        raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
-    return client, admitted_detail
