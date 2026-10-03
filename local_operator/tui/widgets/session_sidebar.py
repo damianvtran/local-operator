@@ -551,9 +551,13 @@ class SessionSidebar(Widget, can_focus=True):
         #: Startup default from `tui.sidebar_show_subagents`; flipped by
         #: `ctrl+a` for THIS session only, never written back to config.
         self.show_subagents: bool = False
-        #: ``(session_id, open_ask_count)`` for the session whose asks this
+        #: ``(session_id, outstanding_ask_count)`` for the session whose asks this
         #: sidebar can actually count — the one the app is attached to. Empty
-        #: string means "no mark". See :meth:`set_asking` for why the count is
+        #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open +
+        #: timed-out-and-answerable), matching the wire's ``asks_open`` and the
+        #: bar's ``present``: a queue of nothing but timed-out asks is still one
+        #: the user can answer, so its row must keep its mark. See
+        #: :meth:`set_asking` for why the count is
         #: live-only rather than read out of the catalogue.
         self._asking: tuple[str, int] = ("", 0)
         #: Hidden-population size for the footer chip, from `subagent_population`.
@@ -1110,7 +1114,7 @@ class SessionSidebar(Widget, can_focus=True):
         }
 
     def set_asking(self, session_id: str, count: int) -> None:
-        """Mark a row as holding OPEN ASKS the user has not answered.
+        """Mark a row as holding OUTSTANDING ASKS the user has not answered.
 
         The sidebar's own state for the queued-ask feature (design §5.1):
         distinct from ``pending``, which means a GATE — a turn that cannot
@@ -1118,6 +1122,11 @@ class SessionSidebar(Widget, can_focus=True):
         fact: the agent already moved on, and the mark says the user still owes
         it an answer rather than that anything is blocked. Two facts, two
         marks, which is why this does not simply feed ``pending``.
+
+        ``count`` is the OUTSTANDING tally (open + timed-out-and-answerable, the
+        same set the wire's ``asks_open`` publishes): a timed-out ask is still
+        one the user can answer, so a queue of nothing but those must keep the
+        mark rather than dropping it to absence.
 
         Only the CURRENT session is marked, and the count is painted rather
         than the sessions': a sidebar row's queue depth lives on that session's

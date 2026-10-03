@@ -988,14 +988,18 @@ class SessionProjection:
     #: A parallel tool batch can open several approvals at once; the phone
     #: shows "1 of N" so the user knows more cards follow this one.
     #:
-    #: THE APPROVAL QUEUE'S LENGTH, and it stays that: an open ASK is counted by
-    #: ``asks_open`` instead. ``pending`` may still carry a queued ask's mirrored
-    #: card during the one-release mirror window, and the count deliberately
-    #: does NOT include it — a badge that mixed the two would tell the user a
-    #: blocking approval was waiting when the agent had merely asked something.
+    #: THE APPROVAL QUEUE'S LENGTH, and it stays that: an outstanding ASK is
+    #: counted by ``asks_open`` instead. ``pending`` may still carry a queued
+    #: ask's mirrored card during the one-release mirror window, and the count
+    #: deliberately does NOT include it — a badge that mixed the two would tell
+    #: the user a blocking approval was waiting when the agent had merely asked
+    #: something.
     pending_count: int = 0
     #: The session's queued asks (design §4), newest first with the OPEN ones in
-    #: front, and how many are still open.
+    #: front, and how many are still OUTSTANDING — open, or timed out and still
+    #: answerable late (``asks.store.OUTSTANDING_STATUSES``). Not "open asks":
+    #: a timed-out ask the user can still answer still counts, which is the
+    #: state the defect this field's rule fixed was about.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (N2): both are ABSENT — ``None``, not
     #: empty — unless queued asks are live in the runtime that published this

@@ -360,9 +360,10 @@ export interface SessionProjection {
 	pending_count: number;
 	/** One queued ask as the runtime publishes it (design §4). */
 	asks?: PendingAsk[];
-	/** How many of `asks` are still open. ABSENT (not 0) while the runtime
-	    does not publish asks at all — the field's presence is the client-side
-	    capability proxy (N2), exactly as it is for `asks` itself. */
+	/** How many of `asks` are outstanding — open, or timed-out and still
+	    answerable (the runtime's `OUTSTANDING_STATUSES`). ABSENT (not 0) while
+	    the runtime does not publish asks at all — the field's presence is the
+	    client-side capability proxy (N2), exactly as it is for `asks` itself. */
 	asks_open?: number;
 	/** True only when the attach frame's byte bound DROPPED ask rows (§4's A2
 	    addendum). Absent when the list is complete, so a client can never draw a

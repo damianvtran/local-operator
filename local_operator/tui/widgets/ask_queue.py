@@ -52,6 +52,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widget import Widget
 
+from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
@@ -79,12 +80,17 @@ ASK_TOGGLE_KEY = "f4"
 ASK_BAR_CHEVRON_COLLAPSED = "⌄"
 ASK_BAR_CHEVRON_EXPANDED = "⌃"
 
-#: The statuses a row can carry from the wire, spelled once so the bar, the
-#: list and the transcript card cannot drift about what ``timed_out`` is called.
-STATUS_OPEN = "open"
-STATUS_TIMED_OUT = "timed_out"
-STATUS_LATE = "late"
-STATUS_ANSWERED = "answered"
+#: The statuses a row can carry, re-exported from ``asks/store.py``'s fold rather
+#: than spelled here. The bar, the list and the transcript card used to keep
+#: their OWN literals "spelled once" in this module, which is exactly how a
+#: surface ends up disagreeing with the wire about what ``timed_out`` means:
+#: the only spelling that is allowed to be authoritative is the fold's.
+STATUS_OPEN = store.STATUS_OPEN
+STATUS_TIMED_OUT = store.STATUS_TIMED_OUT
+STATUS_LATE = store.STATUS_LATE
+STATUS_ANSWERED = store.STATUS_ANSWERED
+STATUS_DECLINED = store.STATUS_DECLINED
+STATUS_DISMISSED = store.STATUS_DISMISSED
 
 #: Statuses a SURFACE drops, because the user has nothing left to do about
 #: them. ``answered`` and ``declined`` are settled; ``late`` joins them because
@@ -92,10 +98,13 @@ STATUS_ANSWERED = "answered"
 #: receipt is in the transcript, and offering an answer box for it can only be
 #: refused (design round 1, D6/U3: ``late`` was painted "timed out — still
 #: answerable" and stayed in the answerable set).
-SETTLED_STATUSES = frozenset({STATUS_ANSWERED, STATUS_LATE, "declined", "dismissed"})
-#: ...which is to say: everything the reader must not be asked to answer. Kept
-#: as an explicit set so a new status has to decide, rather than defaulting in.
-_ANSWERABLE = (STATUS_OPEN, STATUS_TIMED_OUT)
+SETTLED_STATUSES = frozenset({STATUS_ANSWERED, STATUS_LATE, STATUS_DECLINED, STATUS_DISMISSED})
+#: ...which is to say: everything the reader must not be asked to answer. THE
+#: OUTSTANDING SET, taken from the fold rather than re-listed here: a row the
+#: user can still answer is ``open`` or timed out and unanswered, and that ONE
+#: rule decides the wire's tally, this surface's rows and the sidebar mark, so
+#: it lives in ``asks.store.OUTSTANDING_STATUSES`` and nowhere else.
+_ANSWERABLE = store.OUTSTANDING_STATUSES
 
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
