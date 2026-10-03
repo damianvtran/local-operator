@@ -147,6 +147,31 @@ def test_hub_status_prints_the_store_and_json_matches_the_route_payload(
     }
 
 
+def test_hub_status_survives_an_unreadable_credential_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A corrupt credential store must not turn a read-only status read into a crash.
+
+    Before Q-4 the command never opened ``auth.db``: resolving the credential so
+    ``login ok|none`` is a checked fact rather than a dataclass default added
+    this failure mode (review round 2, M-8). A store that cannot be opened means
+    no usable credential, so the honest degradation is ``login none`` — not a
+    traceback, and not the pre-fix unchecked "ok". This runs the REAL resolver
+    (no ``build_clients_sync`` stub) against a genuinely unreadable file.
+    """
+
+    root = tmp_path / ".local-operator"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "auth.db").write_bytes(b"not a sqlite database!")
+
+    rc = cli.hub_status_command(cli.build_cli_parser().parse_args(["hub", "status"]), root)
+
+    assert rc == 0
+    assert "login none" in capsys.readouterr().out
+
+
 def test_teams_link_refuses_a_differing_copy_until_accepted_and_then_never_deletes(
     rig, parser, capsys, monkeypatch
 ) -> None:

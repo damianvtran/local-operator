@@ -1419,7 +1419,7 @@ Append a section (≈ 260 tokens):
 - Best practice: pull once, edit freely, let updates flow. To drop a section for good, delete it — do not blank it. Publish after an update, not before.
 ```
 
-> Correction (2026-10-03): the sketch above is shorthand, corrected when it landed as a guide (PR #1943) — the shipped form is `agents pull --id <id>` (`--id` is required), `--check` covers hub rows only (the starter arm has no report-only mode), `--replace` needs `--yes`, and the push-side merge is *not* shipped: a publish is an upload (`name_taken` on an org name collision; `agents push --id` is the explicit overwrite).
+> Correction (2026-10-03): the sketch above is shorthand, corrected when it landed as a guide (PR #1943) — the shipped form is `agents pull --id <id>` (`--id` is required), `--check` covers hub rows only (the starter arm has no report-only mode), `--replace` needs `--yes`, and the push-side merge is *not* shipped: a publish is an upload that creates a listing, an org name collision is `name_taken`, and the shipped CLI has no overwrite arm.
 
 **`guides/teams/GUIDE.md`** — description (measured 127):
 `Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers org pull/push/update.`
