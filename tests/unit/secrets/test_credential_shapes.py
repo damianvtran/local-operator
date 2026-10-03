@@ -82,6 +82,7 @@ from tests.unit.secrets.credential_shape_corpus import (
     COUNTER_USAGE_LINE,
     DUMP_COMMAND_CASES,
     FIXTURE_VALUE,
+    GITHUB_STATELESS_TOKEN,
     KEBAB_IDENTIFIER,
     KEBAB_IDENTIFIER_FOUR_SEGMENT,
     KEBAB_IDENTIFIER_WITH_DIGIT,
@@ -3733,6 +3734,41 @@ def _run_one_shape(shape: Any, text: str) -> str:
     return _run_shapes((shape,), text, [])
 
 
+# --- the GitHub token family, one row per documented format ------------------
+
+
+def test_the_github_token_family_covers_every_documented_format() -> None:
+    """Every prefix GitHub documents masks WHOLE, and the dotted lookalikes do not.
+
+    Why a table rather than one fixture: the ``ghs_`` stateless rollout
+    (2026-04-27) is exactly how this control fails quietly — the legacy grammar
+    stopped covering tokens that were still credentials, and nothing reddened
+    because no case spelled the new format. A row per format is what makes the
+    next one fail HERE; keep it in step with the corpus rows in
+    ``credential_shape_corpus``.
+    """
+    tail36 = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    formats = {
+        "ghp_ classic PAT": "ghp_" + tail36,
+        "gho_ OAuth token": "gho_" + tail36,
+        "ghu_ user-to-server token": "ghu_" + tail36,
+        "ghs_ legacy installation token": "ghs_" + tail36,
+        "ghs_ stateless installation token": GITHUB_STATELESS_TOKEN,
+        "ghr_ refresh token": "ghr_" + tail36,
+    }
+    for label, value in formats.items():
+        assert scrub_shapes(value) == REDACTION_MARKER, label
+        # ...and inside the composed pass, with neighbours, nothing survives.
+        assert value not in scrub_secrets("issued: " + value + " today"), label
+    for label, text in {
+        "a dotted artifact name": "ghs_2024_q3.release-notes",
+        "segments below the JWT floor": (
+            "ghs_1234567_release-candidate-notes.build-artifacts-2.production-logs"
+        ),
+    }.items():
+        assert REDACTION_MARKER not in scrub_shapes(text), label
+
+
 def test_every_notice_fits_one_narrow_card_row() -> None:
     """The advisory has to be READABLE, not merely correct.
 
@@ -6152,7 +6188,36 @@ _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de
 #: the issuer and padded-base64 ``--token`` values, the five capitals flag values) are
 #: all among the 513 rows that did not move (graded field for field against ``origin/main``'s
 #: module and corpus: 0 moved; the old corpus under this module is ``f1707c1f…``).
-_CORPUS_GRADING_DIGEST = "46a1a6fa34c99c604620527adc3f627430d475bc4a8ba597accb8a8dc62477cc"
+#: MOVED ONCE MORE on 2026-10-03 by the GitHub stateless-token fix, and the
+#: argument is the measurement this constant's history always asks for:
+#:
+#: 11. **The MODULE change moved NOTHING, measured before the corpus grew.** The
+#:     ``github-token`` rule gains the stateless ``ghs_`` arm and the ``ghr_``
+#:     prefix (see its comment in ``redaction_shapes``), and the 522 rows the
+#:     constant above covered were graded field for field (masked text, label,
+#:     value, window, ``complete``, ``exposed``) under ``origin/main``'s module
+#:     and this one: **zero moved** — that corpus under THIS module reproduces
+#:     ``46a1a6fa…`` byte for byte — so the widening is invisible to every row
+#:     that already existed, which is the whole safety claim of the fix.
+#:
+#: 12. **The corpus change is FIVE additions, and they are the whole of the
+#:     move.** THREE positives: the stateless installation token itself, the same
+#:     value under a credential name (the env-dump spelling — the assignment
+#:     grammar refuses a dotted value by design, so this rule is what has to
+#:     catch it), and a ``ghr_`` refresh token, a prefix the family had never
+#:     covered. TWO negatives: dotted artifact names that open with the ``ghs_``
+#:     prefix and stay readable because of the new arm's 20-character segment
+#:     floor — the over-match boundary as rows rather than a paragraph.
+#:     ``POSITIVE_CASES`` moves 310 -> 313 and ``NEGATIVE_CASES`` 212 -> 214;
+#:     ``TYPE_ANNOTATION_POSITIVES`` and ``TYPE_ANNOTATION_NEGATIVES`` are
+#:     unchanged at 34 and 20. Counts measured from the assembled tuples.
+#:
+#:     Under ``origin/main``'s module the three added positives come back
+#:     RELEASED whole with no hit — the stateless token was readable in every one
+#:     of the added spellings, which is the live gap this change closes; under
+#:     this module they are masked whole and contained (``complete`` true,
+#:     ``exposed`` false).
+_CORPUS_GRADING_DIGEST = "515f0e918997e14c9f12710962a6f080d2d81952e02659b6b7277bd2eba3c929"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
