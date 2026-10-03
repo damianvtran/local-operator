@@ -1,7 +1,9 @@
 # Design: non-blocking, queued, timeout-bounded `ask`
 
 Status: PROPOSED — gate for the implementation PRs. Base: `origin/main` @ `302a061e5`
-(v0.64.10). Author: architect, 2026-09-30.
+(v0.64.10). Author: architect, 2026-09-30. **AMENDED 2026-10-03 — see §10**
+(in-flight answer revision, #1936): §10 is binding on §2.2's event table, §2.4, the §4
+ops line and §5's copy contract; read it beside those sections.
 
 **Provenance.** Every `file:line` is against `origin/main` @ `302a061e5` (verified with
 `git show`/`git grep`) unless tagged **(scout)** = taken from a scout report on the stale
@@ -367,6 +369,11 @@ desktop: POST /v1/desktop/sessions/{id}/answers  body gains optional
          owner epochs); GET /v1/desktop/asks (aggregate, index-backed);
 relay:   GET /api/asks (aggregate) ; command op ask_respond via existing /command
 ```
+
+> **Amended 2026-10-03 (§10).** The ops line gains `ask_revise{ask_id, answers, by?}` and
+> the desktop answers body gains `revise` (with `ask_id`+`answers`); §10 carries the
+> binding text for the revision window, the `revised` event, the refusal copy and the
+> kill-switch behaviour.
 
 - **Queue is separate from approvals.** `pending_gate`/`pending`/`pending_count` keep meaning
   *blocking* things; `pending_count` stays the approval queue length (test comment,
@@ -878,3 +885,100 @@ fetch of main — re-grep before editing.
    benchmark concept); `harness/comms.py` `"ask"` (subagent→parent comms kind).
 8. `AGENTS.md` (core): add a short "Ask queue" pointer to this note under the relevant
    section, and the two new capture scripts; `docs/design/ask-nonblocking.md` is this file.
+
+---
+
+## 10. Amendment (2026-10-03): in-flight answer revision, bounded by delivery (#1936)
+
+Status: AMENDMENT to the §4 frozen contract — a wire change made HERE and reviewed like
+code, per the rule above. Drafted from the ask lane's contract answer (2026-10-03) against
+`origin/main` @ `78117f97b`. It is a **queued-arm behaviour and takes no new flag**: it
+rides the flip (#1941), which is what makes the queued arm the default (§6). The code
+change follows this merged text; it cuts only after the flip.
+
+**What this amends.** §2.2's event table gains `revised`; §2.4 gains the revision path and
+its refusals; §4's ops line gains `ask_revise` and the desktop body gains `revise`; §5's
+copy contract gains the delivered refusal. The fold's precedence table, the delivery rules
+and §3's timeout policy are unchanged, and `asks/policy.py`'s terminality horizons
+(`LATE_WINDOW_S`, the late/expired bounds) are untouched: **this amendment adds no time
+bound of its own — its only bound is DELIVERY.**
+
+**The problem.** A multi-question ask answers forward-only: once a response is recorded, a
+changed answer is refused — `already answered by <surface>` on the whole-ask path, and
+`answer_one`'s "a repeat tap is a retry, not a change of mind" on the legacy bridge — even
+while the agent has NOT been handed the answers. A mis-entered answer therefore costs an
+interrupt and a re-ask (#1936). The amendment admits exactly the missing case: a revision
+between the answer's recording and its delivery.
+
+- **The intent is explicit; value equality is never the marker.** A revision is its own op:
+  `ask_revise {ask_id, answers{qid:[str]}, by?}` on the command wire (registered where
+  `ask_respond` lives — server dispatch, the TUI handle, `attach_client`, the relay op
+  list, `mobile/types.py` validation), and `revise` on the desktop answers body
+  (`POST …/answers` with `ask_id`+`answers`). `AskQueue.revise` / `Session.revise_ask`
+  ride `respond`'s atomic whole-ask path — the same complete-map rule (an empty list is
+  how "no answer" is said), the same secret-cell rule (`[<key>]` only), one `flock`'d
+  append, one reconcile — and differ in exactly what they supersede. No layer may infer a
+  revision by comparing values: equal values are not a retry marker, and different values
+  are not a revision. `respond` and `answer_one` keep their refusal SENTENCES
+  byte-for-byte for the retry case, and their docstrings gain the one sentence that names
+  the sanctioned exception — so the rule ("a repeat tap is a retry") and the exception are
+  both written where taps land. Additive only, no `PROTOCOL_VERSION` bump: an old
+  registrant answers `unknown op` (the client says the runtime predates queued asks), and
+  an old client never sends it.
+
+- **The window is bounded by DELIVERY, not by status alone.** A revision is accepted iff,
+  when it is serialised against the log, the fold shows an answer not yet delivered —
+  status `answered` or `late` with `delivered: false` — and it comes from the surface that
+  owns `answered_by`. Successive revisions are allowed while that window is open; the
+  latest accepted one is effective. Against an ask with no recorded answer yet
+  (`open`/`timed_out`) the intent degrades to the plain first answer: one `answered`
+  event, no `revised` — the `revised` event exists only to supersede.
+
+- **Single-winner arbitration is preserved in full.** A revision does not open a second
+  winner: one from any surface other than `answered_by`'s is refused with the same
+  sentence a competing answer gets — `already answered by <surface>` — so a cross-surface
+  race reads the same way it does today.
+
+- **Refusals, one sentence per state (from `asks/render.py`, so every surface shows the
+  same words).** In-window revision → accepted; **once the response row exists →
+  `already delivered — send a new message`** — no silent overwrite, ever: the row pins
+  what the model was told. `declined`/`dismissed` → "you already declined this.";
+  `expired` → "this ask expired 7 days ago — ask again if it is still needed."; a
+  revision from a non-owner surface → "already answered by <surface>." The repeat tap on
+  the current gate keeps today's exact wording.
+
+- **The log records an EVENT, not a replacement.** New kind `revised`:
+  `{v, ask_id, at, by:{surface}, answers}` plus the `at` of the write it supersedes,
+  appended by the same atomic write path as `answered` (the §2.2 cold-append rule applies
+  unchanged: any process may append under `flock`, non-secret only). The fold reads
+  status, `answered_at` and `answered_by` from the first `answered` (unchanged), and the
+  effective `answers` from the LATEST `revised` event when one exists. Delivery, row ids
+  and the `delivered` flag are untouched: exactly one `ask-response-<ask_id>` row,
+  carrying the effective map — a revision can never add a second row or buy a second
+  turn. **Ordering invariant (what the code PR must show):** acceptance, the append and
+  the row's content can never disagree — an accepted revision is what delivery carries,
+  and a revision that lost the race to an existing row is refused with the delivered
+  sentence; never accepted-and-then-dropped.
+
+- **Under the kill switch** (`LOP_ASK_NONBLOCKING=0`): the old picker submits once, so a
+  revision never arises for a real client — and a stray `ask_revise` must be answered in
+  words by the same "a runtime without the queue refuses in words" path the other queued
+  ops use. Never a traceback, never a silent success, never an assumption that the queued
+  machinery is live.
+
+- **Surfaces** (the code PR after the flip carries them, with their own design/UX rounds):
+  the desktop question-dock and the mobile picker gain a **change** affordance on an
+  answered-but-unsettled question (`delivered: false`); a revision sends the WHOLE ask map
+  atomically — the same payload as the initial response, never a per-question amend post;
+  the settled-refusal sentences above render honestly, because that path is reachable and
+  a silent no-op would be the worse failure.
+
+- **Evidence.** The one-way refusal today is pinned by
+  `tests/unit/asks/test_queue.py:212` and a dedicated repro was written and SAVED (two
+  questions; the answer recorded; a changed map refused while `delivered: false`).
+  **Running it was deferred under host pressure** (free pages fell to ≈145 MB; no-builds
+  policy) — the repro file and its exact bounded run command are in the PR thread, and
+  the code PR re-derives it against this text with the §7-style matrix: revision accepted
+  before delivery; refused after delivery with the new copy; non-owner surface refused;
+  second `respond` and repeated `answer_one` byte-unchanged; the log shows
+  `answered`+`revised` with ONE response row; kill-switch refusal without a queue.
