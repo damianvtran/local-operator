@@ -201,6 +201,51 @@ def test_delivered_needs_a_row_that_exists_not_a_status():
     assert delivered["delivered"] is True
 
 
+def _revised(ask_id: str = "a-1", *, at: int, answers: dict[str, list[str]] | None = None):
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_REVISED,
+        "ask_id": ask_id,
+        "at": at,
+        "by": {"surface": "desktop"},
+        "answers": answers if answers is not None else {"q": ["no"]},
+        "supersedes": at - 1,
+    }
+
+
+def test_the_latest_revision_is_effective_and_the_first_answer_keeps_its_stamp():
+    """Design §10: status, ``answered_at`` and ``answered_by`` come from the FIRST
+    ``answered``; the effective ``answers`` come from the LATEST ``revised``.
+
+    Three writes, one ask: the revision does not move the moment of answering, who
+    answered, or the status — only what the agent will be told.
+    """
+    at = BASE + 100
+    events = [
+        _queued(at=BASE, timeout_s=3600),
+        _answered(at=at),
+        _revised(at=at + 10, answers={"q": ["yes"]}),
+        _revised(at=at + 20, answers={"q": ["maybe"]}),
+    ]
+    record = store.fold(events, at + 30)[0]
+    assert record["answers"] == {"q": ["maybe"]}
+    assert record["status"] == store.STATUS_ANSWERED
+    assert record["answered_at"] == at
+    assert record["answered_by"] == {"surface": "terminal"}
+    # The write it supersedes is published so the revision path can name it.
+    assert record["revised_at"] == at + 20
+
+
+def test_a_revision_without_an_answered_row_does_not_invent_an_answer():
+    """A ``revised`` row exists ONLY to supersede: with nothing to supersede (a
+    truncated log that lost the ``answered`` row) the ask stays as it was."""
+    events = [_queued(at=BASE, timeout_s=3600), _revised(at=BASE + 100)]
+    record = store.fold(events, BASE + 200)[0]
+    assert record["status"] == store.STATUS_OPEN
+    assert "answers" not in record
+    assert "revised_at" not in record
+
+
 def test_expected_rows_are_per_kind_and_late_needs_the_response_alone():
     """A `late` ask owes ONE row, and that is the level-triggered rule.
 

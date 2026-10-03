@@ -4952,6 +4952,27 @@ class ServingSessionHandle(SessionHandle):
         await self._session.reconcile_asks()
         return "answered"
 
+    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+        """REVISE a queued ask's recorded answer before it is delivered (design §10).
+
+        The same op family, the same atomic whole-ask body and the same awaited
+        reconcile as :meth:`ask_respond`: what changes is INTENT, not shape. This
+        is the sanctioned replacement of an answer the log already holds, so it
+        supersedes while the response row is absent and refuses once it exists —
+        where a second ``ask_respond`` refuses on the first recorded answer. The
+        caller must say REVISE in those words; no layer infers it from comparing
+        values (design §10).
+        """
+        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the revision was refused"))
+        # Awaited for the same reason ``ask_respond`` awaits it: the caller's
+        # word must be a claim about a row that EXISTS.
+        await self._session.reconcile_asks()
+        # The revision degrades to a first answer when the ask had none recorded;
+        # saying "revised" there would be the one place this path lied.
+        return "revised" if outcome.get("revised") else "answered"
+
     @_on_session_loop
     async def ask_decline(self, ask_id: str, by: str = "") -> str:
         """Decline a queued ask: explicit "no answer, decide yourself" (§2.4)."""

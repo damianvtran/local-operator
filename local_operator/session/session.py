@@ -8873,6 +8873,10 @@ class Session:
         durable, replayed to the provider and shown on every card. The value
         therefore never reaches ``asks.jsonl``, the index, the transcript, an
         event or a notification, which is what the sentinel-grep test asserts.
+
+        The one sanctioned way to CHANGE a recorded answer is :meth:`revise_ask`
+        (design §10, #1936) — a plain repeat of this call keeps its refusal,
+        because a repeat tap is a retry, not a change of mind.
         """
         queue = self.ask_queue()
         if queue is None:
@@ -8899,6 +8903,55 @@ class Session:
                 )
             )
         return queue.respond(ask_id, merged, by=by)
+
+    def revise_ask(
+        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+    ) -> dict[str, Any]:
+        """Revise a queued ask's recorded answer while it is still undelivered.
+
+        The sanctioned exception to the one-way rule (design §10, #1936), and the
+        only path allowed to change an answer the log already holds — a plain
+        second :meth:`respond_ask` still refuses, in the same sentence as before.
+        Everything else about this call is :meth:`respond_ask`'s, including the
+        SECRET hop and the order it runs in: the value reaches the session's
+        memory-only store BEFORE anything is appended, and the log carries the KEY
+        NAME only. What differs is what it supersedes, and the bound on that —
+        DELIVERY — lives in :meth:`AskQueue.revise`, on the response row rather
+        than the sticky ``delivered`` hint.
+
+        NO state-table refusal is consulted here, deliberately: for an answered
+        ask the state table says "already answered by <surface>", and that is
+        exactly the sentence a revision must NOT use — the revision path has its
+        own line for the delivered case. The queue decides, so the copy cannot
+        drift between this hop and the wire (design §10, "one sentence is
+        op-qualified").
+
+        Under the kill switch this refuses in words exactly like
+        :meth:`respond_ask`: with no queue there is nothing to revise, and the
+        caller hears that rather than a traceback or a silent success.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
+        if any(q.get("secret") for q in (record.get("questions") or ())):
+            # The same hop and the same order as ``respond_ask``: the value is
+            # stored, the row keeps the key name, and a refused store is reported
+            # as NOT PROVIDED rather than as a leaked value.
+            from local_operator.asks.render import apply_secret_answers
+
+            merged.update(
+                apply_secret_answers(
+                    record.get("questions") or (),
+                    answers,
+                    variables=self._variables,
+                    journal_credential=self.journal_credential_change,
+                )
+            )
+        return queue.revise(ask_id, merged, by=by)
 
     def answer_ask_question(
         self,

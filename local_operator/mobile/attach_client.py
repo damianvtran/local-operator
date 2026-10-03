@@ -2419,6 +2419,18 @@ class AttachClient:
             fields["by"] = by
         return await self._request("ask_respond", **fields)
 
+    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
+        """REVISE a queued ask's recorded answer before it is delivered (§10).
+
+        Same body as :meth:`ask_respond` and deliberately a separate frame: the
+        intent has to be explicit on the wire, because the far side must never
+        read value equality as a marker (design §10, #1936).
+        """
+        fields: dict[str, Any] = {"ask_id": ask_id, "answers": answers}
+        if by:
+            fields["by"] = by
+        return await self._request("ask_revise", **fields)
+
     async def ask_decline(self, ask_id: str, *, by: str = "") -> str:
         """Decline a queued ask: explicit "no answer, decide yourself"."""
         fields: dict[str, Any] = {"ask_id": ask_id}

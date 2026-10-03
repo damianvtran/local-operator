@@ -209,6 +209,16 @@ def timeout_text(
     return text
 
 
+#: THE DELIVERED REFUSAL (design §10, #1936). Deliberately NOT a row of
+#: :func:`refusal_copy`'s state table: that table answers "why is this ask not
+#: answerable here", and the state this sentence needs — "answered, and the
+#: response row already exists" — is the same ``answered`` state a plain repeat
+#: ``respond`` must keep reading as "already answered by <surface>". The revision
+#: path is the only caller that may say it, so the revision path emits it (see
+#: ``AskQueue.revise``): the sentence belongs to the OP, not to the state table.
+REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
+
+
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
 
