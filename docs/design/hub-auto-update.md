@@ -1419,6 +1419,8 @@ Append a section (≈ 260 tokens):
 - Best practice: pull once, edit freely, let updates flow. To drop a section for good, delete it — do not blank it. Publish after an update, not before.
 ```
 
+> Correction (2026-10-03): the sketch above is shorthand, corrected when it landed as a guide (PR #1943) — the shipped form is `agents pull --id <id>` (`--id` is required), `--check` covers hub rows only (the starter arm has no report-only mode), `--replace` needs `--yes`, and the push-side merge is *not* shipped: a publish is an upload (`name_taken` on an org name collision; `agents push --id` is the explicit overwrite).
+
 **`guides/teams/GUIDE.md`** — description (measured 127):
 `Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers org pull/push/update.`
 Append (≈ 200 tokens): teams are organization-only on the hub (`teams push|pull --org`); `teams sync` checks/merges hub changes into pulled teams (description, manager, roster, collaboration brief, project brief; the local **name** never changes); roster merge is per slot (added / removed / count) and a slot you removed stays removed; roles the roster names but you lack produce a `missing-role` warning, not a failure; teams pulled before this feature are unlinked until `teams link`; FAQs mirrored from the agents guide. Also fix the existing CLI block in the guide (`local-operator teams list …`, `guides/teams/GUIDE.md` CLI section) to add `teams sync`.
