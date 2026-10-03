@@ -159,11 +159,21 @@ export function AsksSheet({
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
 	   the defect, even where their populations legitimately differ (this one
-	   spans every conversation, the bar is this session's). */
-	const outstandingQuestions = outstandingAsks(rows).reduce(
-		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
-		0,
-	);
+	   spans every conversation, the bar is this session's).
+
+	   DEAD ROWS' QUESTIONS ARE NOT WAITING ON ANYONE (agent review round 2,
+	   MINOR-3). A dead conversation's ask still carries `open`, so it enters
+	   `outstandingAsks` — but every op on it is refused with `ask_session_gone`,
+	   and a count that promises answers the backend will refuse is the same class
+	   of claim this whole lane exists to remove. It is the sheet's own rule
+	   ("no contradiction one element apart") applied to the title, one element
+	   above the strip that already honours it. */
+	const outstandingQuestions = outstandingAsks(rows)
+		.filter((row) => !isDeadConversation(row))
+		.reduce(
+			(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
+			0,
+		);
 	const title =
 		outstandingQuestions > 0
 			? `asks · ${outstandingQuestions} question${outstandingQuestions === 1 ? "" : "s"}`
