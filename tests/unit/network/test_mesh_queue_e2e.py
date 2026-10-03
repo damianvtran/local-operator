@@ -132,8 +132,14 @@ async def test_the_queued_move_pauses_at_the_boundary_carries_the_wake_and_lets_
 
     lease = acquire_session_lease(session_dir)
     # The supervisor installer shells out to launchctl/systemd; a test must never
-    # install a unit. The promote still takes the §5.3 `ensure` step on this stub.
-    monkeypatch.setattr(carry, "ensure_supervisor", lambda root: "stubbed")
+    # install a unit. The promote still takes the §5.3 `ensure` step on this stub,
+    # which answers the verify shape (`running`): the carried-wake receipt half is
+    # exercised by ``test_move_carry_supervisor`` on a fake installer instead.
+    monkeypatch.setattr(
+        carry,
+        "ensure_supervisor",
+        lambda root: {"installed": True, "running": True, "detail": "stubbed"},
+    )
     carry.rebuild_indexes(server_a.root, SESSION)
     from local_operator.monitors import state as monitor_state
 

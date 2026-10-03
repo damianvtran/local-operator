@@ -339,8 +339,8 @@ def prune_after_commit(config_dir: Path, session_id: str) -> dict[str, Any]:
     return report
 
 
-def ensure_supervisor(config_dir: Path) -> str:
-    """Install the wake supervisor on demand, when the rebuilt index has rows.
+def ensure_supervisor(config_dir: Path) -> dict[str, Any]:
+    """Install the wake supervisor on demand, and VERIFY it is running.
 
     The §5.3 ``ensure`` step: the destination must be able to FIRE the carried
     rows, and the supervisor is the process that fires wakes for a session with
@@ -348,14 +348,117 @@ def ensure_supervisor(config_dir: Path) -> str:
     effort, never raises, called only when something is scheduled): the
     installer is idempotent and the relay must not pay its cost for the
     overwhelming majority of sessions that have no wakes at all.
+
+    THE VERIFY HALF IS THE POINT, and the carried-wake drill is why (a real
+    two-device move carried a daily wake whose due time passed with the
+    destination's supervisor loaded-but-stopped; nothing said so). The
+    installer's ``installed`` means "a supervisor is now in place" — it may
+    have started one a moment ago, and a process can be gone again by the time
+    the move answers. So the operative fact this function reports is
+    ``running``, read back from the same state probe ``lop wake status``
+    uses; a caller that gets ``running=False`` must SAY so rather than move on.
+
+    Returns ``{"installed": bool, "running": bool, "detail": str}``:
+    ``installed`` is the installer's answer, ``running`` is the verified
+    liveness for THIS store, and ``detail`` names why when it is not running.
+    Never raises, and never lets the verification failure pass in silence
+    either: both halves report through the outcome.
     """
     try:
-        from local_operator.wakes.install import ensure_supervisor_installed
+        from local_operator.wakes.install import (
+            ensure_supervisor_installed,
+            supervisor_state,
+        )
 
         outcome = ensure_supervisor_installed(Path(config_dir))
-        if not outcome.installed:
-            return str(outcome.reason or "not installed")
-        return "installed"
     except Exception as exc:  # noqa: BLE001 — a supervisor is not worth a failed move
         logger.warning("carry: could not ensure the wake supervisor", exc_info=True)
-        return f"failed: {exc}"
+        return {"installed": False, "running": False, "detail": f"failed: {exc}"}
+    try:
+        state = supervisor_state(Path(config_dir))
+        running = bool(state.running)
+        detail = str(state.detail or "") or str(outcome.reason or "")
+    except Exception as exc:  # noqa: BLE001 — an unverifiable supervisor is not a running one
+        logger.warning("carry: could not verify the wake supervisor", exc_info=True)
+        return {"installed": bool(outcome.installed), "running": False, "detail": f"failed: {exc}"}
+    return {"installed": bool(outcome.installed), "running": running, "detail": detail}
+
+
+def supervisor_notice(wakes: int, device: str) -> str:
+    """The LOUD fallback sentence for a move that carried wakes it cannot fire.
+
+    THE COPY IS A CONTRACT: the carried-wake drill requires exactly this sentence
+    on the receipt — "N wakes carried; supervisor not running on <device> — run
+    `lop wake install`" — because it is the one line that turns a silent stopped
+    supervisor into a next step. Named here so the exact wording exists once and
+    is pinned by tests, not concatenated at two call sites.
+    """
+    return f"{wakes} wakes carried; supervisor not running on " f"{device} — run `lop wake install`"
+
+
+def monitors_notice(count: int) -> str:
+    """The up-front monitors statement for a move whose origin holds monitors.
+
+    One sentence, and it says exactly what does not travel: the monitor's STATE
+    (counters/snapshots are device-local observations), not the monitor itself —
+    the spec rows ride the transcript and the destination rebuilds its index at
+    promote, but the first check there re-baselines. The drill's finding was that
+    nothing in the product ever said so; this is that line.
+    """
+    return (
+        f"{count} monitors here will not travel with their state — "
+        "the destination re-baselines them"
+    )
+
+
+def move_carry_block(config_dir: Path, wakes: int, device: str) -> dict[str, Any]:
+    """The receipt's scheduled-state block for a promote that carried ``wakes``.
+
+    THE §5.3 ``ensure`` STEP'S WHOLE OUTCOME, in one function, so the one copy of
+    the loud fallback sentence has a single definition and the promote only has to
+    report it: install/start the supervisor, VERIFY it is running, and when it is
+    not — including an ensure that answered a shape this module did not expect
+    (measured 2026-10-03: a stub on the old string shape raised from inside the
+    fallback logging and failed a whole move) — say so in the exact sentence the
+    drill lane requires. Never raises: a promote must not fail here, and there is
+    no path through this function that ends in silence. The WHY stays in this
+    device's relay log; the one actionable line on the receipt is the notice.
+    """
+    running = False
+    detail: Any = None
+    try:
+        supervision = ensure_supervisor(Path(config_dir))
+        running = bool(supervision["running"])
+        detail = supervision.get("detail")
+    except Exception:  # noqa: BLE001 — the sentence below must still be said
+        logger.warning("carry: could not ensure the wake supervisor", exc_info=True)
+    block: dict[str, Any] = {"wakes": wakes, "supervisor": "running" if running else "not running"}
+    if not running:
+        block["notice"] = supervisor_notice(wakes, device)
+        logger.warning(
+            "carry: wake supervisor not running for %s after %d carried wake(s): %s",
+            config_dir,
+            wakes,
+            detail or "ensure failed",
+        )
+    return block
+
+
+def monitor_count(config_dir: Path, session_id: str) -> int:
+    """How many monitor rows THIS device holds for a session, or 0.
+
+    The "origin can cheaply see its own monitors at move time" half of the
+    move's monitors notice: one small file read
+    (``<config>/monitors/<sid>.json`` — the same index ``lop monitor status``
+    scans). Best effort by design — a count is not worth a failed move, so an
+    unreadable or absent index answers 0.
+    """
+    try:
+        from local_operator.monitors import store as monitor_store
+
+        entry = monitor_store.read_entry(Path(config_dir), session_id)
+    except Exception:  # noqa: BLE001 — a count is not worth a failed move
+        logger.warning("carry: could not read the monitor index for %s", session_id, exc_info=True)
+        return 0
+    rows = (entry or {}).get("monitors")
+    return len(rows) if isinstance(rows, list) else 0

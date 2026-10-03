@@ -5234,6 +5234,30 @@ def sessions_resume_command(args: argparse.Namespace) -> int:
     return 0 if ok == len(outcomes) else 1
 
 
+def _carry_lines(result: dict[str, Any]) -> list[str]:
+    """The scheduled-state lines a move reports when it carried any (§ ``MoveCarryBlock``).
+
+    Two sentences and no more, because each is a fact about a different half: the
+    wake ``notice`` is the LOUD fallback — wakes arrived and the supervisor that
+    would fire them is not running, so the line names the one command that fixes it
+    (`lop wake install` on the named device); the monitor line is the up-front
+    statement that a monitor's state does not travel (its observations are
+    device-local; the destination re-baselines them). Absent keys print nothing: a
+    move that carried nothing new parses and prints exactly as before.
+    """
+    carry = result.get("carry")
+    if not isinstance(carry, dict):
+        return []
+    lines: list[str] = []
+    notice = carry.get("notice")
+    if isinstance(notice, str) and notice:
+        lines.append(notice)
+    monitors_notice = carry.get("monitors_notice")
+    if isinstance(monitors_notice, str) and monitors_notice:
+        lines.append(monitors_notice)
+    return lines
+
+
 def _sessions_move_words(
     result: dict[str, Any], *, session_id: str, to: str, engage_on_arrival: bool = False
 ) -> list[str]:
@@ -5344,6 +5368,7 @@ def _sessions_move_words(
         return [
             f"Copied {session_id} to {target} as {new_id}.",
             f"The original is still running on {source} and the two are separate now.",
+            *_carry_lines(result),
             *engage_lines,
         ]
     if result.get("recovered"):
@@ -5351,9 +5376,14 @@ def _sessions_move_words(
             f"Recovered {session_id} as {new_id} from the copy last synced here.",
             "It is a new conversation: work done on the device that held it since that "
             "copy is not in it.",
+            *_carry_lines(result),
             *engage_lines,
         ]
-    return [f"Moved {session_id} to {target} ({result.get('phase')}).", *engage_lines]
+    return [
+        f"Moved {session_id} to {target} ({result.get('phase')}).",
+        *_carry_lines(result),
+        *engage_lines,
+    ]
 
 
 def sessions_move_command(args: argparse.Namespace) -> int:

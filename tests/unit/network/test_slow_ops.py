@@ -506,12 +506,15 @@ def test_the_session_move_contract_is_frozen() -> None:
 
     ``engagement`` was the first member added since the freeze (``engage_on_arrival``,
     which the desktop never sets); ``queue`` is the second (``--queue``, the queued
-    move of §5.4). BOTH are ``NotRequired`` — so the document a reader parses is
-    byte-identical for every move that did not ask for them, and each addition is
-    additive in the strict sense: no existing key changed spelling, type or meaning,
-    and a move that was refused is unaffected. Widening the phase list would NOT have
-    been additive — arriving live is not a phase of the transfer, and a queued move's
-    phases are words about the QUEUE — which is why ``MOVE_RESULT_PHASES`` and
+    move of §5.4); ``carry`` is the third (the carried-wake drill's remedy: what the
+    promote carried and whether the supervisor that must fire it is running — made
+    visible on the receipt). ALL are
+    ``NotRequired`` — so the document a reader parses is byte-identical for every
+    move that did not ask for them, and each addition is additive in the strict
+    sense: no existing key changed spelling, type or meaning, and a move that was
+    refused is unaffected. Widening the phase list would NOT have been additive —
+    arriving live is not a phase of the transfer, and a queued move's phases are
+    words about the QUEUE — which is why ``MOVE_RESULT_PHASES`` and
     ``MOVE_OPENABLE_PHASES`` are asserted unchanged right here, and the queue's own
     sequence is asserted separately, additively.
     """
@@ -530,6 +533,7 @@ def test_the_session_move_contract_is_frozen() -> None:
         "phases",
         "engagement",
         "queue",
+        "carry",
     }
     # The queue block's own shape: a projection of the source's record, so a
     # reader tolerates missing keys (``total=False``) rather than re-validating
@@ -544,6 +548,18 @@ def test_the_session_move_contract_is_frozen() -> None:
         "detail",
         "code",
         "updated_at",
+    }
+    # The carry block's own shape: two halves, one per end of the move (the
+    # destination's wake/supervisor half rides the ``done`` frame; the source's
+    # monitors half is added where the count was read). ``total=False`` for the
+    # same reason as the queue's: an older peer sends none of it, and a move that
+    # carried nothing must print exactly the document it always did.
+    assert set(mobility.MoveCarryBlock.__annotations__) == {
+        "wakes",
+        "monitors",
+        "supervisor",
+        "notice",
+        "monitors_notice",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

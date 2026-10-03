@@ -52,7 +52,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     from local_operator.network.relay import PeerLink, RelayServer
@@ -386,6 +386,44 @@ class MoveQueueBlock(TypedDict, total=False):
     updated_at: float
 
 
+class MoveCarryBlock(TypedDict, total=False):
+    """What a finished move knows about the session's scheduled state.
+
+    Assembled by BOTH ends and merged by the source, because each half is knowable
+    only where it is produced:
+
+    - the DESTINATION contributes ``wakes``/``supervisor``/``notice`` from the
+      promote-time rebuild and the §5.3 ``ensure`` step — including the LOUD
+      fallback (``notice``) when the supervisor that must fire those wakes is not
+      actually running, which is the one thing the carried-wake drill found nobody
+      was ever told;
+    - the SOURCE contributes ``monitors``/``monitors_notice`` from its own count,
+      read BEFORE the commit deletes the index it lives in — the up-front statement
+      that a monitor's OBSERVATIONS (counters/snapshots) are device-local and the
+      destination re-baselines them (the specs themselves ride the transcript;
+      what does not travel is the state).
+
+    ``total=False``: an older peer sends none of these, and this is a statement
+    about optional state rather than a schema a reader validates. ``notice`` is
+    absent when there is nothing loud to say, never null.
+    """
+
+    wakes: int
+    monitors: int
+    #: ``"running"`` when the destination VERIFIED a live supervisor for the
+    #: carried wakes; ``"not running"`` otherwise — the why stays in the
+    #: destination's relay log, and the loud, actionable half is ``notice``.
+    supervisor: str
+    #: The loud fallback, present only when wakes were carried and the
+    #: destination's supervisor is not running: "N wakes carried; supervisor not
+    #: running on <device> — run `lop wake install`".
+    notice: str
+    #: The monitors statement, present only when the source held monitors for the
+    #: session: "N monitors here will not travel with their state — the destination
+    #: re-baselines them".
+    monitors_notice: str
+
+
 class SessionMoveResult(TypedDict):
     """``lop sessions move --json`` on success (exit status 0).
 
@@ -421,6 +459,15 @@ class SessionMoveResult(TypedDict):
     #: readers parse the identical document (``test_slow_ops`` pins the set and
     #: was updated in the same commit that added this key).
     queue: NotRequired[MoveQueueBlock]
+    #: Present ONLY when the move carried scheduled state worth reporting: the two
+    #: scheduled-state halves (see :class:`MoveCarryBlock`). The third addition to
+    #: this shape since the contract was frozen, and additive like the others — the
+    #: document a reader parses is unchanged for every move that carried nothing.
+    #: The WAKES half is the carried-wake drill's remedy: a schedule that arrives
+    #: is not a schedule that fires, and the receipt now says so when the
+    #: destination's supervisor is not running (``notice``), or confirms the
+    #: supervisor it relies on (``supervisor: "running"``).
+    carry: NotRequired[MoveCarryBlock]
 
 
 class MoveEngagement(TypedDict):
@@ -485,6 +532,7 @@ class _Progress:
         self._phases: dict[str, list[MovePhaseStamp]] = {}
         self._events: dict[str, threading.Event] = {}
         self._refusals: dict[str, tuple[str, str, str]] = {}
+        self._carry: dict[str, dict[str, Any]] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
         with self._lock:
@@ -542,6 +590,25 @@ class _Progress:
             return None
         return found[0], found[1]
 
+    def note_carry(self, session_id: str, block: dict[str, Any]) -> None:
+        """Record the DESTINATION's scheduled-state block for a move this device invited.
+
+        The carried-wake drill's channel, and deliberately the SAME mechanism as
+        :meth:`note_refusal`: the destination is the only device that can see its own
+        supervisor, and the ``done`` frame is the one channel that carries the fact
+        back. Unlike an engage outcome this is knowable BEFORE ``done`` is sent (it
+        is part of the promote itself), so it crosses with the completion signal
+        rather than after it.
+        """
+        with self._lock:
+            self._carry[session_id] = dict(block)
+
+    def carry(self, session_id: str) -> dict[str, Any] | None:
+        """The recorded carry block for ``session_id``, or ``None``."""
+        with self._lock:
+            found = self._carry.get(session_id)
+        return dict(found) if found is not None else None
+
     def forget(self, session_id: str) -> None:
         """Drop EVERYTHING this relay holds in memory for ``session_id``.
 
@@ -559,6 +626,10 @@ class _Progress:
         with self._lock:
             self._phases.pop(session_id, None)
             self._refusals.pop(session_id, None)
+            # A carry block is about ONE move for the same reason the events are:
+            # it describes the supervisor state AFTER one promote, and answering a
+            # later move with it would be a claim about a stale adoption.
+            self._carry.pop(session_id, None)
             prefix = self._event_key(session_id, "")
             for key in [item for item in self._events if item.startswith(prefix)]:
                 del self._events[key]
@@ -1597,7 +1668,7 @@ def _destination_move(
             "",
         )
     try:
-        promoted = _promote(server, staging, target_id)
+        promote_outcome = _promote(server, staging, target_id)
     finally:
         # THE PROMOTE IS THE POINT OF NO RETURN. However it exits — including a raise
         # between the rename and the cleanup below — the id is on this device now, so an
@@ -1607,7 +1678,7 @@ def _destination_move(
         # present (settled) or absent (and then the helper returns without touching it).
         if not keep:
             settle_promoted_handoff(server.root, session_id)
-    if not promoted:
+    if not promote_outcome.ok:
         clear_handoff_entry(server.root, session_id)
         return (
             None,
@@ -1621,6 +1692,7 @@ def _destination_move(
             ),
             "",
         )
+    carry_block = promote_outcome.carry
     note("committed")
     if not keep:
         clear_handoff_entry(server.root, session_id)
@@ -1629,14 +1701,20 @@ def _destination_move(
         # the source gets: nothing on that device changed, so it has nothing to
         # wait for except this frame. Best effort by contract (§6.3 step 18) — a
         # move that stops at ``committed`` is complete from the user's side.
-        transport.ask(
-            {
-                "op": "net_session_move",
-                "phase": "done",
-                "session_id": session_id,
-                "new_session_id": target_id,
-            }
-        )
+        done_frame: dict[str, Any] = {
+            "op": "net_session_move",
+            "phase": "done",
+            "session_id": session_id,
+            "new_session_id": target_id,
+        }
+        if carry_block is not None:
+            # THE §5.3 ``ensure`` OUTCOME RIDES THE COMPLETION FRAME. It is knowable
+            # HERE, as part of the promote itself — unlike the engage, which runs
+            # after this frame and deliberately does not cross — so the inviter's
+            # receipt can report what the destination's supervisor state means for
+            # the wakes that just arrived (see ``MoveCarryBlock``).
+            done_frame["carry"] = carry_block
+        transport.ask(done_frame)
     except Moved:
         logger.debug("mobility: %s did not acknowledge the handoff", session_id)
     note("done")
@@ -1660,6 +1738,8 @@ def _destination_move(
         "phase": "done",
         "phases": phases,
     }
+    if carry_block is not None:
+        receipt["carry"] = carry_block
     if engagement is not None:
         receipt["engagement"] = engagement
     return (
@@ -1805,7 +1885,8 @@ def _finish_from_tombstone(
             ),
             "",
         )
-    if not _promote(server, staging, session_id):
+    promote_outcome = _promote(server, staging, session_id)
+    if not promote_outcome.ok:
         return (
             None,
             _move_refusal(
@@ -1817,6 +1898,7 @@ def _finish_from_tombstone(
             ),
             "",
         )
+    carry_block = promote_outcome.carry
     clear_handoff_entry(server.root, session_id)
     progress.note(session_id, "committed")
     _audit(server, AUDIT_DONE, session_id, owner_device, resumed=True)
@@ -1825,23 +1907,46 @@ def _finish_from_tombstone(
         {"phase": "handing_off", "at": float(ready.get("at") or time.time())},
         {"phase": "committed", "at": time.time()},
     ]
+    result_doc: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "new_session_id": session_id,
+        "mode": "move",
+        "from_device": _device_block(server, owner_device),
+        "to_device": _own_block(server),
+        "phase": "committed",
+        "phases": phases,
+    }
+    if carry_block is not None:
+        # Reported on the receipt this device answers with — and for a RECALL that
+        # receipt is the inviter's own (``_recall`` returns it directly), which is
+        # the direction where the destination's supervisor state is most visible.
+        result_doc["carry"] = carry_block
     return (
-        {
-            "ok": True,
-            "session_id": session_id,
-            "new_session_id": session_id,
-            "mode": "move",
-            "from_device": _device_block(server, owner_device),
-            "to_device": _own_block(server),
-            "phase": "committed",
-            "phases": phases,
-        },
+        cast(SessionMoveResult, result_doc),
         None,
         session_id,
     )
 
 
-def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
+class _PromoteOutcome(NamedTuple):
+    """``_promote``'s answer: whether the copy landed, and its scheduled-state block.
+
+    ``ok`` is the bool the callers used to get back wholesale. ``carry`` is
+    ``None`` unless the arriving session carried wakes — the block the move's
+    receipt reports (see :class:`MoveCarryBlock`), which is the half a bool
+    could never carry out of the promote.
+    """
+
+    ok: bool
+    carry: dict[str, Any] | None
+
+
+#: Every refusal ``_promote`` answers with: nothing landed, nothing carried.
+_PROMOTE_REFUSED = _PromoteOutcome(ok=False, carry=None)
+
+
+def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOutcome:
     """``os.replace(staging, sessions/<id>)`` — the ONE atomic promote (§6.3 step 16).
 
     One rename, on one filesystem (both are under the config root), so the session
@@ -1884,7 +1989,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         # store is one this device is adopting INTO, which is the same claim
         # ``session_factory`` makes when it marks a store it created.
         if not _bare_remnant(target):
-            return False
+            return _PROMOTE_REFUSED
         from local_operator.session.cleanup import (
             MESH_REMNANT_POLICY,
             mark_store,
@@ -1911,12 +2016,12 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
             # MINOR). A promote must never write over what it could not clear,
             # so warn and leave the remnant where it is.
             logger.warning("mobility: a bare remnant at %s could not be cleared: %s", target, exc)
-            return False
+            return _PROMOTE_REFUSED
         if not cleared:
             # The guard refused (or the target moved under us): the remnant is
             # still in the way, and a promote must never write over what it
             # could not clear — refuse exactly as before.
-            return False
+            return _PROMOTE_REFUSED
         logger.info(
             "mobility: cleared a bare remnant (no session content) at %s so the "
             "verified copy of %s could land",
@@ -1928,7 +2033,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         os.replace(str(staging), str(target))
     except OSError as exc:
         logger.warning("mobility: could not adopt %s on this device: %s", target_id, exc)
-        return False
+        return _PROMOTE_REFUSED
     # ``ready.json`` is the move's own boot marker, not session content: it exists
     # so a crash before the promote can be settled, and inside the session it would
     # be a file every future reader has to learn to ignore. IT IS READ FIRST, and
@@ -1996,19 +2101,31 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
     # leaves indexes that self-heal on the next open, while raising here would
     # strand a verified copy mid-promote (see ``network/carry.py`` for the whole
     # ordering contract, including the named ``[commit → promote-rebuild]`` gap).
-    try:
-        from local_operator.network import carry
+    carry_block: dict[str, Any] | None = None
+    from local_operator.network import carry
 
+    try:
         report = carry.rebuild_indexes(server.root, target_id)
-        if int(report.get("wakes") or 0) > 0:
-            # §5.3's ``ensure`` step: a carried wake needs the supervisor on THIS
-            # device to fire with no runtime open. Only wakes need it — monitors
-            # are armed by a running scheduler, not by the supervisor.
-            report["supervisor"] = carry.ensure_supervisor(server.root)
+        wakes = int(report.get("wakes") or 0)
         logger.info("mobility: rebuilt derived state for %s: %s", target_id, report)
     except Exception:  # noqa: BLE001 — the indexes self-heal; a promote must not fail here
         logger.warning("mobility: could not rebuild derived state for %s", target_id, exc_info=True)
-    return True
+        wakes = 0
+    if wakes > 0:
+        # §5.3's ``ensure`` step: a carried wake needs the supervisor on THIS
+        # device to fire with no runtime open. Only wakes need it — monitors
+        # are armed by a running scheduler, not by the supervisor.
+        #
+        # AND THE OUTCOME IS CARRIED, NOT MERELY LOGGED (the carried-wake drill,
+        # two real devices: a moved session carried its daily wake while this
+        # device's supervisor sat loaded-but-stopped, and the overdue wake fired
+        # only after somebody ran `lop wake install` by hand — nothing in the
+        # flow had said a word). The block's own function owns the whole outcome —
+        # install/start, verify, and the loud fallback copy when it is not running
+        # — so that copy has ONE definition (``network/carry.py``) and this call
+        # site cannot end in silence or in a failed promote.
+        carry_block = carry.move_carry_block(server.root, wakes, str(_own_block(server)["name"]))
+    return _PromoteOutcome(ok=True, carry=carry_block)
 
 
 def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path) -> None:
@@ -2977,8 +3094,19 @@ def _source_commit(
 
 
 def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
-    """The destination's best-effort confirmation. One event, no state change."""
+    """The destination's best-effort confirmation. One event, no state change.
+
+    It also carries the destination's scheduled-state block when the move carried
+    wakes (see ``MoveCarryBlock``) — knowable at the destination as part of the
+    promote, so it rides this frame; recorded here so the inviter's receipt can
+    report it. Additive on the wire: a destination from before this key sends
+    none, and a malformed one is ignored rather than allowed to fail the
+    completion it arrived with.
+    """
     session_id = str(frame["session_id"])
+    carry_block = frame.get("carry")
+    if isinstance(carry_block, dict) and carry_block:
+        progress_for(server).note_carry(session_id, carry_block)
     progress_for(server).note(session_id, "done")
     progress_for(server).signal(session_id, "done")
     _audit(server, AUDIT_DONE, session_id, link.device_id)
@@ -4143,6 +4271,14 @@ def _offload(
 
     _stamp_here = read_stamp(server.root, session_id)
     _unattended = bool(_stamp_here is not None and _stamp_here.unattended)
+    # THE MONITORS NOTICE'S ONE INPUT, READ HERE BECAUSE THE COMMIT BELOW DELETES THE
+    # INDEX IT LIVES IN: how many monitors THIS device holds for the session. One small
+    # file read (``carry.monitor_count``), and it feeds the up-front half of the carry
+    # contract on the receipt — a monitor's observations are device-local, so a move
+    # re-baselines them (see ``MoveCarryBlock``: what does not travel is the state).
+    from local_operator.network import carry
+
+    monitors_here = carry.monitor_count(server.root, session_id)
     try:
         accepted = transport.ask(
             {
@@ -4214,19 +4350,29 @@ def _offload(
         # ``cast`` because the document is assembled field by field and pyright
         # cannot narrow a literal to the contract's TypedDict: the shape is pinned by
         # `test_the_session_move_contract_is_frozen` and parsed by the TUI (slice V).
-        return cast(
-            SessionMoveResult,
-            {
-                "ok": True,
-                "session_id": session_id,
-                "new_session_id": new_id or session_id,
-                "mode": "keep" if keep else "move",
-                "from_device": _own_block(server),
-                "to_device": _device_block(server, target_device, target_name),
-                "phase": str(phases[-1]["phase"]),
-                "phases": phases,
-            },
-        )
+        result_doc: dict[str, Any] = {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": new_id or session_id,
+            "mode": "keep" if keep else "move",
+            "from_device": _own_block(server),
+            "to_device": _device_block(server, target_device, target_name),
+            "phase": str(phases[-1]["phase"]),
+            "phases": phases,
+        }
+        # THE CARRY, MERGED ON THIS SIDE (§ ``MoveCarryBlock``): the destination's half
+        # arrived on the ``done`` frame — wakes carried plus the supervisor's verified
+        # state, including the LOUD fallback when it is not running — and this side adds
+        # the monitor half from its own count (``monitors_here``, read before the
+        # commit). Either half may be absent (an older peer sends none; no monitors),
+        # and the key is absent when both are, so an unchanged move parses unchanged.
+        carry_block = progress.carry(session_id) or {}
+        if monitors_here > 0:
+            carry_block.setdefault("monitors", monitors_here)
+            carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)
+        if carry_block:
+            result_doc["carry"] = carry_block
+        return cast(SessionMoveResult, result_doc)
     phases = _move_phases(server, session_id)
     reached = phases[-1]["phase"] if phases else None
     try:
