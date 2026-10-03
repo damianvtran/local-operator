@@ -70,6 +70,27 @@ export function isOutstanding(status: string): boolean {
 	return isAnswerable(status);
 }
 
+/** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
+ *
+ *  THE TWO FIELDS ARE NOT INTERCHANGEABLE, and reading one alone has now caused
+ *  a bug in each direction. `durable: false` says nothing will ever READ an
+ *  answer (the transcript is gone); `runtime_live: false` says nothing can be
+ *  DELIVERED to it right now. A live conversation with no transcript is both
+ *  false, yet answering it works — the route's cold arm is scoped
+ *  `not _session_is_live(...)`, so a live row never reaches the refusal — and a
+ *  non-durable row that is merely cold is refused. Only the conjunction is the
+ *  state the route answers with `ask_session_gone`, so this is the ONE
+ *  predicate the card's pre-emptive terminal state, the sheet's cold strip and
+ *  its `open` control all share.
+ *
+ *  `runtime_live !== true` rather than `=== false`: the route's own test is
+ *  "not live", so an absent field (an older daemon) belongs on the same side as
+ *  a false one. Absent `durable` is NOT dead — a reader must never withdraw an
+ *  affordance it cannot vouch against. */
+export function isDeadConversation(row: PendingAsk): boolean {
+	return row.durable === false && row.runtime_live !== true;
+}
+
 /** How long until this ask's deadline, in milliseconds — negative once past.
  *  Epoch MILLISECONDS on both sides (`created_at`/`expires_at` are `now_ms()`),
  *  unlike the seconds-based `formatRelative`. */

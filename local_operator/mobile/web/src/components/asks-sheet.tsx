@@ -36,7 +36,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
-import { outstandingAsks, orderedForDisplay } from "../lib/asks";
+import { isAnswerable, isDeadConversation, orderedForDisplay, outstandingAsks } from "../lib/asks";
 import { useAsksRevision, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -159,11 +159,21 @@ export function AsksSheet({
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
 	   the defect, even where their populations legitimately differ (this one
-	   spans every conversation, the bar is this session's). */
-	const outstandingQuestions = outstandingAsks(rows).reduce(
-		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
-		0,
-	);
+	   spans every conversation, the bar is this session's).
+
+	   DEAD ROWS' QUESTIONS ARE NOT WAITING ON ANYONE (agent review round 2,
+	   MINOR-3). A dead conversation's ask still carries `open`, so it enters
+	   `outstandingAsks` — but every op on it is refused with `ask_session_gone`,
+	   and a count that promises answers the backend will refuse is the same class
+	   of claim this whole lane exists to remove. It is the sheet's own rule
+	   ("no contradiction one element apart") applied to the title, one element
+	   above the strip that already honours it. */
+	const outstandingQuestions = outstandingAsks(rows)
+		.filter((row) => !isDeadConversation(row))
+		.reduce(
+			(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
+			0,
+		);
 	const title =
 		outstandingQuestions > 0
 			? `asks · ${outstandingQuestions} question${outstandingQuestions === 1 ? "" : "s"}`
@@ -209,7 +219,7 @@ export function AsksSheet({
 									<span className="min-w-0 truncate">
 										{named?.name ?? sessionId}
 									</span>
-									{onOpenConversation ? (
+									{onOpenConversation && !isDeadConversation(row) ? (
 										/* THE PARENT OWNS THE WHOLE TRANSITION (agent review round 2,
 										   M1). This control used to navigate and THEN close itself, and
 										   closing gives the sheet's history entry back with
@@ -231,13 +241,33 @@ export function AsksSheet({
 									) : null}
 								</span>
 							) : null}
-							{/* A conversation whose process is GONE is stated before
-							    the controls, not discovered by a refused tap: the ask
-							    outlives its runtime, so answering may need it reopened,
-							    and the reader deserves to know that before pressing. */}
-							{named?.ended ? (
+							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
+							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
+
+							    ANSWERABLE, because a settled receipt offers nothing to answer, so
+							    a wait stated above it is noise about a tap that does not exist
+							    (UX round 2, U6). This strip used to render only for an `ended` row
+							    with copy naming a manual remedy the relay now performs itself;
+							    `runtime_live` widened it to the merely-not-running conversation
+							    the operator actually hits.
+
+							    DURABILITY, because `runtime_live === false` is ALSO true of a
+							    conversation with no transcript at all — where the op is a
+							    terminal refusal and the promise of a ~30 s bring-up is a claim
+							    about a backend that does not exist (design round 2, D6). On
+							    those rows the strip goes silent and the card states the truth
+							    it already knows, so the sheet and the card cannot contradict
+							    each other one element apart. It is `isDeadConversation`, the
+							    CONJUNCTION of the two fields — not `durable` alone, which would
+							    silence the strip on a live conversation that answers fine
+							    (design round 3, D7). */}
+							{isAnswerable(String(row.status || "open")) &&
+							!isDeadConversation(row) &&
+							(named?.ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">
-									this conversation has ended — answering may need it reopened
+									{named?.ended
+										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
+										: "this conversation is not running — answering will bring it up (this can take up to ~30 s)"}
 								</p>
 							) : null}
 							<AskCard

@@ -10,11 +10,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AskCard } from "./components/ask-card";
 import type { AskQuestion, PendingAsk } from "./types";
 
-vi.mock("./api", () => ({
-	sendCommand: vi.fn(async () => ({ ok: true, detail: "answered" })),
-}));
+vi.mock("./api", async (importOriginal) => {
+	/* PARTIAL, because the card now imports `HttpError` to tell a TERMINAL refusal
+	   (a gone conversation, `ask_session_gone`) from one the user can act on. The
+	   bare `{ sendCommand }` mock left that import undefined, so the card threw
+	   the moment a send was refused. */
+	const actual = await importOriginal<typeof import("./api")>();
+	return {
+		...actual,
+		sendCommand: vi.fn(async () => ({ ok: true, detail: "answered" })),
+	};
+});
 
-const { sendCommand } = await import("./api");
+const { sendCommand, HttpError } = await import("./api");
 
 function question(patch: Partial<AskQuestion> = {}): AskQuestion {
 	return {
@@ -240,5 +248,157 @@ describe("AskCard", () => {
 		expect(
 			(screen.getByRole("button", { name: /send answer/ }) as HTMLButtonElement).disabled,
 		).toBe(false);
+	});
+
+	it("states the wait on a COLD conversation instead of a bare '…'", async () => {
+		/* D1 = UX U1: a cold answer is an engage + dial + ack in ONE call (~30 s
+		   measured against a warm 1–3 s), and the card's entire in-flight
+		   affordance used to be the single glyph `…` — indistinguishable from a
+		   hang on the phone's primary answer path. */
+		let release: (() => void) | undefined;
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					release = () => resolve({ ok: true, detail: "answered" });
+				}),
+		);
+		renderCard(ask({ runtime_live: false }));
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		expect(await screen.findByText(/this can take up to ~30 s/)).toBeTruthy();
+		release?.();
+	});
+
+	it("promises no wait it cannot substantiate (warm, or an older daemon)", async () => {
+		/* ABSENCE IS NOT `false`: `runtime_live` is omitted by an older daemon and
+		   by a row read from a projection, and the card must not assert a ~30 s
+		   envelope it has no way to know about. */
+		let release: (() => void) | undefined;
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					release = () => resolve({ ok: true, detail: "answered" });
+				}),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		await waitFor(() => expect(screen.getByRole("button", { name: "…" })).toBeTruthy());
+		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+		release?.();
+	});
+
+	it("withholds the controls on a TERMINAL refusal, and keeps the sentence", async () => {
+		/* D3: a gone conversation can never be read, so every further tap is a
+		   guaranteed 409 — the surface must stop inviting one. The sentence is the
+		   daemon's own, written for THIS op (D2). */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new HttpError(
+				409,
+				"this conversation no longer exists — nothing was sent; the ask can never be read.",
+				"ask_session_gone",
+			),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() => expect(screen.getByText(/nothing was sent/)).toBeTruthy());
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		/* AND THE STATE LINE STANDS DOWN: "Queued — the agent is continuing; expires
+		   in 11 m" beside "this conversation no longer exists" is the contradiction
+		   the refusal is supposed to end (seen in the capture frame). */
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+
+	it("keeps the controls for a refusal the user can act on", async () => {
+		/* The D3 rule is scoped to the TERMINAL code: a lost race is still a state
+		   with a move (read who beat you to it), which is round 1's own design. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new HttpError(422, "already answered by desktop."),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		await waitFor(() => expect(screen.getByText("already answered by desktop.")).toBeTruthy());
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+	});
+
+	it("places a dismiss refusal beside the dismiss control", async () => {
+		/* D5: the sentence used to render above the send/decline row, which put it
+		   60 px from the button that produced it with the other pair in between. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("only a timed-out ask can be dismissed; it is still open."),
+		);
+		renderCard(ask({ status: "timed_out" }));
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		const sentence = await screen.findByText(/only a timed-out ask/);
+		const dismiss = screen.getByRole("button", { name: /dismiss — send no reply/ });
+		expect(
+			dismiss.compareDocumentPosition(sentence) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+	});
+
+	it("says a COLD dismissal brings the session up, before the tap", () => {
+		/* U3: the label promises "send no reply" and that stays true, but on a cold
+		   conversation the relay also brings it up to RECORD the dismissal — the
+		   conversation surfaces as active, which the copy owed the reader. */
+		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
+		cold.unmount();
+		renderCard(ask({ status: "timed_out" }));
+		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
+	});
+
+	it("stops claiming an engage the moment the outcome is known", async () => {
+		/* UX round 2, U5: `setBusy("")` lived only in the catch, so a SUCCESSFUL
+		   answer left the card asserting `bringing the session up — this can take up
+		   to ~30 s` over a dead `…` until the sheet's re-read landed — and if that
+		   read failed or hung, indefinitely. */
+		renderCard(ask({ runtime_live: false }));
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		await waitFor(() => expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull());
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+	});
+
+	it("states a dead conversation before the tap, and withholds every control", () => {
+		/* Design round 2, D6 = UX U7: a dead conversation — no durable transcript
+		   AND nothing live to deliver to — is the state the route refuses on, so
+		   the sentence a 409 would have returned is known in advance. Showing it
+		   pre-emptively keeps the guarantee without buying the refused request, and
+		   no control invites a tap that cannot work. */
+		renderCard(ask({ runtime_live: false, durable: false }));
+		expect(
+			screen.getByText(/this conversation no longer exists — the ask can never be read; start a new conversation and ask again\./),
+		).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+
+	it("keeps the controls on a LIVE conversation that has no transcript", () => {
+		/* Design round 3, D7: `durable: false` alone is NOT a dead conversation.
+		   The route's cold arm is scoped `not _session_is_live(...)`, so a live row
+		   never reaches the refusal — and gating the card on durability alone made
+		   it refuse an answer the server returned `200 {"ok": true}` for. The
+		   mirror of the bug this lane was opened to fix, pinned before it can
+		   come back. */
+		renderCard(ask({ runtime_live: true, durable: false }));
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^decline$/ })).toBeTruthy();
+		/* And no wait is promised either: the relay can deliver right now. */
+		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+	});
+
+	it("keeps a settled receipt in a dead conversation", () => {
+		/* The other side of the same gate: `durable: false` must not turn a receipt
+		   into a dead end — a row already answered in a conversation that has since
+		   gone still has its own record to show. */
+		renderCard(ask({ status: "answered", delivered: true, runtime_live: false, durable: false }));
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("status")).toBeTruthy();
 	});
 });

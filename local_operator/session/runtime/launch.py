@@ -227,16 +227,19 @@ class AskErrand:
     the same one. ``ask_id`` is carried for the log line and the derived
     ``command_id`` only — no code branches on it.
 
-    **It has no constructor call site yet, and the DEADLINE path will never need
-    one** (review round 1, NIT 10). A due ``ask_timeout`` row IS a wake row, so the
+    **Its first constructor call site is the RELAY's cold reply arm** (design
+    §2.4; ``mobile/daemon.py::api_command``): a surface that must settle an ask
+    while no runtime is running engages one with this errand, then sends the
+    ``ask_respond``/``ask_revise``/``ask_decline``/``ask_dismiss`` op over the
+    dial — the engaged runtime's boot ``reconcile`` plus that op are what put the
+    response row in the transcript. The DEADLINE path will never need one
+    (review round 1, NIT 10): a due ``ask_timeout`` row IS a wake row, so the
     supervisor engages a runtime with :class:`WakeErrand` and the boot reconcile
     does the delivering — wiring an errand into that path would be the second
-    timer substrate the design's D10 exists to avoid. The caller this exists for is
-    the COLD ANSWER: a surface that records an answer while no runtime is running
-    and then engages one so the response is delivered, which is the desktop/relay
-    route's cold arm in A2/B (§6). Declared here so that call site passes a legal
-    payload instead of inventing one, and stated in the PR body so its absence is
-    read as deliberate rather than unwired.
+    timer substrate the design's D10 exists to avoid. The desktop route needs no
+    payload here either: its viewer facade engages a cold owner with
+    :class:`WarmErrand` (``AttachedSession._ensure_bound``) and then sends the
+    same op.
     """
 
     ask_id: str = ""

@@ -174,8 +174,123 @@ describe("AsksSheet", () => {
 	it("warns before the tap when the owning conversation has ended", async () => {
 		rows = [summary({ ended: true })];
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText(/this conversation has ended/)).toBeTruthy());
+		/* THE COST IS ON THE LINE (design round 1, D4 = UX U1/U4): the relay now
+		   reopens it itself, so "may need it reopened" described a manual remedy
+		   that no longer exists — while the ~30 s the cold arm costs went unsaid. */
+		expect(screen.getByText(/answering will reopen it \(this can take up to ~30 s\)/)).toBeTruthy();
+	});
+
+	it("warns before the tap when the conversation is simply not running", async () => {
+		/* UX round 1, U4: for a durable conversation this daemon never watched die,
+		   the list reports `ended:false`, so the strip did not render at all —
+		   exactly the operator's case. The aggregate's own `runtime_live` is what
+		   makes the cue appear, and the copy says "not running" because "has
+		   ended" would be false about it. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ runtime_live: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText(/this conversation is not running/)).toBeTruthy());
+		expect(screen.getByText(/answering will bring it up \(this can take up to ~30 s\)/)).toBeTruthy();
+	});
+
+	it("says nothing about a wait when the relay can deliver now", async () => {
+		/* The other half of the rule: a live conversation answers in ~1 s, so a
+		   ~30 s promise there would be its own lie. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask({ runtime_live: true })] });
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+	});
+
+	it("says nothing about a wait above a settled receipt", async () => {
+		/* UX round 2, U6: `runtime_live === false` is true of a cold conversation
+		   whatever the ask's status, so the strip rendered above a receipt that
+		   offers nothing to answer — a wait promised for a tap that does not exist. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ status: "answered", delivered: true, runtime_live: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("stays silent on a DEAD row, and the card states it", async () => {
+		/* Design round 2, D6: on this row `runtime_live` is false for the OTHER
+		   reason — nothing can ever read the answer — so a strip promising a ~30 s
+		   bring-up would contradict the card's own sentence one element below it. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ runtime_live: false, durable: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() =>
-			expect(screen.getByText(/this conversation has ended/)).toBeTruthy(),
+			expect(screen.getByText(/the ask can never be read/)).toBeTruthy(),
 		);
+		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("keeps the affordances on a LIVE conversation with no transcript", async () => {
+		/* Design round 3, D7: the strip, the card and `open` all key on
+		   `isDeadConversation` — the CONJUNCTION — so a live row with no transcript
+		   answers as normal and its conversation can still be opened. Gating on
+		   durability alone silenced the sheet one element above a card that then
+		   refused a working answer. */
+		rows = [];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ session_id: "gone", runtime_live: true, durable: false })],
+		});
+		render(
+			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
+		);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "open" })).toBeTruthy();
+	});
+
+	it("does not count questions a dead row can never have answered", async () => {
+		/* Agent review round 2, MINOR-3: a dead row's status is still `open`, so it
+		   entered `outstandingAsks` and its questions were counted in the title — a
+		   promise of answers the backend refuses, one element above the card that
+		   says the ask can never be read. It is the sheet's own "no contradiction
+		   one element apart" rule, applied to the title. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				ask({ ask_id: "live", session_id: "s-live", runtime_live: true, durable: false }),
+				ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false }),
+			],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 question")).toBeTruthy());
+	});
+
+	it("carries no count at all when every row is dead", async () => {
+		/* The other half: nothing is waiting on the user, so the title states the
+		   surface rather than a number nobody can act on. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks")).toBeTruthy());
+	});
+
+	it("withholds `open` for a conversation that cannot be opened", async () => {
+		/* UX round 2, U7: the control navigated to `#/s/<id>`, which sat on
+		   "connecting to session…" with nothing to do but go back. A row whose
+		   transcript is gone has no conversation to open. */
+		rows = [];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ session_id: "gone", durable: false })],
+		});
+		render(
+			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
+		);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByRole("button", { name: "open" })).toBeNull();
 	});
 });

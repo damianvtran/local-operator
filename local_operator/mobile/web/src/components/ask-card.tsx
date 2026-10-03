@@ -34,9 +34,9 @@
  * falls back to a plain line when the daemon said nothing usable.
  */
 import { useMemo, useState } from "react";
-import { sendCommand } from "../api";
+import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
-import { answeredPairs, askStateLine, isAnswerable, unansweredQuestions } from "../lib/asks";
+import { answeredPairs, askStateLine, isAnswerable, isDeadConversation, unansweredQuestions } from "../lib/asks";
 import { clearAskDraft, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
@@ -53,6 +53,23 @@ function refusalText(error: unknown): string {
 	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
 	return message;
 }
+
+/** The sentence a row shows when the aggregate ALREADY reports its conversation
+ *  as DEAD (`isDeadConversation`: no durable transcript AND nothing live to
+ *  deliver to) — the state the daemon refuses every op on with
+ *  `ask_session_gone` (design round 2, D6).
+ *
+ *  IT MIRRORS `daemon._ASK_GONE_RESPONSE` rather than waiting for the refusal,
+ *  and that duplication is the point of a pre-emptive state: fetching the
+ *  sentence would mean buying the guaranteed 409 the state exists to avoid. It
+ *  is the ANSWER's wording, remedy included (design round 3, D7's NIT: one
+ *  voice), because the card offers no control at all — so the sentence that fits
+ *  is the one the primary control would have produced, and `start a new
+ *  conversation and ask again` is the user's actual next move. The ops that
+ *  carry their own sentence (a dismissal, a handed-over decision) are only told
+ *  apart when the refusal comes FROM THE WIRE, which this branch never does. */
+const CONVERSATION_GONE_COPY =
+	"this conversation no longer exists — the ask can never be read; start a new conversation and ask again.";
 
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
@@ -181,10 +198,43 @@ export function AskCard({
 	const [draft, setDraft] = useAskDraft(row.ask_id);
 	const [busy, setBusy] = useState<"" | "respond" | "decline" | "dismiss">("");
 	const [error, setError] = useState("");
+	/** Which control produced the refusal, so the sentence can sit beside IT
+	    (design round 1, D5): a dismiss refusal rendered above the send/decline row
+	    landed 60 px from the button that produced it, with the other pair between
+	    them. */
+	const [errorOp, setErrorOp] = useState<"" | "respond" | "decline" | "dismiss">("");
+	/** The conversation is GONE (`ask_session_gone`): terminal, so no control may
+	    stay live (design round 1, D3). */
+	const [gone, setGone] = useState(false);
+
+	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
+	   `runtime_live === false` means the relay will have to bring the conversation
+	   up before the op can land, which is a ~30 s envelope against a warm
+	   answer's 1–3 s. `undefined` (an older daemon, or a row from a projection)
+	   promises nothing and keeps the bare `…`.
+
+	   BOTH FACTS ARE READ OFF THE ROW, not passed as props: they are the
+	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
+	   second copy of them on the component was exactly the drift D7 was made of. */
+	const cold = row.runtime_live === false;
 
 	const state = askStateLine(row, nowMs);
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
+
+	/* A ROW THE AGGREGATE ALREADY KNOWS IS DEAD IS TERMINAL BEFORE THE TAP
+	   (design round 2, D6 + UX U7), and DEAD IS A CONJUNCTION (design round 3,
+	   D7). `isDeadConversation` is the route's own two facts: no durable
+	   transcript to read AND nothing live to deliver to. Gating on `durable`
+	   alone made the client MORE PESSIMISTIC THAN THE SERVER — a live row with no
+	   transcript was shown as a dead end while `ask_respond` on it returned
+	   `200 {"ok": true, "detail": "answered"}` — the same class of lie in the
+	   other direction, and the reason the predicate lives in `lib/asks.ts` and is
+	   shared by this card, the sheet's strip and its `open` control. Gated
+	   further on `answerable`: a SETTLED row in a dead conversation is a receipt,
+	   not a dead end, and must keep its receipt. */
+	const goneFromWire = isDeadConversation(row) && answerable;
+	const terminal = gone || goneFromWire;
 	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
 	   accepts no other status (`asks/queue.py`), and the design states the rule twice
 	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
@@ -230,6 +280,7 @@ export function AskCard({
 		if (busy) return;
 		setBusy(kind);
 		setError("");
+		setErrorOp("");
 		try {
 			await send();
 			/* THE DRAFT IS SPENT ONCE THE ASK SETTLES. Cleared here rather than left
@@ -240,10 +291,32 @@ export function AskCard({
 			onSettled?.();
 		} catch (failure) {
 			setError(refusalText(failure));
+			setErrorOp(kind);
+			/* A GONE CONVERSATION IS TERMINAL (design round 1, D3). The ask can
+			   never be read, so every further tap is a guaranteed 409 — the
+			   sentence, already written for THIS op by the daemon (D2), is the
+			   remedy, and the controls must stop inviting a tap that cannot
+			   work. */
+			if (failure instanceof HttpError && failure.code === "ask_session_gone") {
+				setGone(true);
+			}
 			/* The controls come back: a refusal is a state the user can act on
 			   (answer again, or read who beat them to it), and a card left inert
 			   by its own error is the greyed-out-buttons defect the blocking card
 			   already paid for. */
+		} finally {
+			/* THE OUTCOME ENDS THE IN-FLIGHT STATE, WHICHEVER OUTCOME IT IS (UX round
+			   2, U5). `setBusy("")` lived only in the catch, so a SUCCESSFUL answer
+			   left the card asserting `bringing the session up — this can take up to
+			   ~30 s` over a dead `…` until — and only if — the sheet's aggregate
+			   re-read replaced the row. A refused read (the sheet's own 8 s bound, or
+			   a hung backstop) left that lie on screen indefinitely. The promise has
+			   settled, so the claim that it is still settling must stop.
+
+			   The controls coming back after a refusal is deliberate: a refusal is a
+			   state the user can act on (answer again, or read who beat them to
+			   it), and a card left inert by its own error is the
+			   greyed-out-buttons defect the blocking card already paid for. */
 			setBusy("");
 		}
 	}
@@ -297,14 +370,35 @@ export function AskCard({
 			data-ask-status={String(row.status || "open")}
 			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
 		>
-			<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
-				<span role="status">{state.text}</span>
-				{row.urgent && answerable ? (
-					<span className="text-ink-dim">· urgent</span>
-				) : null}
-			</span>
+			{/* THE STATE LINE STANDS DOWN WHEN THE CARD IS TERMINAL. "Queued — the
+			    agent is continuing; expires in 11 m" beside "this conversation no
+			    longer exists" is the same contradiction §5's preamble forbids — the
+			    timer and the agent both belong to a conversation that is not there.
+			    The refusal sentence is the whole state. */}
+			{terminal ? null : (
+				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
+					<span role="status">{state.text}</span>
+					{row.urgent && answerable ? (
+						<span className="text-ink-dim">· urgent</span>
+					) : null}
+				</span>
+			)}
 
-			{answerable ? (
+			{terminal ? (
+				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3 for
+				   the refusal that arrived; design round 2, D6 for the row the aggregate
+				   already reported dead, where the same sentence is shown BEFORE the tap
+				   that could only ever be refused). The controls are withheld rather
+				   than handed back enabled, because every further tap is a guaranteed
+				   409 and the surface must not invite one. The remedy is a NEW message
+				   in a new conversation, which is what the daemon's per-op sentence
+				   names (D2) when the refusal came from the wire — a dismissal is told
+				   nothing was sent, an answer is told to ask again, a decision is told
+				   the ask can never be read (U9). */
+				<p className="text-body-sm text-danger">
+					{gone ? error : CONVERSATION_GONE_COPY}
+				</p>
+			) : answerable ? (
 				<>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
@@ -370,12 +464,28 @@ export function AskCard({
 						</p>
 					) : null}
 
-					{/* THE REFUSAL SITS WITH THE CONTROLS IT ANSWERS (round-1 design, D4):
-					    it used to render after the control row, which put it below the
-					    fold in the frame captured to show it — the same failure
-					    `pending-card.tsx` pinned its own error for. Above the row, the
-					    sentence and the control that produced it are on screen together. */}
-					{error ? <p className="text-body-sm text-danger">{error}</p> : null}
+					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
+					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
+					    measured, against the 1–3 s a warm answer pays — and until this line
+					    existed the whole in-flight affordance was a bare `…` with the state
+					    line still reading "Queued — the agent is continuing". Saying nothing
+					    is also a claim, and it was the wrong one. */}
+					{busy !== "" && cold ? (
+						<p className="text-body-sm text-ink-muted">
+							{busy === "dismiss"
+								? "bringing the session up to record the dismissal — this can take up to ~30 s"
+								: "bringing the session up — this can take up to ~30 s"}
+						</p>
+					) : null}
+
+					{/* THE REFUSAL SITS WITH THE CONTROL IT ANSWERS (design round 1, D5 for
+					    the dismiss arm; round 1's D4 fixed the send/decline pair). A dismiss
+					    refusal rendered here would land 60 px above the button that produced
+					    it, with the send/decline pair between them, so it renders beside
+					    dismiss instead — see the dismiss control below. */}
+					{error && errorOp !== "dismiss" ? (
+						<p className="text-body-sm text-danger">{error}</p>
+					) : null}
 
 					<div className="flex flex-wrap gap-2">
 						<button
@@ -405,14 +515,33 @@ export function AskCard({
 					    buttons would make them look like two ways of saying no. Its own
 					    state line says what happened. */}
 					{dismissible ? (
-						<button
-							type="button"
-							disabled={busy !== ""}
-							onClick={dismiss}
-							className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
-						>
-							{busy === "dismiss" ? "…" : "dismiss — send no reply"}
-						</button>
+						<>
+							<button
+								type="button"
+								disabled={busy !== ""}
+								onClick={dismiss}
+								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+							>
+								{busy === "dismiss" ? "…" : "dismiss — send no reply"}
+							</button>
+							{/* ITS OWN STATE LINE, because on a cold conversation the promise
+							    it makes ("send no reply") is no longer the whole truth: the
+							    relay brings the conversation up to RECORD the dismissal, so the
+							    conversation surfaces as active (UX round 1, U3). Stated before
+							    the tap, in the same quiet register as the deadline lines.
+
+							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
+							    up already states `this can take up to ~30 s` for this row, and a
+							    second copy of the number buys nothing the first line did not. */}
+							{cold ? (
+								<p className="text-meta text-ink-dim">
+									sends no reply — the conversation is brought up to record it.
+								</p>
+							) : null}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</>
 					) : null}
 				</>
 			) : (

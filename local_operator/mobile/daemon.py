@@ -41,7 +41,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
@@ -2276,6 +2276,148 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
             projection.session_id,
         )
     return data
+
+
+#: The ops that ANSWER a queued ask (design §2.4). They are answered by id and
+#: OUTLIVE the runtime that queued them — durability is the feature — so a relay
+#: with no live entry must ENGAGE rather than refuse: `ask_respond`/`ask_revise`/
+#: `ask_decline`/`ask_dismiss` all settle a durable question whose reader is the
+#: model, and "session not connected" (the pre-engage answer) left the phone
+#: accepting an answer nobody would ever read.
+#:
+#: `ask_dismiss` is deliberately in the set: it injects nothing, but it is still
+#: a view change against the durable log, and a session that cannot be engaged
+#: to record it must say so rather than paint a settled row that never landed.
+_ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
+
+
+#: The refusal for an ask whose conversation is GONE (deleted, or an id that was
+#: never a durable user session), SPLIT BY THE OP (design round 1, D2 = UX U2).
+#: Engaging cannot help here — there is no transcript a runtime could own — and a
+#: surface that reported success would be worse than one that refused, because
+#: the user would believe a model had been told.
+#:
+#: WHY THE OP DECIDES THE SENTENCE, and why there are THREE of them (UX round 2,
+#: U9). One string was returned for all four ops, so ``dismiss — send no reply``
+#: — whose whole promise is that NOTHING is sent — was answered with "…ask
+#: again", which is the remedy for an answer that could not be delivered and the
+#: opposite of what the user asked for. The split then left ``decline``/``revise``
+#: carrying the same re-ask clause, which is addressed to someone who was not
+#: asking: a decline HANDS THE DECISION OVER, so there is no question left for
+#: the user to put again. Three constants, one per thing that is actually lost —
+#: an answer (unread, and still wanted), a decision (unread, and none of the
+#: user's to re-ask) and a dismissal (nothing to record). All keep the register
+#: of the queue's other sentences (lowercase start, em-dash clause, final full
+#: stop). ``_ASK_GONE_RESPONSE`` — the answer's, remedy and all — is also the
+#: sentence the phone shows PRE-EMPTIVELY, without any request, on a row the
+#: aggregate has published as DEAD (``isDeadConversation``: not live AND not
+#: durable, this route's own conjunction); the other two are only ever chosen
+#: when the refusal comes back FROM THE WIRE, which the pre-emptive branch never
+#: does.
+_ASK_GONE_RESPONSE = (
+    "this conversation no longer exists — the ask can never be read; "
+    "start a new conversation and ask again."
+)
+_ASK_GONE_HANDOFF = "this conversation no longer exists — the ask can never be read."
+_ASK_GONE_DISMISS = (
+    "this conversation no longer exists — nothing was sent; the ask can never be read."
+)
+
+
+def _ask_gone_copy(op: str) -> str:
+    """The gone sentence for ONE ask op — the dismissal's, the decision's, or the answer's."""
+    if op == "ask_dismiss":
+        return _ASK_GONE_DISMISS
+    if op in ("ask_decline", "ask_revise"):
+        return _ASK_GONE_HANDOFF
+    return _ASK_GONE_RESPONSE
+
+
+def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
+    """Whether the relay can deliver an op to this session RIGHT NOW.
+
+    The exact predicate ``api_command`` branches on: an op reaches a live entry
+    through ``daemon.request``, which needs a connected ``writer``, and every
+    other case takes the engage arm. Published per ask row so the phone can say
+    whether answering will have to bring the conversation up first (design round
+    1, D1/D4 = UX U1/U3/U4) — before this the customer of that fact was an error
+    message after the tap, and the in-flight state could not distinguish a warm
+    answer from a ~30 s engage.
+    """
+    entry = _entry_for_session(daemon, session_id)
+    return entry is not None and entry.writer is not None
+
+
+async def _engage_and_publish(
+    daemon: "MobileDaemon",
+    session_id: str,
+    engage: "Callable[[], Awaitable[str]]",
+    *,
+    keep_claim_on_failure: bool = False,
+) -> str:
+    """Publish an accepted engage intent, run ``engage``, settle the claim by outcome.
+
+    EXTRACTED FROM THE PROMPT BRANCH so the queued-ask answer's cold arm is the
+    SAME code and not a second implementation that drifts (the defect this whole
+    route avoids): an engage is announced optimistically — the session moves to
+    the active section before process discovery, so even a 50 ms worker is
+    observable in the phone's list SSE.
+
+    ``engage`` does the dial-and-deliver itself and returns the detail string the
+    route answers with. What happens to the claim when it RAISES is the caller's
+    to say, because whether a runtime came up is a property of the arm:
+
+    * ``keep_claim_on_failure=False`` (the prompt wake): a failure means the
+      prompt never reached a runtime, so the claim is RETRACTED — leaving it
+      would paint a session active forever.
+    * ``keep_claim_on_failure=True`` (the queued-ask cold answer): the engage and
+      the op are one call, so a raise is usually a REFUSAL from a runtime that
+      IS live (an expired ask, a race lost to another surface) — discarding here
+      flashes the session out of the active section on a refusal, which is a
+      (brief) lie about a runtime that exists. ``retain_provisional_active``
+      schedules the one-scan settle that discards the claim anyway if discovery
+      finds nothing, so the optimistic side self-corrects.
+
+    Returns the engage's detail; re-raises after settling the claim either way.
+    """
+    daemon.table.provisional_active.add(session_id)
+    # Structural: the session moves to the active section.
+    daemon.table.invalidate_summaries_cache()
+    daemon.table.notify_list_changed()
+    projection = daemon.session_projections.get(session_id)
+    if projection is None:
+        # Off the loop: `_durable_projection` folds disk state and reads the
+        # attention store, whose wait can run to seconds under contention -- the
+        # hop every other call site takes.
+        projection = await asyncio.to_thread(_durable_projection, session_id)
+    if projection is not None:
+        projection.ended = False
+        projection.degraded = False
+        try:
+            projection = daemon.capture_subagent_details(projection)
+        except _StaleProjection:
+            # The optimistic wake repaint is a courtesy; a fenced reconstruction
+            # just means the live owner's frame wins. The engage proceeds
+            # regardless.
+            projection = None
+        if projection is not None:
+            for target in daemon.table.session_subscribers.get(session_id, set()):
+                target.put_nowait(_projection_frame(projection))
+    try:
+        detail = await engage()
+    except BaseException:
+        if keep_claim_on_failure:
+            # See the docstring: the runtime may well exist and have only refused
+            # the op, and the settle task clears a claim discovery can refute.
+            daemon.retain_provisional_active(session_id)
+        else:
+            daemon.table.provisional_active.discard(session_id)
+            # Structural: the failed wake moves it back to previous.
+            daemon.table.invalidate_summaries_cache()
+            daemon.table.notify_list_changed()
+        raise
+    daemon.retain_provisional_active(session_id)
+    return detail
 
 
 def _history_page(
@@ -4552,6 +4694,11 @@ def build_app(daemon: MobileDaemon):
                 ContinuationCommand.from_json(
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
+            # ONE import for BOTH engage branches below: the prompt wake and the
+            # queued-ask cold answer each need the resolved root, and two
+            # function-local imports of the same name in one scope is an F811.
+            from local_operator.paths import config_dir
+
             if op == "prompt" and entry is None:
                 # Only an existing durable user conversation may wake a host.
                 # Besides authorization, this prevents a malformed/unknown id
@@ -4567,44 +4714,91 @@ def build_app(daemon: MobileDaemon):
                 command = ContinuationCommand.from_json(
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
-                from local_operator.paths import config_dir
 
-                # Publish the accepted wake intent before process discovery. It
-                # remains authoritative until a live projection arrives or the
-                # attempt fails, so even a 50 ms worker is observable in list SSE.
-                daemon.table.provisional_active.add(session_id)
-                # Structural: the session moves to the active section.
-                daemon.table.invalidate_summaries_cache()
-                daemon.table.notify_list_changed()
-                projection = daemon.session_projections.get(session_id)
-                if projection is None:
-                    # Off the loop: `_durable_projection` folds disk state and
-                    # reads the attention store, whose wait can run to seconds
-                    # under contention -- the hop every other call site takes.
-                    projection = await asyncio.to_thread(_durable_projection, session_id)
-                if projection is not None:
-                    projection.ended = False
-                    projection.degraded = False
-                    try:
-                        projection = daemon.capture_subagent_details(projection)
-                    except _StaleProjection:
-                        # The optimistic wake repaint is a courtesy; a fenced
-                        # reconstruction just means the live owner's frame wins.
-                        # The wake itself proceeds regardless.
-                        projection = None
-                    if projection is not None:
-                        for target in daemon.table.session_subscribers.get(session_id, set()):
-                            target.put_nowait(_projection_frame(projection))
-                try:
+                async def _deliver_prompt() -> str:
                     client, detail = await continue_command(config_dir(), command)
-                except BaseException:
-                    daemon.table.provisional_active.discard(session_id)
-                    # Structural: the failed wake moves it back to previous.
-                    daemon.table.invalidate_summaries_cache()
-                    daemon.table.notify_list_changed()
-                    raise
-                client.close()
-                daemon.retain_provisional_active(session_id)
+                    client.close()
+                    return detail
+
+                # Publish the accepted wake intent before process discovery (see
+                # ``_engage_and_publish``), so even a 50 ms worker is observable
+                # in list SSE and a failed engage retracts the claim.
+                detail = await _engage_and_publish(daemon, session_id, _deliver_prompt)
+                return JSONResponse({"ok": True, "detail": detail})
+            if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
+                # THE COLD ANSWER (design §2.4). A queued ask is
+                # durable precisely so the agent can move on, so answering one
+                # after its runtime exited must ENGAGE that session rather than
+                # refuse: the pre-engage "session not connected" was a queue with
+                # no reader — the phone accepted the answer and no model ever saw
+                # it. `ask_respond`/`ask_revise`/`ask_decline`/`ask_dismiss` all
+                # take this arm; a decline and a dismiss settle the ask just as an
+                # answer does, so they engage too.
+                #
+                # THE CONDITION IS ``_session_is_live``, THE SAME PREDICATE THE
+                # CARD READS. `entry is None` was too narrow: an entry whose dial
+                # has not landed (or whose socket is gone) has no ``writer``, so
+                # ``daemon.request`` could not deliver either and the op fell
+                # through to the generic "session not connected" — while the
+                # published ``runtime_live`` had already told the phone to expect
+                # an engage. One predicate keeps the surface's promise and the
+                # route's behaviour the same statement.
+                #
+                # The rung is the SAME one the prompt branch uses --
+                # ``engage_session_client`` -> ``engage_runtime``, the single
+                # arbitration point -- with an ``AskErrand`` in place of a
+                # ``PromptErrand``. The errand delivers nothing by design: the
+                # engaged runtime's boot reconcile plus the op below are what
+                # inject the response, so there is no second engage implementation
+                # to drift from the prompt path's.
+                if _durable_user_session_dir(session_id) is None:
+                    # NO transcript to own, so no engage can help. Say so in the
+                    # op's OWN words rather than the generic "not connected" — an
+                    # answer this surface cannot deliver must not look delivered,
+                    # and a dismissal must not be told to "ask again" (D2).
+                    return JSONResponse(
+                        {"error": _ask_gone_copy(op), "code": "ask_session_gone"},
+                        status_code=409,
+                    )
+                if not daemon.dial_registrants:
+                    raise RuntimeError("observer daemon cannot wake sessions")
+                from local_operator.mobile.attach_client import engage_session_client
+                from local_operator.session.runtime.launch import AskErrand
+
+                ask_id = str(body.get("ask_id") or "")
+                by = str(body.get("by") or "")
+                answers = {
+                    str(key): [str(item) for item in (value or [])]
+                    for key, value in (body.get("answers") or {}).items()
+                }
+
+                async def _deliver_answer() -> str:
+                    # BUDGET, because the surface has to live with it: this call
+                    # is an ENGAGE plus a DIAL plus an ACK in one, so its worst
+                    # case composes ``DEFAULT_DEADLINE_S`` (30 s, the engage) with
+                    # ``ACK_TIMEOUT_S`` (15 s, the op) — measured end to end on
+                    # this fleet at ~30 s, not the 1-3 s a warm prompt pays. A
+                    # phone's in-flight state must be sized for that window;
+                    # nothing here may shorten it by dropping the engage, because
+                    # a refusal that arrives without a runtime is the bug this
+                    # arm exists to fix.
+                    client, _ = await engage_session_client(
+                        config_dir(), session_id, AskErrand(ask_id=ask_id)
+                    )
+                    try:
+                        if op == "ask_respond":
+                            return await client.ask_respond(ask_id, answers, by=by)
+                        if op == "ask_revise":
+                            return await client.ask_revise(ask_id, answers, by=by)
+                        if op == "ask_decline":
+                            return await client.ask_decline(ask_id, by=by)
+                        return await client.ask_dismiss(ask_id, by=by)
+                    finally:
+                        client.close()
+
+                detail = await _engage_and_publish(
+                    daemon, session_id, _deliver_answer, keep_claim_on_failure=True
+                )
                 return JSONResponse({"ok": True, "detail": detail})
             if entry is None:
                 raise KeyError(session_id)
@@ -4870,6 +5064,23 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         rows = await asyncio.to_thread(index_asks, config_dir())
+        # PER-ROW LIVENESS (design round 1, D1/D4 = UX U1/U3/U4). The index knows
+        # an ask is durable; it does not know whether answering it will be a warm
+        # round trip or a ~30 s engage. That fact lives in this process's dial
+        # table, so the aggregate carries it and every surface can be honest about
+        # the wait BEFORE the tap rather than after it.
+        for row in rows:
+            session_id = str(row.get("session_id") or "")
+            row["runtime_live"] = _session_is_live(daemon, session_id)
+            # DURABILITY IS THE OTHER HALF (design round 2, D6). `runtime_live`
+            # answers "can the relay deliver right now", NOT "will anything ever
+            # read this". Over a conversation with no durable transcript both are
+            # false, and the op is a terminal 409 (`ask_session_gone`) — so a
+            # strip promising a ~30 s bring-up would be a claim about a backend
+            # that does not exist, and a tap it invites cannot work. Same
+            # predicate the refusal itself branches on, so the surface's words
+            # and the route's behaviour stay one statement.
+            row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
 
     async def api_commands(request: Request) -> Response:
