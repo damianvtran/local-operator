@@ -154,9 +154,21 @@ _WALK_DEPTH_CAP = 2
 #: lives in ``guide://agents`` and ``tool://agent``, which is where the rest of
 #: the label vocabulary already is. Measured through this file's own renderer on
 #: the remediation head; every other entry is byte-identical.
+#:
+#: RE-MEASURED 2026-10-03 by the ask flip (``feat/ask-flip-default``): ``ask``
+#: alone moved, 948 -> 1205, and the move IS the change rather than a side
+#: effect of it — ``asks.policy.NONBLOCKING_ASK`` now defaults ON, so
+#: ``render_tool_doc`` renders the QUEUED tail (the receipt, a receipt-is-not-
+#: consent rule, the deadline calibration and the secret shape in one long
+#: paragraph) instead of the inline one. The BLOCKING tail still renders 948
+#: byte-for-byte, which is why the kill switch does not disturb this table, and
+#: why a future edit to either tail must re-measure BOTH arms here and in
+#: ``scripts/bench_context_budget.py`` — the two ledgers move together.
+#: Measured through this file's own renderer on the flip head; every other
+#: entry is byte-identical.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 849,
-    "ask": 948,
+    "ask": 1205,
     "bash": 313,
     "browser": 1365,
     "console": 1141,

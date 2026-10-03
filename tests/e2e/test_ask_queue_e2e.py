@@ -12,9 +12,11 @@ injected as real turns.
 
 Three properties are asserted here and nowhere else:
 
-* **Flag off is today.** With ``NONBLOCKING_ASK`` False the tool awaits the host
-  hook exactly as before and NOTHING is written to an ask log — the invariant
-  that lets A1 merge dark.
+* **The kill-switch arm is the old behaviour.** With ``NONBLOCKING_ASK`` False —
+  the kill switch, since the queue became the shipped default on 2026-10-03 —
+  the tool awaits the host hook exactly as it did before the queue existed and
+  NOTHING is written to an ask log. This is the arm ``LOP_ASK_NONBLOCKING=0``
+  restores for an operator, so it stays covered rather than retired.
 * **The log survives the runtime.** A second session over the same directory
   delivers what the first one owed, exactly once, because the transcript row is
   the delivery marker rather than a process-local boolean.
@@ -87,8 +89,16 @@ def _ask_ids(directory: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def _dark_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every cell starts from the shipped default; the dark ones turn it back."""
+def _the_blocking_arm_is_selected_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every cell on the KILL-SWITCH arm, and say why out loud.
+
+    These cells pin BOTH arms of one feature. The queued one is the shipped
+    default (2026-10-03), so the arm a cell means is no longer implied by the
+    process default and must be stated — this fixture states it for the file,
+    and the queued cells override it by name (``monkeypatch.setattr(... True)``).
+    Autouse rather than per-cell so a blocking cell added later cannot forget to
+    select the arm it is named for and quietly test the default instead.
+    """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
 
 
@@ -98,11 +108,12 @@ def _dark_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_with_the_flag_off_the_tool_still_awaits_and_writes_no_log(
+async def test_with_the_kill_switch_the_tool_still_awaits_and_writes_no_log(
     headless_tui_env: Path,
 ) -> None:
-    """A1 merges DARK. With the flag off the model's ``ask`` call blocks on the
-    host hook exactly as it always has, and no ask log exists afterwards."""
+    """The kill switch is real: with ``NONBLOCKING_ASK`` off the model's ``ask``
+    call blocks on the host hook exactly as it did before the queue shipped,
+    and no ask log exists afterwards."""
     answered: list[str] = []
 
     async def hook(questions: list[Any]) -> dict[str, list[str]] | None:
