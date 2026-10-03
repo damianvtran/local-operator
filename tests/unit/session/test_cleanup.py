@@ -163,9 +163,20 @@ def test_policy_is_read_through_the_nested_path(tmp_path: Path) -> None:
 
 def test_a_flat_dotted_key_is_not_honoured(tmp_path: Path) -> None:
     """A stray ``"session.cleanup.enabled": true`` at the top level (the shape
-    of the old bug) must not enable anything."""
+    of the old bug) must not enable anything.
+
+    Seeded straight into the mapping rather than through ``update_config``, which
+    now REFUSES a dotted key: it is the second whole-snapshot writer, and the
+    inert literal it used to accept was #1920 verbatim. The stray key this
+    asserts about is one that arrives from a hand-edited ``config.yml`` or a file
+    written by an older build, so seeding the mapping is the way the reader
+    really meets it — and it keeps the property under test (the READER ignores a
+    flat key) pinned rather than the writer's tolerance of one.
+    """
     manager = ConfigManager(tmp_path)
-    manager.update_config({"session.cleanup.enabled": True, "session.cleanup.remove_empty": True})
+    manager.config.set_value("session.cleanup.enabled", True)
+    manager.config.set_value("session.cleanup.remove_empty", True)
+    manager._write_config(vars(manager.config))
     assert policy_from_config(ConfigManager(tmp_path)).enabled is False
 
 

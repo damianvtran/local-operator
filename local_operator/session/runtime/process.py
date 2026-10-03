@@ -47,7 +47,8 @@ flight, the runtime COMMITS to leaving through the same seam a replaced build
 uses (:func:`_commit_to_leaving`) — announced as it commits, so the operator is
 told before anything is refused, and latched so no new work is admitted — then
 leaves at the next boundary at which nothing would be lost, bounded by
-``types.SIGNAL_DRAIN_S`` (see :func:`_drain_for_signal` for the
+``types.SIGNAL_DRAIN_S`` of SILENCE — a turn that keeps making progress is
+never cut by it (see :func:`_drain_for_signal` for the
 three properties and why each is load-bearing). A signal with nothing in
 flight is byte-for-byte the old behaviour, and SIGKILL remains unrefusable.
 The graceful paths were always idle-gated; the signal path was the gap, and it
@@ -1829,6 +1830,56 @@ def _clean_ordering_already_ran(reaper: "asyncio.Task[bool]") -> bool:
     return reaper.result() is True
 
 
+def _another_move_in_flight() -> "int | None":
+    """The pid of ANOTHER live runtime inside its update window, or ``None``.
+
+    THE FLEET-AWARE HALF OF THE STAGGER (2026-10-01, wave C). ``_refresh_for``
+    spreads ONE runtime's exit with a random draw, which cannot serialise a
+    FLEET: when a generation appears, sixteen runtimes draw from the same
+    window and converge on "move now" — the wave that met the wave-C SIGTERM
+    while the whole fleet sat latched. The registry is the existing namespace
+    where a runtime already states what it is doing, and
+    ``SessionRecord.updating`` is non-empty exactly while an update window is
+    open (``RuntimeServer.note_updating`` writes it through in the same
+    synchronous step ``begin_update`` takes the lock), so this gate needs no
+    new file, lock or process that could leak: a candidate consults the
+    population it is about to join and defers to its own next check while a
+    sibling is mid-move. It is ADVISORY by construction — two runtimes that
+    check in the same instant both proceed — and that is the intended weight:
+    the worst it loses is one overlap, and it cannot wedge a move, because the
+    state it reads is cleared by the mover's own completion, failure, or death
+    (a stale pid is not ``live`` and does not hold the gate).
+
+    READER MODE, and that is not decoration: ``reap=False`` leaves every file
+    exactly where it is — this is a reader, and the sweep belongs to the
+    callers that own the namespace. ``check_zombie=False`` keeps it fork-free
+    (signal-0 liveness only), because this runs on a live fleet's own loop.
+
+    A FAILED READ HOLDS NOBODY BACK: an unreadable registry answers ``None``
+    ("no fleet evidence"), never an exception and never a phantom holder —
+    the same fail-open direction ``_should_refresh``'s gates use, because a
+    wrongly-deferred move leaves a runtime on a stale build for one more
+    check, while a wrongly-taken one costs one overlap in an advisory.
+    """
+    try:
+        # Late, like this module's other registry-adjacent imports: this file
+        # is run as ``__main__`` and its import block is the child's boot path.
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+
+        rows = registry.scan(config_dir(), reap=False, check_zombie=False)
+    except Exception:  # noqa: BLE001 — a fleet read must never hold a move back
+        logger.debug("could not read the session registry for the fleet gate", exc_info=True)
+        return None
+    me = os.getpid()
+    for record, state in rows:
+        if record.pid == me:
+            continue
+        if state == "live" and getattr(record, "updating", ""):
+            return int(record.pid)
+    return None
+
+
 async def _refresh_for(
     newer: "BuildStamp", handle: object, runtime: object, stop: asyncio.Event
 ) -> bool:
@@ -1900,6 +1951,22 @@ async def _refresh_for(
         pass
     if _should_refresh(handle, boot) is None:
         logger.info("session runtime: work arrived during the refresh stagger; keeping")
+        return False
+
+    # THE FLEET GATE — the other half of the stagger, checked AFTER the work
+    # re-check because a deferred move must still yield to work. The random
+    # draw spreads ONE exit; this serialises the fleet's (see
+    # ``_another_move_in_flight`` for the mechanism and its advisory limit).
+    # Deferring here touches nothing — no window was opened, nothing was
+    # announced — so the next check simply asks again.
+    holder = _another_move_in_flight()
+    if holder is not None:
+        logger.info(
+            "session runtime: another runtime (pid %d) is already inside its update "
+            "window; keeping %s — the fleet moves one runtime at a time",
+            holder,
+            pair,
+        )
         return False
 
     # THE WINDOW OPENS HERE — after the last cheap gate and BEFORE the announce,
@@ -2656,6 +2723,115 @@ class _DrainProgress:
         return at - self.latched_at
 
 
+class _SignalDrainBound:
+    """When a signalled runtime should stop waiting and dispose: SILENCE, not the clock.
+
+    THE FIX (wave C, 2026-10-01). ``_drain_for_signal`` used to bound its wait
+    by WALL CLOCK — ``deadline = monotonic() + SIGNAL_DRAIN_S``, expiry ->
+    dispose — so a signal that arrived at a busy, unattached runtime cut the
+    turn at the bound whenever the turn was longer than it: on wave C an
+    install-adjacent SIGTERM cost nine fleet sessions their open turns, and the
+    ~120 s gap between the signal and the ``disposed`` rows IS this bound. The
+    bound's job is to keep a WEDGED runtime killable, not to cap honest work,
+    so it is now progress-gated the way ``_await_live_window`` gates the build
+    handover on the lock's heartbeat, and the way ``stall_watchdog`` gates its
+    own bound — its progress leg "restarts the progress clock each time" a
+    sample answers in flight, so a step OPEN at every sample is an ABSTENTION
+    rather than a fire. The same rule, here:
+
+    * PROGRESS is either movement the work reports (:func:`_work_motion` — the
+      same footprint :class:`_DrainProgress` measures) or an EXECUTING STEP
+      (:func:`_step_in_flight` — a tool batch, a compaction, a child lane's
+      provider request). Either one restarts the clock.
+    * A turn that keeps reporting either is NEVER cut by the bound, however
+      long it runs; it leaves at its turn boundary. THE RESIDUAL IS A BLIND
+      SPOT, stated rather than implied: the parent's own provider request is
+      INVISIBLE to both probes, streamed or not — ``_step_in_flight``'s stream
+      counter is CHILD-only (see its docstring), and none of ``_work_motion``'s
+      four components move while a parent call is the only activity (transcript
+      rows land at step boundaries) — so a signalled turn whose only activity
+      is the parent's own provider call reports neither movement nor an
+      executing step, is indistinguishable from a stall for the whole bound,
+      and is reaped. That is the same blind spot ``_work_motion`` documents;
+      it is named here so the next reader can widen the probes rather than
+      discover it.
+    * ONLY SILENCE AND IDLENESS TOGETHER REAP: no movement AND no step for
+      ``SIGNAL_DRAIN_S`` disposes, byte for byte the old exit.
+    * WHAT STILL KILLS A WEDGED-BUT-BEATING RUNTIME IS SIGKILL — the
+      unrefusable stop every path already documents (``_on_signal``, the kill
+      ladder) — and the stall watchdog keeps writing its evidence. There is
+      deliberately NO second wall-clock ceiling for a progressing turn: it
+      cannot tell "still working" from "never settles" (measured honest turns
+      run 2h42m), and a ceiling that cannot tell the two apart would cut
+      exactly the turns this drain exists to save.
+    * OBSERVABLE, NOT SILENT: a hold with no MOVEMENT for a whole bound while
+      a step is in flight returns :attr:`SPARE` once per bound's worth of
+      silence, so a runtime that looks idle but is spared is a WARNING line in
+      its own log rather than only an absence.
+
+    A REDUCED HOST KEEPS THE OLD DEADLINE. A handle with no readable session
+    (the tests' stubs, an older host) cannot answer either probe, and "bounded"
+    must not depend on a seam being present — the same fallback
+    ``_await_live_window`` keeps for a handle without the update lock. Such a
+    handle gets the total-duration deadline, byte for byte the old behaviour.
+    """
+
+    #: What :meth:`sample` can answer.
+    WAIT = ""
+    REAP = "reap"
+    SPARE = "spare"
+
+    def __init__(self, handle: object, at: float) -> None:
+        #: Whether the progress seam is readable at all; ``False`` keeps the
+        #: deadline instead (see the docstring's reduced-host paragraph).
+        self.gated = getattr(handle, "_session", None) is not None
+        self.motion: "tuple[Any, ...]" = _work_motion(handle)
+        #: Last instant of PROGRESS (movement OR a step in flight): the reap
+        #: clock runs from here.
+        self.progress_at = at
+        #: Last instant of MOVEMENT alone, kept apart from ``progress_at`` for
+        #: the observability line only: it is what makes "no movement for N
+        #: seconds, held open only by a step" sayable.
+        self.motion_at = at
+        self.deadline = at + SIGNAL_DRAIN_S
+        #: The no-movement age at which the next :attr:`SPARE` line is due.
+        self.note_span = SIGNAL_DRAIN_S
+
+    def sample(self, handle: object, at: float) -> str:
+        """One tick: :attr:`WAIT`, :attr:`REAP` (dispose), or :attr:`SPARE` (say so).
+
+        ORDER IS THE MECHANISM: movement is asked first (the cheaper read, and
+        the clock the build drain also uses), the step second, and the reap is
+        only reachable when BOTH answered empty at this tick and have answered
+        empty for the whole bound.
+        """
+        if not self.gated:
+            return self.REAP if at >= self.deadline else self.WAIT
+        motion = _work_motion(handle)
+        if motion != self.motion:
+            self.motion = motion
+            self.progress_at = at
+            self.motion_at = at
+            self.note_span = SIGNAL_DRAIN_S
+            return self.WAIT
+        if _step_in_flight(handle):
+            self.progress_at = at
+            if at - self.motion_at >= self.note_span:
+                # Consume EVERY crossed multiple, so a starved loop cannot
+                # return SPARE on several consecutive ticks for one silence.
+                while at - self.motion_at >= self.note_span:
+                    self.note_span += SIGNAL_DRAIN_S
+                return self.SPARE
+            return self.WAIT
+        if at - self.progress_at >= SIGNAL_DRAIN_S:
+            return self.REAP
+        return self.WAIT
+
+    def motion_age(self, at: float) -> float:
+        """Seconds since the last MOVEMENT alone — a step does not reset it."""
+        return at - self.motion_at
+
+
 #: The handle of the runtime this process is currently running, for the stall
 #: bound's progress leg — and for nothing else.
 #:
@@ -3336,6 +3512,17 @@ async def _drain_for(
     if at < drain.stagger_until:
         return False
     if not _idle_for_refresh(handle):
+        # A SIGNAL drain draws no abandonment arms, and the guard is the
+        # trigger's own token: ``_abandon_move`` RELEASES the latch and keeps
+        # serving — the right give-up for a build handover that can wait for
+        # its next idle, and a silent revocation of a termination signal when
+        # it is not. A signalled runtime's bound is its own progress clock
+        # (``_SignalDrainBound``, judged in ``_drain_for_signal``), so all
+        # this function may do for it is keep waiting and re-check the idle
+        # gate — the failed-update row and the released latch it would
+        # otherwise write must never appear on a signal.
+        if drain.cause == SIGNAL_DRAIN_CAUSE:
+            return False
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
             await _abandon_move(drain, handle, runtime, at=at)
             return False
@@ -3627,10 +3814,45 @@ def _route_signal(
     )
 
 
+def _warn_signal_reap(sig_name: str, bound: "_SignalDrainBound") -> None:
+    """The one line the bound's expiry writes, on all three wait arms.
+
+    THE WORDS SEPARATE THE TWO CLOCKS the bound can run on, because this is the
+    line a reader greps to learn WHY a turn was cut: on a readable session the
+    claim is what the clock measured (no progress), and on a reduced handle it
+    is the only thing the fallback knows (work still in flight). "drain bound
+    (Ns) expired" is the stable, greppable half.
+    """
+    logger.warning(
+        "session runtime: %s drain bound (%.0fs) expired with %s; disposing now",
+        sig_name,
+        SIGNAL_DRAIN_S,
+        "no progress from the work in flight" if bound.gated else "work still in flight",
+    )
+
+
+def _note_signal_spare(sig_name: str, bound: "_SignalDrainBound", at: float) -> None:
+    """The spared-but-idle-looking hold, said out loud once per bound of silence.
+
+    A hold that reports NO MOVEMENT for a whole bound while a step is in flight
+    is the one state this fix can leave looking idle indefinitely (the step may
+    never close). It is not silent by accident: the line names the age and the
+    one fact holding it open, so "why has this signalled runtime been alive for
+    an hour" is answerable from its own log.
+    """
+    logger.warning(
+        "session runtime: %s is holding for a step in flight with no progress for "
+        "%.0fs; the signal drain keeps waiting — only a turn with nothing executing "
+        "and nothing moving is reaped",
+        sig_name,
+        bound.motion_age(at),
+    )
+
+
 async def _drain_for_signal(
     handle: object, runtime: object, stop: asyncio.Event, *, sig_name: str
 ) -> None:
-    """Leave after a termination signal — at the next boundary, or at the bound.
+    """Leave after a termination signal — at the next boundary, or when it goes silent.
 
     Called by ``amain``'s signal handler INSTEAD of ``stop.set()`` when
     :func:`_work_in_flight` is true. It is the fix for the asymmetry the
@@ -3651,11 +3873,18 @@ async def _drain_for_signal(
 
     Three properties, each load-bearing:
 
-    * THE WAIT IS BOUNDED by ``types.SIGNAL_DRAIN_S``. A wedged or runaway
-      runtime must not become unkillable, and a signal must never turn into an
-      unbounded wait. The deadline is absolute and the boundary is re-checked
-      every ``REAP_CHECK_S``, so the wait ends at the FIRST tick after the work
-      finishes.
+    * THE WAIT IS BOUNDED BY SILENCE, NOT BY THE CLOCK (2026-10-01, wave C).
+      ``types.SIGNAL_DRAIN_S`` no longer caps the wait itself — it caps how long
+      the work may show NO PROGRESS while the runtime waits: no movement
+      reported (:func:`_work_motion`) AND no step executing
+      (:func:`_step_in_flight`) for the whole bound disposes the runtime
+      exactly as expiry always did, where a turn that keeps moving or
+      executing is NEVER cut by the bound, however long it runs, and leaves at
+      its boundary. :class:`_SignalDrainBound` carries the full rule, the
+      reduced-host fallback that keeps the old deadline, the stated residuals,
+      and why there is no second wall-clock ceiling (SIGKILL is the unrefusable
+      stop). The boundary is re-checked every ``REAP_CHECK_S``, so the wait
+      ends at the FIRST tick after the work finishes.
 
     * THE COMMIT IS SAFE TO TAKE NOW, and PR #1108 is what made it so.
       ``begin_drain`` refuses new admissions and spools peer messages without
@@ -3686,7 +3915,8 @@ async def _drain_for_signal(
       refusal is only honest if the operator was told, which is why the commit
       announces the moment it is taken.
 
-    * ON EXPIRY THE DISPOSAL IS THE ORDINARY ONE: no second announcement and no
+    * ON THE BOUND'S EXPIRY (a stalled clock, not a deadline) THE DISPOSAL IS
+      THE ORDINARY ONE: no second announcement and no
       clean-exit convergence, so the dispose rung notes ``runtime-shutdown`` for
       the turn it aborts — the token this drain's own latch carries, so a turn
       is classified identically whether the drain expired or never ran. Say so
@@ -3713,7 +3943,9 @@ async def _drain_for_signal(
     re-reads the idle gate immediately before ``begin_retire`` (through
     ``_idle_for_refresh``, the same ``may_refresh`` gate the reaper samples) and
     skips the commit when work arrived, so such a turn is normally WAITED OUT and
-    ``stop.set()`` cuts it only if ``SIGNAL_DRAIN_S`` expires first (pinned by
+    ``stop.set()`` cuts it only once the work has shown no progress for
+    ``SIGNAL_DRAIN_S`` — the same progress clock every arm of this function runs
+    on (pinned by
     ``test_process_refresh.py::test_work_arriving_after_the_announce_keeps_the_runtime``).
     Re-reading the gate at the announce would not close the window — the signal
     has already decided that this process leaves, so a re-read could only relabel
@@ -3726,30 +3958,33 @@ async def _drain_for_signal(
     it is and in the order it already had — ``amain`` owns deny -> dispose ->
     aclose, and this function only decides WHEN ``stop`` is set.
     """
-    # ``time.monotonic`` rather than ``loop.time``: the deadline is compared
-    # against a clock nobody can move, and the reaper's own waits use this one.
-    deadline = time.monotonic() + SIGNAL_DRAIN_S
+    # ``time.monotonic`` rather than ``loop.time``: the bound's clock and its
+    # reduced-host deadline are compared against a clock nobody can move, and
+    # the reaper's own waits use this one.
+    bound = _SignalDrainBound(handle, time.monotonic())
     logger.info(
         "session runtime: %s arrived with work in flight; leaving at the next boundary "
-        "(bound %.0fs)",
+        "(disposing only if the turn stops making progress for %.0fs)",
         sig_name,
         SIGNAL_DRAIN_S,
     )
     if getattr(handle, "_draining", False) and not stop.is_set():
         # A departure is ALREADY committed to — the build on disk was replaced
         # first — so its own call site owns the exit and this signal adds only
-        # the one thing that path does not have: a bound. Waiting on ``stop``
-        # rather than on the work is what keeps the two from racing into
-        # ``_clean_exit``; the drain the reaper is running sets it.
-        while not stop.is_set() and time.monotonic() < deadline:
+        # the one thing that path does not have: a bound, judged on PROGRESS
+        # (``_SignalDrainBound``) rather than on wall clock. Waiting on
+        # ``stop`` rather than on the work is what keeps the two from racing
+        # into ``_clean_exit``; the drain the reaper is running sets it.
+        while not stop.is_set():
+            at = time.monotonic()
+            verdict = bound.sample(handle, at)
+            if verdict == _SignalDrainBound.REAP:
+                break
+            if verdict == _SignalDrainBound.SPARE:
+                _note_signal_spare(sig_name, bound, at)
             await asyncio.sleep(REAP_CHECK_S)
         if not stop.is_set():
-            logger.warning(
-                "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
-                "disposing now",
-                sig_name,
-                SIGNAL_DRAIN_S,
-            )
+            _warn_signal_reap(sig_name, bound)
             stop.set()
         return
     # ``leaving=`` is how the pending exit reaches the fleet surfaces, and the
@@ -3782,18 +4017,20 @@ async def _drain_for_signal(
             return
         # NO LATCH ON THIS HANDLE (a reduced host or a test double). The old
         # fallback, kept because the guarantee it buys is the point of this
-        # function: wait the work out, bounded, announcing nothing — a runtime
-        # that never latched has nothing to refuse, so there is no handover to
-        # advertise — and let the disposal own the exit.
-        while _work_in_flight(handle) and time.monotonic() < deadline:
+        # function: wait the work out, bounded BY THE SAME PROGRESS CLOCK,
+        # announcing nothing — a runtime that never latched has nothing to
+        # refuse, so there is no handover to advertise — and let the disposal
+        # own the exit.
+        while _work_in_flight(handle):
+            at = time.monotonic()
+            verdict = bound.sample(handle, at)
+            if verdict == _SignalDrainBound.REAP:
+                break
+            if verdict == _SignalDrainBound.SPARE:
+                _note_signal_spare(sig_name, bound, at)
             await asyncio.sleep(REAP_CHECK_S)
         if _work_in_flight(handle):
-            logger.warning(
-                "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
-                "disposing now",
-                sig_name,
-                SIGNAL_DRAIN_S,
-            )
+            _warn_signal_reap(sig_name, bound)
         stop.set()
         return
     while True:
@@ -3801,15 +4038,14 @@ async def _drain_for_signal(
             return
         if stop.is_set():
             return
-        if time.monotonic() >= deadline:
+        at = time.monotonic()
+        verdict = bound.sample(handle, at)
+        if verdict == _SignalDrainBound.REAP:
             break
+        if verdict == _SignalDrainBound.SPARE:
+            _note_signal_spare(sig_name, bound, at)
         await asyncio.sleep(REAP_CHECK_S)
-    logger.warning(
-        "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
-        "disposing now",
-        sig_name,
-        SIGNAL_DRAIN_S,
-    )
+    _warn_signal_reap(sig_name, bound)
     stop.set()
 
 
@@ -3886,6 +4122,7 @@ async def _drain_inbox_into(handle: object) -> int:
     from local_operator.session.runtime.inbox import (
         SOURCE_USER,
         append_inbox,
+        coalesce_wake_rows,
         drain_inbox,
         drop_owed_turn,
     )
@@ -3896,6 +4133,13 @@ async def _drain_inbox_into(handle: object) -> int:
     except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
         logger.warning("inbox drain failed", exc_info=True)
         return 0
+    # BEFORE the deferral split below, which re-spools what it will not deliver:
+    # a draining runtime spools one row per fired occurrence, so a schedule that
+    # repeats across a long handover arrives here as dozens of identical wake rows
+    # and each would be delivered as its own turn. Coalescing first means the
+    # deferral writes back ONE row per wake (carrying its fire count), which is
+    # also what keeps a later drain's merge from double-counting.
+    lines = coalesce_wake_rows(lines)
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]

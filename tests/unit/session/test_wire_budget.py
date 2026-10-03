@@ -15,6 +15,7 @@ session could not recover from the inside.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
@@ -23,10 +24,13 @@ import types
 import pytest
 from PIL import Image
 
+from local_operator.compaction import api
 from local_operator.compaction.api import CompactionSettings
+from local_operator.compaction.tokens import estimate_wire_bytes
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
+    CompactionEndEvent,
     ImageContent,
     Message,
     ModelSpec,
@@ -35,6 +39,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     TextContent,
     ToolCall,
+    Usage,
 )
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import FRAMES_SHED_NOTICE, Session
@@ -985,5 +990,129 @@ async def test_a_refusal_after_a_size_strip_makes_the_strip_permanent(tmp_path):
     rendered = session._render_history(list(session._context.messages))
     assert not any(
         isinstance(block, ImageContent) for message in rendered for block in message.content
+    )
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The soft byte trigger on the MID-TURN path (fix/compaction-bytegate-midturn)
+# ---------------------------------------------------------------------------
+
+
+async def _settle_background(session: Session, tries: int = 300) -> None:
+    """Let a detached pass finish, the way a real turn's next steps do."""
+    for _ in range(tries):
+        if not session._compaction_pass_in_flight:
+            return
+        await asyncio.sleep(0.01)
+
+
+def _usage_at(context_tokens: int) -> Usage:
+    return Usage(input_tokens=context_tokens, output_tokens=10, context_tokens=context_tokens)
+
+
+@pytest.mark.asyncio
+async def test_a_byte_heavy_history_compacts_at_a_mid_turn_boundary(tmp_path):
+    """THE trigger gap: the mid-turn gate must see the byte figure.
+
+    ``_on_turn_end`` runs the cheap pre-gate at every continuing tool-loop
+    boundary and returns BEFORE ``_plan_compaction`` when it says "no pass
+    due". That gate passed ``advisory_ok`` but not ``wire_bytes``, while both
+    of the plan gate's own token gates pass it — so a screenshot history over
+    the 16 MB soft trigger, and under every TOKEN threshold, was answered "no
+    pass due" at each such boundary and the gate that would have compacted on
+    size was never reached.
+
+    The history here is deliberately UNDER the 24 MB hard budget: nothing is
+    shed at the render seam, so the payload that reaches the gate is the whole
+    24 frames and the soft trigger is the only thing that can fire. Both
+    discriminators are asserted before the pass, because a history the token
+    term could also have caught would pass this test with or without the fix.
+    """
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(24))
+
+    events: list[object] = []
+    session.subscribe(events.append)
+
+    assistant = Message.assistant("mid-run reply")
+    assistant.usage = _usage_at(60_000)
+    messages = [*session._context.messages, assistant]
+
+    settings = CompactionSettings()
+    rendered = session._render_history(messages)
+    payload = estimate_wire_bytes(rendered)
+    byte_trigger = api.resolve_wire_bytes_trigger(settings)
+    token_bound = api.messages_tokens_upper_bound(rendered)
+    token_trigger = api.resolve_threshold_tokens(MODEL.context_window, settings)
+
+    assert 0 < byte_trigger < payload < session._wire_bytes_budget(), (
+        f"the fixture must sit between the soft trigger ({byte_trigger}) and the hard budget "
+        f"({session._wire_bytes_budget()}) so the trigger is the only thing that can fire; "
+        f"payload was {payload}"
+    )
+    assert (
+        token_bound < token_trigger
+    ), "the token term could fire on its own; the test proves nothing"
+    assert (
+        sum(isinstance(block, ImageContent) for m in rendered for block in m.content) == 24
+    ), "the render seam shed frames; this would be testing the hard budget, not the trigger"
+
+    await session._on_turn_end(messages)
+    await _settle_background(session)
+
+    ends = [e for e in events if isinstance(e, CompactionEndEvent)]
+    assert ends, "a byte-heavy history reached a mid-turn boundary and never compacted"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_byte_triggered_pass_is_not_credited_to_the_advisor(tmp_path):
+    """The sibling site: ``_fires_on_size_alone`` was byte-blind too.
+
+    It answers "would this have compacted with NO advice at all?", and that
+    answer is carried onto the plan as ``advisor_hint`` — the receipt then
+    names an advisor that did nothing, and ``_settle_advisor`` JUDGES the
+    advisor by the pass's reclaim, so a pass the byte trigger caused by itself
+    could switch the advisor off for the session. ``advisory_ok=False`` is the
+    whole meaning of "alone" and bytes are not advice, so the byte figure has
+    to be part of the question.
+
+    Asserted on the plan rather than on a receipt string: ``advisor_hint`` on
+    the plan IS what both consumers read, so this is the decision itself and
+    not a rendering of it.
+    """
+    from local_operator.compaction.advisor import CompactionHint
+    from local_operator.session.session import _CompactionPlan
+
+    stream = ScriptedOk()
+    settings = CompactionSettings(
+        strategy="context-full",
+        keep_recent_tokens=1_000,
+        advisor_enabled=True,
+        advisor_floor_tokens=200_000,
+        advisor_trigger_tokens=300_000,
+        advisor_every_n_turns=5,
+    )
+    session = make_session(tmp_path, stream, compaction_settings=settings)
+    await session.seed_history(_frames(24))
+
+    session._advisor_hint = CompactionHint(
+        preserve_from_id=session._context.messages[-1].id,
+        preserve_tokens=5000,
+        compact_now=True,
+        confidence=0.9,
+        reason="task boundary reached",
+        turn_index=session._generation,
+    )
+    session._last_usage = _usage_at(60_000)
+
+    plan = await session._plan_compaction(respect_threshold=True)
+
+    assert isinstance(plan, _CompactionPlan), "no pass was planned; the fixture proves nothing"
+    assert plan.advisor_hint is None, (
+        "a pass the byte trigger caused by itself was carried as an ADVISORY pass: "
+        "the receipt blames the advisor and _settle_advisor judges it by this pass"
     )
     await session.dispose()

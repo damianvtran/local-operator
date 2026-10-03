@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.65.0"
+version = "0.66.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -230,6 +230,14 @@ local_operator = [
     # that dropped it would install the roles while having no record of which
     # names the hub refuses to republish.
     "agent_seeds/*.json",
+    # The SPEECH VOICING MAP, vendored byte-for-byte from agent-server
+    # (internal/services/speech_voicing/) beside the adapters that execute it.
+    # Without these a wheel would install the Python executor and no map, and
+    # every BYO synthesis would fail at import: the map IS the mapping, not a
+    # fixture for the tests (the vectors travel with it so the same golden
+    # contract still runs from an installed tree).
+    "tts/voicing_map/*.json",
+    "tts/voicing_map/*.md",
     # The macOS notification sender's source and icon. Both must ship: the
     # bundle is compiled on the user's machine on first use (see
     # ``tui/notifier_app``), and without the `.m` there is nothing to build

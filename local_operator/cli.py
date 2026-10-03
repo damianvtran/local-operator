@@ -922,8 +922,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "sessions",
         help=(
             "List active lop sessions and their resource usage; "
+            "`sessions resume` reopens a set of stored sessions (paused/failed/all) "
+            "in one bounded batch; "
             "`sessions cleanup` previews or runs the session cleanup policy; "
             "`sessions reclaim` previews or ends runtimes nothing can reach"
+        ),
+        description=(
+            "List active lop sessions and their resource usage; "
+            "`sessions resume` reopens a set of stored sessions in one command; "
+            "`sessions cleanup` previews or runs the session cleanup policy; "
+            "`sessions reclaim` previews or ends runtimes nothing can reach."
         ),
         parents=[parent_parser],
     )
@@ -1103,6 +1111,92 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions resume`: the BULK door — resume a set of stored sessions in
+    # one command. The operator escalation (2026-10-01): resuming 15+ paused/
+    # failed sessions one `lop exec --resume` at a time took ~10 minutes and
+    # had to be babysat, because every invocation pays its own launcher
+    # startup and readiness wait — serially.
+    #
+    # THE SETS ARE THE LISTING'S OWN WORDS (FAILED_OUTCOME_KINDS /
+    # PAUSED_OUTCOME_KINDS in info/collect.py, the constants behind
+    # `lop sessions --paused/--failed`): `--paused` is {interrupted, retired},
+    # `--failed` is {error}, and given together they are the union. `--all`
+    # WINS over them (review round 1, m3): it widens to every stored, non-live
+    # session, and `--paused --all` is all — the widest reading, which is what
+    # the header, the approval description and the help now all say.
+    #
+    # THE LIVE EXCLUSION IS THE REGISTRY'S ANSWER: sessions with a live or
+    # wedged record are never candidates. That answer is comprehensive for
+    # RECORD-HOLDING runtimes, but a session whose owner holds no registry
+    # record (a marker-only runtime — the live-marker cell QA ran) can still
+    # be SELECTED; the exec path's own lease check then refuses it loudly per
+    # session. The selection narrows what is offered; the child guard decides.
+    #
+    # THE DEFAULT CAP IS DELIBERATE: a bare `--all` on a well-used store can
+    # match thousands of directories, and resuming is an ACTION, so the
+    # selection is capped (newest first) unless the caller raises --limit. The
+    # cap is named in the output whenever it truncated a set.
+    resume_parser = sessions_subparsers.add_parser(
+        "resume",
+        help="Resume a set of stored sessions in one command (bulk)",
+        description=(
+            "Resume stored sessions without a shell loop: `--paused` (the "
+            "interrupted/retired pair), `--failed` (error), or `--all` (every "
+            "stored, non-live session — the widest reading, so given with the "
+            "other selectors it wins). Newest first, capped at 20 unless "
+            "--limit is given. Each session is reopened headlessly as `lop exec "
+            "--resume <id> --background` with --message (default: a continuation). "
+            "Children run with bounded concurrency (6 at a time) and print one "
+            "line per session as it resolves. Exit codes: 0 = every selected "
+            "session resumed; 1 = at least one failed or was unresolved at the "
+            "bound; 2 = misuse (no set selected)."
+        ),
+        parents=[parent_parser],
+    )
+    resume_parser.add_argument(
+        "--paused",
+        action="store_true",
+        help=(
+            "select stored sessions whose last outcome was interrupted/retired "
+            "(the 'Unseen interruption' pair; implies the store scope)"
+        ),
+    )
+    resume_parser.add_argument(
+        "--failed",
+        action="store_true",
+        help="select stored sessions whose last outcome was error (implies the store scope)",
+    )
+    resume_parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_sessions",
+        help=(
+            "select every stored, non-live session (newest first, capped); the "
+            "widest reading — given with --paused/--failed it wins"
+        ),
+    )
+    resume_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the selected set (newest first) and resume nothing",
+    )
+    resume_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="cap the set at the N newest matches (default: 20)",
+    )
+    resume_parser.add_argument(
+        "--message",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "the message each resumed session runs (default: a continuation — "
+            "'Continue the task from where it left off.')"
+        ),
+    )
 
     # `lop sessions move`: hand a conversation to another device, or bring one
     # home. A sub-subcommand rather than a flag on `sessions` because it is an
@@ -1573,7 +1667,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
-    # question ("install THIS tree") and asks nothing of the network.
+    # question ("install THIS tree"); on macOS a ref that is exactly a published
+    # release routes through the published wheel instead (see
+    # ``update.classify_snapshot_install``); off macOS every ref builds from
+    # source. This command may consult PyPI, but it never runs the version
+    # check the default update runs.
     update_parser.add_argument(
         "--from-snapshot",
         dest="from_snapshot",
@@ -1581,7 +1679,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Install a local source tree (a directory, or a git ref of the current "
-            "repository) into its own install generation, instead of upgrading from PyPI"
+            "repository) into its own install generation. On macOS, a ref that is exactly a "
+            "published release installs the published wheel from PyPI — the only build "
+            "carrying the macOS key agent — and every other ref is built from source."
         ),
     )
     update_parser.add_argument(
@@ -4898,6 +4998,183 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
         return _local_relay_refusal()
 
 
+def sessions_resume_command(args: argparse.Namespace) -> int:
+    """``lop sessions resume [--paused] [--failed] [--all] [--dry-run]``.
+
+    Resumes a SET of stored sessions in one command: enumerate once, then
+    reopen each as its own ``lop exec --resume --background`` child under a
+    bounded capacity, printing one line per session the moment it resolves.
+    The set vocabulary, the enumeration rule and the capacity reasoning live
+    in ``session/bulk_resume.py`` (the module docstring carries the
+    measurements); this function owns only the CLI's rendering and exit codes.
+
+    EXIT CODES (scripts depend on them):
+
+    * ``0`` — every selected session resumed (a resolved run, or a job still
+      truthfully reading ``running`` at its resolution); an empty set is also
+      0 — nothing matched is an answer, not a failure;
+    * ``1`` — at least one session failed, was refused, or was unresolved at
+      the readiness bound (each is a loud line naming the session and the
+      follow-up command);
+    * ``2`` — misuse: no set selected, or an empty ``--message``.
+
+    ``--dry-run`` prints the selected set (newest first, with ages) and
+    resumes nothing; it never spawns, so it also skips the PATH prime below.
+    """
+    import asyncio
+
+    from local_operator.helpers import setup_cross_platform_environment
+    from local_operator.resume import format_age, session_name
+    from local_operator.session.bulk_resume import (
+        DEFAULT_RESUME_MESSAGE,
+        RESUME_BATCH_CONCURRENCY,
+        RESUME_DEFAULT_LIMIT,
+        ResumeOutcome,
+        live_session_ids,
+        resume_sessions,
+        select_resume_candidates,
+    )
+
+    paused = bool(getattr(args, "paused", False))
+    failed = bool(getattr(args, "failed", False))
+    all_sessions = bool(getattr(args, "all_sessions", False))
+    if not (paused or failed or all_sessions):
+        print(
+            "choose a set to resume: --paused (interrupted/retired), "
+            "--failed (error), or --all (every stored, non-live session); "
+            "add --dry-run to preview the selection.",
+            file=sys.stderr,
+        )
+        return 2
+    message = args.message if args.message is not None else DEFAULT_RESUME_MESSAGE
+    if not message.strip():
+        print(
+            "--message must be a non-empty message: a headless resume runs a "
+            "prompt, and an empty one is refused by `lop exec` the same way.",
+            file=sys.stderr,
+        )
+        return 2
+    limit = args.limit if args.limit is not None else RESUME_DEFAULT_LIMIT
+
+    root = config_dir()
+    try:
+        exclude = live_session_ids(root)
+        selection = select_resume_candidates(
+            root,
+            paused=paused,
+            failed=failed,
+            all_sessions=all_sessions,
+            limit=limit,
+            exclude_ids=exclude,
+        )
+    except Exception as exc:  # noqa: BLE001 — a resume must report, not traceback
+        print(f"could not enumerate the store: {exc}", file=sys.stderr)
+        return 1
+    sessions_dir = root / "sessions"
+    rows = [
+        (session_id, session_name(sessions_dir / session_id) or "(unnamed)")
+        for session_id, _mtime in selection.sessions
+    ]
+    mtime_by_id = dict(selection.sessions)
+    capped = ""
+    if selection.matched > len(selection.sessions):
+        capped = (
+            f" (newest {len(selection.sessions)} of {selection.matched} matched; "
+            f"raise --limit to act on more)"
+        )
+
+    if args.dry_run:
+        for session_id, name in rows:
+            age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
+            print(f'  {session_id}  "{name}"  ({age})')
+        if not rows:
+            print("no sessions matched the selection.")
+        else:
+            print(f"{len(rows)} session(s) selected{capped}; nothing resumed (dry run).")
+        return 0
+
+    if not rows:
+        print(f"no sessions matched the selection{capped}; nothing to resume.")
+        return 0
+
+    # THE ONE-TIME PATH PRIME. Children are `lop exec` invocations, and each
+    # would otherwise run its own login-shell round-trip (measured 0.9-1.3 s
+    # on this host — the single most expensive step of a child's startup).
+    # Reconciling PATH here, ONCE, marks the environment (helpers.
+    # PATH_PRIMED_ENV) so every child inherits the answer and skips the
+    # capture; see ``setup_cross_platform_environment`` for why inheritance is
+    # a sound substitute for a cache.
+    setup_cross_platform_environment()
+
+    # All wins (review round 1, m3): the name printed here must be the
+    # selection the selector actually made, or the header is a claim the
+    # behaviour contradicts.
+    if all_sessions:
+        sets = ["all"]
+    else:
+        sets = []
+        if paused:
+            sets.append("paused")
+        if failed:
+            sets.append("failed")
+    print(
+        f"resuming {len(rows)} session(s) ({'+'.join(sets)}, newest first){capped} "
+        f"— {RESUME_BATCH_CONCURRENCY} at a time, message: {message!r}",
+        flush=True,
+    )
+
+    started = time.monotonic()
+    reported: set[str] = set()
+
+    def _render_line(outcome: ResumeOutcome) -> None:
+        # One line per session AS IT RESOLVES. ``ok`` means the worker was seen
+        # live (or its run already completed); anything else carries the reason
+        # — a refusal, a worker failure, or the readiness bound — inline.
+        reported.add(outcome.session_id)
+        if outcome.ok:
+            print(
+                f'  ok    {outcome.session_id}  "{outcome.name}"  '
+                f"({outcome.status}, job {outcome.job_id})",
+                flush=True,
+            )
+        else:
+            print(
+                f'  FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"{outcome.detail or outcome.status}",
+                flush=True,
+            )
+
+    def progress(outcome: ResumeOutcome) -> None:
+        _render_line(outcome)
+
+    outcomes = asyncio.run(
+        resume_sessions(
+            rows,
+            message=message,
+            env=dict(os.environ),
+            progress=progress,
+        )
+    )
+    # The callback above is the LIVE half; this is the fallback that keeps the
+    # report complete if an outcome ever arrives without one (the runner
+    # reports progress for every resolved outcome, but a future code path
+    # that forgets must not cost a session its line — the summary counts
+    # alone would then disagree with what was printed).
+    for outcome in outcomes:
+        if outcome.session_id not in reported:
+            _render_line(outcome)
+    wall = time.monotonic() - started
+    ok = sum(1 for outcome in outcomes if outcome.ok)
+    unresolved = sum(1 for outcome in outcomes if outcome.status == "unresolved")
+    failed_count = len(outcomes) - ok - unresolved
+    print(
+        f"{len(outcomes)} session(s): {ok} ok, {failed_count} failed, "
+        f"{unresolved} unresolved — {wall:.1f}s",
+        flush=True,
+    )
+    return 0 if ok == len(outcomes) else 1
+
+
 def _sessions_move_words(
     result: dict[str, Any], *, session_id: str, to: str, engage_on_arrival: bool = False
 ) -> list[str]:
@@ -5146,6 +5423,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
+
+    if getattr(args, "sessions_command", None) == "resume":
+        return sessions_resume_command(args)
 
     # The two mesh verbs. Both reach the relay, so both are refusals rather than
     # no-ops on a device with no relay running — which is the state of every
@@ -6044,6 +6324,61 @@ def _wake_rows() -> "list[dict[str, Any]]":
     return rows
 
 
+def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
+    """Spooled wake FIRES awaiting delivery, aggregated per session.
+
+    The held-delivery state this surface never had. A runtime leaving for a
+    replaced build SPOOLS the wakes that fire meanwhile
+    (``Session.retire_wakes_to_inbox``), and if that move is then abandoned
+    with the hook still installed, every later fire lands there too: measured
+    2026-10-01/02, one desk session lost ~14 h of fires while ``wake list``
+    showed a fresh "last fired" and every other line on this screen read as
+    healthy.
+
+    THE CANDIDATE SESSIONS ARE THE WAKE INDEX'S KEYS, a proxy with one named
+    gap (review round 1, R1). It covers the reported shape — a schedule that
+    keeps recurring keeps its index entry, which is why the desk session was
+    counted — and it costs what this screen already pays for the index
+    (milliseconds). The complete source is a scan of every
+    ``sessions/*/inbox.jsonl``; measured 2026-10-02 it finds 272 files across
+    16,718 session directories at ~1.5 s, which a status read declines to pay.
+    THE RESIDUAL, stated so the omission is a choice rather than a surprise: a
+    spooled row whose schedule has RETIRED and whose re-arm failed sits in the
+    inbox of a session with no index key, so it is not counted here; the
+    re-arm path is the designed cover for retired schedules, and the row still
+    runs at a successor boot either way.
+
+    Never raises: a count is a status nicety, and one unreadable session
+    directory must not take the whole screen down (``spooled_wake_fires``
+    itself already counts fires-not-rows and skips torn rows and missing
+    files).
+    """
+    import time as _time
+
+    from local_operator.wakes.spooled import spooled_wake_fires
+    from local_operator.wakes.store import read_index
+
+    fires = 0
+    sessions = 0
+    oldest_at: float | None = None
+    oldest_session = ""
+    for session_id in read_index(root):
+        count, written = spooled_wake_fires(root / "sessions" / session_id)
+        if count <= 0:
+            continue
+        fires += count
+        sessions += 1
+        if written is not None and (oldest_at is None or written < oldest_at):
+            oldest_at = written
+            oldest_session = session_id
+    return {
+        "fires": fires,
+        "sessions": sessions,
+        "oldest_age_s": None if oldest_at is None else max(_time.time() - oldest_at, 0.0),
+        "oldest_session_id": oldest_session or None,
+    }
+
+
 def _supervisor_parentheticals() -> tuple[str, str]:
     """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
 
@@ -6531,6 +6866,15 @@ def wake_command(args: argparse.Namespace) -> int:
     stalled = _delivery_rows(STATE_UNDELIVERED)
     retrying = _delivery_rows(STATE_RETRYING)
 
+    # SPOOLED WAKES — the other held-delivery state, and until now the invisible
+    # one: a runtime that spools its wakes for a replaced build and then
+    # ABANDONS the move keeps the hook, so every fire for the rest of its life
+    # lands in a session inbox nothing drains until a successor boots (measured
+    # 2026-10-01/02: ~14 h of fires on one desk session, reported on no
+    # surface). Read per wake-carrying session — the INDEX's own keys — so a
+    # session with no wakes is never opened.
+    spooled = _spooled_wake_summary(config_dir())
+
     def _attempts_label(row: dict[str, Any]) -> str:
         """``"4 attempt(s) since <time>"`` for one owed fire.
 
@@ -6657,6 +7001,16 @@ def wake_command(args: argparse.Namespace) -> int:
             "total": len(owed),
             "retrying": len(retrying),
             "undelivered": len(stalled),
+        },
+        # THE SPOOLED FIRES, additive like the blocks above (a consumer that
+        # predates this block keeps parsing every key it knew). `fires` counts
+        # wake ROWS awaiting delivery; `oldest_age_s` is None when no counted
+        # row carried a usable `written_at`.
+        "spooled": {
+            "fires": spooled["fires"],
+            "sessions": spooled["sessions"],
+            "oldest_age_s": spooled["oldest_age_s"],
+            "oldest_session_id": spooled["oldest_session_id"],
         },
         "deliveries": [
             {
@@ -6798,6 +7152,31 @@ def wake_command(args: argparse.Namespace) -> int:
                 "retrying:",
             )
         )
+    if spooled["fires"]:
+        # SPOOLED WAKES, and only when there are any: the count and the age are
+        # what separate "a drain just happened" from "delivery has been dark
+        # for half a day" (the incident's shape — a fresh `last fired` and no
+        # line anywhere saying the fire never ran). The noun is the wake
+        # ITSELF rather than "fire(s)" (design round 1, D5: "5 fires" reads
+        # as pending alarms, not five occurrences that fired and were never
+        # run), and it pluralises for real — the singular store is the
+        # recovering case and `1 wake(s) in 1 session(s)` read as a glitch
+        # (design round 1, D1).
+        from local_operator.info.render import plural
+
+        summary = (
+            f"{plural(spooled['fires'], 'wake')} in "
+            f"{plural(spooled['sessions'], 'session')} awaiting delivery"
+        )
+        if spooled["oldest_age_s"] is not None:
+            # ONE TOKEN through `_wrap_status`: at 80 columns — its own default
+            # width — a break after the em-dash orphaned the session id onto
+            # the next line (design round 1, D2).
+            summary += " " + _one_token(
+                f"(oldest {_format_duration(spooled['oldest_age_s'])} — "
+                f"{spooled['oldest_session_id']})"
+            )
+        print(_wrap_status(summary, "spooled:"))
     if stale:
         print(
             _wrap_status(
@@ -6913,6 +7292,12 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "consecutive_failures": raw.get("consecutive_failures") or 0,
                     "disabled": bool(raw.get("disabled")),
                     "disabled_reason": raw.get("disabled_reason") or "",
+                    # §D6's two health facts, carried onto the listing row so
+                    # the CLI reads the same shared hint the tool, the desktop
+                    # route and the TUI band read.
+                    "unavailable_since": raw.get("unavailable_since") or 0,
+                    "last_error": raw.get("last_error") or "",
+                    "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
                     "last_check_age_s": None if not last else max((now_ms - last) / 1000.0, 0.0),
@@ -6938,6 +7323,9 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
     dormant monitor is one nothing is SUPPOSED to run, so a failure word would
     point the reader at the wrong remedy — reopening the session re-arms it.
     Disabled wins over the due time: a disabled monitor does not tick at all.
+    ``idle`` is the last word before a clock: a monitor whose session is not
+    open is overdue by hours, and "next due now" read as a stuck check rather
+    than as a watch nothing is hosting (§D6).
     """
     if row["dormant"]:
         return "dormant"
@@ -6945,29 +7333,72 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "disabled"
     if row["due_in_s"] is None:
         return "waiting"
+    from local_operator.monitors import store as monitor_store
+
+    if monitor_store.is_idle(row, int(time.time() * 1000)):
+        return "idle"
     return _format_due(row["due_in_s"])
 
 
 def _monitor_detail(row: "dict[str, Any]") -> str:
-    """The monitor row's tail: interval, checks, last check, health, reason."""
+    """The monitor row's tail: health FIRST, then the interval and counters.
+
+    ORDER IS THE DEGRADATION POLICY (design review round 1, D6). The table is
+    clamped to the terminal, and a hint appended last was the first thing cut —
+    measured at ``COLUMNS=80``, every hint was truncated away while the counters
+    beside it survived. Leading with the health means a narrow row loses the
+    boilerplate instead, and the DUE column's state word (``idle``) carries the
+    short form of the same fact.
+    """
     from local_operator.harness.wake import format_duration
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
+    now = int(time.time() * 1000)
+    # The hint is shared with the agent tool, the desktop route and the TUI band
+    # (§D6) so one monitor cannot read as healthy on one surface and stalled on
+    # another.
+    hint = monitor_store.health_hint(row, now)
+
     parts: list[str] = []
+    clause = ""
+    if row.get("disabled"):
+        # ``disabled_clause``, not the stored string: it folds the reason into
+        # one line (a live disable carries ``invalid arguments:\n- path: …``,
+        # which printed its continuation at column 0 and broke the table — UX
+        # round 1, U3) and prefers the counters' plain cause to a raw tool
+        # banner (U4). The row leads with it, so it has to be readable.
+        clause = monitor_store.disabled_clause(row)
+        if clause:
+            parts.append(clause)
+    if hint:
+        parts.append(hint)
+    if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
+        # "overdue by 2h — session not open" and "never checked — its session was
+        # not open since arming" are ONE fact said twice (D7): the idle detail
+        # is the tail the reader needs only when the hint is not already naming
+        # the unhosted session.
+        parts.append(monitor_store.idle_detail(row, now))
     if row.get("every_ms"):
         parts.append(f"every {format_duration(int(row['every_ms']))}")
     else:
         parts.append("once")
     if row.get("checks"):
-        parts.append(f"{int(row['checks'])} checks")
+        # The zero-deliveries hint OPENS with the same count ("12 checks, 0
+        # deliveries"), so the standalone counter would say it twice in one row
+        # — the D7 defect in its other form.
+        counter_clause = f"{int(row['checks'])} checks"
+        if not (hint and hint.startswith(counter_clause)):
+            parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:
         parts.append(f"last check {format_age(age)} ago")
     failures = int(row.get("consecutive_failures") or 0)
-    if failures:
+    if failures and not (clause and clause.startswith(f"{failures} ")):
+        # The disabled clause already carries the count when it was derived
+        # from it ("5 consecutive failed checks"), and a row that says both is
+        # the D7 duplication in another form.
         parts.append(f"{failures} failed")
-    if row.get("disabled") and row.get("disabled_reason"):
-        parts.append(str(row["disabled_reason"]))
     return " · ".join(parts)
 
 
@@ -7026,6 +7457,10 @@ def monitor_command(args: argparse.Namespace) -> int:
                 "same watch again to reactivate",
             )
         )
+    if any(_monitor_state_word(row) == "idle" for row in rows):
+        # One clause, because the row above already says "session not open"
+        # (D7): the legend's job is to say what to DO, not to restate the row.
+        legend.append(("idle", "no session is hosting it — reopen it to resume"))
     if legend:
         import textwrap
 
@@ -7191,8 +7626,8 @@ WHY_COLUMN_WIDTH = 48
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
 #:
 #: A phrase, not an enum: the field's whole purpose is to say what is happening
-#: in the words the operator needs (``signalled; leaving when its turn ends (up
-#: to 2 min)``), so it is bounded like WHY rather than abbreviated to a token
+#: in the words the operator needs (``signalled; finishing its turn (cut if
+#: silent 2 min)``), so it is bounded like WHY rather than abbreviated to a token
 #: nobody could read. Wide enough for the shipped phrase in full, so the common
 #: case is not cut and a cut one is visibly marked (`_fit_cell`). The column
 #: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
@@ -7205,9 +7640,10 @@ WHY_COLUMN_WIDTH = 48
 #: machine reads to say something only a person needs.
 #:
 #: WIDENED FROM 40 when the phrase grew the drain's bound (UX round 2, U9): the
-#: row that carries this is the one the operator reads most, and
-#: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
-#: can take away. The number is the phrase's own cell width, pinned against it by
+#: row that carries this is the one the operator reads most, and a phrase that
+#: omits the bound promises a boundary the bound can take away — true of the
+#: wording this widened for and of the 2026-10-01 reword that replaced it. The
+#: number is the phrase's own cell width, pinned against it by
 #: ``tests/unit/info/test_sessions_extraction.py`` rather than imported — this
 #: module keeps session internals out of its module scope on purpose (see the
 #: header) — so a reword of the phrase fails loudly there instead of silently
@@ -7277,6 +7713,12 @@ PEER_COLUMN_WIDTH = 18
 #: line that wraps at column 0 reads as a different block (round 2, D13).
 _STATUS_LABEL_W = 13
 
+#: The sentinel :func:`_wrap_status` swaps in for a protected span's spaces
+#: while it wraps, and swaps back afterwards. Single-quoted remedy commands
+#: are its one writer there; :func:`_one_token` names the same contract for a
+#: span a caller must keep whole WITHOUT printing quote characters.
+_WRAP_SENTINEL = "\x00"
+
 
 def _wrap_status(text: str, label: str = "") -> str:
     """One `wake status` line, folded at the surface's own hanging indent.
@@ -7305,7 +7747,7 @@ def _wrap_status(text: str, label: str = "") -> str:
     # a wrap inside one produces a line that looks like an instruction and is
     # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
     # single quotes are hidden from it and restored afterwards.
-    nbsp = "\x00"
+    nbsp = _WRAP_SENTINEL
     protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
     return "\n".join(
         textwrap.wrap(
@@ -7318,6 +7760,19 @@ def _wrap_status(text: str, label: str = "") -> str:
             break_on_hyphens=False,
         )
     ).replace(nbsp, " ")
+
+
+def _one_token(text: str) -> str:
+    """Hide ``text``'s spaces from :func:`_wrap_status`, so the span wraps WHOLE.
+
+    The discipline ``_wrap_status`` applies to single-quoted remedy commands,
+    named for callers whose span must stay one token without quote characters:
+    the spooled line's ``(oldest 13h — <id>)`` (design round 1, D2 — at 80
+    columns, the default width, the break landed after the em-dash and
+    orphaned the session id onto the next line). Call it on the SPAN itself;
+    the space that separates it from the sentence stays breakable.
+    """
+    return text.replace(" ", _WRAP_SENTINEL)
 
 
 def _json_dumps(value: Any) -> str:
@@ -8686,13 +9141,22 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     # nothing, and this must not become a second spelling of "hub_sha256:".
     from local_operator.agents import HUB_SHA256_PREFIX
 
+    # The one shared display rule (``label`` is display-only, so the row shows
+    # what a reader recognises while the key that addresses the row stays on
+    # the line: ``Label (key)`` for a chosen label, the label alone for a
+    # canonical one, the raw key when nothing adds information).
+    from local_operator.display_labels import display_form
+
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
         branch = "└──" if is_last else "├──"
         print(f"\033[1;32m│ {branch} Agent {start_idx + i + 1}\033[0m")
         left_bar = "│ │" if not is_last else "│  "
-        print(f"\033[1;32m{left_bar}   • Name: {agent.name}\033[0m")
+        print(
+            f"\033[1;32m{left_bar}   • Name: "
+            f"{display_form(str(agent.name), str(getattr(agent, 'label', '') or ''))}\033[0m"
+        )
         print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
         print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
         print(f"\033[1;32m{left_bar}   • Version: {agent.version}\033[0m")
@@ -11172,6 +11636,22 @@ def _maybe_brand_process(args: argparse.Namespace) -> None:
     """
     subcommand = getattr(args, "subcommand", None)
     if subcommand not in _BRANDED_SUBCOMMANDS:
+        return
+    if subcommand == "exec" and (
+        getattr(args, "background", False) or getattr(args, "status", None)
+    ):
+        # THE SHORT-LIVED EXEC PATHS ARE NOT WORTH A RE-EXEC (measured).
+        # ``lop exec --background`` spawns a detached worker and exits once the
+        # readiness wait resolves (seconds); ``lop exec --status`` exits on the
+        # first read. Neither process lingers in Activity Monitor for the
+        # re-exec's +~200 ms to buy a name anyone sees -- and the WORKER, the
+        # process whose row actually matters, is born branded regardless:
+        # ``exec_mode`` spawns it with ``executable=`` set to the branded
+        # image via ``procname.spawn_identity``. A bulk resume pays this
+        # re-exec ONCE PER CHILD, so skipping it saves the interpreter restart
+        # and its re-import on every one of N launches. Foreground ``lop exec``
+        # (the run itself in this process) keeps the brand, and so does every
+        # other subcommand above.
         return
     procname.reexec_branded(_process_label(args))
 

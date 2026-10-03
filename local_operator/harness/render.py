@@ -74,6 +74,11 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 
+# ``monitors.spec`` is the monitor DTO leaf (pydantic + stdlib only, and
+# ``harness/types.py`` already imports it), so naming the marker from its owner
+# keeps this module's import closure clean for a runner.
+from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
+
 
 def _injected_user_message(text: str, entry_id: str) -> Message:
     """A user-role message minted from a harness aside, stamped as such.
@@ -299,7 +304,17 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             HUB_MESSAGE_TYPE,
             JOB_RESULT_MESSAGE_TYPE,
             PEER_MESSAGE_MESSAGE_TYPE,
+            MONITOR_PROMPT_MESSAGE_TYPE,
         ):
+            # A monitor delivery (a delta, or a lifecycle notice — disabled,
+            # stalled, restored) is the same shape: ``Session._deliver_monitor``
+            # formats ``details["text"]`` and appends the row, and it must be
+            # listed here or the monitor "fires" into a transcript row the
+            # model never reads (measured: the provider request carried
+            # ``messages=[]``, so the agent re-ran the check itself). The
+            # companion ``monitor_schedules`` custom ENTRY is transcript
+            # bookkeeping and deliberately stays out of this tuple.
+            #
             # A hub message renders exactly like a wake delivery: the sender
             # already formatted ``details["text"]``, and it must reach the
             # model as a user turn or the agent it was addressed to never

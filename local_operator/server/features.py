@@ -683,5 +683,14 @@ def feature_flags() -> dict[str, Any]:
         # transcription route is untouched by all of this and remains the
         # ungated path for a client that has it.
         "stt": 1,
+        # THE VOICING SURFACE: `GET /v1/tts/paths` (the synthesis availability
+        # report) and the `voice_descriptor` block the speak-aloud route sends
+        # to the hub. A SEPARATE key from `stt` rather than a bump of it: the
+        # two directions ship independently (STT is merged and in use; voicing
+        # lands after it), and a client that can read one report is not
+        # necessarily the client that can send the other's payload. Both are
+        # additive — an absent key means the surface is not there, which is the
+        # pre-voicing behaviour rather than a degraded one.
+        "tts": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

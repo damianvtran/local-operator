@@ -31,7 +31,7 @@ import signal
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from pathlib import Path
 from typing import Callable
 
@@ -329,6 +329,16 @@ _AMBIENT_VARS = (
     # feature, and the zero-footprint cells would pass for the wrong reason.
     # The aida conftest clears it for its own package; this scrubs it everywhere.
     "LOCAL_OPERATOR_NO_AIDA",
+    # The startup shortcut's inheritance marker (``helpers.PATH_PRIMED_ENV``,
+    # the bulk-resume lane's C1 cut): set by
+    # ``setup_cross_platform_environment`` once a lineage has captured the
+    # login shell's PATH, and read back so every descendant SKIPS that
+    # round-trip. Inherited, it is the escape-hatch class this list exists for,
+    # one level down from the guards above: a cell that asserts the PATH PRIME
+    # itself — that the shell capture ran and its PATH was adopted — would take
+    # the skip arm while looking like it tested the prime. Cells that want a
+    # primed lineage set it explicitly (the helpers tests do).
+    "LOCAL_OPERATOR_PATH_PRIMED",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
@@ -573,6 +583,88 @@ def reset_store_maintenance() -> Iterator[None]:
         reset_store_maintenance_for_tests()
 
 
+def _redaction_filter() -> logging.Filter | None:
+    """``local_operator.mcp.redaction``'s filter, iff that module is imported.
+
+    Read out of ``sys.modules`` rather than imported: this runs at the end of
+    every test in the suite, and importing the MCP package for a test that never
+    touches it would change what a run loads. Absent means there is no filter of
+    that kind to drop.
+    """
+    module = sys.modules.get("local_operator.mcp.redaction")
+    found = getattr(module, "_FILTER", None) if module is not None else None
+    return found if isinstance(found, logging.Filter) else None
+
+
+@contextmanager
+def _root_logger_guard() -> Iterator[None]:
+    """Snapshot the process-global logging state and put it back on exit.
+
+    The body of :func:`restore_root_logger`, factored out so that a single test
+    can cross a test boundary — see :func:`root_logger_guard` for why that
+    matters.
+
+    What is restored, and why each piece:
+
+    * the root handler LIST and level, plus ``lastResort``, ``raiseExceptions``
+      and ``Logger.addHandler``, which :mod:`local_operator.logger`'s silencing
+      patches in place;
+    * per handler, its FILTER LIST — because the handler list alone does not
+      undo a filter. ``_pytest.logging``'s capture handlers are built ONCE for
+      the session (``LoggingPlugin.caplog_handler`` / ``report_handler``) and
+      the next test reuses the same object, so a filter added to one outlives
+      the test that added it. That is reachable from ordinary code:
+      ``local_operator.mcp.redaction.attach()`` — called whenever an MCP
+      credential is resolved — puts its ``_FILTER`` on **every** root handler,
+      and that filter rewrites the record in place, clearing ``exc_info`` (it
+      renders the traceback into ``exc_text`` so a secret cannot be
+      re-interpolated downstream by another formatter). Every later test in the
+      worker that inspects ``caplog.records`` then sees ``exc_info=None`` where
+      the record did carry one — the order-dependent failure of
+      ``tests/unit/tui/test_projects_send.py::test_an_internal_fault_reaches_the_reader_as_a_sentence``
+      in CI shard 2, which passes when it runs alone;
+    * and, below that snapshot, the one filter that rewrite is known to come
+      from — because a snapshot only undoes what happened *after* it was taken.
+      A credential resolved by a module- or session-scoped fixture (or by any
+      earlier hook in the same test's setup) attaches ``_FILTER`` *before* the
+      snapshot, which then records it as "as I found it" and re-restores it in
+      every later test of that worker: the leak would be sticky rather than
+      cleared. No fixture in the tree does that today, so the strip is closing
+      the class, not an instance. It is safe to strip because the filter is
+      defence in depth, not the control: the source-side scrubs do the real
+      work, every ``register()`` re-attaches through ``attach()``, and nothing
+      downstream of a test may rely on a filter that outlived it.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    # Keyed by the handler OBJECT, and holding it alive for the guard's duration:
+    # the session-lived capture handlers are the same objects the next test
+    # uses, so an id-keyed (or reference-free) snapshot could miss them.
+    saved_filters = {handler: list(handler.filters) for handler in saved_handlers}
+    saved_level = root.level
+    saved_last_resort = logging.lastResort
+    saved_raise = logging.raiseExceptions
+    saved_add_handler = logging.Logger.addHandler
+    try:
+        yield
+    finally:
+        logging.Logger.addHandler = saved_add_handler  # type: ignore[method-assign]
+        logging.lastResort = saved_last_resort
+        logging.raiseExceptions = saved_raise
+        for handler, filters in saved_filters.items():
+            handler.filters[:] = filters
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+        # AFTER the list assign, so this runs over the restored set. The filter
+        # is identified by identity, not by type: an unrelated filter of the
+        # same class is somebody else's to keep.
+        leak = _redaction_filter()
+        if leak is not None:
+            for handler in root.handlers:
+                if any(f is leak for f in handler.filters):
+                    handler.filters[:] = [f for f in handler.filters if f is not leak]
+
+
 @pytest.fixture(autouse=True)
 def restore_root_logger() -> Iterator[None]:
     """Give every test the process-global logging state back as it found it.
@@ -587,27 +679,29 @@ def restore_root_logger() -> Iterator[None]:
     it passed. That is the signature of leaked global state, and answering it
     per-test is a fix that has to be remembered every time.
 
-    Restores what the modules under test actually mutate: root handlers and
-    level, plus ``lastResort``, ``raiseExceptions`` and ``Logger.addHandler``,
-    which :mod:`local_operator.logger`'s silencing patches in place. This
-    replaces the identical fixtures that ``tests/unit/test_logger.py`` and
+    This replaces the identical fixtures that ``tests/unit/test_logger.py`` and
     ``tests/unit/tui/test_logger_silence.py`` each kept locally: they were
-    right, they were just scoped to the two files that already knew.
+    right, they were just scoped to the two files that already knew. The work
+    itself lives in :func:`_root_logger_guard`, which also documents what is
+    restored and why each piece is there.
     """
-    root = logging.getLogger()
-    saved_handlers = list(root.handlers)
-    saved_level = root.level
-    saved_last_resort = logging.lastResort
-    saved_raise = logging.raiseExceptions
-    saved_add_handler = logging.Logger.addHandler
-    try:
+    with _root_logger_guard():
         yield
-    finally:
-        logging.Logger.addHandler = saved_add_handler  # type: ignore[method-assign]
-        logging.lastResort = saved_last_resort
-        logging.raiseExceptions = saved_raise
-        root.handlers[:] = saved_handlers
-        root.setLevel(saved_level)
+
+
+@pytest.fixture
+def root_logger_guard() -> Iterator[Callable[[], AbstractContextManager[None]]]:
+    """Hand a test the autouse guard's own enter/exit, as a context manager.
+
+    ``restore_root_logger`` only ever wraps ONE test, so a regression test for
+    "what a test attaches must not reach the next one" could otherwise only be
+    written as two tests — and pytest-xdist dispatches tests to workers
+    individually (``-n auto --dist worksteal`` is this repo's own addopts), so
+    the pair splits across workers and passes on the *unfixed* tree. The pin in
+    ``tests/unit/test_root_logger_filter_isolation.py`` therefore crosses the
+    boundary it asserts on inside a single test, using this.
+    """
+    yield _root_logger_guard
 
 
 @pytest.fixture

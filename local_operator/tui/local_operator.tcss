@@ -563,6 +563,21 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
     padding: 1 1 0 0;
 }
 
+/* The projects compose strip (P5a, design review round 1, D6): the recipient
+ * band — and then the delivered receipt — as a REAL one-row surface above the
+ * prompt. It replaced the editor-placeholder incarnation, which vanished on
+ * the first keystroke, exactly when the reader needs to see who the message is
+ * addressed to. `display: none` everywhere except while the projects page
+ * composes, so the dock keeps its height in every other mode; `$lo-dim` is
+ * the ink the placeholder it replaced used, so the strip is the same voice
+ * about the same composer. */
+.projects-compose-strip {
+    display: none;
+    width: 1fr;
+    height: 1;
+    color: $lo-dim;
+}
+
 /* Input panel: two widgets for one panel, and the split is load-bearing.
  *
  * `#input-dock` is a POSITIONER — docked to the bottom, full width, no fill of
@@ -603,6 +618,69 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
 
 #input-row {
     height: auto;
+}
+
+/* The MINIMIZED queued-ask bar (design §5.0/R7): one line directly above the
+ * composer, built from the composer's own vocabulary so it reads as a chip and
+ * not as a modal, a toast or a banner. It lives INSIDE `#input-shell`, which
+ * puts it in the same fill and the same one-cell inset as the input row — the
+ * bar is part of the composer's panel, which is what "attention-calling but
+ * minimal" means here.
+ *
+ * `display: none` in the sheet and `display = True` from Python: the app owns
+ * the toggle (a zero-row dock row when there is no queue), and an inline
+ * `styles.display` set by the widget outranks this rule. Written this way so a
+ * bar that never got its first state cannot paint one row of empty chrome.
+ *
+ * NO ANIMATION, per §5.0: the accent on the glyph is a persistent colour. A
+ * pulse would be the focus-steal this design exists to avoid, expressed in
+ * colour instead of keys. */
+#ask-bar {
+    width: 1fr;
+    height: 1;
+    /* `$lo-surface` — the composer's OWN ground, and the ground the palette
+     * gate actually checks. The first cut sat on `$lo-raised`, one elevation
+     * step up, where the bar's message measured 3.81:1 dark / 3.09:1 LIGHT
+     * (under the gate's 3.4:1 dim floor) and the accent glyph 3.96:1 in light
+     * (under its 4.0 state-hue floor) — a new surface has to solve its own
+     * pairs, and the gate cannot do it for a ground it never measures (design
+     * round 1, D2). On `surface` every ink this row uses clears its floor:
+     * fg 13.76/13.86, muted 7.93/6.58, dim 4.18/3.46, accent 8.02/4.43. */
+    background: $lo-surface;
+    color: $lo-fg;
+    display: none;
+}
+
+/* Hover brightens the row to say it is clickable — it is a control, not a
+ * status line, and the transcript's expand affordances are the model. */
+#ask-bar:hover {
+    background: $lo-overlay;
+}
+
+/* The open-ask list (design §5.1), mounted in `#prompt-host` beside the picker
+ * and never at the same time as one. Same elevation step as the ask card, and
+ * the same `width: 1fr` — an auto-width list would resize as the questions
+ * changed length, the defect `AskPickerScreen` was already fixed for. */
+AskQueueList {
+    width: 1fr;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 1;
+    /* ONE PAINTED LINE PER ASK, enforced where the painting happens. Each row's
+     * `Text(no_wrap=True)` is a rich-side hint that Textual's widget painting
+     * does not read, so a question wider than the content box used to spend a
+     * SECOND painted line — and the pointer hit test, which counts one line per
+     * ask, then opened the wrong ask and left the last ones inert (review round
+     * 3: reproduced with 90-character questions, clicked through the real event
+     * path). `nowrap` is the lever that actually paints; it is a ONE-LINE
+     * guarantee only — the painter hard-crops a row that is still too wide and
+     * draws no glyph of its own, so the widget's `render` clips the QUESTION
+     * against the room its tail leaves and paints the `…` itself. The hit test is only valid while this holds, so
+     * the surface test asserts `virtual_size.height == header + rows` at three
+     * widths with long questions. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #prompt-chevron {
@@ -2168,6 +2246,139 @@ Screen.settings #input-dock #prompt-chevron {
  * pushed down a row. The markdown description declares nothing either: its
  * rhythm comes from the markdown blocks' own fills, not the sheet. */
 
+/* The form state (S6d parity P4): the same frame as the canvas and the detail
+ * — title, rule, body, footer, hints — with the body swapped for the create
+ * page. It is a one-axis scroll container of FIELDS; every field block takes
+ * the sheet's single sanctioned vertical space (`.gap-above`), exactly as the
+ * detail's section headings do, so nothing here declares a margin of its own
+ * and the minimalism guard's count stays at one. Horizontal padding is the
+ * only spacing this block adds. */
+/* The page's OWN class, which Textual derives from the widget's class name —
+ * `.projects-form` matched nothing, so every rule here was dead: the scrollbar
+ * measured 2 cells and painted Textual's stock blue-on-black track (design
+ * review round 1, D2). The fields scroll; the page does not, so the confirm row
+ * can be pinned below them. */
+.projects-form-page {
+    height: 1fr;
+    padding: 0;
+}
+
+.projects-form-fields {
+    height: 1fr;
+    padding: 0;
+    overflow: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+/* One form-scoped rule for the inputs, for the reason every other surface here
+ * has one: stock `Input` is a 3-row box with a tall blue border — near-black
+ * slabs on light, stub ticks on dark, and the form measured 58 rows with 9
+ * visible at 80x24 (design review round 1, D3). Height 1, no border, the panel
+ * fill, and the app's "this is the one you are on" fill under the cursor. */
+.projects-form-fields Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-form-fields Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The caret, in the form's own controls. Stock Textual draws it in the theme's
+ * near-white, which on this light ramp measured about 1:1 against the field's
+ * own fill — the one mark a reader needs while typing was the one mark they
+ * could not see (design review round 1 r3, D13). Same treatment as the
+ * composer's caret above: the surface colour on the foreground step. */
+.projects-form-fields .input--cursor,
+.projects-form-fields .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+/* The selection band, in the form's own controls. Stock Textual paints `Input`
+ * selection with the theme's default blue and leaves the glyphs at the
+ * widget's colour — measured 1.41:1 on the light ramp, i.e. the text a reader
+ * had just selected became unreadable (design review round 1 r2, D9). The form
+ * takes the composer's treatment instead (`Editor .text-area--selection`):
+ * the ramp's selected-prose ground, with the ink NORMALISED to `fg`. */
+.projects-form-fields .input--selection,
+.projects-form-fields .text-area--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+/* The description editor keeps its own height (it is the one multi-line
+ * field), but shares the box treatment so the form has ONE control look. */
+.projects-form-fields TextArea {
+    border: none;
+    height: 6;
+    padding: 0 1;
+    background: $lo-sunken;
+    /* The INK is not optional: stock `TextArea` carries its own light-theme
+     * colour (`(224,224,224)` measured against this panel's `(229,224,213)`,
+     * i.e. the scaffold was invisible on light) — the same class of stock
+     * default the Input rule above exists for, caught in the light frame of
+     * this round. */
+    color: $lo-fg;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+}
+
+.projects-form-field {
+    width: 1fr;
+    height: auto;
+}
+
+.projects-form-label {
+    width: 1fr;
+    height: 1;
+}
+
+/* A field's quiet second line — the key's following rule, the chip preview,
+ * the known teams — and its refusal share one indentation, so a reader takes
+ * either as a note ABOUT the control above it rather than as the next field. */
+.projects-form-hint,
+.projects-form-error {
+    width: 1fr;
+    height: auto;
+    /* The hint is the LABEL's voice, not the value's: at full foreground it
+     * competed with the value it was explaining (design review round 1 r2,
+     * D11). */
+    color: $lo-muted;
+    /* One left edge: the label, the control's text and these lines all start at
+     * the same column, so a hint or a refusal reads as part of the field rather
+     * than as the next one (design review round 1, D6). */
+    padding-left: 1;
+}
+
+/* The `‹ value ›` rows (status, estimate unit): one line, focusable, and lit
+ * with the app's "this is the one you are on" fill while the cursor is here —
+ * the treatment ToolCard and the approval block take, for the same reason. */
+.projects-form-cycle {
+    width: 1fr;
+    height: 1;
+}
+
+.projects-form-cycle:focus {
+    background: $lo-tint-select;
+}
+
+/* The discard confirm: one line that OWNS the keyboard while it is up (the
+ * page hands it focus), so it reads as a question rather than as another
+ * field. No box — the transcript's own inline-confirm grammar. */
+.projects-form-confirm {
+    width: 1fr;
+    height: 1;
+}
+
 /* The pinned footer: the highlighted project's detail in the list view, the
  * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
  * empty: a footer that appeared and disappeared would move the canvas on every
@@ -2183,6 +2394,118 @@ Screen.settings #input-dock #prompt-chevron {
     height: 2;
     width: 1fr;
     padding: 1 0 0 0;
+}
+
+/* The projects overlay card (S6d parity P5a quick-send; P5b's start-session
+ * picker shares this class and every rule below it — one card family, one
+ * ground, one geometry, and a second set of selectors is how the two would
+ * come to disagree about where a card sits). WHAT THE FAMILY SHARES IS THE
+ * FRAME — ground, elevation, inset, selection band, filter, legend and row
+ * grammar — and what a card puts BETWEEN its title and its rule is its own:
+ * the start card carries a subject line (`starts a turn · links to <project> ·
+ * you go there`, UX U2) and the send card goes title → rule. That is the
+ * D13 decision, stated rather than left to look like drift: the alternative
+ * was inventing a subject for the shipped send card, which is P5a's surface to
+ * change, not this PR's. It FLOATS, and that is the geometry
+ * fix rather than decoration (design review round 1, D1/D2): as a flow child
+ * the card competed with the canvas for rows and lost its own tail at 60x24,
+ * and at 80x24 painted zero target rows while `enter` still picked one. The
+ * page sets a Python offset against the canvas's content box and hands the
+ * card its row budget; the layer keeps it out of the page's flow entirely, so
+ * opening it reflows nothing and the height it was given is the height it
+ * paints. The ground and inset are the family card's (`CopyPickerScreen
+ * .copy-picker`): one elevation step up, content inset 2 cells, no frame —
+ * this sheet has no box glyphs, so D2's "one rule or box" lands as the
+ * title's own rule row, the app's separator vocabulary. */
+.projects-send-card {
+    layer: toast;
+    /* FULL WIDTH, and the cap is gone deliberately (design round 2, D9). At
+     * `max-width: 60` an 80-cell terminal left 20 cells of page beside the card
+     * on its own rows — the frame painted the canvas fragment `essions` level
+     * with the card's last row, so two surfaces shared a row and the page's text
+     * read as part of the card's edge. The `/resume` family answers the same
+     * question by taking the width it can hold, and this card does the same: it
+     * fills the page's content box, so no page row is visible beside it at any
+     * width. Its height and its floating position are unchanged — the layer
+     * keeps it out of the layout, so the page still does not reflow (D2). */
+    width: 1fr;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 2;
+    overflow: hidden;
+}
+
+.projects-send-title {
+    width: 1fr;
+    height: 1;
+}
+
+.projects-send-rule {
+    width: 1fr;
+    height: 1;
+    color: $lo-edge;
+}
+
+/* The form's input treatment, scoped to the card for the form's own recorded
+ * reason (`local_operator.tcss:2199-2203`): stock `Input` is a 3-row box with
+ * a tall border — a near-black slab in this sheet's vocabulary AND three rows
+ * where the card's deterministic height budgets one. */
+.projects-send-card Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-send-card Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The placeholder is the card's only affordance LABEL, and it was the least
+ * legible text in the frame: the framework's default measured 3.38:1 on the
+ * focused input ground (design review round 1, D6) — under the 4.5:1 floor for
+ * normal text and well below every other ink in the card (rows 11.3:1, muted
+ * 6.51:1). `$lo-muted` on that same ground measures 6.72:1 and puts the hint
+ * in the card's own quiet voice, beside the section headers and the legend.
+ * Scoped to the FAMILY class on purpose: the quick-send picker's filter takes
+ * the same treatment, because it has the same placeholder on the same ground. */
+.projects-send-card .input--placeholder {
+    color: $lo-muted;
+}
+
+/* The caret and the selection band, the composer's pair (`Editor`): the
+ * surface colour on the foreground step for the caret, the ramp's selected
+ * ground with `fg` ink for a selection. */
+.projects-send-card .input--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+.projects-send-card .input--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+/* The rows block is sized in Python to the painted window (chrome + rows is
+ * the card's whole height, D1's deterministic geometry); the pin here is the
+ * pre-placement default, and `overflow: hidden` keeps a stale frame from
+ * bleeding past the budget. */
+.projects-send-rows {
+    width: 1fr;
+    height: 1;
+    overflow: hidden;
+}
+
+.projects-send-note,
+.projects-send-hints {
+    width: 1fr;
+    height: 1;
+    /* The legend is a hint row, and every hint row in this sheet is `muted`
+     * (cf. `.projects-form-hint`): at card ink it competed with the rows it
+     * describes. */
+    color: $lo-muted;
 }
 
 /* The dock in projects mode: PRESENT and RECEDED, never removed — the exact

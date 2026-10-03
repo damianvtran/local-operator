@@ -3,7 +3,7 @@ import time
 import unicodedata
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 from pydantic import BaseModel, SecretStr
@@ -1665,6 +1665,7 @@ class RadientClient:
         speed: Optional[float] = 1.0,
         provider: Optional[str] = "openai",
         language_code: Optional[str] = None,
+        voice_descriptor: Optional[Dict[str, Any]] = None,
     ) -> bytes:
         """Generate speech from text using the Radient API.
 
@@ -1682,6 +1683,12 @@ class RadientClient:
             provider (Optional[str]): The provider. Defaults to "openai".
             language_code (Optional[str]): ISO 639-1 language code for the
                 synthesis. Omitted when None so the provider can auto-detect.
+            voice_descriptor (Optional[Dict[str, Any]]): The provider-neutral
+                voicing descriptor (descriptor v1), omitted when the caller has
+                none so the request is byte-identical to the pre-descriptor
+                one. An explicit legacy field alongside it WINS for its own
+                field (the hub's per-field pin rule), which is why the
+                speak-aloud route sends neither voice nor speed.
 
         Returns:
             bytes: The binary audio data of the generated speech.
@@ -1690,6 +1697,41 @@ class RadientClient:
             APIError: When the hub refuses the request (the status, the
                 designed ``error`` prose and any machine code are carried).
             RuntimeError: If the API request fails in any other way.
+        """
+        audio, _headers = self.create_speech_response(
+            input_text=input_text,
+            model=model,
+            voice=voice,
+            instructions=instructions,
+            response_format=response_format,
+            speed=speed,
+            provider=provider,
+            language_code=language_code,
+            voice_descriptor=voice_descriptor,
+        )
+        return audio
+
+    def create_speech_response(
+        self,
+        input_text: str,
+        model: Optional[str] = None,
+        voice: Optional[str] = None,
+        instructions: Optional[str] = None,
+        response_format: Optional[str] = "mp3",
+        speed: Optional[float] = 1.0,
+        provider: Optional[str] = "openai",
+        language_code: Optional[str] = None,
+        voice_descriptor: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bytes, Dict[str, str]]:
+        """As :meth:`create_speech`, also returning the hub's response headers.
+
+        Split out rather than made a flag on ``create_speech`` because the two
+        callers want different things and neither should have to unwrap the
+        other's shape: the legacy routes want bytes, and the cascade executor
+        wants the hub's own ``X-Radient-Speech-*`` headers so it can relay the
+        leg that ACTUALLY served (the echoed-actual-path rule) instead of
+        claiming one. The hub's words are the only place that fact exists —
+        the request names no leg when it carries a descriptor.
         """
         if not self.api_key:
             raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create speech.")
@@ -1710,6 +1752,7 @@ class RadientClient:
             "speed": speed,
             "provider": provider,
             "language_code": language_code,
+            "voice_descriptor": voice_descriptor,
         }
         payload = {k: v for k, v in payload_data.items() if v is not None}
 
@@ -1730,7 +1773,7 @@ class RadientClient:
                     status_code=response.status_code,
                     body=self._surfaceable_body(scrubbed_response_body(response)),
                 )
-            return response.content
+            return response.content, dict(response.headers)
         except APIError:
             # Raised above from a 2xx body carrying an error. Re-raise it
             # unchanged: the catch-all below would otherwise wrap it a second

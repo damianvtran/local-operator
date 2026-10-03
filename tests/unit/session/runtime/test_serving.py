@@ -2490,6 +2490,14 @@ async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
     # refusal to. Which one comes back is the whole defect.
     assert result.kind == "block", result
     assert result.data == {"type": "mcp"}
+    # THE ROSTER TRAVELS WITH THE BLOCK (review round 1, R1-1). A terminal draws
+    # this block from its own live panel, but a surface WITHOUT one -- the phone --
+    # was handed a bare type marker and answered "ran /mcp" with the roster it had
+    # just read thrown away. ``text`` is that surface's line, and the terminal's
+    # renderer returns on the block type before reading it, so nothing paints
+    # twice.
+    assert "alpha-stdio" in result.text and "beta-oauth" in result.text, result.text
+    assert "2 MCP servers" in result.text, result.text
 
 
 @pytest.mark.parametrize(

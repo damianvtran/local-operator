@@ -171,6 +171,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
     (
+        "local_operator/tui/widgets/projects_view.py::ProjectsView._close_send_picker",
+        "<path>.remove",
+        "Textual SendTargetCard.remove unmounts the widget; no filesystem path",
+    ),
+    (
+        # The start-session card (P5b), one mode over: `card.remove()` tears down
+        # a Textual widget, and `_close_start_picker` holds no path at all — the
+        # session the create mints lives under a directory this method never
+        # names (the create core writes it, and the reader's own `esc` is what
+        # runs this).
+        "local_operator/tui/widgets/projects_view.py::ProjectsView._close_start_picker",
+        "<path>.remove",
+        "Textual StartPickerCard.remove unmounts the widget; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._on_steer_undeliverable",
         "<path>.remove",
         "THREE list removals on the app's own bookkeeping — `_held_steer_blocks`, "
@@ -2323,6 +2338,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/monitors/state.py::remove_session_state",
         "<path>.rmdir",
         "the <config>/monitors/state/<session_id> dir AFTER its own files",
+    ),
+    (
+        "local_operator/monitors/state.py::_rmdir_if_empty",
+        "<path>.rmdir",
+        # The ONE rmdir helper both callers share: ``remove_monitor_state``
+        # (above) after a cancel, and ``prune_empty_state_dirs`` over the
+        # children of ``<config>/monitors/state/``. Its receiver is always that
+        # state directory or one of its per-session children — both under the
+        # CONFIG root, never under ``sessions/`` — and ``rmdir`` itself refuses
+        # any directory that still holds a file, so a sibling monitor's state
+        # cannot be taken with it.
+        "the <config>/monitors/state[/<session_id>] dir, only when EMPTY",
     ),
     # -- evaluation record sink (the session-arm record's durability layer) --
     # Every path in these FOUR is built from the record root the caller hands

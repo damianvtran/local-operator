@@ -3598,6 +3598,8 @@ def test_no_login_flavour_is_in_the_chat_registry() -> None:
         definition.id for definition in PROVIDER_REGISTRY if definition.store_credentials_as
     }
     # Guard the guard: if the class ever empties, the assertion below is vacuous.
+    # ``openai-key`` is NOT a flavour and is absent on purpose: it owns its
+    # credential namespace instead of aliasing onto ``openai``.
     assert flavours == {
         "openai-device",
         "xai-oauth",

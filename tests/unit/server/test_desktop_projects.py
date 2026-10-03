@@ -180,15 +180,21 @@ async def test_milestone_routes_report_derived_status_and_refuse_unknowns(api) -
     created = await client.post("/v1/desktop/projects", json={"name": "alpha"})
     project_id = created.json()["result"]["id"]
 
+    # FAR-FUTURE, not a fixed near date: ``status`` is DERIVED from
+    # ``target_date`` against the local today, so a fixture pinned to a date
+    # that arrives rots — 2026-10-01 read "upcoming" only while it was today or
+    # later, then flipped to "overdue" the next day and reddened every PR. 2099
+    # is this file's established convention for the upcoming arm (see the
+    # timeline test below); the "audit" row keeps the overdue arm honest.
     added = await client.post(
         f"/v1/desktop/projects/{project_id}/milestones",
-        json={"name": "beta cut", "target_date": "2026-10-01"},
+        json={"name": "beta cut", "target_date": "2099-01-01"},
     )
     assert added.status_code == 200
     (milestone,) = added.json()["result"]["milestones"]
     assert milestone == {
         "name": "beta cut",
-        "target_date": "2026-10-01",
+        "target_date": "2099-01-01",
         "completed_at": None,
         "status": "upcoming",
     }

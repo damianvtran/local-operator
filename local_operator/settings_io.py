@@ -719,6 +719,21 @@ SECTIONS: tuple[Section, ...] = (
         "defaults to, how it backs off across re-attempts, and when a cycle "
         "must end. Read at the moment a wait is armed or fires.",
     ),
+    # The speak-aloud voicing dials (design note §1). One section, LIVE: the
+    # descriptor is built per request, so an edit changes the next spoken
+    # message and nothing needs a relaunch or a /new. It is ONE section rather
+    # than keys scattered into ``model``/``providers`` because they are one
+    # object — the descriptor — and a user tuning how the assistant sounds is
+    # doing one thing.
+    Section(
+        "speech",
+        "Speech voicing",
+        Scope.LIVE,
+        "How the assistant sounds when it speaks aloud. The descriptor is sent "
+        "to the hub, which maps it onto whichever voice provider serves; "
+        "fields a provider cannot express degrade with a note rather than "
+        "failing. Read on the next spoken message.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -2537,31 +2552,58 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: lo",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
+        #
+        # `'default':` rather than `'default'=` is the page's own notation for
+        # "this literal means X" (see the retry row's "'default': nothing
+        # sent"), and it names the resolved thing the way the neighbouring
+        # model_choice row does ("inherits the session model"). The `=` would
+        # also read as "the default VALUE is the session model", which is not
+        # what the shipped default (`""`) is.
+        #
+        # On the sentinel row the word `default` carries three referents on the
+        # bottom two lines: the VALUE the operator stored, the clause
+        # `default: —` (what `r` restores), and the footer's `r default` hint.
+        # The help quotes the literal and the inks differ (value `fg`, clause
+        # `dim`), which is what keeps them apart; recorded because the collision
+        # exists only in this new state.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
-        # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # of help, and this string measures 71. An earlier version measured 73
+        # and shed the key path, which the comment beside it wrongly claimed it
+        # did not.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # Measured on rendered frames rather than derived, and on BOTH sides of
+        # this change in the `subagents` state: at 100 columns the help and
+        # `subagents.models.hi` both paint — but only on a row AT ITS DEFAULT.
+        # An OFF-DEFAULT row also carries the `· default: —` clause (about 12
+        # more cells), which pushes the key path off the line; that is base
+        # behaviour (the sentence this replaced did the same) and not a
+        # regression, and the HELP still paints whole at every width. At 80
+        # columns the help paints whole and the key path is shed. The frame is
+        # the only thing that settles it, which is why the bounds below are
+        # measured rather than derived.
+        #
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model". The design round reviewed and
+        # signed off this trade.
+        help="Bills at that model's rates; 'default': session; empty removes the tier",
         empty_unsets=True,
     ),
     Setting(
@@ -2571,31 +2613,58 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: med",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
+        #
+        # `'default':` rather than `'default'=` is the page's own notation for
+        # "this literal means X" (see the retry row's "'default': nothing
+        # sent"), and it names the resolved thing the way the neighbouring
+        # model_choice row does ("inherits the session model"). The `=` would
+        # also read as "the default VALUE is the session model", which is not
+        # what the shipped default (`""`) is.
+        #
+        # On the sentinel row the word `default` carries three referents on the
+        # bottom two lines: the VALUE the operator stored, the clause
+        # `default: —` (what `r` restores), and the footer's `r default` hint.
+        # The help quotes the literal and the inks differ (value `fg`, clause
+        # `dim`), which is what keeps them apart; recorded because the collision
+        # exists only in this new state.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
-        # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # of help, and this string measures 71. An earlier version measured 73
+        # and shed the key path, which the comment beside it wrongly claimed it
+        # did not.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # Measured on rendered frames rather than derived, and on BOTH sides of
+        # this change in the `subagents` state: at 100 columns the help and
+        # `subagents.models.hi` both paint — but only on a row AT ITS DEFAULT.
+        # An OFF-DEFAULT row also carries the `· default: —` clause (about 12
+        # more cells), which pushes the key path off the line; that is base
+        # behaviour (the sentence this replaced did the same) and not a
+        # regression, and the HELP still paints whole at every width. At 80
+        # columns the help paints whole and the key path is shed. The frame is
+        # the only thing that settles it, which is why the bounds below are
+        # measured rather than derived.
+        #
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model". The design round reviewed and
+        # signed off this trade.
+        help="Bills at that model's rates; 'default': session; empty removes the tier",
         empty_unsets=True,
     ),
     Setting(
@@ -2605,31 +2674,58 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: hi",
         kind=Kind.TEXT,
         default="",
-        # The billing fact and the picker pointer are the two things this row
-        # was missing, and the incident is why: a deliberate tier pin read as
-        # harmless because nothing said a child on it RUNS, and is billed, at
-        # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it.
+        # Billing, the sentinel, and what empty does are the three facts this
+        # row has to carry. The FIRST and THIRD are the incident's: a
+        # deliberate tier pin read as harmless because nothing said a child on
+        # it RUNS, and is billed, at that model's rates — and the sentence that
+        # used to stand here, "empty inherits", said the opposite of what the
+        # code does. Empty (and absent) REMOVE the tier: the schema stops
+        # advertising it and the strict launch path REFUSES a role pinned to it
+        # rather than quietly inheriting (#635). The SECOND is the explicit
+        # opt-in `default`, resolved at launch to the session's current model;
+        # without it named here the only spelling an operator had for "use the
+        # session model" was the one that deletes the tier.
+        #
+        # `'default':` rather than `'default'=` is the page's own notation for
+        # "this literal means X" (see the retry row's "'default': nothing
+        # sent"), and it names the resolved thing the way the neighbouring
+        # model_choice row does ("inherits the session model"). The `=` would
+        # also read as "the default VALUE is the session model", which is not
+        # what the shipped default (`""`) is.
+        #
+        # On the sentinel row the word `default` carries three referents on the
+        # bottom two lines: the VALUE the operator stored, the clause
+        # `default: —` (what `r` restores), and the footer's `r default` hint.
+        # The help quotes the literal and the inks differ (value `fg`, clause
+        # `dim`), which is what keeps them apart; recorded because the collision
+        # exists only in this new state.
         #
         # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
         # (settings_view._detail_clause), and at 100 columns that row is 94 cells
         # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
-        # of help. An earlier version measured 73 and shed the key path, which
-        # the comment beside it wrongly claimed it did not; this is 71 and was
-        # re-measured on a rendered frame at 80/100/140 rather than estimated.
-        # At 80 the key path RENDERS (the row is 74 cells there and the rung
-        # paints `help · clause · key`), so the earlier note that it was "still
-        # shed" at that width was wrong in the safe direction — the frame is the
-        # only thing that settles it, which is why the bounds below are measured
-        # rather than derived.
+        # of help, and this string measures 71. An earlier version measured 73
+        # and shed the key path, which the comment beside it wrongly claimed it
+        # did not.
         #
-        # The pointer names the row (by the key the page greppable from, which is
-        # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, slim_child_knowledge,
-        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
-        # at lo and hi at med — and `hi` is the row this incident ran through.
-        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
+        # Measured on rendered frames rather than derived, and on BOTH sides of
+        # this change in the `subagents` state: at 100 columns the help and
+        # `subagents.models.hi` both paint — but only on a row AT ITS DEFAULT.
+        # An OFF-DEFAULT row also carries the `· default: —` clause (about 12
+        # more cells), which pushes the key path off the line; that is base
+        # behaviour (the sentence this replaced did the same) and not a
+        # regression, and the HELP still paints whole at every width. At 80
+        # columns the help paints whole and the key path is shed. The frame is
+        # the only thing that settles it, which is why the bounds below are
+        # measured rather than derived.
+        #
+        # This line no longer carries the `See subagents.model_choice` pointer
+        # the previous wording did: three facts do not fit in 72 cells beside a
+        # 26-cell cross-reference, and this row's own contract is what each
+        # VALUE does. The row it pointed at is two above, and is the only one
+        # labelled "Who picks a subagent's model". The design round reviewed and
+        # signed off this trade.
+        help="Bills at that model's rates; 'default': session; empty removes the tier",
         empty_unsets=True,
     ),
     # -- resource classification --------------------------------------------
@@ -4214,6 +4310,113 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         maximum=16,
         help="How many hidden waits may be pending at once for one session.",
+    ),
+    # --- speech voicing -----------------------------------------------------
+    # Every default below is a LITERAL on purpose (``settings_io`` must stay off
+    # the tts package's import path), and ``test_settings_io``'s
+    # ``_consumer_defaults`` imports the real constants and asserts they match —
+    # the pair is what stops a page from advertising a default the synthesizer
+    # does not use.
+    Setting(
+        key="speech.voice.gender",
+        path=("speech", "voice", "gender"),
+        section="speech",
+        label="Voice gender",
+        kind=Kind.ENUM,
+        # ``auto`` is today's behaviour: the daemon classifies each agent and
+        # resolves the result before sending, because the hub refuses ``auto``
+        # (it has no agent context to classify with).
+        default="auto",
+        help="auto picks per agent; a fixed value overrides the classifier.",
+        choices=(
+            Choice(
+                "auto",
+                "auto",
+                "Classify per agent (recommended).",
+            ),
+            Choice("female", "female", "Always use a female voice."),
+            Choice("male", "male", "Always use a male voice."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.tone",
+        path=("speech", "voice", "tone"),
+        section="speech",
+        label="Tone",
+        kind=Kind.ENUM,
+        default="warm",
+        help="Warmth of delivery. Honoured as a voice row or emulated in instructions.",
+        choices=(
+            Choice("warm", "warm", "Friendly and approachable."),
+            Choice("neutral", "neutral", "Even and unmarked."),
+            Choice("bright", "bright", "Upbeat and energetic."),
+            Choice("calm", "calm", "Unhurried and steady."),
+            Choice("authoritative", "authoritative", "Confident and assured."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.expressiveness",
+        path=("speech", "voice", "expressiveness"),
+        section="speech",
+        label="Expressiveness",
+        kind=Kind.ENUM,
+        default="medium",
+        help="How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.",
+        choices=(
+            Choice("low", "low", "Restrained and plain."),
+            Choice("medium", "medium", "Today's constant."),
+            Choice("high", "high", "Lively and expressive."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.pace",
+        path=("speech", "voice", "pace"),
+        section="speech",
+        label="Pace",
+        kind=Kind.FLOAT,
+        default=1.0,
+        minimum=0.5,
+        maximum=2.0,
+        help="Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps.",
+    ),
+    Setting(
+        key="speech.voice.language",
+        path=("speech", "voice", "language"),
+        section="speech",
+        label="Language",
+        kind=Kind.TEXT,
+        default="auto",
+        # Cleared, the key is removed and the consumer's own ``auto`` applies.
+        empty_unsets=True,
+        help="auto lets the provider detect; a two-letter code (e.g. es) pins it.",
+    ),
+    Setting(
+        key="speech.voice.accent",
+        path=("speech", "voice", "accent"),
+        section="speech",
+        label="Accent",
+        kind=Kind.TEXT,
+        default="",
+        empty_unsets=True,
+        help="A region tag such as en-GB, or empty. Reaches the provider as instructions text.",
+    ),
+    Setting(
+        key="speech.voice.instructions",
+        path=("speech", "voice", "instructions"),
+        section="speech",
+        label="Delivery instructions",
+        kind=Kind.TEXT,
+        # The pre-#1835 native-dialect guidance. NOT ``empty_unsets``: an empty
+        # value is meaningful (send no instructions of our own) and is a
+        # DIFFERENT state from the key being absent (use this default).
+        default=(
+            "Speak aloud and pay attention to potentially multilingual inputs and make sure to "
+            "use native accents for all different parts of the text, especially those that are "
+            "not english. Strive for a casual and native-sounding conversational tone. Don't "
+            "over-enunciate, consider word combinations that should have silent and natural "
+            'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
+        ),
+        help="Free text for how speech should sound (OpenAI only). Empty sends none of our own.",
     ),
 )
 

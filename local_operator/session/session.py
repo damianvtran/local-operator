@@ -126,11 +126,14 @@ from local_operator.harness.render import (
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
+    is_inherit_tier_sentinel,
     read_effort_tier_selectors,
     resolve_launch_target,
     run_subagent,
 )
 from local_operator.harness.types import (
+    FAULT_INVALID_ARGUMENTS,
+    FAULT_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -199,9 +202,14 @@ from local_operator.model.effort import cheapest_real_rung
 from local_operator.monitors.classify import MonitorClassify
 from local_operator.monitors.delivery import (
     MonitorDelivery,
+    MonitorNotice,
     format_monitor_delivery_text,
+    format_monitor_notice_text,
 )
-from local_operator.monitors.readonly import readonly_verdict
+from local_operator.monitors.readonly import (
+    monitor_call_arguments,
+    monitor_call_verdict,
+)
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import read_monitor_settings
 from local_operator.monitors.spec import (
@@ -1495,13 +1503,27 @@ def _paired_prefix(messages: Sequence[AgentMessage], *, strict: bool = False) ->
         if item.role == "tool":
             if item.tool_call_id not in pending:
                 if strict:
-                    raise ValueError("history has an unmatched tool result; cannot fork safely")
+                    # THE STRICT ARM IS THE SNAPSHOT/CUT VALIDATION, not a general
+                    # strictness: its only caller is ``Transcript.fork_snapshot``
+                    # (the persist path passes ``strict=False``, where this shape
+                    # is trimmed instead of refused). So it raises the TYPED
+                    # refusal the cut needs rather than a bare ``ValueError``,
+                    # which crossed the attach transport with no state and left the
+                    # owner answering a malformed interior as an unreachable
+                    # runtime. A future NON-fork caller that wants strictness has
+                    # to move the typing up to itself rather than inherit a fork
+                    # refusal.
+                    from local_operator.session.errors import ForkRefused
+
+                    raise ForkRefused(reason="unmatched_tool_result")
             else:
                 pending.remove(item.tool_call_id)
             continue
         if pending:
             if strict:
-                raise ValueError("history has incomplete tool calls before later messages")
+                from local_operator.session.errors import ForkRefused
+
+                raise ForkRefused(reason="incomplete_tool_calls")
             break
         if item.role == "assistant" and item.tool_calls:
             start = index
@@ -3746,6 +3768,11 @@ class Session:
             on_change=lambda: (
                 self.refresh_frontend_state() if hasattr(self, "_frontend_state_store") else None
             ),
+            # The one site that sees EVERY removal (tool cancel, desktop route,
+            # ask-deadline retire, patience sweep, switch cleanup), so the purge
+            # of what a cancelled schedule already spooled/queued lives here
+            # rather than on the tool's own path — see `_purge_removed_wakes`.
+            on_removed=self._purge_removed_wakes,
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
         #: The queued-ask engine (design docs/design/ask-nonblocking.md). Built
@@ -3793,6 +3820,7 @@ class Session:
             on_change=self._on_monitor_change,
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
+            announce=self._announce_monitor_notice,
         )
         #: Stored, not merely consumed: the naming OWNERS (the TUI's naming
         #: workers and the runtime's) reach the fit check through the session
@@ -4951,6 +4979,10 @@ class Session:
         # The same re-arm for monitors: adopted rows whose first check lands
         # inside the grace window start here rather than waiting for a turn.
         await self._monitors.pump()
+        # And the one retro-active duty an open owes: a monitor disabled before
+        # this build (or by a crash between the disable and its notice) tells
+        # the operator exactly once here, instead of staying silently stopped.
+        await self._monitors.announce_unannounced_disables()
         # Narrate a cut-off this boot repaired BEFORE anything can open a turn,
         # so the notice is in the live context the first turn reads. Deduped on
         # the token, so a second open of the same session is silent.
@@ -5643,6 +5675,13 @@ class Session:
                     withdraw()
                 self._journal_effort_if_selection_in_force(previous, model)
                 self.refresh_frontend_state()
+                # The label moved even though the pair did not (the pin came
+                # off), so the baked tier descriptions are stale for the same
+                # reason they are on a genuine switch — see the call on that
+                # path below. Reached only on an EXPLICIT re-selection, never
+                # on an ``/effort`` knob change, so it adds nothing to that
+                # hot path.
+                self._rebuild_effort_tier_tools()
                 return
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
@@ -5735,6 +5774,21 @@ class Session:
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
         self.refresh_frontend_state()
+        # The tier tools bake the session's model label into their schema text
+        # at BUILD time (``describe_effort_tiers``), while a sentinel tier
+        # resolves to ``self.model`` at LAUNCH. Without this the two drift the
+        # moment the operator follows the command that motivated the sentinel:
+        # after ``/model B`` the enum still advertises A as the model a
+        # ``default`` tier runs on, and only an unrelated config edit happens
+        # to re-render it. Routing was never wrong — the disclosure was, which
+        # is the one surface this feature exists to make honest.
+        #
+        # Placed after the fallback withdrawal above so the label it renders is
+        # the settled one, and only on this path: the same-pair early returns
+        # above cover ``/effort`` and the server's per-request sampling
+        # overrides, which run on every call and must not each pay a tool
+        # rebuild for a label that did not move.
+        self._rebuild_effort_tier_tools()
         if not announced:
             # Every host keys its model display off this event, and a genuine
             # switch used to emit NONE: the runtime's projection (and so the
@@ -7892,23 +7946,40 @@ class Session:
         self._steering_queue.put_nowait(message)
         self.refresh_frontend_state()
 
-    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+    async def fork_snapshot(
+        self, message: str = "", *, through_entry_id: str | None = None
+    ) -> dict[str, Any]:
         """Fork the committed prefix without interrupting the live agent loop.
 
         Both in-process callers and socket-attached front ends use this same admission path.
         The transcript lock, not a viewer or a turn interruption, defines the
         copy boundary; active history rewrites are refused explicitly.
+
+        ``through_entry_id`` names the entry the copy stops at (see
+        :meth:`Transcript.fork_snapshot`): the child keeps the committed prefix
+        up to it and loses everything after. A named cut point is already
+        committed, so it needs no turn boundary — which is why this method is
+        also the correct one for a mid-turn fork, unlike the deferred
+        :meth:`request_fork` below.
+
+        ``cut_entry_id`` in the result is the row the copy actually stopped at:
+        equal to ``through_entry_id`` unless the cut landed at-or-before an
+        unfinished tool batch, and ``None`` when nothing was retained (or when no
+        cut point was named).
         """
         busy = self._is_streaming or self._turn_lock.locked()
         await self._ensure_selected_model()
-        fork_id, omitted = await self._transcript.fork_snapshot(
-            message=message, is_compacting=lambda: self._compacting
+        fork_id, omitted, cut_entry_id = await self._transcript.fork_snapshot(
+            message=message,
+            is_compacting=lambda: self._compacting,
+            through_entry_id=through_entry_id,
         )
         return {
             "fork_id": fork_id,
             "parent_id": self.session_id,
             "busy": busy,
             "incomplete": busy or omitted,
+            "cut_entry_id": cut_entry_id,
         }
 
     def request_fork(
@@ -8163,7 +8234,11 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
+        from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
+            coalesce_wake_rows,
+            drain_inbox,
+        )
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -8173,6 +8248,11 @@ class Session:
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
+        # BEFORE anything is delivered: a long handover spools one row per fired
+        # occurrence, and every row would otherwise be its own wake and its own
+        # turn (the reported 52-alarm flood). Coalescing first is also what keeps
+        # this drain's own steer arm from queueing N copies of one reminder.
+        lines = coalesce_wake_rows(lines)
         # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
         # empties the file, so a crash between the read and its receipt can
         # re-deliver the whole batch, and the steer arm's identity does not
@@ -12255,6 +12335,11 @@ class Session:
             # re-armed by the first turn's pump (a separate condition — one
             # scheduler being armed says nothing about the other).
             await self._monitors.pump()
+            # The re-arm path can also be the FIRST place a hosted session sees
+            # an adopted disable (a session built without a running loop skips
+            # the async_init announcement), so it is announced here too. The
+            # latch makes the second call a no-op in the common case.
+            await self._monitors.announce_unannounced_disables()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
@@ -13098,7 +13183,18 @@ class Session:
             # "this child owns no model and inherits" is only sayable if the
             # caller can see what inheriting means. Re-read per turn, so a
             # ``/model`` switch is reflected on the next call.
-            session_model_label=self.effective_model_label,
+            #
+            # The SELECTED model, not ``effective_model_label``: every
+            # consumer of this label names what a child that owns no model
+            # will RUN, and that is ``self.model`` — the spec
+            # ``run_subagent`` builds an inherit child with, and the spec a
+            # sentinel tier resolves to. Under a pinned provider fallback the
+            # effective label is the FALLBACK, so the two disagreed exactly
+            # when a delegating model is deciding on cost: a `hi: default`
+            # tier was advertised as a model the child would not run on, and
+            # the inherit line named the fallback for a child that would run
+            # the selected spec (review round 2, MINOR 1).
+            session_model_label=self.model_label,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s
@@ -13238,6 +13334,26 @@ class Session:
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
 
+        A tier whose VALUE is the inherit sentinel (``default``, matched by
+        :func:`~local_operator.harness.subagent.is_inherit_tier_sentinel`)
+        resolves to the session's own model (``self.model``) instead of being
+        refused. It is
+        the explicit opt-in to "this tier runs on whatever this session is on":
+        absent and empty still remove the tier and still refuse under
+        ``strict``, so nothing an operator already has configured changes
+        behaviour, while a tier they deliberately set to the sentinel is
+        honoured rather than read as an unset one. ``None`` keeps its separate
+        meaning ("no tier was asked for") — the two used to be the same
+        spelling and are now distinguishable, which is the point of the
+        sentinel.
+
+        The resolved SPEC is what makes the sentinel cheap to disclose: every
+        surface downstream (:attr:`AsyncJob.model_label`,
+        ``requested_model_label``, the child stream's launch pin,
+        :class:`SubagentStartEvent`, :func:`_describe_child_failure`) is fed
+        the model this method returned, so all of them name a real
+        ``provider/model`` without a single edit of their own.
+
         ``strict`` (the launch path) turns "tier named but unresolvable" from a
         warning-and-inherit into :class:`SubagentModelUnavailable`. The
         lenient default stays for callers that merely PREFER a tier and have
@@ -13326,6 +13442,25 @@ class Session:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
+        if is_inherit_tier_sentinel(selector):
+            # The explicit opt-in, resolved at LAUNCH and not at write time:
+            # ``self.model`` is the accessor the rest of the session uses to
+            # name the model every provider call is built from, and the SAME
+            # one ``run_subagent`` reaches for when a child owns no model
+            # (``model=model_spec if model_spec is not None else
+            # parent_session.model``). Reading it here rather than recording
+            # the model into the config is what makes a later default move
+            # every pin on this tier — the requirement the sentinel exists to
+            # satisfy, and the pinned test in
+            # ``tests/unit/session/test_pinned_subagent_model.py`` holds it.
+            #
+            # Because this returns a SPEC and not ``None``, ``owns_model`` is
+            # stamped True and the child's routing is pinned to it: an
+            # operator-configured tier is a deliberate pin even when it points
+            # at the session's own model, and the disclosure code already
+            # anticipates exactly that (a pin whose label equals the parent's
+            # is why ``owns_model`` is a separate field).
+            return self.model
         provider, _, model_id = selector.partition("/")
         # BOTH halves, to the same standard ``configured_effort_tiers`` applies
         # (review R3-F11). Checking only the model let a leading-slash selector
@@ -15393,15 +15528,38 @@ class Session:
             # in one step, so the cheap proof must also bound the current
             # history. Reuse the planner's conservative ruler, not a second
             # token heuristic calibrated to typical tool outputs.
-            current_bound = compaction_api.messages_tokens_upper_bound(
-                self._render_history(messages)
-            )
+            # The SAME byte figure the plan gate below will use, taken off the
+            # same render. Without it this gate is BYTE-BLIND, and that is a
+            # reachable hole rather than a theoretical one: the plan gate
+            # (:meth:`_plan_compaction`) passes ``wire_bytes`` at both of its
+            # token gates, but this gate returns BEFORE it, so a payload over
+            # the 16 MB soft trigger while under every token threshold answers
+            # "no pass due" here and the plan gate is never reached at that
+            # boundary. Measured on a 24-frame screenshot history at the wire
+            # ruler's own frame size (19,293,593 bytes of payload, a
+            # 29,081-token upper bound against a 600k/800k trigger, a
+            # provider-reported 60k): zero compaction events at the boundary,
+            # against one for the identical history as soon as this gate is
+            # bypassed — no provider figure — or reached through the post-turn
+            # gate.
+            #
+            # Costs one byte sum over a list this line already rendered and
+            # throws away — no tokenizer, ``_wire_bytes_of`` is structural —
+            # which is the same trade the plan gate's own pre-gate makes and
+            # for the same reason. Bytes, like advice, can only make a pass
+            # fire EARLIER, so the monotonicity the upper-bound proof on the
+            # token side depends on is untouched; a figure that over-states
+            # this render can at worst fall through to a plan gate that
+            # re-derives its own and returns ``below_threshold``.
+            rendered = self._render_history(messages)
+            current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
                 max(provider_reported, current_bound),
                 self.effective_model.context_window,
                 settings,
                 self._has_pending_advisory(settings),
+                self._wire_bytes_of(compaction_api, rendered),
             ):
                 # A background pass that just landed still has to reach the
                 # loop, or the run accumulator keeps the history the pass
@@ -16027,7 +16185,12 @@ class Session:
             advisor_hint=(
                 advisor_hint
                 if advisory_ok
-                and not self._fires_on_size_alone(compaction_api, context_tokens, settings)
+                and not self._fires_on_size_alone(
+                    compaction_api,
+                    context_tokens,
+                    settings,
+                    self._wire_bytes_of(compaction_api, llm_history),
+                )
                 else None
             ),
         )
@@ -16713,7 +16876,9 @@ class Session:
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
-    def _fires_on_size_alone(self, compaction_api: Any, context_tokens: int, settings: Any) -> bool:
+    def _fires_on_size_alone(
+        self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
+    ) -> bool:
         """Would this context have compacted with NO advice at all?
 
         The one place that question is asked, because two different decisions
@@ -16726,6 +16891,24 @@ class Session:
         Asked through the same ``should_compact`` the gate itself uses, with
         ``advisory_ok=False``, so this is a reading of the one resolved trigger
         rather than a second notion of the ceiling.
+
+        ``advisory_ok=False`` is the whole meaning of "alone": advice is the
+        one input this question exists to exclude. ``wire_bytes`` is REQUIRED
+        and is NOT advice — the byte term is size, and leaving it out made this
+        predicate answer "the advice caused it" for a payload the byte trigger
+        would have fired by itself. Those two are exactly the inputs
+        ``should_compact`` OR-s in above its token term; excluding one and
+        forgetting the other is how a size pass came to claim advisor credit —
+        and, through :meth:`_settle_advisor`, to switch the advisor OFF for the
+        rest of the session on a pass it never caused. That is the round-5
+        MINOR-2 outcome re-entered through the byte arm. It is a required
+        argument rather than a defaulted one for that reason: a default of 0
+        would restore the identical blind spot at the next call site.
+
+        Both callers hold the payload the pass will actually send, so neither
+        invents a figure: ``_plan_compaction`` measures the post-prune
+        ``llm_history`` it just gated on, and :meth:`_pass_may_run_off_the_turn`
+        measures ``plan.llm_history`` from that same plan.
         """
         return _should_compact(
             compaction_api,
@@ -16733,6 +16916,7 @@ class Session:
             self.effective_model.context_window,
             settings,
             False,
+            wire_bytes,
         )
 
     def _pass_may_run_off_the_turn(self, plan: _CompactionPlan) -> bool:
@@ -16762,10 +16946,15 @@ class Session:
         Expressed through :meth:`_fires_on_size_alone`, which is also what
         decides whether the advisor may be credited with a pass — the two
         answers have to come from one question, or a pass could be deferred as
-        "advisory" while being attributed to size, or the reverse.
+        "advisory" while being attributed to size, or the reverse. Both call it
+        with the plan's own ``llm_history``, so "size alone" is read off the
+        payload the pass would send rather than off a token figure for it.
         """
         return not self._fires_on_size_alone(
-            plan.compaction_api, plan.context_tokens, plan.settings
+            plan.compaction_api,
+            plan.context_tokens,
+            plan.settings,
+            self._wire_bytes_of(plan.compaction_api, plan.llm_history),
         )
 
     def _spawn_compaction_pass(self, plan: _CompactionPlan, *, reason: str) -> None:
@@ -18453,6 +18642,94 @@ class Session:
         self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
+    async def _purge_removed_wakes(self, removed: Sequence[WakeSchedule]) -> None:
+        """Take a cancelled schedule's ALREADY-QUEUED work out of circulation.
+
+        Cancelling a wake stops two things at the store/index layer — the row and
+        the supervisor's errand — and neither is what the user was still being
+        hit by: a draining runtime had already spooled one inbox row per fired
+        occurrence (the flood), and a live busy stretch may have a courtesy
+        delivery sitting on the steering queue. Both would go off AFTER the
+        cancel, which reads as "the cancel did not work".
+
+        TWO SINKS, both best-effort, both keyed on ``wake_id``:
+
+        * the steering queue's queued wake deliveries for these ids, dropped
+          whole (a queued delivery that was never read is not a delivery);
+        * the spool's pending rows, through ``inbox.remove_wake_rows``.
+
+        The steering queue is drained FIRST, before the first ``await``: this runs
+        from inside ``WakeScheduler.update`` on the loop, and a ``to_thread`` spool
+        purge is exactly the window in which a turn boundary could otherwise pick
+        a cancelled delivery up. The spool purge is file I/O and is awaited off
+        the loop, like every other spool writer here.
+
+        Never raises: ``WakeScheduler.update`` already wraps this, but a failure
+        must not also cost the OTHER ids their purge, so each is its own attempt.
+        """
+        ids = {str(schedule.id) for schedule in removed}
+        if not ids:
+            return
+        self._drop_queued_wake_deliveries(ids)
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        # Imported in-function for the reason the drains do: the runtime inbox
+        # sits behind the mobile package's config-path machinery and this module
+        # does not carry a module-level dependency on it for a rare path.
+        from local_operator.session.runtime.inbox import remove_wake_rows
+
+        for wake_id in sorted(ids):
+            try:
+                dropped = await asyncio.to_thread(remove_wake_rows, Path(directory), wake_id)
+            except Exception:  # noqa: BLE001 — a purge must never break scheduling
+                logger.warning("could not purge spooled wake rows for %s", wake_id, exc_info=True)
+                continue
+            if dropped:
+                logger.info(
+                    "cancelled wake %s purged %d spooled row(s) it had left behind",
+                    wake_id,
+                    dropped,
+                )
+
+    def _drop_queued_wake_deliveries(self, wake_ids: set[str]) -> None:
+        """Remove queued WAKE deliveries for ``wake_ids`` from the steering queue.
+
+        Matched on the wake id the delivery carries (``details["wake_id"]``, set
+        by every wake build path) AND the wake custom type, so a queued peer note,
+        monitor delta or producer steer keeps its place even if some future
+        message type also carries a ``wake_id`` detail. The rebuild goes through
+        the public get/put API, exactly as ``_drop_queued_steering`` does, and for
+        the same reason: the queue's private deque is not this method's contract.
+
+        ``_courtesy_wake_count`` is decremented for each dropped courtesy item.
+        That counter is what ``_has_urgent_steering`` subtracts from the queue
+        size, so leaving it inflated after a drop would make a genuinely urgent
+        steer look like a courtesy wake and cost it its tool interrupt.
+        """
+        remaining: list[AgentMessage] = []
+        dropped_courtesy = 0
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            details = getattr(item, "details", None)
+            wake_id = str(details.get("wake_id", "")) if isinstance(details, dict) else ""
+            if (
+                wake_id
+                and wake_id in wake_ids
+                and getattr(item, "custom_type", "") == WAKE_PROMPT_MESSAGE_TYPE
+            ):
+                dropped_courtesy += 1
+                continue
+            remaining.append(item)
+        for item in remaining:
+            self._steering_queue.put_nowait(item)
+        if dropped_courtesy:
+            self._courtesy_wake_count = max(0, self._courtesy_wake_count - dropped_courtesy)
+            logger.info(
+                "dropped %d queued wake deliver(ies) for a cancelled schedule", dropped_courtesy
+            )
+            self.refresh_frontend_state()
+
     def retire_wakes_to_inbox(self) -> None:
         """From now on, a fired wake is SPOOLED for whoever opens next.
 
@@ -18479,13 +18756,74 @@ class Session:
         Overwrites the resume catch-up shim if one is installed, deliberately: a
         runtime that is leaving does not owe a catch-up of its own — the
         successor loads the same index and folds the same overdue wakes.
+
+        THE HOOK THIS REPLACES IS KEPT, so the overwrite is reversible: the one
+        give-up arm that ends up STILL SERVING (``process._abandon_move``)
+        releases this divert again through :meth:`resume_wakes_from_inbox`,
+        which puts back exactly what a fire would have used here before the
+        drain committed. Saved only while the current hook is not already the
+        spool, so a second retire cannot overwrite the pre-drain hook with the
+        spool itself.
         """
+        # ``getattr`` like ``_wake_rearms`` below: the cell harnesses bind these
+        # methods one at a time, so a host can reach here without the hook the
+        # real session owns in ``__init__`` — and ``None`` is the honest thing
+        # to save for it.
+        previous = getattr(self, "_wake_deliver_hook", None)
+        if previous != self._spool_wake_to_inbox:
+            self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
         #: One-shot schedules this drain swallowed, written to the index by
         #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
         #: ``__init__`` because a session that never drains never has any, and
         #: the hook that fills it is installed on this same line.
         self._wake_rearms: list[WakeSchedule] = []
         self._wake_deliver_hook = self._spool_wake_to_inbox
+
+    def resume_wakes_from_inbox(self) -> bool:
+        """Undo :meth:`retire_wakes_to_inbox` — the departure was ABANDONED, not made.
+
+        The mirror of the retire, and it exists for one caller: ``end_drain``,
+        the give-up arm of a build handover (``process._abandon_move``, reached
+        from ``_drain_for`` when the drain cannot reach idle). The wake divert's
+        premise is that this runtime is leaving for a build whose files are
+        being replaced, and a fire that opens a turn in that window only loads
+        the departing tree — but an abandoned move KEEPS the build, so the
+        premise is gone and a runtime that serves again must DELIVER again.
+        Without this the spool hook stands for the rest of the process's life:
+        every fire is diverted to an inbox nobody drains until a successor
+        boots, and nothing on any surface says so (measured 2026-10-01/02: a
+        desk session lost ~14 h of fires while `lop wake list` showed a fresh
+        "last fired" and the supervisor saw a live runtime and skipped). The
+        same argument :meth:`resume_job_deliveries_to_turns` makes for settled
+        children, applied to the other harness-initiated arrival.
+
+        NO-CLOBBER: when the current hook is not the spool, some other path
+        owns the hook now (a resume catch-up, a test's sentinel) and this
+        returns False having touched nothing — undoing a drain that is not the
+        one in force would be a second, silent hook change on top of theirs.
+        Idempotent for the same reason: a second resume after a successful one
+        also finds a non-spool hook and returns False. Never raises — the
+        caller is releasing an exit latch and a failed undo must not block it.
+
+        The saved slot is CLEARED on the way out, so a later retire while
+        serving starts from the hook as it stands NOW rather than at whatever
+        it was before the previous drain.
+        """
+        try:
+            if self._wake_deliver_hook != self._spool_wake_to_inbox:
+                return False
+            restored = getattr(self, "_wake_hook_before_drain", None)
+            if restored is None:
+                # A host that never took the pre-drain hook (a fixture whose
+                # hook just isn't the session's own): the default delivery path
+                # is the only honest restore.
+                restored = self._deliver_wake
+            self._wake_deliver_hook = restored
+            self._wake_hook_before_drain = None
+            return True
+        except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+            logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
+            return False
 
     async def _spool_wake_to_inbox(self, due: DueWake) -> None:
         """The draining hook: hand one fired wake to the successor. Never raises.
@@ -18532,7 +18870,20 @@ class Session:
             written = await asyncio.to_thread(
                 append_inbox,
                 Path(directory),
-                InboxLine(text=text, sender={}, mode="mailbox", written_at=time.time(), wake=True),
+                InboxLine(
+                    text=text,
+                    sender={},
+                    mode="mailbox",
+                    written_at=time.time(),
+                    wake=True,
+                    # WHICH wake this fire belongs to, so the successor's drain can
+                    # fold a long handover's repeated fires into one delivery
+                    # (`inbox.coalesce_wake_rows`) and so cancelling the schedule
+                    # can purge the rows it left behind (`inbox.remove_wake_rows`).
+                    # The text is what the user reads; this is what the plumbing
+                    # needs, and the two must not be re-derived from each other.
+                    wake_id=due.schedule.id,
+                ),
             )
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(
@@ -18987,6 +19338,40 @@ class Session:
         cold reader (cleanup guard, picker, ``lop monitor status``) sees.
         """
         self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+        self._prune_monitor_store()
+
+    def _prune_monitor_store(self) -> None:
+        """Reclaim what a cancel and a dead session leave behind (§D5).
+
+        Runs on every open beside the index rebuild and is deliberately NOT
+        behind ``session.cleanup.enabled`` (default False): both halves are one
+        directory listing plus a stat per monitor-carrying session, and the
+        alternative is the orphan state the live store carried — 16 empty
+        ``state/<session_id>/`` directories and one ghost index row for a
+        session that no longer exists on disk.
+
+        Both halves are conservative by construction: the sweep can only
+        ``rmdir`` an EMPTY directory, and the ghost pass needs all three of "no
+        transcript", "older than an hour" and "not held" before it deletes
+        anything. Best-effort: store maintenance may never fail a boot.
+        """
+        try:
+            from local_operator.monitors import state as monitor_state
+            from local_operator.monitors import store as monitor_store
+            from local_operator.paths import config_dir
+            from local_operator.wakes.supervisor import _session_exists
+
+            root = config_dir()
+            monitor_store.prune_ghost_entries(
+                root,
+                int(time.time() * 1000),
+                # The supervisor's own ghost guard, so a monitor entry and a
+                # wake row agree on what "this session exists" means.
+                session_exists=lambda session_id: _session_exists(root, session_id),
+            )
+            monitor_state.prune_empty_state_dirs(root)
+        except Exception:  # noqa: BLE001 — derived state; never fail a boot over it
+            logger.debug("monitor store prune failed", exc_info=True)
 
     def _write_monitor_index_entry(
         self, schedules: list[MonitorSpec], *, clear: tuple[str, ...] = ()
@@ -19736,26 +20121,155 @@ class Session:
     # -- monitor checks and delivery ----------------------------------------
 
     def _resolve_monitor_tool(self, name: str) -> AgentTool | None:
-        """One tool from this session's LIVE inventory, by name.
+        """One tool for a monitor, by name: this session's set, then the MCP manager.
 
-        The inventory is read at call time (not latched) so a tool a
-        settings flip or a prune removed is seen as gone — which is exactly
-        what the run-time re-check must detect (§6.8).
+        The session inventory is read first and at call time (not latched) so
+        a settings flip or a prune removed tool is still seen as gone (§6.8).
+
+        An MCP name that is NOT in ``self._tools`` falls back to the manager's
+        REGISTRY, and that fallback is load-bearing rather than convenient:
+        ``self._tools`` holds only the ACTIVATED subset, and the activation set
+        is process-lifetime state rebuilt on every ``tools_changed``. One
+        reconnect, one failed connect or one ``_rebuild_agent_names`` therefore
+        drops an armed monitor's tool out of the inventory for good — which is
+        how the Datadog monitor read "it is not in this session's tool set" on
+        every tick until it was disabled. The registry is the stable source: it
+        keeps a server's tools across a disconnect and carries deferred ones
+        before a connect.
+
+        The returned object is the same ``AgentTool``, so ``mcp_annotations``
+        still rides it and :func:`readonly_verdict` still gates on
+        ``readOnlyHint is True`` every tick: the fallback widens WHICH names
+        resolve, never what may run. ``_declared_tools`` is honoured exactly as
+        the loop's own out-of-inventory resolver honours it — a host that
+        declared its inventory must not have a monitor reach past it.
         """
         for tool in self._tools:
             if tool.name == name:
                 return tool
+        if not name.startswith("mcp__"):
+            return None
+        declared = self._declared_tools
+        if declared is not None and name not in declared:
+            return None
+        manager = self.mcp_manager
+        if manager is None:
+            return None
+        for tool in manager.get_tools():
+            if tool.name == name:
+                return tool
+        return None
+
+    def _monitor_availability(self, name: str) -> tuple[str, str]:
+        """Why a monitor's tool cannot run right now: ``(state, detail)``.
+
+        ``("ok", "")`` when :meth:`_resolve_monitor_tool` answers. Otherwise
+        the manager is asked WHY, because the two answers have opposite
+        policies downstream: a tool that is temporarily out of reach (its
+        server is connecting, or needs a re-auth) must NOT burn a strike —
+        five ticks of "not in this session's tool set" is how a monitor is
+        silently disabled while its server was merely reconnecting — while a
+        name that is genuinely gone keeps today's strike behaviour.
+
+        The states, and why each is unavailable rather than gone:
+
+        - the server is still settling at startup, or reports ``connecting``:
+          it may hand the tool over on its own;
+        - the server needs a re-auth, or its reconnect is suspended: it will
+          NOT heal by itself, but the fix is a one-line operator action, so
+          this stalls immediately (a notice naming ``/mcp reauth``) rather
+          than striking;
+        - the server is connected but no longer lists the tool, or is
+          disconnected: not reachable now, retried on the ladder.
+
+        Fail-closed for a manager that cannot answer (a fake or a snapshot
+        without the status APIs): the tool is treated as gone, which is
+        exactly the behaviour before this method existed.
+        """
+        if self._resolve_monitor_tool(name) is not None:
+            return ("ok", "")
+        if not name.startswith("mcp__"):
+            # A builtin/session tool: its absence is a real change (a settings
+            # flip, a disabled tool), so it keeps the strike path.
+            return ("gone", "")
+        manager = self.mcp_manager
+        if manager is None:
+            return ("gone", "")
+        server = self._monitor_server_for(name)
+        if server is None:
+            return ("gone", "")
+        detail = f'"{server}"'
+        try:
+            if manager.startup_settling() and manager.get_connection_status(server) != "connected":
+                return ("unavailable", f"MCP server {detail} is still connecting")
+            status = manager.get_connection_status(server)
+            if status == "auth-required":
+                return (
+                    "unavailable",
+                    f"MCP server {detail} needs re-authentication — run /mcp reauth {server}",
+                )
+            if manager.reconnect_suspended(server):
+                return (
+                    "unavailable",
+                    f"MCP server {detail} stopped reconnecting — run /mcp reauth {server}",
+                )
+            if status == "connecting":
+                return ("unavailable", f"MCP server {detail} is still connecting")
+            if status == "connected":
+                return (
+                    "unavailable",
+                    f'MCP server {detail} is connected but no longer lists "{name}"',
+                )
+            return ("unavailable", f"MCP server {detail} is disconnected")
+        except Exception:  # noqa: BLE001 — fail CLOSED, and the states are the reason
+            # A manager that cannot answer is not proof of absence, so this does
+            # NOT invent "unavailable" (which would suspend the strike ladder
+            # forever on a broken probe). Every other absent-tool answer on this
+            # path is fail-closed too: the tool is treated as GONE, which keeps
+            # today's behaviour and lets the ordinary ladder disable a monitor
+            # nothing can run.
+            logger.debug("monitor availability probe failed for %s", name, exc_info=True)
+            return ("gone", "")
+
+    def _monitor_server_for(self, name: str) -> str | None:
+        """The MCP server that mints ``name``, by registry meta then by prefix.
+
+        ``get_tool_meta`` is the precise answer while the tool is registered.
+        The prefix scan is the fallback for a server whose tools were dropped
+        from the registry entirely: ``create_mcp_tool_name`` is
+        ``mcp__<server>_<tool>``, so a configured server name that prefixes
+        the minted name (plus its separator) names the owner.
+        """
+        manager = self.mcp_manager
+        if manager is None:
+            return None
+        try:
+            meta = manager.get_tool_meta(name)
+            if isinstance(meta, Mapping):
+                server = meta.get("server_name")
+                if isinstance(server, str) and server:
+                    return server
+            from local_operator.mcp.tool_bridge import create_mcp_tool_name
+
+            for server in manager.get_all_server_names():
+                if name.startswith(create_mcp_tool_name(server, "x")[:-1]):
+                    return server
+        except Exception:  # noqa: BLE001 — origin metadata is best-effort
+            logger.debug("monitor server lookup failed for %s", name, exc_info=True)
         return None
 
     def _validate_monitor_call(self, tool_name: str, arguments: Mapping[str, Any]) -> str | None:
-        """The read-only gate, shared by arm-time validation and the
-        run-time re-check (§6.1/§6.8): tool present in this session's set and
-        the harness's effective tier still ``read``.
+        """The gate, shared by arm-time validation and the run-time re-check
+        (§6.1/§6.8): tool present, the harness's effective tier still ``read``,
+        and the call's SHAPE one the tool would accept (``monitor_call_verdict``).
+
+        The shape half is why a monitor armed as ``glob({path: ...})`` no
+        longer dies on every tick: the arm refuses exactly what a tick would.
         """
         tool = self._resolve_monitor_tool(tool_name)
         if tool is None:
             return f"monitor can't watch \"{tool_name}\": it is not in this session's tool set."
-        return readonly_verdict(
+        return monitor_call_verdict(
             tool,
             arguments,
             mcp_annotations=getattr(tool, "mcp_annotations", None),
@@ -19772,12 +20286,29 @@ class Session:
         the reason. A timeout aborts the call's own signal so a wedged
         subprocess is reaped by the tool's normal paths (§5.4).
         """
+        # Availability FIRST, because the absent-tool sentence that
+        # ``_validate_monitor_call`` would return is the same string for a
+        # server that is reconnecting and for a tool that is gone — and the
+        # scheduler must tell them apart: one is a wait, the other a strike
+        # (see ``_monitor_availability``).
+        state, detail = self._monitor_availability(spec.tool)
+        if state == "unavailable":
+            return {"error": detail, "kind": "unavailable"}
         reason = self._validate_monitor_call(spec.tool, spec.arguments)
         if reason is not None:
             return {"error": reason}
         tool = self._resolve_monitor_tool(spec.tool)
         if tool is None:  # pragma: no cover — validate() above covers this
             return {"error": "call is no longer read-only"}
+        # The intent the harness injects into every tool schema is LIFTED here,
+        # exactly as the loop lifts it before ``execute`` (see
+        # ``readonly.monitor_call_arguments``): the model naturally includes
+        # ``i`` when it arms a monitor, every builtin params model forbids the
+        # extra key, and leaving it in made the tick fail deterministically
+        # with ``- i: Extra inputs are not permitted`` — measured live on two
+        # monitors, every tick, until this lift. A tool that declares its own
+        # ``i`` keeps it: the helper decides, not this call site.
+        call_arguments = monitor_call_arguments(tool, spec.arguments)
         signal = AbortSignal()
         context = self._build_tool_context()
         if spec.cwd:
@@ -19785,7 +20316,7 @@ class Session:
         timeout_s = self._monitors.settings.run_timeout_ms / 1000.0
         try:
             result = await asyncio.wait_for(
-                tool.execute(f"monitor-{spec.id}", dict(spec.arguments), signal, None, context),
+                tool.execute(f"monitor-{spec.id}", call_arguments, signal, None, context),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
@@ -19797,8 +20328,48 @@ class Session:
             return {"error": f"{type(exc).__name__}: {exc}"}
         if result.is_error:
             text = (result.text or "").strip()
+            fault = None
+            details = getattr(result, "details", None)
+            if isinstance(details, Mapping):
+                fault = details.get(FAULT_KEY)
+            if fault == FAULT_INVALID_ARGUMENTS:
+                # Deterministic and never self-healing: the tool's own schema
+                # rejected these arguments, so every future tick fails
+                # identically. One strike-free retry ladder would spend the
+                # whole ladder reaching the same answer.
+                return {
+                    "error": text or "the tool rejected the monitor's arguments",
+                    "kind": "fatal",
+                }
+            if spec.tool.startswith("mcp__") and self._mcp_call_lost_its_server(spec.tool):
+                # A transport failure, not the tool's opinion: the call never
+                # reached the server. Counting it as a failed check is how one
+                # reconnect window disables an MCP monitor.
+                return {
+                    "error": text or "the MCP call did not reach its server",
+                    "kind": "unavailable",
+                }
             return {"error": text or "the tool returned an error"}
         return {"text": result.text, "error": None}
+
+    def _mcp_call_lost_its_server(self, name: str) -> bool:
+        """Whether an MCP error result happened while the server was not up.
+
+        Read AFTER the failure, so ``get_connection_status`` reports the state
+        the call actually met (a server we just lost reads ``disconnected``, a
+        retriable error that already reconnected reads ``connected`` — and that
+        second case keeps its strike, because the retry policy inside the
+        manager already spent it).
+        """
+        server = self._monitor_server_for(name)
+        if server is None:
+            return False
+        try:
+            return self.mcp_manager is not None and (
+                self.mcp_manager.get_connection_status(server) != "connected"
+            )
+        except Exception:  # noqa: BLE001 — an unanswerable manager proves nothing
+            return False
 
     async def _deliver_monitor(self, delivery: MonitorDelivery) -> None:
         """Deliver one material monitor delta as a user-attributed
@@ -19836,15 +20407,76 @@ class Session:
                 skipped=delivery.skipped,
             )
         )
+        self._send_monitor_message(message, busy=busy)
+
+    def _send_monitor_message(self, message: CustomMessage, *, busy: bool) -> None:
+        """Hand one ``monitor_prompt`` to the session: busy rides the boundary,
+        idle opens a turn.
+
+        The tail both a delivery and a lifecycle notice share. It is one method
+        rather than two copies because the busy path's marks are load-bearing
+        and easy to drop in a copy: a message parked on the steering queue must
+        ride the COURTESY lane (an immediate-interrupt poll would otherwise
+        cancel the tool it landed inside), and ``_peer_arrival`` must be marked
+        AFTER the put so the woken tool's drain finds it.
+
+        ``busy`` is the caller's LATCHED reading rather than a fresh probe: the
+        busy-resume note is decided before ``_emit`` is awaited, so re-reading
+        ``_is_streaming`` here could give a delta the note without the queue
+        lane (a turn that ended during the await) or the lane without the note
+        (a turn that started) — the two must describe one moment (review round
+        1, R4).
+        """
         if busy:
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(message)
-            # AFTER the put, for the lost-wakeup reason the wake path records:
-            # the woken tool returns into a drain, and the drain must find the
-            # message already queued.
             self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([message]))
+
+    async def _announce_monitor_notice(self, notice: MonitorNotice) -> None:
+        """Deliver one lifecycle notice (§D4): disabled, stalled or restored.
+
+        Rides the delivery's own custom type, which buys four things at once:
+        the renderer's allow-list entry (so the model reads it), the run
+        trigger accounting, the TUI's live and replay rows, and the mobile
+        fallback notice row. It is NOT a delivery: ``deliveries`` is untouched
+        and the rate window is never consulted, because notices are bounded by
+        state transitions (a disable happens once; a stall at most once per
+        30-minute episode) rather than by the change rate the window exists to
+        cap.
+        """
+        text = format_monitor_notice_text(notice)
+        # The lane is decided ONCE, before the emit is awaited and before the
+        # message is built: the same latch the delivery path makes, so a turn
+        # that starts or ends during the await cannot split the message's lane
+        # from its note (review round 1, R4).
+        busy = self._is_streaming
+        message = CustomMessage(
+            custom_type=MONITOR_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={
+                "monitor_id": notice.monitor_id,
+                "name": notice.name,
+                "text": text,
+                # A notice answers no diff, so the delivery counters ride at
+                # their latest known values and ``skipped`` is always 0.
+                "checks": notice.checks,
+                "skipped": 0,
+                "notify": bool(notice.notify),
+                "kind": notice.kind,
+            },
+        )
+        await self._emit(
+            MonitorDeltaEvent(
+                text=text,
+                monitor_id=notice.monitor_id,
+                name=notice.name,
+                changes=0,
+                skipped=0,
+            )
+        )
+        self._send_monitor_message(message, busy=busy)
 
     async def _deliver_patience_wake(self, due: DueWake) -> None:
         """Deliver one fired patience wait: hidden, watermark-checked, bounded.

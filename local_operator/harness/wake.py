@@ -713,12 +713,22 @@ class WakeScheduler:
         persist: Callable[[list[WakeSchedule]], Awaitable[None] | None],
         on_retire: Callable[[WakeSchedule, WakeRetireReason], Awaitable[None] | None] | None = None,
         on_change: Callable[[], None] | None = None,
+        on_removed: Callable[[list[WakeSchedule]], Awaitable[None] | None] | None = None,
     ) -> None:
         self._now = now
         self._deliver = deliver
         self._persist = persist
         self._on_retire = on_retire
         self._on_change = on_change
+        #: Told which schedules an ``update`` REMOVED. It exists for the state a
+        #: schedule leaves behind that is not its own: a draining runtime spools
+        #: one inbox row per fired occurrence, and cancelling the schedule stops
+        #: the store entry and the supervisor's errand but not those already
+        #: spooled. The session uses this to purge them (and any queued courtesy
+        #: delivery) at the moment the user cancels. Reported, not owned: the
+        #: hook is best-effort like ``on_retire``/``on_change``, because a purge
+        #: that fails must not leave the scheduler holding stale schedules.
+        self._on_removed = on_removed
         self._schedules: list[WakeSchedule] = []
         self._timer: asyncio.TimerHandle | None = None
         # Tick tasks spawned by the armed timer; kept as a set so dispose()
@@ -793,16 +803,34 @@ class WakeScheduler:
         return missed
 
     async def update(self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]) -> None:
-        """Caller-driven change: persist the full list then re-arm."""
+        """Caller-driven change: persist the full list then re-arm.
+
+        Every removal path in the product goes through here — the ``wake`` tool's
+        cancel, the desktop route, the ask-deadline retire, the patience sweep and
+        the switch cleanup — so this is the ONE site that can tell what was removed
+        whatever the caller was (see ``on_removed``). Removal is by ID: a caller
+        that re-writes a row in place (``patience``'s ``armed_after`` flush) has
+        removed nothing and the hook must not fire.
+        """
         async with self._write_lock:
             copies = [schedule.model_copy(deep=True) for schedule in schedules]
             copies.sort(key=lambda s: s.created_at)
+            kept_ids = {schedule.id for schedule in copies}
+            removed = [s for s in self._schedules if s.id not in kept_ids]
             self._schedules = copies
             try:
                 await self._maybe_await(self._persist(list(self._schedules)))
             except Exception:
                 logger.warning("wake persist failed", exc_info=True)
             self._arm()
+            if removed and self._on_removed is not None:
+                try:
+                    await self._maybe_await(self._on_removed(removed))
+                except Exception:
+                    # Observation cannot break scheduling, and the schedules are
+                    # already persisted: a failed purge must not skip the change
+                    # notification below.
+                    logger.warning("wake on_removed failed", exc_info=True)
             self._notify_change()
 
     async def pump(self, now_ms: int | None = None) -> int:

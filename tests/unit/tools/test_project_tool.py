@@ -486,7 +486,12 @@ async def test_show_reports_the_record_and_its_linked_sessions(context) -> None:
         name="alpha",
         description="Alpha stream",
         estimate=13.0,
-        milestones=[{"name": "beta cut", "target_date": "2026-10-01"}],
+        # FAR-FUTURE, not a fixed near date: the rendered marker is DERIVED
+        # from ``target_date`` against the local today, so a fixture pinned to
+        # a date that arrives rots — 2026-10-01 rendered ``[upcoming]`` for one
+        # day, then ``[overdue]``, and reddened every PR. 2099 keeps the
+        # upcoming arm true forever.
+        milestones=[{"name": "beta cut", "target_date": "2099-01-01"}],
     )
     await call(context, op="update", name="alpha", progress="moved")
     body = await call(context, op="show", name="alpha")

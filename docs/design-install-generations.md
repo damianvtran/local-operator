@@ -310,8 +310,11 @@ is why `editable` is one of them).
   is installed as it stands (a caller that prepares its own tree keeps doing
   so); a git ref is archived out of the repository the command runs in, and its
   commit is recorded, so two builds of one unchanged version stay
-  distinguishable. This is the in-repo half of the out-of-tree `lop-update`
-  script's job, and it is deliberately independent of it.
+  distinguishable. On macOS, a ref that is exactly a published release takes
+  the published wheel instead — the only shape carrying the signed key agent —
+  and the marker records `pypi <version>`. This is the in-repo half of the
+  out-of-tree `lop-update` script's job, and it is deliberately independent of
+  it.
 * `lop install prune [--keep N]`, `lop install migrate`, `lop install status`.
 
 pip and pipx **keep today's behaviour**, with the consequence stated: neither

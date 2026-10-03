@@ -3821,9 +3821,10 @@ async def test_the_title_drops_whole_fields_rather_than_cutting_a_value() -> Non
 @pytest.mark.asyncio
 async def test_the_title_names_a_non_default_role_and_the_effort_tier() -> None:
     """The header surfaces WHAT kind of child this is and at what level, not
-    only its label: a scout on the `hi` tier reads `Subagent · scout · <label>
-    … running · hi · <elapsed>`. Both come off the job, recorded at launch."""
-    job = _Job("sub-scout", "RetryBudgetScout", status="running")
+    only its label: a scout on the `hi` tier reads `Subagent · Scout · <label>
+    … running · hi · <elapsed>`. Both come off the job, recorded at launch; the
+    role paints the shared display form (a packaged seed's canonical label)."""
+    job = _Job("sub-scout", "BudgetRetry", status="running")
     job.agent_role = "scout"
     job.effort = "hi"
     session = FakeSession()
@@ -3832,11 +3833,11 @@ async def test_the_title_names_a_non_default_role_and_the_effort_tier() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         view = await _open(pilot, app, job)
         wide = view._title_row(120, "⣾", tools=0).plain
-        assert "scout" in wide
+        assert "Scout" in wide
         assert "hi" in wide
         # Role rides the breadcrumb (before the label); effort rides the status
         # group (after the state word), which is where the band puts it too.
-        assert wide.index("scout") < wide.index("RetryBudgetScout")
+        assert wide.index("Scout") < wide.index("BudgetRetry")
         assert wide.index("running") < wide.index(" hi")
 
 
@@ -3864,7 +3865,7 @@ async def test_the_default_task_role_is_not_printed_as_noise() -> None:
     [
         # A SHORT state word (`running`, 7 cells) and a LONG one (`completed`,
         # 9 cells). The long word is the regression guard for MINOR 1: the role
-        # chrome (`scout · `, 8 cells) is shorter than ` completed`, so an
+        # chrome (`Scout · `, 8 cells) is shorter than ` completed`, so an
         # innermost keep-role offer let a wordless-but-role-kept row win over a
         # worded-but-roleless one at ~30 cells — the invariant held for
         # `running` and broke for `completed`, which the old single-status test
@@ -3883,7 +3884,7 @@ async def test_the_role_yields_before_the_state_word_as_the_row_tightens(
     when the role chrome is shorter than the word), every field on the row is
     whole, and the role is gone entirely once the row is narrow enough that only
     the identity of the page survives."""
-    job = _Job("sub-scout", "RetryBudgetScout", status=status)
+    job = _Job("sub-scout", "BudgetRetry", status=status)
     job.agent_role = "scout"
     job.effort = "hi"
     session = FakeSession()
@@ -3892,17 +3893,17 @@ async def test_the_role_yields_before_the_state_word_as_the_row_tightens(
     async with app.run_test(size=(120, 40)) as pilot:
         view = await _open(pilot, app, job)
         wide = view._title_row(120, glyph, tools=0).plain
-        assert "scout" in wide  # the role shows when there is room
+        assert "Scout" in wide  # the role shows when there is room
         for width in range(20, 121):
             row = view._title_row(width, glyph, tools=0).plain
             assert cell_len(row) <= width, (width, row)
             # The role never survives a width where the state word had to go —
             # not even where the role is the cheaper of the two to keep.
-            if "scout" in row:
+            if "Scout" in row:
                 assert word in row, (width, row)
         # At the narrow end the row keeps only what identifies the page; the
         # role has left with the rest of the qualifiers.
-        assert "scout" not in view._title_row(24, glyph, tools=0).plain
+        assert "Scout" not in view._title_row(24, glyph, tools=0).plain
 
 
 @pytest.mark.asyncio

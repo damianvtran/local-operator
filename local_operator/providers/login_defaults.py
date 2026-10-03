@@ -103,8 +103,8 @@ def plan_login_defaults(
     …and providers that can serve no CHAT turn are exempt from ALL THREE: a
     DECISION-ONLY one (``registry.is_decision_only`` — TypeSafe's Jev, whose
     wire rejects ``chat/completions`` on every host we reach it through) and a
-    SPEECH-ONLY one (``registry.is_speech_only`` — ElevenLabs, whose wire serves
-    speech-to-text only). Logging in to one of them stores a credential the
+    SPEECH-ONLY one (``registry.is_speech_only`` — ElevenLabs and ``openai-key``,
+    whose wires serve speech and never chat). Logging in to one of them stores a credential the
     harness's other layers use — resource classification for Jev, the mobile
     voice path for ElevenLabs — and is not a statement about chat routing at
     all, so the routing is left exactly as it was and the plan carries a RECEIPT

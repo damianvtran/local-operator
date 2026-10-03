@@ -1,0 +1,112 @@
+{
+  "map_version": "1.0",
+  "descriptor_version": 1,
+  "fields": {
+    "gender": {
+      "type": "enum",
+      "values": ["female", "male"],
+      "default": null,
+      "required_at_hub": true,
+      "note": "No default at the hub: it always refuses `auto` and an absent gender (400). `auto` is the CALLER's configured default (its per-agent classifier) and must be resolved client-side into `female` or `male` before the descriptor is sent, because the hub has no agent context to classify."
+    },
+    "tone": {
+      "type": "token",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "v1_values": ["warm", "neutral", "bright", "calm", "authoritative"],
+      "default": "warm",
+      "note": "An unknown token is a NEWER CLIENT than this hub, so it degrades to the nearest tone with a note rather than a 400."
+    },
+    "expressiveness": {"type": "enum", "values": ["low", "medium", "high"], "default": "medium"},
+    "pace": {"type": "float", "min": 0.5, "max": 2.0, "default": 1.0, "note": "1.0 is normal speech; a value outside the accepted range is a 400, an accepted value outside a provider's own range is clamped with a note."},
+    "language": {"type": "enum", "values": ["auto"], "or": "ISO 639-1 two lowercase letters", "default": "auto", "note": "`auto` means the caller sends no language and the vendor auto-detects."},
+    "accent": {"type": "bcp47-or-empty", "default": "", "note": "Honoured only where a provider takes instructions text; a provider with no instructions field ignores it with a note."},
+    "instructions": {"type": "text", "max": 8000, "default": "DEFAULT_SPEECH_INSTRUCTIONS", "note": "The default is the pre-#1835 native-dialect guidance. It lives in the CALLER's config, beside its consumer, so the caller resolves the default before sending and the hub adds nothing when the field is absent."}
+  },
+
+  "request_providers": {
+    "selectable": ["openai", "elevenlabs"],
+    "note": "`radient` is not a provider a request may name: it is what omitting `provider` gets you (the hub's own cascade, which owns leg choice), so the radient capability row is a promise about the composite and the response headers name the leg that actually served."
+  },
+
+  "capabilities": {
+    "radient": {
+      "gender": {"flag": "honoured", "detail": "the hub's own cascade always serves a voice from the logical pool"},
+      "tone": {"flag": "emulated", "detail": "honoured as a pool row on ElevenLabs, emulated as an instructions sentence on OpenAI; the hub owns leg choice, so the map states the weaker guarantee"},
+      "expressiveness": {"flag": "emulated", "detail": "honoured as voice_settings.stability on ElevenLabs, emulated on OpenAI"},
+      "pace": {"flag": "honoured", "detail": "clamped per leg: 0.7-1.2 on ElevenLabs, 0.25-4 on OpenAI"},
+      "language": {"flag": "ignored", "detail": "ElevenLabs' default model (eleven_multilingual_v2) drops language_code; only eleven_flash_v2_5 enforces it"},
+      "accent": {"flag": "ignored", "detail": "only reachable through OpenAI instructions emulation, which the primary leg does not take"},
+      "instructions": {"flag": "ignored", "detail": "ElevenLabs has no instructions field and this integration never folds instructions into the synthesized text"}
+    },
+    "elevenlabs": {
+      "gender": {"flag": "honoured", "detail": "voice pool row"},
+      "tone": {"flag": "honoured", "detail": "voice pool row; the v1 tone rows share the two verified voices, so variety within a gender comes from voice_settings.stability"},
+      "expressiveness": {"flag": "honoured", "detail": "voice_settings.stability: high 0.35, medium 0.5, low 0.7 (today's constant is 0.5, so medium is unchanged)"},
+      "pace": {"flag": "honoured", "detail": "voice_settings.speed, clamped 0.7-1.2"},
+      "language": {"flag": "honoured", "detail": "only on the models listed here, via language_code; eleven_multilingual_v2 drops it with a note", "models": ["eleven_flash_v2_5"]},
+      "accent": {"flag": "ignored", "detail": "no field, and the integration never folds a hint into the text"},
+      "instructions": {"flag": "ignored", "detail": "no field; never folded into the text"}
+    },
+    "openai": {
+      "gender": {"flag": "honoured", "detail": "voice from the pool; the vendor does not document voice gender, so the pool's labels are our judgement"},
+      "tone": {"flag": "emulated", "detail": "pool voice plus a fixed tone sentence appended to instructions"},
+      "expressiveness": {"flag": "emulated", "detail": "instructions sentence"},
+      "pace": {"flag": "honoured", "detail": "speed, clamped 0.25-4"},
+      "language": {"flag": "emulated", "detail": "instructions sentence; gpt-4o-mini-tts takes no language parameter"},
+      "accent": {"flag": "emulated", "detail": "instructions sentence"},
+      "instructions": {"flag": "honoured", "detail": "the instructions field, capped at 8000 characters"}
+    }
+  },
+
+  "voices": [
+    {"key": "f-warm", "gender": "female", "tones": ["warm", "neutral", "calm"], "elevenlabs": {"voice_id": "OZ0L6eISlOejga3XjDFt", "name": "Talia"}, "openai": {"voice": "nova"}},
+    {"key": "m-warm", "gender": "male", "tones": ["warm", "neutral", "calm"], "elevenlabs": {"voice_id": "8dEUmyPMdDdK91vboYih", "name": "Sawyer"}, "openai": {"voice": "onyx"}},
+    {"key": "f-bright", "gender": "female", "tones": ["bright"], "elevenlabs": {"voice_id": "OZ0L6eISlOejga3XjDFt", "name": "Talia", "same_id_as": "f-warm"}, "openai": {"voice": "shimmer"}},
+    {"key": "m-auth", "gender": "male", "tones": ["authoritative"], "elevenlabs": {"voice_id": "8dEUmyPMdDdK91vboYih", "name": "Sawyer", "same_id_as": "m-warm"}, "openai": {"voice": "ash"}}
+  ],
+
+  "tone_phrase": {
+    "warm": "Speak in a warm, friendly tone.",
+    "neutral": "Speak in a neutral, even tone.",
+    "bright": "Speak in a bright, upbeat tone.",
+    "calm": "Speak in a calm, unhurried tone.",
+    "authoritative": "Speak in an authoritative, confident tone."
+  },
+  "expressiveness": {
+    "elevenlabs": {"stability": {"high": 0.35, "medium": 0.5, "low": 0.7}},
+    "openai": {"phrase": {"high": "Sound expressive and lively.", "medium": "", "low": "Sound restrained and plain."}}
+  },
+  "language_phrase": {
+    "openai": "Speak the text in the language it is written in, and pronounce foreign words as a native speaker of that language would."
+  },
+  "accent_phrase": {
+    "openai": "Adapt the pronunciation for the %s accent."
+  },
+  "fixed": {
+    "elevenlabs": {
+      "similarity_boost": 0.75,
+      "use_speaker_boost": true,
+      "output_format": "mp3_44100_128",
+      "speed_min": 0.7,
+      "speed_max": 1.2,
+      "voice_id_pattern": "^[A-Za-z0-9]{10,40}$"
+    },
+    "openai": {
+      "model": "gpt-4o-mini-tts",
+      "speed_min": 0.25,
+      "speed_max": 4.0,
+      "voices": ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
+    }
+  },
+  "nearest": {
+    "tone": {"unknown": "neutral"},
+    "gender": {"unknown": "female"},
+    "voice_row": "exact (gender, tone) row -> same gender with warm -> same gender's first row -> the female warm row"
+  },
+  "provenance": {
+    "elevenlabs_voice_ids": "verified by a 200 synthesis with the production key; not name-confirmable against GET /v1/voices for this account (docs/SPEECH.md, Voices)",
+    "openai_gender_labels": "our judgement, not vendor-documented",
+    "unverified_entries": ["voices[f-bright].openai", "voices[m-auth].openai"],
+    "tone_phrases": "authored here, not vendor-published; a MINOR bump may revise them"
+  }
+}

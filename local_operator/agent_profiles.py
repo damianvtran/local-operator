@@ -188,6 +188,14 @@ class AgentProfile:
     """
 
     name: str
+    #: The display LABEL carried by the row or declared by a packaged seed's
+    #: ``label:`` frontmatter. DISPLAY-ONLY, exactly as
+    #: :func:`local_operator.display_labels.display_form` defines: ``name`` is
+    #: the key every resolver and surface ADDRESSES by, and this field is what
+    #: a listing paints. Empty means "no stored label" -- a registry row holds
+    #: its derived default after the first write (``save_agent``), and an
+    #: un-installed seed falls back to its own derived default too.
+    label: str = ""
     description: str = ""
     when_to_use: str = ""
     instructions: str = ""
@@ -294,6 +302,10 @@ def _profile_from_text(name: str, text: str, *, agent_id: str | None = None) -> 
 
     return AgentProfile(
         name=_str("name") or name,
+        # A seed's canonical label (``label: UX Reviewer``): display-only, and
+        # deliberately NOT part of the seed fingerprint/divergence comparison
+        # -- see ``_SEED_FIELDS``.
+        label=_str("label"),
         description=_str("description"),
         when_to_use=_str("when_to_use"),
         instructions=body[:MAX_INSTRUCTIONS_CHARS],
@@ -456,6 +468,10 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
     # and an absent tag reads reactive, which is what every pre-class row is.
     return AgentProfile(
         name=agent.name,
+        # The label rides the ROW, not the tags: it is not a role field (a
+        # label-only edit must never read as seed divergence -- see
+        # ``_SEED_FIELDS``), so there is nothing to encode.
+        label=str(getattr(agent, "label", "") or ""),
         description=str(agent.description or ""),
         when_to_use=str(agent.description or ""),
         instructions=_agent_instructions(registry, agent),
@@ -467,6 +483,102 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
         model=str(agent.model or ""),
         hosting=str(agent.hosting or ""),
     )
+
+
+def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
+    """``(name, label, kind-facts, summary)`` per role/specialist, roles first.
+
+    ONE enumeration feeding the listing block, the argument picker AND the
+    detached runtime's routed ``/agent``, so no two surfaces can disagree about
+    which names ``/agent`` accepts or how a name reads. It lives here rather than
+    on ``OperatorApp`` because a session can be hosted by a process with no TUI
+    at all: the runtime used to answer a bare ``/agent`` with a ``noop`` whose
+    rows only the terminal's own resolver could draw, so the phone offered the
+    command in its sheet and painting the tap delivered nothing (review round 1,
+    R1-2/U2). A second assembly in ``serving.py`` would have been a second source
+    of truth for the same list, which is what the original split was avoiding.
+
+    The row carries the RAW label beside the name, never a composed display
+    form: each surface composes through the ONE shared rule
+    (``display_labels.display_form`` / ``bounded_display_form``) for its own
+    geometry, and the picker keeps ``name`` as the value it completes --
+    labels are display-only, so completion must stay on the key.
+
+    Scope is deliberate: only rows tagged as delegation roles (``is_role``) or
+    explicitly authored specialists (``is_specialist``). A registry also holds
+    ordinary conversational and autosave agents; offering those would be noise at
+    best and a privacy leak at worst — the same boundary the ``agent`` tool's
+    listing draws. ``registry`` may be ``None`` (a session that never wired one):
+    the packaged seeds below still list, because ``resolve_profile`` falls through
+    to them, so ``/agent reviewer`` works on a fresh machine and the listing must
+    not deny a name the attach path accepts.
+    """
+    from local_operator.action_class import class_from_tags
+    from local_operator.action_class import normalize as normalize_action_class
+
+    rows: list[tuple[str, str, str, str]] = []
+    seen: set[str] = set()
+    if registry is not None and hasattr(registry, "list_agents"):
+        try:
+            agents = list(registry.list_agents())
+        except Exception:
+            agents = []
+        roles: list[tuple[str, str, str, str]] = []
+        specialists: list[tuple[str, str, str, str]] = []
+        for agent in agents:
+            try:
+                if is_role(agent):
+                    profile = profile_from_agent(registry, agent)
+                    facts = "role"
+                    # The CLASS leads the optional facts (design round 1, D1):
+                    # the settings pane truncates this line to 27 cells, and a
+                    # marker appended after a configured role's model/effort was
+                    # the first thing cut — the surface §8.1.3 puts forward as
+                    # where the class is visible could not show it on exactly the
+                    # agents that carry config detail.
+                    if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
+                        facts += " · proactive"
+                    # Model/effort are facts a user picks a hat by; the rest of
+                    # the profile is what the attach applies.
+                    if profile.model:
+                        facts += f" · {profile.model}"
+                    if profile.effort:
+                        facts += f" · effort {profile.effort}"
+                    summary = (profile.when_to_use or profile.description or "").strip()
+                    roles.append((profile.name, profile.label, facts, summary))
+                    seen.add(profile.name.lower())
+                elif is_specialist(agent):
+                    summary = str(agent.description or "").strip()
+                    class_fact = (
+                        " · proactive" if class_from_tags(agent.tags) == PROACTIVE_CLASS else ""
+                    )
+                    specialists.append(
+                        (
+                            str(agent.name),
+                            str(getattr(agent, "label", "") or ""),
+                            f"specialist{class_fact}",
+                            summary,
+                        )
+                    )
+                    seen.add(str(agent.name).lower())
+            except Exception:
+                continue
+        rows.extend(sorted(roles, key=lambda row: row[0].lower()))
+        rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
+    seeds: list[tuple[str, str, str, str]] = []
+    for seed_name in list_seeds():
+        if seed_name.lower() in seen:
+            continue
+        profile = load_seed(seed_name)
+        if profile is None:
+            continue
+        summary = (profile.when_to_use or profile.description or "").strip()
+        seed_facts = "role · packaged"
+        if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
+            seed_facts += " · proactive"
+        seeds.append((profile.name, profile.label, seed_facts, summary))
+    rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
+    return rows
 
 
 def resolve_profile(
@@ -756,6 +868,12 @@ def install_seed(
         # mode, which is the convention every other caller here follows.
         base: dict[str, Any] = dict(
             name=None,
+            # The seed's canonical label ships on install AND reset (""
+            # re-derives -- see ``AgentEditFields.label``); the reset path
+            # deliberately writes it as a plain field update, NOT through the
+            # divergence gate, because a label edit is not "edited since
+            # install" (``_SEED_FIELDS``).
+            label=seed.label or "",
             # ``when_to_use`` FIRST, and the order is load-bearing. The
             # registry has one description field; a profile has two texts, and
             # this one is the ROUTING text — it is what ``search`` embeds and
@@ -882,6 +1000,14 @@ def matches_seed_text(profile: AgentProfile, seed: AgentProfile) -> bool:
 #: exact category this list is for. A user's switch to reactive therefore
 #: shows as divergence and ``reset`` restores the packaged class, the same
 #: deal as ``delegate``.
+#: ``label`` is deliberately NOT in this tuple, mirroring teams' local-only
+#: stance: the label is display metadata a user may retitle without having
+#: "edited" the seed's ROLE. Excluded from the comparison AND the fingerprint,
+#: a label-only edit never shows as divergence, never blocks a sync, and a
+#: ``reset`` still restores the packaged label because it rides
+#: ``install_seed._fields``. One list stays one list: the field a reset writes
+#: and the field divergence compares are allowed to differ ONLY where a
+#: docstring says so, which is here.
 _SEED_FIELDS: tuple[str, ...] = (
     "instructions",
     "description",

@@ -1416,6 +1416,88 @@ def _bootstrap_mobile_attention() -> None:
             bootstrap_transcript(Transcript(directory, defer_materialise=True))
 
 
+#: The outcome types the runtime NAMES as a completed mutation, and therefore the
+#: only routed answers the phone paints in the success container. Deliberately a
+#: CLOSED set of the runtime's own words rather than a guess from ``style``: the
+#: runtime marks a completed write (``goal_set``, ``agent_attached``,
+#: ``team_attached``, ``forked``) but leaves an informational report and a
+#: completed write both at ``style="info"`` ("no goal set — /goal <text> to set
+#: one" beside "renamed to x"), so anything else defaults to neutral and fails
+#: safe when a new command ships without a type (design round 1, D1).
+_SLASH_SUCCESS_TYPES = frozenset({"goal_set", "agent_attached", "team_attached", "forked"})
+
+#: A folded listing is one notice line on a phone. The rows are joined until this
+#: many characters and the remainder is elided, so a hundred-team roster cannot
+#: push the composer off the screen.
+_SLASH_RECEIPT_CHARS = 400
+
+
+#: Registry descriptions that name a TERMINAL affordance, rewritten for the
+#: phone's sheet. Only the rows that differ; see the catalogue builder.
+_PHONE_SLASH_DESCRIPTIONS = {
+    # "(shift+tab cycles)" is the TUI's own key chord — a phone has no shift and
+    # no tab, so the parenthetical is an instruction the reader cannot follow.
+    "effort": "Show or set this session's reasoning effort",
+    # The `/title --refresh` half exists to teach the terminal's help table a
+    # flag; the sheet's reader types `/rename <words>`.
+    "rename": "Name this conversation",
+}
+
+
+def _slash_receipt(outcome: Any, command: str) -> tuple[str, str, bool]:
+    """``(detail, tone, refused)`` for one routed slash outcome — the phone's line.
+
+    THE RUNTIME'S OWN WORDS FIRST. ``text`` is written for a person and is what
+    every other surface prints, so it passes through unchanged.
+
+    A ``block`` outcome carries ROWS INSTEAD (``/context``'s two-slot rows,
+    ``/team``'s and ``/agent``'s three-slot rows), and they are folded rather than
+    dropped — a command that ran and said nothing reads as a dead tap, which is
+    the defect this surface exists to remove (issue #1869). The fold takes EVERY
+    row of arity >= 2 as ``row[0]: row[1]``: the third slot is the TUI's own
+    description text and would triple the line, and keying on an exact arity is
+    what dropped every real listing, since no producer emits two-slot rows for a
+    roster (review round 1, R1-1; QA Q1). ``/mcp`` with servers configured carries
+    NEITHER text nor rows — its roster is a live panel on the terminal, which the
+    runtime says by putting the line in ``text``.
+
+    ``tone`` is the container, and ``refused`` is the outcome saying it did not do
+    the thing. One classification serves both readers: the composer paints the
+    neutral surface for a receipt and keeps the draft when ``refused``, so a
+    mistyped argument costs one word rather than the whole command (UX round 1,
+    U3), and the success wash is reserved for the outcomes the runtime names as a
+    completed mutation (design round 1, D1).
+    """
+    if not isinstance(outcome, dict):
+        return f"ran /{command}", "neutral", False
+    text = str(outcome.get("text") or "").strip()
+    data = outcome.get("data")
+    if not text:
+        items = data.get("items") if isinstance(data, dict) else None
+        if isinstance(items, list):
+            rows = []
+            for row in items:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                rows.append(f"{row[0]}: {row[1]}")
+            if rows:
+                text = " · ".join(rows)
+    if not text:
+        # Nothing to show and nothing claimed: the same ``ran /…`` the runtime's
+        # own receipt uses, so a noop (a listing the frontend owns) is not silent
+        # without pretending to have printed something.
+        text = f"ran /{command}"
+    tone = (
+        "success"
+        if isinstance(data, dict) and str(data.get("type") or "") in _SLASH_SUCCESS_TYPES
+        else "neutral"
+    )
+    refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
+    if len(text) > _SLASH_RECEIPT_CHARS:
+        text = text[: _SLASH_RECEIPT_CHARS - 1].rstrip() + "\u2026"
+    return text, tone, refused
+
+
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
     """Select the newest live generation without exposing its pid publicly."""
     candidates = [
@@ -3238,6 +3320,14 @@ class MobileDaemon:
                 model=reply.get("error_model"),
                 report=reply.get("error_report"),
                 format_unsupported=reply.get("error_format"),
+                # The same carriage ``attach_client`` performs, field for field,
+                # ``error_reason`` included: without it a fork refusal's cause
+                # would be dropped here and rebuilt as the generic sentence. No
+                # ``/fork`` reaches this decoder today (it is frontend-local), but
+                # the two writers are meant to move together — this one's own
+                # comment above says so — and a silent divergence is exactly how
+                # one of them is forgotten.
+                reason=reply.get("error_reason"),
             )
             if known is not None:
                 raise known
@@ -3625,17 +3715,53 @@ class MobileDaemon:
     # -- slash command catalogue ----------------------------------------------------
 
     def slash_commands(self) -> list[dict[str, Any]]:
-        """The phone's slash sheet. Imported lazily (the TUI registry pulls
-        the app's command table) and cached — the registry is static."""
+        """The phone's slash sheet: ONLY the commands the phone can run end to end.
+
+        THE SCOPE COMES FROM THE ONE PLACE THAT CLASSIFIES IT, not from a second
+        name list here. ``_slash_capabilities`` marks every registry command
+        ``FRONTEND_LOCAL`` (the process drawing the widgets runs it: pickers,
+        clipboard, session lifecycle, theme...) or ``AUTHORITATIVE_SESSION`` (the
+        session's owner runs it, so any attached surface can). The phone is a
+        remote surface with no terminal and no local handler for the first class,
+        so offering it meant a tap that died with "terminal-only here" (issue
+        #1869: 35 of the 46 entries it listed). The second class is exactly what
+        the routed ``slash_result`` op reaches, which is what the composer sends;
+        ``tests/unit/session/runtime/test_capability_surface.py`` pins that every
+        one of those is dispatched by the runtime, so the sheet cannot offer a
+        command the route does not run. A command that later gains structured
+        phone behaviour (issue #1598) joins by changing its scope, not this list.
+
+        Imported lazily (the TUI registry pulls the app's command table) and
+        cached — the registry is static.
+        """
         if self._slash_commands is None:
+            # The PUBLIC seam, not the module's private `_slash_capabilities`:
+            # production code reaching into a leading-underscore name is a
+            # boundary the next refactor breaks silently (review round 1, R1-5).
+            from local_operator.session.frontend_state import (
+                CommandScope,
+                slash_capabilities,
+            )
             from local_operator.slash_commands import SLASH_COMMANDS
             from local_operator.tui.autocomplete import ArgumentMode
 
-            excluded = {"exit", "quit", "clear"}  # TUI chrome, meaningless on a phone
+            routed = {
+                capability.command
+                for capability in slash_capabilities()
+                if capability.scope is CommandScope.AUTHORITATIVE_SESSION
+            }
             self._slash_commands = [
                 {
                     "name": cmd.name,
-                    "description": cmd.description,
+                    # THE PHONE'S OWN COPY where the registry's names a control
+                    # this surface does not have (UX round 1, U5). The registry
+                    # description is written for a terminal: "(shift+tab cycles)"
+                    # is a key chord a touch device cannot send, and `/title
+                    # --refresh` points at a flag whose only reason to be spelled
+                    # out is the terminal help table. Every entry NOT listed here
+                    # ships the registry's words unchanged, so this stays a short
+                    # exception list rather than a second catalogue.
+                    "description": _PHONE_SLASH_DESCRIPTIONS.get(cmd.name, cmd.description),
                     "aliases": list(cmd.aliases),
                     "arguments": (
                         cmd.arguments.name.lower()
@@ -3644,7 +3770,7 @@ class MobileDaemon:
                     ),
                 }
                 for cmd in SLASH_COMMANDS
-                if cmd.name not in excluded
+                if cmd.name in routed
             ]
         return self._slash_commands
 
@@ -4029,6 +4155,38 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    def known_device_id(value: object) -> str | None:
+        """The device id a ``/seen`` body names that THIS machine knows, or ``None``.
+
+        §3.1's ``device_id`` is the app's advice about who acted, and it ends up
+        in the cloud's ``exclude`` for this machine's corrections, so it is
+        accepted only when it names a device of this computer. Without the check
+        an authenticated caller could put an arbitrary string into the fan-out's
+        skip list; with it the field is bounded by the same read gate 4 already
+        trusts (``push_devices.credential_facts``, read-only). The capability this
+        closes is small and dominated — a paired device can already delete a row
+        through the revoke route — so this is tidiness, not a boundary (review
+        round 1, n1).
+
+        A non-string, an empty string, one past the registry's own field bound,
+        and a store this process cannot read all answer ``None``: none of them is
+        a device id, and none of them fails the ack, because the field is
+        advisory and the receipt is the read's whole purpose. The caller runs
+        this off the event loop, for the reason ``_note_device_credential``
+        states: this daemon serves a 2 s SSE repaint loop.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        if len(value) > mobile_push_devices.MAX_FIELD_CHARS:
+            return None
+        from local_operator.paths import config_dir
+
+        try:
+            facts = mobile_push_devices.credential_facts(config_dir())
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return None
+        return value if any(fact.get("device_id") == value for fact in facts) else None
+
     async def api_session_seen(request: Request) -> Response:
         """The phone marks a session seen; the unread verdict clears.
 
@@ -4059,6 +4217,14 @@ def build_app(daemon: MobileDaemon):
         token = body.get("completion_token") if isinstance(body, dict) else None
         if not isinstance(token, str):
             return JSONResponse({"error": "completion_token is required"}, status_code=422)
+        # §3.1's ADDITIVE field: the device that acted, when the caller is one.
+        # It is advisory in the strict sense — it decides only who is SKIPPED by
+        # the badge correction the worker emits for this ack — so a body that
+        # omits it, or sends something that is not an id, acks exactly as it
+        # always did. Refusing here would fail a read over a field the read does
+        # not need; what IS checked is the value's shape and whether it names a
+        # device of this computer (see ``known_device_id``).
+        device_id = body.get("device_id") if isinstance(body, dict) else None
         try:
             state = await asyncio.to_thread(
                 AttentionStore().acknowledge, f"session/{session_id}", token
@@ -4083,6 +4249,33 @@ def build_app(daemon: MobileDaemon):
         # The next list paint must already show the authoritative verdict.
         daemon.table.invalidate_summaries_cache()
         daemon.table.notify_list_changed()
+        # S6's nudge (ADR §3.1, step 2), and it is a NUDGE and nothing more: the
+        # receipt was written above, so the worker is told which device acted and
+        # on which conversation — and no more than that. It writes no receipt,
+        # acks nothing and touches no ``deliveries`` row: the attention emit is a
+        # consequence of the read state that moved here, never a second
+        # acknowledgement path, and the pass that emits it reads the store for
+        # itself. ``None`` on the in-process worker (a daemon with push not
+        # armed) is not a failure — but note the guard also keeps an unarmed
+        # daemon from paying the registry read below. The conversation is the
+        # store key, because the hint is applied only to the change it names.
+        worker = daemon.push_worker
+        if worker is not None and device_id is not None:
+            known = await asyncio.to_thread(known_device_id, device_id)
+            # ``revision[1]`` is the acknowledged watermark this receipt just moved
+            # the conversation to — the same value ``acknowledgement_map``
+            # returns — and it rides the nudge so the pass can tell THIS change
+            # from a later one on the same conversation (review round 2, m2).
+            # Guarded rather than indexed: the receipt above is already written,
+            # and a store shape this route does not recognise must not fail a read
+            # that has succeeded.
+            revision = state.get("revision") if isinstance(state, dict) else None
+            if known is not None and isinstance(revision, list) and len(revision) == 2:
+                worker.note_ack(
+                    device_id=known,
+                    conversation=f"session/{session_id}",
+                    acknowledged=revision[1],
+                )
         return JSONResponse({"ok": True, "attention": state})
 
     async def api_session_pin(request: Request) -> Response:
@@ -4442,6 +4635,34 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse(body, status_code=422)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
+        if op == "slash_result" and reply.get("op") == "result":
+            # A ROUTED command (``slash_result``) answers with a typed outcome, not
+            # an ack, so ``detail`` was always "" and the phone could not say what a
+            # command DID. The text is read from the outcome here, the one place
+            # that knows this is a phone-shaped answer, rather than asking each
+            # command to grow a second wording.
+            outcome = reply.get("data")
+            detail, tone, refused = _slash_receipt(outcome, str(body.get("command", "")))
+            if isinstance(outcome, dict) and outcome.get("kind") == "error":
+                # An error outcome is a refusal, so it travels as one (422 + the
+                # runtime's own sentence) instead of a 200 the composer would paint
+                # as a success. Built here rather than raised: this line sits past
+                # the ``try`` that maps exceptions to responses. THE TYPED CODE
+                # TRAVELS TOO, like every other 422 on this route (review round 1,
+                # R1-3): the outcome carries its category in ``data.code``
+                # (``loop_busy``, ``loop_invalid``), and a client that keys on the
+                # category rather than the sentence must not be told less here than
+                # anywhere else on the same route.
+                outcome_data = outcome.get("data") if isinstance(outcome, dict) else None
+                code = outcome_data.get("code") if isinstance(outcome_data, dict) else None
+                body_out: dict[str, Any] = {"error": detail}
+                if isinstance(code, str) and code:
+                    body_out["code"] = code
+                return JSONResponse(body_out, status_code=422)
+            # ``tone`` is the container and ``refused`` keeps the reader's draft;
+            # both are additive fields, so a client built before them reads
+            # ``detail`` exactly as it always did.
+            return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
 
     async def api_operator_challenge(request: Request) -> Response:

@@ -29,8 +29,10 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.geometry import Region
 from textual.widgets import Static
 
+from local_operator.logger import get_logger
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.projects_render import (
     UPDATE_BODY_LINES,
@@ -50,10 +52,35 @@ from local_operator.tui.projects_render import (
     update_more_lines_text,
     update_stamp_text,
 )
+from local_operator.tui.widgets.image_block import ImageBlock
+
+logger = get_logger(__name__)
+
+#: How many opened image payloads the page keeps for re-shows. An attachment
+#: may be 5 MB (``ATTACHMENT_MAX_BYTES``) and its base64 a third larger again,
+#: so the cache is bounded rather than trusting the per-update cap: the reader
+#: who opens a fourth picture loses the first, and the row says so by painting
+#: its closed state again rather than a stale frame.
+PREVIEW_CACHE_MAX = 3
+
+#: How many deferred passes the preview's reveal may take. The re-show mounts
+#: the picture in the SAME turn the reveal is queued for, so the first pass
+#: scrolls against a scroller that is still one layout behind it: its
+#: ``max_scroll_y`` is the OLD content's, the clamp eats the delta (measured: no
+#: movement at all) and the block lands wherever the settle leaves it — QA
+#: round 2's Q2-1, where the same code landed right on the pin's own feed and
+#: left 0 of 18 picture rows visible at the 60-column floor on a longer one.
+#: Each pass re-derives the geometry, so the second lands and the third
+#: confirms; the bound keeps a page that cannot satisfy the anchor (a block at
+#: the very start of the content) from spinning.
+PREVIEW_REVEAL_PASSES = 3
 
 #: A row action the page relays to its host: ``(kind, row)`` with kind
 #: ``"session"`` (open the conversation), ``"milestone"`` (toggle it) or
-#: ``"attachment"`` (hand the copied file to the platform opener).
+#: ``"attachment"`` (hand the copied file to the platform opener). The two
+#: other row-scoped keys (`y` copy, `space` preview) never travel this path:
+#: they act on the SELECTED row through the page's own accessors, so they
+#: need no row of their own to be clicked.
 RowAction = Callable[[str, dict[str, Any]], None]
 
 
@@ -242,18 +269,74 @@ class DetailAttachmentRow(DetailRow):
         *,
         on_action: RowAction,
         style_for: StyleFor,
+        preview_open: bool = False,
     ) -> None:
         super().__init__(classes="projects-detail-attachment")
         self._attachment = attachment
         self._on_action = on_action
         self._style_for = style_for
         self.section_label = "updates"
+        #: Whether this row's own picture is mounted just now — the affordance
+        #: reads `· space hide` rather than `· space` while it is (agent review
+        #: round 2, N2: the row and the ladder must not name the same key two
+        #: ways). It is set at construction because every open and close
+        #: rebuilds the rows through ``_reshow``.
+        self._preview_open = preview_open
+        #: The box width the row last fit itself to (``None`` until measured),
+        #: and whether the cursor is on it — both feed :meth:`set_selected`.
+        self._width: int | None = None
+        self._selected = False
         self.set_selected(False)
 
     def set_selected(self, selected: bool) -> None:
+        self._selected = selected
         self.update(
-            attachment_row_text(self._attachment, selected=selected, style_for=self._style_for)
+            attachment_row_text(
+                self._attachment,
+                selected=selected,
+                style_for=self._style_for,
+                width=self._width,
+                previewable=self.can_preview(),
+                preview_open=self._preview_open,
+            )
         )
+
+    def fit_width(self, width: int) -> None:
+        """Fit the row to the box — the path row's rule (spec §7.4).
+
+        The row carries the `· space` affordance while selected (design review
+        round 1, D1) and it must not wrap: a ``Static`` wraps what it is given
+        whatever its ``no_wrap`` says, which is the defect that put the path on
+        its own fitted row in the first place (see ``attachment_path_text``).
+
+        ``width`` is the PAGE's content width, and it is one cell wider than
+        this row's own box whenever the vertical scrollbar is up (measured: 96
+        against 95), so fitting to it left the fitted line a cell too wide and
+        Textual wrapped the tail — the size on an unselected row, the `· space`
+        affordance on the selected one, taking a row from the page above the
+        path line (agent review round 2, A1). The row's own CONTENT REGION is
+        the box it renders into; the argument is only the fallback for a row
+        that has not been laid out yet.
+
+        Nothing here re-fits on the row's OWN resize INLINE, deliberately: the
+        page already fits after every re-show and every page resize through
+        ``call_after_refresh(self._fit_meta)``, but the vertical scrollbar
+        arriving narrows this row's content region without touching the page's,
+        so the fit it was handed then is one cell too wide (a stored 94 against
+        a settled 93 is what wraps the tail). :meth:`on_resize` closes that gap
+        with a DEFERRED refit: doing it inside the layout pass re-enters it,
+        which was measured inflating a boundary-length row to three blank rows
+        at 100x30 and four at 60 columns.
+        """
+        target = self.content_region.width or self.size.width or width
+        if target <= 0 or self._width == target:
+            return
+        self._width = target
+        self.set_selected(self._selected)
+
+    def on_resize(self) -> None:
+        """Re-fit when this row's own box moves — deferred, never inline."""
+        self.call_after_refresh(lambda: self.fit_width(self.size.width))
 
     def action_label(self) -> str | None:
         """No verb while the copy is gone (UX round 1, U3).
@@ -272,6 +355,100 @@ class DetailAttachmentRow(DetailRow):
             return
         self._on_action("attachment", self._attachment)
 
+    def has_path(self) -> bool:
+        """Whether there is an absolute path to copy or to read (spec §7.4).
+
+        A pathless record — a hand-edited store row, or one whose copy step
+        died before the path was written — has nothing to put on the
+        clipboard and nothing to read, so the two row-scoped keys are not
+        offered for it. The path line already says ``(no path recorded)``,
+        which is the honest account of why.
+        """
+        return bool(str(self._attachment.get("path") or ""))
+
+    def can_preview(self) -> bool:
+        """Whether ``space`` may show this file's pixels (spec §7.4, staged part).
+
+        Images only: a data file has no pixels to show, and a copy that is
+        gone cannot be read at all. The page says which of the two applies
+        rather than offering a verb it cannot honour (the row's ``open`` rule).
+        """
+        return (
+            str(self._attachment.get("kind") or "data") == "image"
+            and self.has_path()
+            and not self._attachment.get("missing")
+        )
+
+    def attachment(self) -> dict[str, Any]:
+        """The store row this affordance stands for — the view's payload."""
+        return self._attachment
+
+
+class DetailAttachmentPreviewRow(DetailRow):
+    """The inline preview of one image attachment (spec §7.4, staged part).
+
+    Terminals CAN show pixels when the terminal and the transport allow it,
+    and the repo already owns that stack (:mod:`local_operator.tui.images` +
+    :class:`ImageBlock`). The row is a thin container: the block makes every
+    rendering decision — kitty placement, half-cells, the one-row receipt on
+    a terminal that cannot take pixels, and the ``unavailable`` receipt for
+    bytes that will not decode — so the page cannot disagree with the
+    transcript about what "rendering an image" means.
+
+    Not selectable, like the path row above it: the affordance that owns the
+    verb is the attachment row, and a cursor stop inside a picture would make
+    `↑↓` cost a press per pixel row.
+    """
+
+    selectable = False
+
+    def __init__(
+        self,
+        attachment: dict[str, Any],
+        *,
+        data_b64: str,
+        mime_type: str,
+        style_for: StyleFor,
+    ) -> None:
+        super().__init__(classes="projects-detail-attachment-preview")
+        self._attachment = attachment
+        self._style_for = style_for
+        #: Built here, mounted by ``compose``: the block must exist before the
+        #: row is mounted so the page can answer "is this file on screen?"
+        #: without reaching into the widget tree.
+        self._block = ImageBlock(
+            data_b64,
+            mime_type,
+            label=str(attachment.get("name") or ""),
+        )
+        self.section_label = "updates"
+
+    def compose(self):  # type: ignore[override]
+        yield self._block
+
+    def block(self) -> ImageBlock:
+        """The image widget this row mounted — what the tests and the app read."""
+        return self._block
+
+    def path(self) -> str:
+        """The stored copy this preview shows — the row's own identity.
+
+        The same key the page's preview state is held under, so the reveal can
+        find the row a keypress just added without a second lookup table.
+        """
+        return str(self._attachment.get("path") or "")
+
+    def readback(self) -> str | None:
+        """What the preview actually paints: its pixels' cell grid or a receipt.
+
+        The block owns the text; reading it through ``content`` is the same
+        accessor ``painted_rows`` already uses for ``Static`` children, so the
+        page's readback and its frame cannot disagree.
+        """
+        content = getattr(self._block, "content", None)
+        plain = getattr(content, "plain", None)
+        return str(plain) if plain else None
+
 
 class DetailAttachmentPathRow(DetailRow):
     """``→ <path>`` under its attachment, always shown (spec §7.4).
@@ -285,6 +462,9 @@ class DetailAttachmentPathRow(DetailRow):
         super().__init__(classes="projects-detail-attachment-path")
         self._attachment = attachment
         self._style_for = style_for
+        #: The box width this row last fit itself to, so a resize that does not
+        #: move the box does not re-cut the text (``None`` until measured).
+        self._width: int | None = None
         self.update(attachment_path_text(attachment, style_for=style_for))
 
     def fit_width(self, width: int) -> None:
@@ -299,12 +479,25 @@ class DetailAttachmentPathRow(DetailRow):
         # The CONTENT REGION — the box minus its padding — not the outer size
         # and not `content_size` (which is the TEXT's own size, so fitting to it
         # is circular: measured at 60 cols it answered the un-padded width and
-        # the fitted path wrapped onto a second row).
+        # the fitted path wrapped onto a second row). The stored width also
+        # keeps a second fit at the same box from re-cutting the text.
         target = self.content_region.width or self.size.width or width
-        if target > 0:
-            self.update(
-                attachment_path_text(self._attachment, width=target, style_for=self._style_for)
-            )
+        if target <= 0 or target == self._width:
+            return
+        self._width = target
+        self.update(attachment_path_text(self._attachment, width=target, style_for=self._style_for))
+
+    def on_resize(self) -> None:
+        """Re-fit when this row's own box moves — deferred, never inline.
+
+        The page fits after its own resizes and after every re-show, but the
+        vertical scrollbar arriving narrows this row's box without resizing the
+        page, and the fit it was handed then is one cell too wide (the trap the
+        docstring above records — agent review round 2's A1 is the same one on
+        the affordance row). The refit runs on the next refresh: doing it inside
+        the layout pass re-enters it.
+        """
+        self.call_after_refresh(lambda: self.fit_width(self.size.width))
 
     def readback(self) -> str | None:
         """The path line as plain text, for ``painted_rows``."""
@@ -438,6 +631,11 @@ class DetailSessionRow(DetailRow):
     def activate(self) -> None:
         self._on_action("session", self._row)
 
+    @property
+    def session_payload(self) -> dict[str, Any]:
+        """The row's payload, for the quick-send target (spec §7.5.1)."""
+        return self._row
+
 
 class DetailTodoRow(DetailRow):
     """One ``todos`` line (information only, like the spec says: no actions)."""
@@ -498,6 +696,25 @@ class ProjectDetailPage(VerticalScroll):
         self._expanded: set[str] = set()
         #: The project whose entries the expanded set belongs to.
         self._expanded_project: str | None = None
+        #: Image previews the reader opened — page-local VIEW state like the
+        #: expansion set above, never written to the store. Keyed by the
+        #: stored copy's own path (the one thing unique to one attachment
+        #: row), holding the base64 the host read for us. Bounded on purpose:
+        #: an attachment may be 5 MB, so the retained payload is capped at
+        #: :data:`PREVIEW_CACHE_MAX` open pictures, oldest dropped first. The
+        #: rows are re-shown out of it, which is what keeps a preview on
+        #: screen across `r` instead of silently collapsing under the reader.
+        self._previews: dict[str, tuple[str, str]] = {}
+        self._preview_open: list[str] = []
+        #: Paths whose payload the host is reading right now, and the ones the
+        #: reader dismissed while that read was in flight. Without them a
+        #: second `space` started a second read of a 5 MB copy and looked like
+        #: a dead key, and the first read's answer would re-open what the
+        #: reader had just closed (agent review round 1, M2).
+        self._preview_pending: set[str] = set()
+        self._preview_cancelled: set[str] = set()
+        #: The project whose previews these are (same rule as the expansion set).
+        self._previews_project: str | None = None
         #: The host's chrome refresh, installed by the view: a toggle changes
         #: the selected row's verb, and the hint row must re-sync with it
         #: (UX review round 1, U2).
@@ -564,6 +781,15 @@ class ProjectDetailPage(VerticalScroll):
         if self._project_id != self._expanded_project:
             self._expanded.clear()
             self._expanded_project = self._project_id
+        # Previews are per-project view state on the same rule: the payloads
+        # are the previous project's files, and a row that outlived them would
+        # paint a picture under a heading it no longer belongs to.
+        if self._project_id != self._previews_project:
+            self._previews.clear()
+            self._preview_open.clear()
+            self._preview_pending.clear()
+            self._preview_cancelled.clear()
+            self._previews_project = self._project_id
         children = self._build(view, own_session)
         self.remove_children()
         self.mount_all(children)
@@ -703,12 +929,40 @@ class ProjectDetailPage(VerticalScroll):
                 )
             attachments = [a for a in entry.get("attachments") or [] if isinstance(a, dict)]
             for attachment in attachments:
+                path = str(attachment.get("path") or "")
                 rows.append(
                     DetailAttachmentRow(
-                        attachment, on_action=self._on_action, style_for=self._style_for
+                        attachment,
+                        on_action=self._on_action,
+                        style_for=self._style_for,
+                        # The row's affordance flips to `space hide` while its
+                        # own picture is mounted (agent review round 2, N2).
+                        preview_open=bool(path) and path in self._preview_open,
                     )
                 )
                 rows.append(DetailAttachmentPathRow(attachment, self._style_for))
+                # The preview rides directly under the path line it belongs to,
+                # and only while the reader has it open: the feed's rhythm is
+                # the row the reader asked for, not a picture per attachment
+                # (spec §7.4 — the affordance row stays the baseline).
+                preview = self._preview_payload(attachment)
+                if preview is not None:
+                    # Construction is GUARDED the way the transcript guards it
+                    # (`append_image_blocks`): a block whose bytes will not
+                    # decode still mounts as its own receipt, but a failure
+                    # CONSTRUCTING one must not take down the re-show that
+                    # carried a perfectly good page (agent review round 1, M3).
+                    try:
+                        rows.append(
+                            DetailAttachmentPreviewRow(
+                                attachment,
+                                data_b64=preview[0],
+                                mime_type=preview[1],
+                                style_for=self._style_for,
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 — the row above still stands
+                        logger.debug("preview block construction failed", exc_info=True)
         older = len(newest_first) - len(shown)
         if older > 0:
             rows.append(DetailSentenceRow(older_updates_text(older).plain, self._style_for))
@@ -743,6 +997,229 @@ class ProjectDetailPage(VerticalScroll):
             self._expanded.discard(key)
         else:
             self._expanded.add(key)
+        self._reshow()
+
+    # -- previews -----------------------------------------------------------
+    def _preview_payload(self, attachment: dict[str, Any]) -> tuple[str, str] | None:
+        """The host-read pixels for this row, when the reader has them open.
+
+        The page never reads a file: the host hands the payload back through
+        :meth:`apply_preview`, and this is the lookup that decides whether the
+        row was one of them. Keyed by the stored COPY's path, which is the one
+        value unique to a single attachment row.
+        """
+        path = str(attachment.get("path") or "")
+        if not path or path not in self._preview_open:
+            return None
+        return self._previews.get(path)
+
+    def request_preview(self, path: str) -> bool:
+        """Note that a read is now in flight for ``path``.
+
+        ``False`` when one already is — the caller must not start a second
+        read of the same copy, and the page needs to know whether the answer
+        it is about to receive is the one it asked for.
+        """
+        if path in self._preview_pending:
+            return False
+        self._preview_pending.add(path)
+        self._preview_cancelled.discard(path)
+        return True
+
+    def preview_pending(self, path: str) -> bool:
+        """Whether the host is reading this copy just now."""
+        return path in self._preview_pending
+
+    def cancel_pending_preview(self, path: str) -> None:
+        """The reader dismissed a preview whose bytes are still being read.
+
+        The read itself is not aborted (it is a bounded worker the host owns);
+        its answer is dropped instead, which is what the reader asked for by
+        pressing the key a second time.
+        """
+        self._preview_pending.discard(path)
+        self._preview_cancelled.add(path)
+
+    def preview_failed(self, path: str) -> None:
+        """The host could not read ``path`` — stop treating it as in flight."""
+        self._preview_pending.discard(path)
+        self._preview_cancelled.discard(path)
+
+    def apply_preview(
+        self, path: str, *, data_b64: str, mime_type: str, project_name: str = ""
+    ) -> None:
+        """Show the image the host just read for ``path`` (spec §7.4, staged).
+
+        Called back by the app-side reader, off the UI loop; a re-show keeps
+        the row cursor. The payload is cached so a later re-show — `r`, or a
+        toggle on a neighbouring row — rebuilds the same picture instead of
+        dropping it under the reader (the cache bound is
+        :data:`PREVIEW_CACHE_MAX`).
+
+        Two answers are DROPPED rather than shown: one for a copy the reader
+        dismissed while it was being read, and one that arrives after they
+        have moved to another project — the row it names is not on this page
+        any more, so mounting it would paint a picture under the wrong
+        headings.
+        """
+        self._preview_pending.discard(path)
+        if path in self._preview_cancelled:
+            # `discard` is not a predicate — it returns None — so the test is
+            # membership, not the call's return value.
+            self._preview_cancelled.discard(path)
+            return
+        if project_name and project_name != self._project_name:
+            return
+        self._remember_preview(path, data_b64, mime_type)
+        if path not in self._preview_open:
+            self._preview_open.append(path)
+        self._reshow()
+        self.call_after_refresh(lambda: self._reveal_preview(path))
+
+    def preview_unit(self, path: str) -> tuple[DetailRow, DetailAttachmentPreviewRow] | None:
+        """The block a preview belongs to: its affordance row and the picture.
+
+        The path line between them is implied rather than returned: it carries
+        no state, but the reveal treats the three as ONE unit, because the row
+        and its path line are what NAME the picture (in half-cell and kitty
+        mode ``ImageBlock`` paints its caption only on the unavailable
+        receipt), so a reveal that shows the picture without them leaves it
+        anonymous (design observation, filed with QA round 1's Q1).
+        """
+        preview = next(
+            (
+                child
+                for child in self.children
+                if isinstance(child, DetailAttachmentPreviewRow) and child.path() == path
+            ),
+            None,
+        )
+        if preview is None:
+            return None
+        index = list(self.children).index(preview)
+        for back in range(index - 1, -1, -1):
+            candidate = self.children[back]
+            if isinstance(candidate, DetailRow) and not isinstance(
+                candidate, DetailAttachmentPreviewRow
+            ):
+                if callable(getattr(candidate, "attachment", None)):
+                    return candidate, preview
+        return None
+
+    def _reveal_preview(self, path: str, *, pass_number: int = 1) -> None:
+        """Bring a just-opened preview's BLOCK into view; the cursor does not move.
+
+        ONE authority, and the unit is the attachment row, its path line and
+        the picture. Two measured failures shape the rule (QA round 1, Q1):
+
+        * Textual's own ``scroll_visible`` keeps the widget's ORIGIN in view,
+          which over-scrolled by exactly the amount that pushed the owning row
+          out of the box — at 60x24 with the feed paged away the picture sat at
+          screen rows −4..1 against a box of 4..12, i.e. the reader pressed
+          `space` and saw NOTHING, and the picture on screen named nothing.
+        * A block TALLER than the box cannot be shown whole, so the useful end
+          is its TOP: the owning row and the path line stay on screen and the
+          picture reads from its first row down.
+
+        A block that FITS keeps Textual's minimal scroll, so an
+        already-visible preview does not jump. ``region`` rows are compared
+        only as a SPAN (screen rows subtracted from screen rows); nothing here
+        mixes a screen row with ``scroll_offset``, which is the mistake the row
+        cursor's own reveal documents.
+
+        A pass that does not LAND is retried, bounded by
+        :data:`PREVIEW_REVEAL_PASSES` — and the retry is what makes the reveal
+        feed-independent. The scroll is the least reliable part of this: it is
+        computed against the scroller's metrics and CLAMPED against
+        ``max_scroll_y``, and the mount that carried the picture had not been
+        laid out for the first pass, so the clamp swallowed the delta and the
+        block stayed wherever the settle left it. Verification is the same
+        geometry the reveal promises, read live, so a pass that landed costs
+        nothing and one that did not gets a second, now-settled attempt.
+        """
+        unit = self.preview_unit(path)
+        if unit is None:
+            return
+        owner, preview = unit
+        box = self.content_region
+        try:
+            span = preview.region.y + preview.region.height - owner.region.y
+            taller = span > box.height
+            if taller:
+                owner.scroll_visible(animate=False, top=True)
+            else:
+                # The WHOLE unit, in the scroller's own virtual space. Revealing
+                # the picture alone scrolls the row that NAMES it off the top
+                # (measured at 60x24: owner y=2 against a box at 4), and the two
+                # widgets' regions are screen rows — handing those to
+                # ``scroll_to_region`` is the mixed-space mistake this page
+                # documents, so the union comes from the virtual regions.
+                whole = owner.virtual_region_with_margin.union(preview.virtual_region_with_margin)
+                self.scroll_to_region(whole, animate=False)
+            landed = self._preview_landed(owner, preview, box=box, taller=taller)
+        except Exception:  # noqa: BLE001 — a reveal is a bonus, never a failure
+            return
+        # The FIRST pass reads the layout the re-show replaced: the picture was
+        # mounted in this turn, so the rows it measures are the PREVIOUS
+        # layout's — measured on a case that fits, a unit read as 12 rows when
+        # it is 8, so it took the taller branch and reported itself landed with
+        # the owner row at −2. Its verdict is therefore not trusted and the
+        # confirmation pass is unconditional; from the second pass the numbers
+        # have settled and a landed block stops the chain.
+        if pass_number < PREVIEW_REVEAL_PASSES and (pass_number == 1 or not landed):
+            self.call_after_refresh(lambda: self._reveal_preview(path, pass_number=pass_number + 1))
+
+    def _preview_landed(
+        self, owner: DetailRow, preview: DetailAttachmentPreviewRow, *, box: Region, taller: bool
+    ) -> bool:
+        """Whether the block sits where the reveal promises, read live.
+
+        The promise in the same screen rows the reveal compares: a block that
+        FITS is wholly inside the box; a TALLER one has its owning row on the
+        box's first row, so the path line under it still names the picture.
+        ``scroll_offset.y <= 0`` counts as landed for the taller case — the
+        content cannot move any further down, so the owner is as high as the
+        scroll can put it and another pass would only spin.
+        """
+        if taller:
+            return owner.region.y == box.y or self.scroll_offset.y <= 0
+        return owner.region.y >= box.y and preview.region.bottom <= box.bottom
+
+    def close_preview(self, path: str) -> None:
+        """Hide one open preview. The payload stays cached for a re-open."""
+        self._preview_open = [open_path for open_path in self._preview_open if open_path != path]
+        self._preview_cancelled.discard(path)
+        self._reshow()
+
+    def _remember_preview(self, path: str, data_b64: str, mime_type: str) -> None:
+        """Cache one payload, evicting the oldest past the cap.
+
+        An attachment may be 5 MB, and its base64 a third larger again, so the
+        cache is bounded rather than trusting the feed's 10-per-update cap: the
+        reader who opens an eleventh picture loses the first, which is the
+        behaviour a scroll back up would show anyway. Eviction drops the row
+        from the OPEN set too, so the row that loses its payload paints closed
+        rather than mounted-with-nothing.
+        """
+        self._previews.pop(path, None)
+        self._previews[path] = (data_b64, mime_type)
+        while len(self._previews) > PREVIEW_CACHE_MAX:
+            oldest = next(iter(self._previews))
+            self._previews.pop(oldest, None)
+            self._preview_open = [
+                open_path for open_path in self._preview_open if open_path != oldest
+            ]
+            self._preview_pending.discard(oldest)
+            self._preview_cancelled.discard(oldest)
+
+    def _reshow(self) -> None:
+        """Rebuild the rows in place, keeping the row cursor and the hints.
+
+        The same shape :meth:`_toggle_entry` uses: the expansion toggle and a
+        preview both change what the page draws without changing what the
+        store says, so both must leave the cursor and the host's chrome alone
+        except for the state-change note.
+        """
         if self._view is None:
             return
         self.show(
@@ -792,6 +1269,17 @@ class ProjectDetailPage(VerticalScroll):
         """Where the cursor sits among selectables — the refresh anchor."""
         return self._selected
 
+    def selected_session(self) -> dict[str, Any] | None:
+        """The selected row's SESSION payload, when a session row has the cursor.
+
+        `m` sends straight to this row (spec §7.5.1) — one keystroke from the
+        row you are reading to a message to it — and ``None`` means the cursor
+        is somewhere else, so the page asks for a target instead of guessing.
+        """
+        row = self._current()
+        payload = getattr(row, "session_payload", None)
+        return payload if isinstance(payload, dict) else None
+
     def selected_action_label(self) -> str | None:
         row = self._current()
         return row.action_label() if row is not None else None
@@ -800,6 +1288,38 @@ class ProjectDetailPage(VerticalScroll):
         """The bare verb — the ``↵`` hint's fallback label (UX round 1, U3)."""
         row = self._current()
         return row.action_verb() if row is not None else None
+
+    def selected_attachment(self) -> dict[str, Any] | None:
+        """The selected row's ATTACHMENT payload, when an attachment row has
+        the cursor (spec §7.4). ``None`` means the cursor is elsewhere, so the
+        row-scoped keys (`y`, `space`) are inert rather than guessing at a
+        neighbour's file.
+        """
+        row = self._current()
+        payload = getattr(row, "attachment", None)
+        if not callable(payload):
+            return None
+        value = payload()
+        return value if isinstance(value, dict) else None
+
+    def selected_can_copy(self) -> bool:
+        """Whether `y` has an absolute path to put on the clipboard."""
+        row = self._current()
+        check = getattr(row, "has_path", None)
+        return bool(check()) if callable(check) else False
+
+    def selected_can_preview(self) -> bool:
+        """Whether `space` has an image it could show pixels of."""
+        row = self._current()
+        check = getattr(row, "can_preview", None)
+        return bool(check()) if callable(check) else False
+
+    def selected_preview_open(self) -> bool:
+        """Whether the selected attachment's preview is on screen just now."""
+        attachment = self.selected_attachment()
+        if attachment is None:
+            return False
+        return str(attachment.get("path") or "") in self._preview_open
 
     def _current(self) -> DetailRow | None:
         if not self._selectables:
@@ -957,10 +1477,13 @@ class ProjectDetailPage(VerticalScroll):
         for child in self.children:
             if isinstance(child, DetailMetaRow):
                 child.fit_width(width)
-            elif isinstance(child, DetailAttachmentPathRow):
+            elif isinstance(child, (DetailAttachmentPathRow, DetailAttachmentRow)):
                 # The path is a whole-line fit like the meta sentence: both
                 # must be cut at the box, because a Static wraps what it is
-                # given (see `attachment_path_text`).
+                # given (see `attachment_path_text`). The attachment row joins
+                # them because the `· space` affordance it reveals on select
+                # (design round 1, D1) must not be what tips a long name over
+                # the box.
                 child.fit_width(width)
 
     def on_resize(self) -> None:

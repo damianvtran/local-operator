@@ -244,3 +244,265 @@ def test_cancel_refuses_an_unknown_session(
 
     assert monitor_command(_args(monitor_command="cancel", session="nosuch", monitor_id="m1")) == 1
     assert "no session 'nosuch'" in capsys.readouterr().err
+
+
+def test_an_overdue_monitor_on_a_closed_session_reads_idle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§D6: "next due now" on a watch nothing is hosting reads as a stuck
+    check; the row has to say which of the two it is.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=4, next_due_at=now - 3_600_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "idle" in out
+    assert "overdue by" in out
+    # And the legend earns its place only when the word is present.
+    assert "no session is hosting it" in out
+
+
+def test_the_idle_legend_is_absent_when_nothing_is_idle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(tmp_path, "msess01", cwd="/w", monitors=[_row("m1", next_due_at=now + 150_000)])
+
+    assert monitor_command(_args()) == 0
+    assert "no session is hosting it" not in capsys.readouterr().out
+
+
+def test_zero_deliveries_after_several_checks_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The live store's second silent failure: a monitor that ran and delivered
+    nothing, with no way for the operator to tell that from a broken watch.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=9, deliveries=0, next_due_at=now + 150_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "9 checks, 0 deliveries" in out
+    assert "confirm the call observes what you expect" in out
+
+
+def test_an_unavailable_episode_is_named_in_the_tail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=4, unavailable_since=now - 600_000, next_due_at=now + 60_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+    assert "tool unavailable since" in capsys.readouterr().out
+
+
+def test_the_hint_leads_the_row_so_a_narrow_table_keeps_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: the hint was appended last, so at 80 columns every hint was cut
+    while the counters beside it survived — the one fact the row exists for,
+    lost to the terminal width."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=12, deliveries=0, next_due_at=now + 30_000)],
+    )
+    monkeypatch.setenv("COLUMNS", "80")
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "0 deliveries" in out
+
+
+def test_the_full_hint_sentence_reaches_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The band shows a hint's STATE clause; the surfaces with room show the
+    whole shared sentence, and this pins that the long form is still produced."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=0, deliveries=0, created_at=now - 3_600_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    assert "never checked — its session was not open since arming" in capsys.readouterr().out
+
+
+def test_an_unhosted_row_does_not_say_the_session_is_closed_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7: "overdue by 2h — session not open" and "never checked — its session
+    was not open since arming" are one fact said twice."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=0, deliveries=0, next_due_at=now - 7_200_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "never checked — its session was not open since arming" in out
+    assert out.count("session not open") == 0
+
+
+def test_the_check_count_is_not_said_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7's other form: the zero-deliveries hint opens with the check count, so
+    the counter beside it must not repeat it."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=12, deliveries=0, next_due_at=now + 30_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("12 checks") == 1
+    assert "12 checks, 0 deliveries" in out
+
+
+def test_a_multiline_disable_reason_cannot_break_the_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 1, U3: the live shape is ``invalid arguments:\\n- path: …``, and
+    the raw reason printed its continuation at column 0 — a broken table row."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m4",
+                disabled=True,
+                disabled_reason="invalid arguments:\n- path: Extra inputs are not permitted",
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert not any(line.startswith("- path:") for line in lines)
+    assert "disabled" in out
+    # U4: and the cell leads with a cause a person can read, not the banner.
+    assert "5 consecutive failed checks" in out
+    assert "invalid arguments" not in out
+
+
+def test_a_disable_reason_that_reads_as_a_sentence_is_kept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m1",
+                disabled=True,
+                disabled_reason='monitor can\'t watch "mcp__x": it is not in this tool set.',
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "it is not in this tool set." in out
+    assert "consecutive failed checks" not in out
+
+
+def test_a_disabled_row_does_not_say_its_failure_count_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7's duplication in its disabled form: the clause is derived FROM the
+    count ("5 consecutive failed checks") when the reason is a raw banner, so
+    the standalone counter beside it repeats it."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m2",
+                disabled=True,
+                disabled_reason="invalid arguments:\n- path: Extra inputs are not permitted",
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("5 failed") == 0
+    assert "5 consecutive failed checks" in out

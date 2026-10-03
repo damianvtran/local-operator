@@ -25,9 +25,11 @@ from local_operator.session.runtime.inbox import (
     SOURCE_USER,
     InboxLine,
     append_inbox,
+    coalesce_wake_rows,
     drain_inbox,
     inbox_path,
     peek_inbox,
+    remove_wake_rows,
     withdraw_inbox,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
@@ -40,6 +42,8 @@ def _line(
     command_id: str = "",
     wake: bool = False,
     harness_injected: bool = False,
+    wake_id: str = "",
+    wake_fires: int = 1,
 ) -> InboxLine:
     return InboxLine(
         text=text,
@@ -48,7 +52,43 @@ def _line(
         command_id=command_id,
         wake=wake,
         harness_injected=harness_injected,
+        wake_id=wake_id,
+        wake_fires=wake_fires,
     )
+
+
+def _fire(text: str, wake_id: str = "w1", fires: int = 1) -> InboxLine:
+    """One spooled wake fire, as ``Session._spool_wake_to_inbox`` writes it."""
+    return _line(text, wake=True, wake_id=wake_id, wake_fires=fires)
+
+
+def _wake_text(message: str = "standup", occurrence: int = 1) -> str:
+    """A REAL spooled fire's text, built by the production formatter.
+
+    Shape assertions have to run against the envelope the product actually
+    writes (``(alarm) Scheduled wake w1 (20, every 20m) — cancel with …``
+    followed by the user's words), not a stand-in: the whole point of the note's
+    placement is what the receipt and the notice-marker read off this string.
+    """
+    from local_operator.harness.wake import (
+        DueWake,
+        WakeSchedule,
+        format_wake_delivery_text,
+    )
+
+    return format_wake_delivery_text(
+        DueWake(
+            schedule=WakeSchedule(id="w1", message=message, next_due_at=0, every_ms=1_200_000),
+            occurrence=occurrence,
+            planned_total=None,
+            final=False,
+        )
+    )
+
+
+def _fire_row(message: str = "standup", occurrence: int = 1) -> InboxLine:
+    """A spooled fire carrying the real envelope + message."""
+    return _fire(_wake_text(message, occurrence), wake_id="w1")
 
 
 def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
@@ -706,3 +746,360 @@ def test_a_recall_that_loses_the_race_answers_so(
     monkeypatch.setattr(inbox_mod, "_read_all", read_all)
 
     assert withdraw_inbox(tmp_path, "w" * 8) is False
+
+
+# ---------------------------------------------------------------------------
+# Repeated fires of ONE wake: coalesce at drain, purge at cancel
+#
+# The operator's report (2026-10-01): an ``every: 20m`` wake whose runtime kept
+# draining spooled one row per fire — ~52 rows over ~17 h — and the successor
+# delivered each as its own turn. Cancelling the schedule stopped the store entry
+# and the supervisor's errand but not the rows already in the spool.
+# ---------------------------------------------------------------------------
+
+
+def test_wake_carriage_round_trips_and_legacy_rows_read_absent(tmp_path: Path) -> None:
+    """``wake_id``/``wake_fires`` are additive: absent must read as the old row.
+
+    The rows already sitting in the fleet's spools were written by a build with
+    no such keys, and they must keep delivering exactly as they did — individually
+    and without a count — rather than failing to parse or being folded together.
+    """
+    path = inbox_path(tmp_path)
+    path.write_text(
+        json.dumps({"text": "older build's fire", "sender": {}, "wake": True}) + "\n",
+        encoding="utf-8",
+    )
+    (legacy,) = drain_inbox(tmp_path)
+    assert legacy.wake is True
+    assert legacy.wake_id == ""
+    assert legacy.wake_fires == 1, "an absent count is one fire, not zero"
+
+    row = _fire("newer build's fire", wake_id="w1", fires=4)
+    assert append_inbox(tmp_path, row)
+    (restored,) = drain_inbox(tmp_path)
+    assert (restored.wake_id, restored.wake_fires) == ("w1", 4)
+    assert restored.to_json()["wake_id"] == "w1"
+    assert restored.to_json()["wake_fires"] == 4
+
+
+def test_a_junk_fire_count_reads_as_one_and_does_not_take_the_batch_with_it(
+    tmp_path: Path,
+) -> None:
+    """The spool is untrusted input: a hand-edited row must not fail the drain.
+
+    ``int(raw)`` raises on ``"soon"``, and ``_parse`` catches only the JSON
+    decode — so a raising coercion would lose the whole batch, not just the row.
+    """
+    path = inbox_path(tmp_path)
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {"text": "a", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": "soon"},
+                {"text": "b", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": 0},
+                {"text": "c", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": None},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lines = drain_inbox(tmp_path)
+    assert [line.wake_fires for line in lines] == [1, 1, 1]
+
+
+def test_three_fires_of_one_wake_coalesce_to_one_row(tmp_path: Path) -> None:
+    """The core of the flood fix: N spooled fires deliver as ONE row."""
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])
+    assert len(merged) == 1
+    assert merged[0].wake is True
+    assert merged[0].wake_id == "w1"
+    assert merged[0].wake_fires == 3
+    assert "This wake fired 3 times while the runtime was being replaced" in merged[0].text
+    assert merged[0].text.endswith("standup"), "the latest envelope is the payload"
+
+
+def test_the_note_sits_between_the_envelope_and_the_message() -> None:
+    """The delivered shape (design round 1, D1): identity, then the count, then the
+    user's own words verbatim.
+
+    The note used to lead, which made the row anonymous — the collapsed surface
+    showed the coalesce bookkeeping where the wake's name belongs.
+    """
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])[0]
+    envelope, _, rest = merged.text.partition("\n\n")
+    note, _, message = rest.partition("\n\n")
+
+    assert envelope.startswith("(alarm) Scheduled wake w1 (22,"), "the LAST fire's envelope leads"
+    assert "once its goal is met." in envelope, "the envelope is whole, not truncated by the split"
+    assert "standup" not in envelope, "and it has not swallowed the message"
+    assert note == (
+        "(This wake fired 3 times while the runtime was being replaced; the latest is below.)"
+    )
+    assert message == "standup", "the user's words, untouched"
+
+
+def test_a_coalesced_row_still_reads_as_the_wakes_own_notice() -> None:
+    """Identity is what the merge must not cost: the receipt headline must still
+    name the wake (coalescing must not change the identity a single fire shows),
+    and the row must still be recognisable as harness-minted.
+
+    Both read the FIRST segment, which is exactly why the note sits behind the
+    envelope (design round 1, D1).
+    """
+    from local_operator.harness.rows import (
+        is_harness_notice_text,
+        wake_receipt_headline,
+    )
+
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])[0]
+
+    assert wake_receipt_headline(merged.text) == wake_receipt_headline(
+        _wake_text("standup", occurrence=22)
+    ), "the headline names the wake exactly as an un-coalesced fire does"
+    assert "fired 3 times" not in wake_receipt_headline(merged.text)
+    assert (
+        is_harness_notice_text(merged.text) is True
+    ), "a 2026-era transcript can only prove its provenance by its opening words"
+
+
+def test_a_coalesced_row_keeps_the_last_occurrence_position(tmp_path: Path) -> None:
+    """Position is part of the guarantee: the row stands where the LAST fire did.
+
+    Merging to the first position would deliver the reminder ahead of a peer note
+    that arrived before the last fire — an ordering the drain's own docstring
+    promises to preserve.
+    """
+    a, b = _line("peer one"), _line("peer two")
+    lines = [_fire("first fire", wake_id="w1"), a, _fire("last fire", wake_id="w1"), b]
+    merged = coalesce_wake_rows(lines)
+    assert [line.text for line in merged] == ["peer one", merged[1].text, "peer two"]
+    assert "last fire" in merged[1].text
+    assert merged[1].wake_fires == 2
+
+
+def test_rows_without_a_wake_id_are_untouched(tmp_path: Path) -> None:
+    """A peer note, an owner prompt, or a row an older build wrote has no id to
+    group on, and must survive byte-for-byte (identity, not equality)."""
+    legacy = _line("older build's fire", wake=True)
+    note = _line("a quiet note")
+    another = _fire("other wake", wake_id="w2")
+    lines = [legacy, note, another]
+    merged = coalesce_wake_rows(lines)
+    assert merged == lines
+    assert merged[0] is legacy and merged[1] is note and merged[2] is another
+
+
+def test_a_single_fire_is_not_rewritten(tmp_path: Path) -> None:
+    """One fire is not a flood: no note, no count, the same object back.
+
+    The shape is asserted rather than a substring, because "no note" is a claim
+    about the row's segments: a lone fire delivers envelope-then-message, with
+    nothing between them, exactly as it did before this fix.
+    """
+    only = _fire_row("standup", occurrence=4)
+    merged = coalesce_wake_rows([only])
+    assert merged == [only]
+    assert merged[0] is only, "the row's bytes are handed on untouched"
+    assert merged[0].text == _wake_text("standup", occurrence=4)
+
+    envelope, _, message = merged[0].text.partition("\n\n")
+    assert envelope.startswith("(alarm) Scheduled wake w1 (4,")
+    assert message == "standup", "the message is the second segment; no note was inserted"
+    assert "This wake fired" not in merged[0].text
+
+
+def test_a_non_wake_row_with_a_wake_id_is_not_a_fire(tmp_path: Path) -> None:
+    """``wake`` decides: the id alone must not fold a quiet row into an alarm."""
+    quiet = _line("read when you next turn", wake=False, wake_id="w1")
+    fires = [_fire("standup", wake_id="w1") for _ in range(2)]
+    merged = coalesce_wake_rows([quiet, *fires])
+    assert merged[0] == quiet
+    assert len(merged) == 2
+    assert merged[1].wake_fires == 2
+
+
+def test_a_re_coalesce_replaces_the_note_instead_of_nesting_it() -> None:
+    """The deferral path re-spools kept rows and they are merged AGAIN.
+
+    The count must be the sum of what each row already stood for (5 then 1 is 6,
+    not 2), and the note must be REPLACED rather than stacked — otherwise the
+    user reads a two-fire note for six alarms, and every handover adds a line.
+    """
+    once = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in range(1, 6)])
+    assert once[0].wake_fires == 5
+
+    # The row is re-spooled (carrying its count and note) and one more fire lands.
+    again = coalesce_wake_rows([once[0], _fire_row("standup", occurrence=23)])
+    assert len(again) == 1
+    assert again[0].wake_fires == 6
+    assert again[0].text.count("This wake fired") == 1, "replaced, never nested"
+    assert "This wake fired 6 times" in again[0].text
+    # And the replacement lands in the SAME place, so the envelope is still first.
+    assert again[0].text.startswith("(alarm) Scheduled wake w1 (23,")
+
+
+def test_a_message_opening_with_the_note_sentence_survives_the_first_merge() -> None:
+    """The strip runs only on a row that was ALREADY coalesced (review round 2).
+
+    A merge is the only writer of a note and a merge always leaves
+    ``wake_fires > 1``, so a single-fire row cannot be carrying one — and without
+    that gate a wake whose own first paragraph happens to be that sentence loses
+    the paragraph on the very first merge. The count tests could not see it: they
+    assert the note's presence, never the message's survival.
+    """
+    sentence = (
+        "(This wake fired 3 times while the runtime was being replaced; the latest is below.)"
+    )
+    quoted = f"{sentence}\n\nthen the real instructions"
+
+    first = coalesce_wake_rows([_fire_row("earlier"), _fire_row(quoted, occurrence=2)])[0]
+    assert quoted in first.text, "the message's own opening paragraph is not the stripper's"
+    assert first.text.count(sentence) == 1, "and no second note was written over it"
+
+    # The gate must not disable the strip where it is needed. A batch whose LAST
+    # row is itself an already-coalesced one — the deferral re-spool's shape when
+    # another row follows the merged position — still replaces rather than nests.
+    again = coalesce_wake_rows([_fire_row("third", occurrence=3), first])[0]
+    assert again.wake_fires == 3
+    envelope, _, rest = again.text.partition("\n\n")
+    note, _, message = rest.partition("\n\n")
+    assert envelope.startswith("(alarm) Scheduled wake w1 (2,"), "the re-spooled row leads"
+    assert note.startswith("(This wake fired 3 times"), "ONE note, replaced in place"
+    assert message == quoted, "and the user's paragraph survives the re-merge"
+
+
+def test_a_note_shaped_string_in_the_message_is_not_stripped() -> None:
+    """The strip is anchored at the head of the text AFTER the envelope.
+
+    Only a previous merge can put the sentence there, so a wake whose own message
+    happens to quote it keeps its words: the anchor is what tells the two apart,
+    and without it a re-coalesce would quietly eat the user's text.
+    """
+    quoted = "Please review the note below.\n\nThis wake fired 4 times while the runtime "
+    quoted += "was being replaced; the latest is below."
+    merged = coalesce_wake_rows(
+        [_fire_row("earlier", occurrence=1), _fire_row(quoted, occurrence=2)]
+    )[0]
+
+    assert quoted in merged.text, "the message's own words survive verbatim"
+    # Exactly ONE inserted note: the sentence quoted inside the message is not one.
+    assert merged.text.count("(This wake fired") == 1
+    assert "(This wake fired 2 times" in merged.text
+
+
+def test_coalescing_is_pure(tmp_path: Path) -> None:
+    """The drains pass the live batch: mutating it in place would merge rows the
+    deferral path still has to re-spool."""
+    lines = [_fire("standup", wake_id="w1") for _ in range(3)]
+    before = [line.text for line in lines]
+    coalesce_wake_rows(lines)
+    assert [line.text for line in lines] == before
+
+
+def test_remove_wake_rows_drops_only_that_wakes_pending_rows(tmp_path: Path) -> None:
+    """The cancel path: matching fires go, everything else keeps its place."""
+    assert append_inbox(tmp_path, _fire("w1 fire one", wake_id="w1"))
+    assert append_inbox(tmp_path, _line("a quiet note"))
+    assert append_inbox(tmp_path, _fire("w2 fire", wake_id="w2"))
+    assert append_inbox(tmp_path, _fire("w1 fire two", wake_id="w1"))
+    assert append_inbox(tmp_path, _line("owner prompt", source=SOURCE_USER))
+
+    assert remove_wake_rows(tmp_path, "w1") == 2
+    left = [line.text for line in peek_inbox(tmp_path)]
+    assert left == ["a quiet note", "w2 fire", "owner prompt"]
+
+    # An id nobody spooled is not a write.
+    assert remove_wake_rows(tmp_path, "w3") == 0
+    assert [line.text for line in peek_inbox(tmp_path)] == left
+
+
+def test_remove_wake_rows_keeps_unknown_fields_and_torn_rows_verbatim(
+    tmp_path: Path,
+) -> None:
+    """Rows nobody asked to remove must come back byte-identical.
+
+    A re-serialisation through ``InboxLine`` would drop any key a NEWER build
+    wrote beside the known ones — the very additivity ``from_json`` reads — and
+    would silently repair a torn final line into a deliverable row.
+    """
+    path = inbox_path(tmp_path)
+    future_row = json.dumps(
+        {"text": "peer note", "sender": {}, "wake": False, "field_from_2027": {"a": 1}}
+    )
+    torn = '{"text": "half a line", "sender": {}, '
+    path.write_text(
+        f"{json.dumps(_fire('gone', wake_id='w1').to_json())}\n{future_row}\n{torn}",
+        encoding="utf-8",
+    )
+    assert remove_wake_rows(tmp_path, "w1") == 1
+    assert path.read_text(encoding="utf-8") == f"{future_row}\n{torn}"
+
+
+def test_remove_wake_rows_on_a_missing_or_id_less_spool_is_a_no_op(tmp_path: Path) -> None:
+    assert remove_wake_rows(tmp_path, "w1") == 0
+    assert remove_wake_rows(tmp_path, "") == 0
+
+
+def test_the_spool_owes_no_turn_once_the_cancelled_rows_are_gone(tmp_path: Path) -> None:
+    """The obligation the supervisor reads must go with the rows, or a purged
+    cancel still raises a runtime that wakes to nothing."""
+    from local_operator.wakes.spooled import spool_owes_turn
+
+    assert append_inbox(tmp_path, _fire("standup", wake_id="w1"))
+    assert spool_owes_turn(tmp_path) is True
+    assert remove_wake_rows(tmp_path, "w1") == 1
+    assert spool_owes_turn(tmp_path) is False
+
+
+def test_the_boot_drain_delivers_three_spooled_fires_as_one_turn(tmp_path: Path) -> None:
+    """END TO END over the real spool and the real drain: the flood, fixed.
+
+    Three fires of one wake reach ``_drain_inbox_into`` as three rows and must
+    leave as ONE wake delivery carrying the count — the operator's reading was
+    three turns for one reminder.
+    """
+    import asyncio
+
+    from local_operator.session.runtime.process import _drain_inbox_into
+
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for n in (20, 21, 22):
+        assert append_inbox(session_dir, _fire_row("standup", occurrence=n))
+
+    class _Transcript:
+        directory = session_dir
+
+    class _Session:
+        transcript = _Transcript()
+
+    class _Handle:
+        def __init__(self) -> None:
+            self._session = _Session()
+            self.received: list[tuple[str, bool]] = []
+
+        async def receive_peer_message(self, text, *, mode, wake, sender=None):
+            self.received.append((text, wake))
+            return "ok"
+
+    handle = _Handle()
+    assert asyncio.run(_drain_inbox_into(handle)) == 1
+    assert len(handle.received) == 1, "one reminder is one turn"
+    text, wake = handle.received[0]
+    assert wake is True, "it still RUNS the occurrence rather than filing a note"
+    assert text.startswith("(alarm) Scheduled wake w1 ("), "the identity leads the delivery"
+    assert "This wake fired 3 times while the runtime was being replaced" in text
+    assert peek_inbox(session_dir) == [], "and the spool is consumed"

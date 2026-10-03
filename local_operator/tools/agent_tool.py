@@ -117,15 +117,12 @@ logger = logging.getLogger(__name__)
 class AgentParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Per-op semantics moved to the tool:// doc's ops table (slimming wave,
+    # audit item 2): this description rode every request while being read once,
+    # and `read tool://agent` renders the same blurbs on demand. The enum
+    # literals stay, so the op set is still learnable from the wire.
     op: Literal["list", "show", "search", "install", "reset", "create", "update", "sync"] = Field(
-        description=(
-            "search: find a role by meaning; list/show: what exists and what it "
-            "says (show also prints the packaged text when an installed role "
-            "has diverged from it); install: add a packaged starter; reset: "
-            "restore it over an edited role, reporting what it replaced; sync: "
-            "pull the latest for installed roles (merges hub updates with local edits); "
-            "create/update: author or fix a role or a specialist profile."
-        )
+        description="The op to run."
     )
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
@@ -134,9 +131,13 @@ class AgentParams(BaseModel):
     name: str | None = Field(
         default=None,
         description=(
-            "Role or specialist name (all ops but search). No spaces — the "
-            "name doubles as the /agent slash-command argument."
+            "Role or specialist name (all ops but search); no spaces — it doubles "
+            "as the /agent slash-command argument."
         ),
+    )
+    label: str | None = Field(
+        default=None,
+        description="create/update: display label; '' resets it.",
     )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
     description: str | None = Field(
@@ -151,8 +152,7 @@ class AgentParams(BaseModel):
         description=(
             "create/update: standing guidance prepended to every run of the "
             "profile. Imperative and short — it is billed on each of that "
-            "profile's turns. This is the BASE behaviour; a team layers "
-            "collaboration and project briefs on top without rewriting it."
+            "profile's turns. Teams layer briefs on top without rewriting it."
         ),
     )
     tools: list[str] | None = Field(
@@ -217,20 +217,17 @@ class AgentParams(BaseModel):
     action_class: Literal["reactive", "proactive"] | None = Field(
         default=None,
         description=(
-            "create/update: the agent's class. 'reactive' (default) is ordinary "
-            "behaviour. 'proactive' lets it attach hidden patience waits and run "
-            "proactive deliveries — set it ONLY when the user clearly asked for a "
-            "proactive use case (companion agents are the canonical one); it can "
+            "create/update: 'reactive' (default) or 'proactive'. Set proactive "
+            "ONLY when the user clearly asked for a proactive use case: it can "
             "message them unprompted, so it is sparing by default."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
-            "create: 'role' (default) is a reusable delegation target tagged "
-            "for task(agent=...). 'specialist' is a durable named agent with "
-            "its own instruction set, and can sit on a team roster without "
-            "being a role. Ignored on update: a profile cannot change kind."
+            "create: 'role' (default; a reusable task(agent=...) target) or "
+            "'specialist' (a durable named agent, may sit on a team roster). "
+            "Ignored on update: kind cannot change."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
@@ -324,7 +321,18 @@ def _profile_line(profile: AgentProfile, *, installed: bool, compact: bool = Fal
         # A role with no description is invisible to `search`, which matches on
         # exactly this text. Saying so is more useful than a dangling colon.
         summary = "(no description — not searchable; add one with op='update')"
-    row = f"- {profile.name}{suffix}: {summary}"
+    # The shared display rule's material, composed for ADDRESSING (D2). This
+    # row is the model's install/address menu -- it names the string a later
+    # ``install``/``update`` must pass as ``name`` -- so the KEY leads and the
+    # human label follows in parentheses. ``display_form`` alone cannot be used
+    # verbatim here: for a canonical label it paints the label WITHOUT the key
+    # (``UX Reviewer``), which is right on a human listing and wrong on the one
+    # surface where the reader has to reproduce the exact install name.
+    if profile.label and profile.label.casefold() != profile.name.casefold():
+        display = f"{profile.name} ({profile.label})"
+    else:
+        display = profile.name
+    row = f"- {display}{suffix}: {summary}"
     # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
     # cannot tell an author's fragment from text we dropped.
     cap = _STARTER_ROW_CAP if compact else _ROW_CAP
@@ -1311,6 +1319,7 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
     def _fields(**overrides: Any) -> AgentEditFields:
         base: dict[str, Any] = dict(
             name=None,
+            label=None,
             description=None,
             tags=None,
             categories=None,
@@ -1338,13 +1347,21 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
                 description=profile.description,
                 tags=tags,
                 categories=categories,
+                # An omitted label (None) means "derive" on the create path
+                # ("" is the reset spelling); a provided one is validated by
+                # ``create_agent`` against the shared rule.
+                label=params.label,
             )
         )
     else:
         agent = existing
         # An update carries only what changed: passing a None description here
         # would blank the routing text a previous create had set.
-        overrides: dict[str, Any] = {"tags": tags, "categories": categories}
+        overrides: dict[str, Any] = {
+            "tags": tags,
+            "categories": categories,
+            "label": params.label,
+        }
         if profile.description:
             overrides["description"] = profile.description
         registry.update_agent(agent.id, _fields(**overrides))
@@ -1442,7 +1459,7 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
-def _effort_pin_description(model_choice: bool) -> str:
+def _effort_pin_description(model_choice: bool, session_model_label: str | None = None) -> str:
     """The ``effort`` description for create/update, matching the live schema.
 
     With model choice ON and tiers configured it names what each resolves to so
@@ -1475,7 +1492,8 @@ def _effort_pin_description(model_choice: bool) -> str:
             "'inherit' clears a pin and every role inherits the launching session's model."
         )
     return (
-        f"create/update: default model tier ({describe_effort_tiers(tiers)}). "
+        "create/update: default model tier ("
+        f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}). "
         "'inherit' clears it."
     )
 
@@ -1496,20 +1514,23 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
     model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         AgentParams.model_json_schema(),
-        description=_effort_pin_description(model_choice),
+        description=_effort_pin_description(model_choice, context.session_model_label),
         extra=(INHERIT_EFFORT,),
         model_choice=model_choice,
     )
     return AgentTool(
         name="agent",
         label="Agent roles",
+        # The op roster used to be spelled in the description ("Find, install,
+        # author, or reset one to its packaged version") plus the op field's
+        # per-op exegesis. Both moved to the tool:// doc's ops table in the
+        # slimming wave (audit item 2) — the enum literals and the Ops section
+        # still carry every op. The specialist sentence moved to the doc's
+        # notes for the same reason.
         description=(
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
-            "own instruction sets. Find, install, author, or reset one to its "
-            "packaged version; launch a role with task(agent='<name>'). A "
-            "specialist is the reusable base a team layers collaboration and "
-            "project briefs on top of."
+            "own instruction sets; launch a role with task(agent='<name>')."
         ),
         parameters=parameters,
         # Writes land in the user's own configuration directory, never in the
@@ -1523,5 +1544,10 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_agent, parameters, model_choice=model_choice),
+        execute=_with_advertised_effort(
+            execute_agent,
+            parameters,
+            model_choice=model_choice,
+            session_model_label=context.session_model_label,
+        ),
     )

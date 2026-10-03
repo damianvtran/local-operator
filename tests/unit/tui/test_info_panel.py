@@ -1446,8 +1446,8 @@ def test_below_the_note_floor_a_draining_row_keeps_its_own_words(width: int) -> 
     the operator may safely do next rendered as a bare ``● <name>``, while a
     wedged row next to it kept "not answering". The compact form carries the
     bound where the phrase has one, so the narrow reader is told both that it is
-    leaving and how long that can take, and it is derived from the same
-    ``SIGNAL_DRAIN_S`` the long phrase spells out.
+    leaving and what ends the wait — silence for the bound — and it is derived
+    from the same ``SIGNAL_DRAIN_S`` the long phrase spells out.
     """
 
     def row(phrase: str) -> str:
@@ -1469,7 +1469,7 @@ def test_below_the_note_floor_a_draining_row_keeps_its_own_words(width: int) -> 
         return rows[0]
 
     signalled = row(LEAVING_ON_SIGNAL)
-    assert f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})" in signalled, signalled
+    assert f"leaving (silent {bound_text(SIGNAL_DRAIN_S)})" in signalled, signalled
 
     # The build trigger names no bound and gets none: the phrase promises none,
     # so the compact form must not invent one.

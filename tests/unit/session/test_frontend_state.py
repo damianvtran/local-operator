@@ -2424,3 +2424,29 @@ def test_the_turn_end_refresh_keeps_the_decode_window_on_last_usage() -> None:
     assert last2 is not None
     dumped2 = last2.model_dump()
     assert "decode_us" not in dumped2 and "decode_tokens" not in dumped2
+
+
+def test_monitor_state_carries_the_health_fields() -> None:
+    """§D6: the wire row declares the two facts every health surface derives
+    from, so a viewer never has to open the counters file to explain a stalled
+    watch.
+    """
+    from local_operator.session.frontend_state import _monitor_state
+
+    class _Scheduler:
+        def index_rows(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "m1",
+                    "name": "watch",
+                    "unavailable_since": 123,
+                    "last_error": "MCP error: closed",
+                }
+            ]
+
+    row = _monitor_state(_Scheduler())[0]
+    assert row.unavailable_since == 123
+    assert row.last_error == "MCP error: closed"
+    # Declared, not merely allowed through: a viewer reading the model's fields
+    # must see them rather than falling back to ``extra``.
+    assert {"unavailable_since", "last_error"} <= set(type(row).model_fields)

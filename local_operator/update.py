@@ -87,6 +87,12 @@ TTL_S = 6 * 60 * 60
 
 PYPI_JSON_URL = "https://pypi.org/pypi/local-operator/json"
 
+#: The per-VERSION document: a different endpoint on the same API, and the
+#: classifier that decides ``--from-snapshot``'s route asks this one rather
+#: than the full index — it already knows the version it is asking about, and
+#: the full document is ~1.3 MB and grows with every release.
+PYPI_VERSION_JSON_URL = "https://pypi.org/pypi/local-operator/{version}/json"
+
 #: Short enough that a hung PyPI cannot stall a splash worker across the
 #: TUI suite; long enough for a slow but living mirror.
 _FETCH_TIMEOUT_S = 5.0
@@ -211,6 +217,13 @@ _DAEMON_PLIST_LABELS = (
 #: ``sys.platform`` process-wide (which is what an inline read would force, and
 #: which leaks into any import that lands inside that window).
 _DAEMONS_ARE_LAUNCHD_AGENTS = sys.platform == "darwin"
+
+#: Whether this host can carry the operator-key key agent at all. Read ONCE for
+#: the same reason as the constant above: the ``--from-snapshot`` route
+#: classifier (:func:`classify_snapshot_install`) refuses the published wheel
+#: off macOS, and its tests flip this constant rather than patching
+#: ``sys.platform`` process-wide.
+_HOST_IS_MACOS = sys.platform == "darwin"
 
 #: Default loopback probe used only for the unsupervised warning. Must
 #: match ``mobile.daemon.DEFAULT_PORT``; do not import that module here.
@@ -939,6 +952,7 @@ def write_source_marker(
     commit: str = "",
     ref: str = "",
     origin: str = PYPI_SOURCE_TOKEN,
+    note: str = "",
 ) -> bool:
     """Record what is installed at ``root`` in ``.lop-source``. Never raises.
 
@@ -968,6 +982,15 @@ def write_source_marker(
     reader that does not recognise it degrades to "no ref", which for such an
     install is the truth.
 
+    ``note`` is the marker's one ANNOTATION slot: a trailing, single-token
+    rationale appended as a THIRD token, and only when set — so the two-token
+    shape shared with the out-of-tree writer above stays byte-identical for
+    every existing caller. The ``--from-snapshot`` route classifier records the
+    fallback reason there (:func:`classify_snapshot_install`), so a generation
+    that asked for a release but is a source build can say WHY without anyone
+    having kept the day's terminal output. Readers take the first token's shape
+    and ignore the rest, so a note can never render as a commit.
+
     ORDERING IS LOAD-BEARING
     ------------------------
     Callers must write this only AFTER the installer has exited successfully.
@@ -989,8 +1012,9 @@ def write_source_marker(
     second = ref if commit else version
     # A bare sentinel when there is nothing to say about the second token: the
     # shape stays ``<token> [<label>]``, and no reader has to cope with a
-    # trailing space that means "the label was empty".
-    line = f"{first} {second}\n" if second else f"{first}\n"
+    # trailing space that means "the label was empty". ``note``, when set, is
+    # the third token; joining drops empty fields rather than leaving a gap.
+    line = " ".join(token for token in (first, second, note) if token) + "\n"
 
     path = Path(root) / ".lop-source"
     fd: int | None = None
@@ -2540,6 +2564,7 @@ def install_into_generation(
     commit: str = "",
     ref: str = "",
     origin: str = PYPI_SOURCE_TOKEN,
+    note: str = "",
 ) -> Path:
     """Install ONE build into its own generation and point ``current`` at it.
 
@@ -2566,7 +2591,9 @@ def install_into_generation(
        guard's comment below);
     3. write ``.lop-source`` into the new tree, so the marker is in place BEFORE
        the generation becomes visible to any reader (and so "no marker" means
-       "still installing" for :func:`prune_generations`);
+       "still installing" for :func:`prune_generations`); ``note`` rides into
+       that marker as its trailing annotation — the ``--from-snapshot``
+       fallback rationale, see :func:`write_source_marker`;
     4. flip ``current``;
     5. write the stable launchers and the daemon shim.
 
@@ -2639,6 +2666,7 @@ def install_into_generation(
             commit=commit,
             ref=ref,
             origin=origin,
+            note=note,
         )
         # The flip is INSIDE this handler so a refusal from the stable root
         # (``EACCES``, ``ENOSPC``) arrives as the one sentence the callers print
@@ -4524,6 +4552,330 @@ def _git_bytes(repo: Path, *args: str) -> bytes | None:
     return completed.stdout if completed.returncode == 0 else None
 
 
+#: The plain release-tag form the release owner cuts (``gh release create
+#: vX.Y.Z``). Every other tag is deliberately NOT release evidence — a beta
+#: (``v0.4.0b1``), a salvage or scratch tag, or a future shape all fall through
+#: to the source build, which is the conservative branch (see
+#: :func:`classify_snapshot_install`).
+_RELEASE_TAG_PATTERN = re.compile(r"^v(\d+\.\d+\.\d+)$")
+
+#: Fallback rationale tokens for the ``--from-snapshot`` route classifier.
+#: Short and stable because each is ALSO the ``.lop-source`` note: an auditor
+#: who finds a source build where a release was expected can read WHY from the
+#: marker alone, without the day's terminal output.
+FALLBACK_UNRELEASED = "unreleased-ref"
+FALLBACK_PLATFORM = "non-macos-host"
+FALLBACK_WHEEL = "wheel-unavailable"
+
+
+@dataclass(frozen=True)
+class SnapshotRoute:
+    """Where ``--from-snapshot`` should install from, and if not the wheel, why.
+
+    ``install_from_wheel`` is the narrow YES: install ``version`` from PyPI
+    through the PyPI path (:func:`install_into_generation` with ``source=None``),
+    which is the only shape that carries the signed ``lop-keyagent.app``. Every
+    other case is the source build the command always took, with ``reason`` and
+    ``detail`` recording why the published wheel was not used so the caller can
+    print it and the marker can keep it.
+
+    The defaults ARE the conservative answer: a route built without evidence is
+    a source build that claims nothing.
+    """
+
+    install_from_wheel: bool = False
+    version: str = ""
+    #: The wheel filename PyPI serves, so the announcement names the artifact a
+    #: reader can independently check.
+    artifact: str = ""
+    #: One of the ``FALLBACK_*`` tokens, or ``""`` for a route that was never a
+    #: wheel candidate (a directory snapshot).
+    reason: str = ""
+    #: A clause completing "building from source — ..." in the notice — the
+    #: specific fact that stopped the wheel route, NAMING the ref (design
+    #: review D4) so a branch never degrades to a bare commit SHA.
+    detail: str = ""
+
+
+def _snapshot_ref_at(snapshot: SnapshotSource) -> str:
+    """``main @ c63efc1fe9e6`` — the ref the caller named, and where it resolved.
+
+    Both halves earn their place in a warning: a branch moves, and a bare SHA
+    cannot be read against the ref list. When the caller passed the commit
+    itself (a raw SHA), the pair collapses to that one string rather than
+    repeating it.
+    """
+    label = snapshot.label
+    if not label or snapshot.commit.startswith(label):
+        return label or snapshot.commit[:12]
+    return f"{label} @ {snapshot.commit[:12]}"
+
+
+def _wheel_unavailable_detail(snapshot: SnapshotSource, complaint: str) -> str:
+    """One sentence for a wheel-unavailable fallback: ref first, complaint last.
+
+    The version is stated ONCE — as part of the ref when the ref's own name
+    carries it (``v0.62.39 @ 50111337…``), otherwise as a parenthetical for the
+    branch that merely points at the release's commit — so the line cannot
+    repeat itself the way "release X … version X" did (design review D7).
+    """
+    claim = _snapshot_ref_at(snapshot)
+    if snapshot.version not in snapshot.label:
+        claim = f"{claim} (release {snapshot.version})"
+    return f"{claim} is release-tagged, but {complaint}"
+
+
+def classify_snapshot_install(
+    snapshot: SnapshotSource,
+    *,
+    repo: Path | None = None,
+) -> SnapshotRoute:
+    """Decide whether a resolved snapshot can install a PUBLISHED wheel instead.
+
+    THE PROBLEM THIS SOLVES, stated once: ``--from-snapshot`` builds the tree it
+    was handed, and a generation built from a git ref carries no
+    ``lop-keyagent.app`` — the signed bundle only ever rides inside the macOS
+    universal2 wheel that the release pipeline builds. The operator-key presence
+    path on such an install refuses loudly, but it is dead, and it was dead on
+    every generation install of a ref. A ref that IS a published release can
+    take the wheel instead; everything else must keep the source build.
+
+    THE ONE WRONG ANSWER is accepting a ref that is not exactly a published
+    release — that installs a presence-less build behind the wheel's presence
+    promise. So the confirmation is POSITIVE on every axis, and every inability
+    to confirm falls toward the source build:
+
+    1. the snapshot must be the ARCHIVED-REF shape (``temporary``): a directory
+       is installed AS IT STANDS by contract, so its HEAD matching a tag
+       vouches for bytes that were not the ones installed;
+    2. the host must be macOS — the key agent is a Developer-ID-signed app for
+       the data-protection keychain and exists nowhere else, so off macOS the
+       wheel buys nothing this route exists for;
+    3. the resolved commit must carry a plain ``vX.Y.Z`` release tag whose
+       version equals the tree's own ``pyproject`` version — a commit merely
+       reachable from a release (``main`` the day after) is not one;
+    4. PyPI must actually serve that version with a non-yanked macOS universal2
+       wheel. The repo can know a tag PyPI never got — v0.62.39's signing job
+       died and the release never reached the index — so both sources have to
+       agree before this route is taken.
+
+    Every check answers NO when it cannot be made (no git, no tags fetched,
+    PyPI unreachable): an unreleased commit mis-tagged as released would ship
+    someone else's bytes behind a promise of presence, and this function may
+    not gamble on the difference.
+    """
+    if not snapshot.temporary:
+        # Not a fallback: a prepared directory is installed as it stands, which
+        # is that shape's whole contract, so no reason is recorded.
+        return SnapshotRoute()
+    if not _HOST_IS_MACOS:
+        return SnapshotRoute(reason=FALLBACK_PLATFORM, detail="this host is not macOS")
+    if not snapshot.commit or not snapshot.version:
+        # resolve_snapshot's ref branch always records both; anything else is a
+        # hand-built SnapshotSource or an unreadable pyproject — no evidence,
+        # so no wheel.
+        return SnapshotRoute(
+            reason=FALLBACK_UNRELEASED,
+            detail="the snapshot carries no commit or version to check against a release",
+        )
+    tags = _release_versions_at(repo if repo is not None else Path.cwd(), snapshot.commit)
+    if tags != {snapshot.version}:
+        # The detail NAMES the ref and LISTS what was found: "a tag at the
+        # commit names a different version" and "no tag at all" are different
+        # conditions the reader has to be able to tell apart, and a bare
+        # 12-char SHA is not the name anyone typed (design review D4).
+        ref_at = _snapshot_ref_at(snapshot)
+        if tags:
+            found = ", ".join(sorted(tags))
+            detail = f"{ref_at} is tagged {found}, not version {snapshot.version}"
+        else:
+            detail = f"no release tag points at {ref_at}"
+        return SnapshotRoute(reason=FALLBACK_UNRELEASED, detail=detail)
+    document, complaint = _pypi_release_document(snapshot.version)
+    if document is None:
+        return SnapshotRoute(
+            reason=FALLBACK_WHEEL,
+            version=snapshot.version,
+            detail=_wheel_unavailable_detail(snapshot, complaint),
+        )
+    artifact = _macos_universal2_wheel(document, snapshot.version)
+    if not artifact:
+        complaint = (
+            "its macOS universal2 wheel is yanked on PyPI"
+            if _macos_universal2_wheel_is_yanked(document, snapshot.version)
+            else "PyPI serves no macOS universal2 wheel for it"
+        )
+        return SnapshotRoute(
+            reason=FALLBACK_WHEEL,
+            version=snapshot.version,
+            detail=_wheel_unavailable_detail(snapshot, complaint),
+        )
+    return SnapshotRoute(install_from_wheel=True, version=snapshot.version, artifact=artifact)
+
+
+def _release_versions_at(repo: Path, commit: str) -> set[str]:
+    """Every plain release version whose tag points EXACTLY at ``commit``.
+
+    ``git tag --points-at``, never ``git describe``: describe answers
+    ``v0.65.1-12-gabc1234`` for an unreleased commit twelve steps past a
+    release, which is precisely the mis-tag this classifier exists to refuse.
+    Total like every other ``_git`` caller: a repository without the tag
+    fetched answers the empty set, and the empty set is "not released" for
+    routing purposes — fail toward source, and the marker says why.
+    """
+    listed = _git(repo, "tag", "--points-at", commit)
+    versions: set[str] = set()
+    for line in listed.splitlines():
+        match = _RELEASE_TAG_PATTERN.fullmatch(line.strip())
+        if match is not None:
+            versions.add(match.group(1))
+    return versions
+
+
+def _pypi_release_document(
+    version: str, *, client: Any | None = None
+) -> tuple[dict[str, Any] | None, str]:
+    """PyPI's per-version document, as ``(document, why-not)``.
+
+    Exactly one of the pair is non-empty. The complaint is the clause the
+    caller splices into the fallback notice after ``but``, so it says WHAT
+    could not be confirmed — "not published", "unreachable" and "the answer
+    did not match" are different facts about different parties, and a reader
+    has to be able to tell them apart (design review D7/D8).
+
+    httpx is imported here rather than at module scope for the same reason
+    :func:`_fetch_pypi_version` imports it there: the updater sits on ``lop``'s
+    startup path and must not pay for the HTTP stack unless a ref-snapshot is
+    actually being classified.
+    """
+    import httpx
+
+    url = PYPI_VERSION_JSON_URL.format(version=version)
+    try:
+        if client is None:
+            response = httpx.get(url, timeout=_FETCH_TIMEOUT_S)
+        else:
+            response = client.get(url, timeout=_FETCH_TIMEOUT_S)
+        if response.status_code == 404:
+            return None, "PyPI does not serve it"
+        response.raise_for_status()
+        document = response.json()
+    except Exception:  # noqa: BLE001 — any failure is "not confirmed"
+        return None, "PyPI could not be reached to check it"
+    info = document.get("info") if isinstance(document, dict) else None
+    if not isinstance(info, dict) or info.get("version") != version:
+        return None, "PyPI's answer did not match the release"
+    return document, ""
+
+
+def _is_macos_universal2_wheel(entry: dict[str, Any], version: str) -> bool:
+    """Whether one PyPI file entry is a macOS universal2 wheel of ``version``.
+
+    One predicate, two readers (:func:`_macos_universal2_wheel` and
+    :func:`_macos_universal2_wheel_is_yanked`), because the NAME rule is the
+    whole definition of "the artifact the key agent can ride in" and a second
+    copy of it is how the two answers drift.
+    """
+    if entry.get("packagetype") != "bdist_wheel":
+        return False
+    name = str(entry.get("filename") or "")
+    return (
+        name.startswith(f"local_operator-{version}-") and "macosx" in name and "universal2" in name
+    )
+
+
+def _macos_universal2_wheel(document: dict[str, Any], version: str) -> str:
+    """The version's macOS universal2 wheel filename, or ``""``.
+
+    The ONE artifact the key agent can ride in, by construction:
+    ``packaging/macos/make_macos_wheel.py`` retags the pure wheel to
+    ``macosx_11_0_universal2`` and injects the signed bundle, and the release
+    pipeline verifies the injected helper is present, executable and universal2
+    before it publishes (publish.yml's ``keyagent-macos`` job). A yanked file
+    is not evidence: the promise this route makes is presence, and PyPI keeps
+    serving a yanked release.
+    """
+    info = document.get("info")
+    if isinstance(info, dict) and info.get("yanked"):
+        return ""
+    files = document.get("urls")
+    if not isinstance(files, list):
+        return ""
+    for entry in files:
+        if not isinstance(entry, dict) or entry.get("yanked"):
+            continue
+        if _is_macos_universal2_wheel(entry, version):
+            return str(entry.get("filename") or "")
+    return ""
+
+
+def _macos_universal2_wheel_is_yanked(document: dict[str, Any], version: str) -> bool:
+    """Whether a matching macOS universal2 wheel exists but is withdrawn.
+
+    Consulted only when :func:`_macos_universal2_wheel` found no LIVE wheel, so
+    "one exists and it is yanked" is reported as that rather than as "there is
+    none": yanking is how a broken release is retired, and the fallback detail
+    exists so a reader can tell the two apart and follow up differently.
+    """
+    info = document.get("info")
+    if isinstance(info, dict) and info.get("yanked"):
+        return True
+    files = document.get("urls")
+    if not isinstance(files, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and bool(entry.get("yanked"))
+        and _is_macos_universal2_wheel(entry, version)
+        for entry in files
+    )
+
+
+def snapshot_route_lines(snapshot: SnapshotSource, route: SnapshotRoute) -> tuple[str, ...]:
+    """The lines ``--from-snapshot`` prints for this route, in order.
+
+    ONE owner for both directions, so the wheel announcement and the fallback
+    marker cannot drift apart. The wheel lines promise the key agent only where
+    the confirmation above proved it can be delivered — the macOS universal2
+    wheel, on macOS — and every fallback NAMES THE ROUTE AND THE REASON, never
+    a capability: it states plainly that this build does not carry the key
+    agent, so nothing here can be misread as presence being present, likely or
+    restorable (design review D2/D4). The platform case does not talk about a
+    missing thing to repair: off macOS the key agent is not a capability this
+    platform has, and the wording says exactly that.
+
+    Channel discipline is deliberate, and visible at the call site: the wheel
+    lines are ordinary progress under the command's own prefix (stdout), while
+    every fallback line leads with ``warning:`` and belongs on stderr — this is
+    warning output, and it must not read like the routine ``lop-update:``
+    progress printed beside it.
+    """
+    if route.install_from_wheel:
+        return (
+            f"lop-update: {snapshot.label} matches published release {route.version}; "
+            "installing the published macOS wheel instead of building this tree",
+            f"lop-update: wheel: {route.artifact} — carries the macOS key agent "
+            "(lop-keyagent.app)",
+        )
+    if not route.reason:
+        return ()
+    if route.reason == FALLBACK_PLATFORM:
+        head = (
+            "warning: building from source — this host is not macOS; the "
+            "key agent (lop-keyagent.app) exists only on macOS"
+        )
+    else:
+        head = f"warning: building from source — {route.detail}"
+    if route.reason == FALLBACK_PLATFORM:
+        tail = "warning: the macOS key agent is not available on this platform"
+    else:
+        tail = (
+            "warning: this build does not carry the macOS key agent "
+            "(lop-keyagent.app); only the published macOS wheel does"
+        )
+    return (head, tail)
+
+
 def _human_bytes(total: int) -> str:
     """``136 MB``, for a number a person reads in a status block."""
     for unit, step in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
@@ -6341,6 +6693,14 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     release), so "am I behind PyPI" is not the question being answered —
     installing the tree is. A git snapshot also still upgrades from PyPI on a
     plain ``lop update``; nothing here changes that.
+
+    A REF THIS COMMAND RESOLVES TO A PUBLISHED RELEASE INSTALLS THE PUBLISHED
+    WHEEL instead of building the tree, because that wheel is the only shape
+    carrying the signed macOS key agent — see
+    :func:`classify_snapshot_install` for the confirmation that requires and
+    why every other case keeps the source build. This is not the version check
+    the paragraph above declines: the question is "is this ref EXACTLY a
+    released build", and it is asked once, before any install work.
     """
     kind = install_kind()
     if kind is InstallKind.EDITABLE:
@@ -6363,110 +6723,136 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    # THE ROUTE DECISION, made before any install work so the loud fallback
+    # notice (or the wheel announcement) cannot end up buried behind a bundle
+    # build or a refusal — see :func:`classify_snapshot_install` for why every
+    # ambiguous case falls toward the source build.
+    route = classify_snapshot_install(snapshot)
     shape = (
         f"{snapshot.version}, {snapshot.install_shape}"
         if snapshot.version
         else snapshot.install_shape
     )
-    # The mobile bundle, built INTO the snapshot before uv copies it: a source
-    # snapshot carries the web SOURCES and no dist/ (gitignored), so installing
-    # without this lands a generation with no UI — every authed GET answers 503
-    # "bundle not built" until someone runs `lop mobile install` on that
-    # machine, which is exactly what happened on 2026-09-19. The host script
-    # `~/.local/bin/lop-update` already builds the tree it prepares (lines
-    # ~209-246 of that script); this path had no equivalent, so the two
-    # installers disagreed about whether a snapshot has a UI. Same line, same
-    # wording as the host script's.
-    #
-    # Imported HERE rather than at module scope for the reason recorded on
-    # _DAEMON_PLIST_LABELS: mobile.install pulls Starlette into the updater,
-    # and that probe runs in the CLI and in the TUI's update worker. All three are
-    # that module's own helpers for "is this tree's UI servable, and what can build
-    # it" — re-implementing any of them here is how the two answers drift apart.
-    from local_operator.mobile.install import (
-        _EXACT_VERSION,
-        _pinned_pnpm,
-        _shim_argv,
-        snapshot_bundle,
-    )
-
-    web_dir = snapshot.path / "local_operator" / "mobile" / "web"
-    bundle_status = snapshot_bundle(web_dir)
-    print(f"lop-update: mobile web bundle: {bundle_status}", flush=True)
-    # ``snapshot_bundle`` NEVER raises — it returns a status STRING — and this
-    # caller used to print that string and install anyway, so a snapshot whose
-    # bundle did not build was flipped to `current` with no UI and exit 0: that is
-    # how generations 0.61.13-0.61.16, 0.61.18 and 0.62.0 landed with no bundle,
-    # the phone's portal answered 503 "mobile web bundle not built", and `lop
-    # mobile status` still printed `healthy: yes` the whole time. A snapshot with
-    # a `web/` tree whose build did not reach a servable dist is a FAILED update,
-    # so it does not install.
-    #
-    # The tolerance is keyed on the `web/` DIRECTORY being absent, and NOT on the
-    # `missing-sources` classifier: ``_bundle_state`` answers `missing-sources` for
-    # any tree with neither `dist/` nor `package.json`, so keying on it alone also
-    # tolerates a TRUNCATED copy that kept `web/src/` and lost the manifest — a
-    # broken tree wearing the costume of a UI-less one. "No `web/` directory" is
-    # the only shape that genuinely has no UI either way, and the non-web
-    # snapshots this command legitimately installs all have it.
-    #
-    # The guard is inside the same try/finally as the install so the refusal
-    # reclaims a temporary extract too: `_remove_tree` below is what keeps a
-    # refused `--from-snapshot <ref>` from leaking its ~95 MB
-    # `$TMPDIR/lop-snapshot-*` tree on every attempt.
     try:
-        if web_dir.is_dir() and bundle_status not in ("built", "already built"):
-            raw_pin = _pinned_pnpm(web_dir)
-            # Whether the reader could even TYPE the fetch route (D2/R2-1/O1): a
-            # range cannot be handed to `npx`, and recommending a fetch of the very
-            # range this update just declined to auto-resolve reads as "we will not
-            # do this — you do it". An absent pin is not a range: the default below
-            # is one concrete version this module already uses.
-            exact_pin = raw_pin is None or _EXACT_VERSION.fullmatch(raw_pin) is not None
-            pinned = raw_pin or "11.22.0"
-            if exact_pin:
-                # Same habit as `_pin_mismatch`'s route list: a remedy this host
-                # cannot run is a second refusal, so the npx clause is offered only
-                # where npx resolves. `lop mobile install` is named unconditionally
-                # — it is the primary remedy, and the one that needs no pin.
-                remedy = (
-                    f"`lop mobile install`, or run `npx --yes pnpm@{pinned} "
-                    "install --frozen-lockfile && "
-                    f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web, "
-                    "then re-run this update."
-                    if _shim_argv("npx") is not None
-                    else "`lop mobile install`, then re-run this update."
-                )
-            else:
-                remedy = (
-                    f"`lop mobile install` — this tree pins a range "
-                    f"(`pnpm@{raw_pin}`), so a by-hand fetch has to name a "
-                    "concrete version; then re-run this update."
-                )
-            # TWO sentences, one vocabulary ("mobile web UI"), and the status is
-            # NOT re-spliced in: it is already printed on the line above, and
-            # echoing it pushed the pair to ~470 characters (exact pin) / ~840
-            # (range) as a single paragraph of nested parentheses — a wall, at the
-            # one moment the reader's portal has already broken (design round 1,
-            # D1/D3).
-            print(
-                "lop-update: refusing to install this build — it has no mobile "
-                f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
-                file=sys.stderr,
+        # The channel is part of the message: every fallback line leads with
+        # ``warning:`` on stderr (a build the operator must not mistake for
+        # presence-bearing is a warning), while the wheel announcement is
+        # ordinary progress on stdout. ``route.reason`` is non-empty exactly
+        # when the route is a fallback.
+        for line in snapshot_route_lines(snapshot, route):
+            print(line, file=sys.stderr if route.reason else sys.stdout, flush=True)
+        if route.install_from_wheel:
+            # THE PyPI PATH: no source tree and no mobile-bundle step (the
+            # wheel ships the built bundle), and the marker records
+            # ``pypi <version>`` — this build genuinely has no git ref.
+            try:
+                install_into_generation(None, version=route.version)
+            except UpdateError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            installed_version = route.version
+        else:
+            # The mobile bundle, built INTO the snapshot before uv copies it: a
+            # source snapshot carries the web SOURCES and no dist/ (gitignored),
+            # so installing without this lands a generation with no UI — every
+            # authed GET answers 503 "bundle not built" until someone runs `lop
+            # mobile install` on that machine, which is exactly what happened on
+            # 2026-09-19. The host script `~/.local/bin/lop-update` already
+            # builds the tree it prepares (lines ~209-246 of that script); this
+            # path had no equivalent, so the two installers disagreed about
+            # whether a snapshot has a UI. Same line, same wording as the host
+            # script's.
+            #
+            # Imported HERE rather than at module scope for the reason recorded on
+            # _DAEMON_PLIST_LABELS: mobile.install pulls Starlette into the updater,
+            # and that probe runs in the CLI and in the TUI's update worker. All three are
+            # that module's own helpers for "is this tree's UI servable, and what can build
+            # it" — re-implementing any of them here is how the two answers drift apart.
+            from local_operator.mobile.install import (
+                _EXACT_VERSION,
+                _pinned_pnpm,
+                _shim_argv,
+                snapshot_bundle,
             )
-            return 1
-        print(f"installing {snapshot.install_label} ({shape})")
-        try:
-            install_into_generation(
-                snapshot.path,
-                version=snapshot.version,
-                commit=snapshot.commit,
-                ref=snapshot.ref,
-                origin=SNAPSHOT_SOURCE_TOKEN,
-            )
-        except UpdateError as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
+
+            web_dir = snapshot.path / "local_operator" / "mobile" / "web"
+            bundle_status = snapshot_bundle(web_dir)
+            print(f"lop-update: mobile web bundle: {bundle_status}", flush=True)
+            # ``snapshot_bundle`` NEVER raises — it returns a status STRING — and this
+            # caller used to print that string and install anyway, so a snapshot whose
+            # bundle did not build was flipped to `current` with no UI and exit 0: that is
+            # how generations 0.61.13-0.61.16, 0.61.18 and 0.62.0 landed with no bundle,
+            # the phone's portal answered 503 "mobile web bundle not built", and `lop
+            # mobile status` still printed `healthy: yes` the whole time. A snapshot with
+            # a `web/` tree whose build did not reach a servable dist is a FAILED update,
+            # so it does not install.
+            #
+            # The tolerance is keyed on the `web/` DIRECTORY being absent, and NOT on the
+            # `missing-sources` classifier: ``_bundle_state`` answers `missing-sources` for
+            # any tree with neither `dist/` nor `package.json`, so keying on it alone also
+            # tolerates a TRUNCATED copy that kept `web/src/` and lost the manifest — a
+            # broken tree wearing the costume of a UI-less one. "No `web/` directory" is
+            # the only shape that genuinely has no UI either way, and the non-web
+            # snapshots this command legitimately installs all have it.
+            #
+            # The guard is inside the same try/finally as the install so the refusal
+            # reclaims a temporary extract too: `_remove_tree` below is what keeps a
+            # refused `--from-snapshot <ref>` from leaking its ~95 MB
+            # `$TMPDIR/lop-snapshot-*` tree on every attempt.
+            if web_dir.is_dir() and bundle_status not in ("built", "already built"):
+                raw_pin = _pinned_pnpm(web_dir)
+                # Whether the reader could even TYPE the fetch route (D2/R2-1/O1): a
+                # range cannot be handed to `npx`, and recommending a fetch of the very
+                # range this update just declined to auto-resolve reads as "we will not
+                # do this — you do it". An absent pin is not a range: the default below
+                # is one concrete version this module already uses.
+                exact_pin = raw_pin is None or _EXACT_VERSION.fullmatch(raw_pin) is not None
+                pinned = raw_pin or "11.22.0"
+                if exact_pin:
+                    # Same habit as `_pin_mismatch`'s route list: a remedy this host
+                    # cannot run is a second refusal, so the npx clause is offered only
+                    # where npx resolves. `lop mobile install` is named unconditionally
+                    # — it is the primary remedy, and the one that needs no pin.
+                    remedy = (
+                        f"`lop mobile install`, or run `npx --yes pnpm@{pinned} "
+                        "install --frozen-lockfile && "
+                        f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web, "
+                        "then re-run this update."
+                        if _shim_argv("npx") is not None
+                        else "`lop mobile install`, then re-run this update."
+                    )
+                else:
+                    remedy = (
+                        f"`lop mobile install` — this tree pins a range "
+                        f"(`pnpm@{raw_pin}`), so a by-hand fetch has to name a "
+                        "concrete version; then re-run this update."
+                    )
+                # TWO sentences, one vocabulary ("mobile web UI"), and the status is
+                # NOT re-spliced in: it is already printed on the line above, and
+                # echoing it pushed the pair to ~470 characters (exact pin) / ~840
+                # (range) as a single paragraph of nested parentheses — a wall, at the
+                # one moment the reader's portal has already broken (design round 1,
+                # D1/D3).
+                print(
+                    "lop-update: refusing to install this build — it has no mobile "
+                    f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"installing {snapshot.install_label} ({shape})")
+            try:
+                install_into_generation(
+                    snapshot.path,
+                    version=snapshot.version,
+                    commit=snapshot.commit,
+                    ref=snapshot.ref,
+                    origin=SNAPSHOT_SOURCE_TOKEN,
+                    note=route.reason,
+                )
+            except UpdateError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            installed_version = snapshot.version
     finally:
         if snapshot.temporary:
             # ``uv`` has copied what it needs; the extract is ours to reclaim,
@@ -6477,7 +6863,7 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
             # sits outside the guard.
             _remove_tree(snapshot.path)
     return _generation_upgrade(
-        0, services=services, install_version=snapshot.version, target=snapshot.version
+        0, services=services, install_version=installed_version, target=installed_version
     )
 
 

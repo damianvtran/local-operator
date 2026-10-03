@@ -213,7 +213,7 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     "storage_id": storage_id,
                     "search_aliases": list(provider.search_aliases),
                     "login_kind": provider.login_kind,
-                    "accepts_api_key": storage.env_keys is not None,
+                    "accepts_api_key": storage.accepts_api_key,
                     "local": provider.allows_missing_api_key,
                     "credential_name": env_key_name(storage_id),
                     "paste_required": provider.paste_prompt_required,
@@ -422,7 +422,7 @@ async def save_key(
     """
     storage_id = credential_provider_id(provider_id)
     definition = get_provider_definition(storage_id)
-    if definition is None or definition.env_keys is None:
+    if definition is None or not definition.accepts_api_key:
         raise HTTPException(422, "This provider does not accept an API key.")
     secret = _secret(body)
     verdict = await key_check.check_api_key(storage_id, secret)

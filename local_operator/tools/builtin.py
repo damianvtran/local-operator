@@ -102,6 +102,7 @@ from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    is_inherit_tier_sentinel,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -5017,7 +5018,13 @@ def build_bash_tool() -> AgentTool:
             # Interpolated rather than spelled out, so the name the model is told
             # to use and the name both spawn sites export are one constant — a
             # second literal here is how the advice would outlive a rename.
-            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp."
+            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp. "
+            # The eval boundary, stated on the side that a bash-shaped task
+            # reaches first (audit item 7): `eval`'s own description already
+            # says it is "cheaper and safer than bash one-shots", but a model
+            # about to run a chain of shell steps reads THIS description, and
+            # one short clause here is the whole fix.
+            "For multi-step Python, prefer `eval`."
         ),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
@@ -12224,6 +12231,7 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     receipts use (QA round-1 observation 1): two monitors of one tool are
     told apart by what they watch, not only by their names.
     """
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
     mid = str(row.get("id") or "?")
@@ -12253,9 +12261,22 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     if isinstance(due, int) and not isinstance(due, bool):
         if due > now:
             bits.append(f"next due in {format_age((due - now) / 1000)}")
+        elif monitor_store.is_idle(row, now):
+            # A monitor ticks only while its session is open, so a row that is
+            # hours overdue is not lateness — it is a dormant watch, and the
+            # reader (often the agent itself deciding whether to wait) has to
+            # see that rather than a bare "next due now".
+            bits.append(monitor_store.idle_detail(row, now))
         else:
             bits.append("next due now")
-    return f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits) + "."
+    row_text = f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits)
+    hint = monitor_store.health_hint(row, now)
+    if hint:
+        # The §D6 discoverability line: a monitor with 0 deliveries after many
+        # checks, one that never checked, or one stalled on an absent tool,
+        # otherwise reads exactly like a healthy watch.
+        row_text = f"{row_text} [{hint}]"
+    return row_text + "."
 
 
 async def _monitor_list(tool_call_id: str, scheduler: MonitorSchedulerProtocol) -> ToolResult:
@@ -12325,12 +12346,28 @@ async def _monitor_create(
 
     bound = f"until {format_wake_time(spec.until_at)}" if spec.until_at is not None else "durable"
     call = _monitor_call_repr(spec.tool, spec.arguments)
+    # §D8: the hosting caveat belongs on the RECEIPT, not only in the guide.
+    # The live store carried arms with ``checks=0`` — the operator armed a
+    # watch, closed the conversation and never learned that nothing would run
+    # until it was open again. The MCP clause is the other half of the same
+    # lesson: a server that reconnects must not read as a failing monitor.
+    #
+    # It goes in the FIRST clause, right after the identity, rather than at the
+    # end of the paragraph (design review round 1, D9): a receipt is one card
+    # whose collapsed row shows ~90 cells, and at the end of a 505-character
+    # paragraph the one condition that changes what the operator does was never
+    # in it. Two sentences, one line each, so the expansion stays readable.
+    caveat = "ticks run only while this session is open."
+    if spec.tool.startswith("mcp__"):
+        caveat += " If its server reconnects the monitor waits (no failed checks)."
     return _text(
         tool_call_id,
         "monitor",
-        f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
+        f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
-        "baseline; you'll be told only what changes.",
+        "baseline; you'll be told only what changes.\n"
+        "A closed session's monitors resume, with one consolidated delta, when it "
+        "reopens; a watch whose tool stays unreachable for 30 minutes says so.",
         details=facts,
     )
 
@@ -13448,11 +13485,26 @@ class SessionsParams(BaseModel):
         default=True,
         description="spawn/resume: detach (v1's only value).",
     )
+    # --- bulk resume: the SET form of `resume` (2026-10-01) ------------------
+    # The single form keeps its shape byte-for-byte: these fields select FROM
+    # the store instead of addressing one session, so the two forms are
+    # mutually exclusive by construction (the refusals say so). Descriptions
+    # are deliberately terse — the schema rides every request, and the full
+    # vocabulary lives in the `help` reference.
+    paused: bool = Field(default=False, description="resume set: interrupted/retired.")
+    failed: bool = Field(default=False, description="resume set: error.")
+    all: bool = Field(default=False, description="resume set: all stored, non-live.")
+    dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
     include_stored: bool = Field(
         default=False,
         description="list: include stored (not running) sessions.",
     )
-    limit: int = Field(default=20, ge=1, le=100, description="list: max rows.")
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="list: max rows; resume: cap on the set.",
+    )
     query: str | None = Field(
         default=None,
         description="list: search stored sessions by name/content; peek: locate a step.",
@@ -13490,7 +13542,21 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     "spawn": frozenset(
         {"op", "prompt", "name", "team", "profile", "model", "visibility", "background"}
     ),
-    "resume": frozenset({"op", "session", "target", "pid", "prompt", "background"}),
+    "resume": frozenset(
+        {
+            "op",
+            "session",
+            "target",
+            "pid",
+            "prompt",
+            "background",
+            "limit",
+            "paused",
+            "failed",
+            "all",
+            "dry_run",
+        }
+    ),
     "stop": frozenset({"op", "session", "target", "pid"}),
     "peek": frozenset({"op", "session", "target", "pid", "query"}) | _SESSIONS_PEEK_FIELDS,
     # ``help`` reads nothing: the reference is static, so an address or a
@@ -13590,7 +13656,8 @@ def _sessions_tool_description() -> str:
         f" Inputs per op (anything else is refused) — {summary}."
         " `spawn` opens a listed workstream for USER-requested work"
         " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
-        " stored/stopped session headlessly; `stop` ends gracefully; `peek` reads a"
+        " stored/stopped session headlessly, or a SET (`paused`/`failed`/`all`)"
+        " as a bounded batch; `stop` ends gracefully; `peek` reads a"
         " transcript window. Address exactly one of `session` (id), `target`"
         " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
     )
@@ -13652,12 +13719,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     ),
     "resume": _SessionsOpDoc(
         summary="reopen a stored/stopped session headlessly and report what was"
-        " opened; the receipt names the session, job and pid once published.",
+        " opened; the receipt names the session, job and pid once published. Or"
+        " reopen a SET — `paused` (interrupted/retired), `failed` (error), `all`"
+        " (every stored, non-live session; capped by `limit`; the widest reading —"
+        " given with the other two it wins) — as a bounded batch with a"
+        " per-session ok/fail outcome; `dry_run` previews the set.",
         example="sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue')",
         refusals=(
-            "needs an address and `prompt`; a session already open elsewhere is"
-            " refused by its lease; the calling session cannot resume itself;"
-            " `visibility` is fixed at creation and cannot be re-stamped.",
+            "the single form needs an address and `prompt`; the set form takes no"
+            " address and defaults `prompt` to a continuation; a session already"
+            " open elsewhere is refused by its lease; the calling session cannot"
+            " resume itself; `visibility` is fixed at creation and cannot be"
+            " re-stamped.",
         ),
     ),
     "stop": _SessionsOpDoc(
@@ -13858,8 +13931,23 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
     op = params.op
     given = params.model_fields_set
 
+    # THE SET FORM of resume (2026-10-01): a selector turns `resume` into a
+    # bounded batch over the store, which flips three rules below — no address
+    # may accompany it, `prompt` becomes optional (it defaults to a
+    # continuation), and `dry_run` becomes meaningful. Computed from VALUES,
+    # not from `given`: a selector passed `False` selects nothing and is not a
+    # set form, and letting it flip the rules would let `paused=False` smuggle
+    # a second personality past every check.
+    batch = op == "resume" and (params.paused or params.failed or params.all)
+
     if op in ("spawn", "resume"):
-        if params.prompt is None or not params.prompt.strip():
+        if batch:
+            if "prompt" in given and (params.prompt is None or not params.prompt.strip()):
+                return (
+                    "`prompt` must be a non-empty message when given; omit it for the "
+                    "default continuation ('Continue the task from where it left off.')."
+                )
+        elif params.prompt is None or not params.prompt.strip():
             return (
                 f"{op} needs `prompt`: the message the opened run executes. A headless "
                 "exec refuses a prompt-less run the same way."
@@ -13873,6 +13961,30 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             )
     elif "prompt" in given:
         return _sessions_stray_field_refusal(op, "`prompt` applies to spawn/resume only.")
+
+    if batch:
+        # A set and an address are two different requests; composing them is the
+        # misspelled-intent shape this validator exists for. The check reads
+        # VALUES — an explicitly-null `session` names no session and does not
+        # conflict with the set.
+        addressed = sorted(
+            field
+            for field in _SESSIONS_ADDRESS_FIELDS
+            if field in given and getattr(params, field) is not None
+        )
+        if addressed:
+            return _sessions_stray_field_refusal(
+                op,
+                f"a set selection takes no `{addressed[0]}` — drop it, or drop "
+                "`paused`/`failed`/`all` and address ONE session.",
+            )
+
+    if op == "resume" and params.dry_run and not batch:
+        return (
+            "`dry_run` needs a set selection: it previews the sessions that "
+            "`paused`/`failed`/`all` would resume. A single resume has one target "
+            "and nothing to preview."
+        )
 
     if op == "resume" and "visibility" in given:
         # The immutability sentence (§5.3): origin.json is written once, at
@@ -13900,6 +14012,10 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             )
         if field == "background":
             return _sessions_stray_field_refusal(op, "`background` applies to spawn/resume only.")
+        if field in ("paused", "failed", "all", "dry_run"):
+            return _sessions_stray_field_refusal(op, f"`{field}` applies to op='resume' only.")
+        if field == "limit":
+            return _sessions_stray_field_refusal(op, "`limit` applies to list/resume only.")
         if field in _SESSIONS_PEEK_FIELDS:
             return _sessions_stray_field_refusal(op, f"`{field}` applies to op='peek' only.")
         if op == "list":
@@ -13913,7 +14029,7 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
         if refusal is not None:
             return refusal
 
-    if op in _SESSIONS_TARGET_OPS:
+    if op in _SESSIONS_TARGET_OPS and not batch:
         provided = [
             field
             for field in _SESSIONS_ADDRESS_FIELDS
@@ -13978,6 +14094,32 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
     if op == "stop":
         return f"stop {address}: ends its current run and releases the session lease"
     if op == "resume":
+        # All wins (review round 1, m3): `all` is the widest reading, so a
+        # combination is described by the selection it actually performs.
+        if args.get("all"):
+            sets_selected = ["all stored"]
+        else:
+            sets_selected = [
+                label
+                for flag, label in (
+                    ("paused", "paused"),
+                    ("failed", "failed"),
+                )
+                if args.get(flag)
+            ]
+        if sets_selected:
+            # The batch form: say what it will do to how many, so the prompt
+            # can be decided in one glance (a batch starts one runtime per
+            # selected session — the biggest commitment this tool makes).
+            words = " + ".join(sets_selected)
+            cap = args.get("limit")
+            cap_note = f", cap {cap}" if isinstance(cap, int) and cap > 0 else ""
+            if args.get("dry_run"):
+                return f"review the {words} session set{cap_note}: resumes nothing (dry run)"
+            return (
+                f"resume the {words} session set{cap_note}: starts one headless run "
+                "per selected session"
+            )
         return f"resume {address}: reopens its transcript headlessly"
     return op or "sessions"
 
@@ -15711,6 +15853,175 @@ async def _sessions_open(
     return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
 
 
+async def _sessions_resume_batch(
+    tool_call_id: str,
+    params: SessionsParams,
+    context: ToolContext | None,
+) -> ToolResult:
+    """The SET form of `resume`: enumerate once, reopen each, report per session.
+
+    WHY THE SET FORM LIVES ON `resume` AND NOT A NEW OP (the scout's finding,
+    2026-10-01): resuming one session and resuming N is the same act with the
+    same guards and the same receipts — only the ADDRESS differs (a selector
+    over the store instead of an id). A second op would have forked the
+    approval story, the tier, the description budget and the drift table for
+    no behavioural difference.
+
+    THE MECHANICS ARE SHARED, NOT REIMPLEMENTED (``session/bulk_resume.py``):
+    the selection is the listing's own walker filtered by the listing's own
+    outcome sets, live sessions are excluded by the same rule the stored
+    listing uses, and each child is the real CLI (``lop exec --resume
+    --background``) under a bounded capacity — so every refusal and receipt a
+    single resume gets, a batch child gets too, and one session's failure
+    (say, a lease refusal) is one loud line rather than an aborted batch.
+
+    ``dry_run`` prints the selected set and starts nothing. The tool does NOT
+    mutate its own environment to prime the children's PATH (the CLI's batch
+    does that once per command): this runs inside a live session, and the
+    children inherit whatever that session already primes — see the bulk
+    module's C1 notes; a session born from a primed launcher skips the
+    round-trip for free.
+    """
+    import asyncio as _asyncio
+
+    from local_operator.paths import config_dir
+    from local_operator.resume import format_age, session_name
+    from local_operator.session.bulk_resume import (
+        DEFAULT_RESUME_MESSAGE,
+        ResumeSelection,
+        live_session_ids,
+        resume_sessions,
+        select_resume_candidates,
+    )
+
+    root = config_dir()
+    # All wins (review round 1, m3): the name must be the selection the
+    # selector actually made, or the summary is a claim the behaviour
+    # contradicts.
+    if params.all:
+        sets_name = "all"
+    else:
+        sets_name = "+".join(
+            name
+            for name, on in (
+                ("paused", params.paused),
+                ("failed", params.failed),
+            )
+            if on
+        )
+
+    def _select() -> ResumeSelection:
+        return select_resume_candidates(
+            root,
+            paused=params.paused,
+            failed=params.failed,
+            all_sessions=params.all,
+            limit=params.limit,
+            exclude_ids=live_session_ids(root),
+        )
+
+    # The selection is the store scan (one warm walk). Off the loop: it reads
+    # files, and this tool runs inside the session's event loop.
+    try:
+        selection = await _asyncio.to_thread(_select)
+    except Exception as exc:  # noqa: BLE001 — a resume reports; it does not traceback
+        return _error(tool_call_id, "sessions", f"could not enumerate the store: {exc}")
+
+    sessions_dir = root / "sessions"
+    rows = [
+        (session_id, session_name(sessions_dir / session_id) or "(unnamed)")
+        for session_id, _mtime in selection.sessions
+    ]
+    mtime_by_id = dict(selection.sessions)
+    capped_note = ""
+    if selection.matched > len(selection.sessions):
+        capped_note = (
+            f" (newest {len(selection.sessions)} of {selection.matched} matched; "
+            "raise `limit` to act on more)"
+        )
+
+    if params.dry_run:
+        lines = [
+            f"resume set ({sets_name}), dry run — {len(rows)} session(s) selected{capped_note}:",
+            "",
+        ]
+        for session_id, name in rows:
+            age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
+            lines.append(f'- {session_id}  "{name}"  ({age})')
+        if not rows:
+            lines = [f"resume set ({sets_name}): no stored sessions match{capped_note}."]
+        text, spill = spill_truncate("\n".join(lines), "sessions", context)
+        details: dict[str, Any] = {
+            "op": "resume",
+            "batch": True,
+            "dry_run": True,
+            "sets": sets_name,
+            "selected": len(rows),
+            "matched": selection.matched,
+        }
+        if spill:
+            details.update(spill)
+        return _text(tool_call_id, "sessions", text, details=details)
+
+    if not rows:
+        return _text(
+            tool_call_id,
+            "sessions",
+            f"resume set ({sets_name}): no stored sessions match{capped_note}; nothing started.",
+            details={"op": "resume", "batch": True, "sets": sets_name, "selected": 0},
+        )
+
+    message = (params.prompt or "").strip() or DEFAULT_RESUME_MESSAGE
+    env = _sessions_open_env(context)
+    cwd = _sessions_child_cwd(context)
+    try:
+        outcomes = await resume_sessions(rows, message=message, env=env, cwd=cwd)
+    except Exception as exc:  # noqa: BLE001 — report, never traceback
+        return _error(tool_call_id, "sessions", f"bulk resume failed: {exc}")
+
+    ok = sum(1 for outcome in outcomes if outcome.ok)
+    unresolved = sum(1 for outcome in outcomes if outcome.status == "unresolved")
+    failed = len(outcomes) - ok - unresolved
+    lines = [
+        f"resume set ({sets_name}): {len(outcomes)} session(s) — "
+        f"{ok} ok, {failed} failed, {unresolved} unresolved{capped_note}",
+        "",
+    ]
+    for outcome in outcomes:
+        if outcome.ok:
+            lines.append(
+                f'- ok    {outcome.session_id}  "{outcome.name}"  '
+                f"({outcome.status}, job {outcome.job_id})"
+            )
+        else:
+            lines.append(
+                f'- FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"{outcome.detail or outcome.status}"
+            )
+    text, spill = spill_truncate("\n".join(lines), "sessions", context)
+    result_details: dict[str, Any] = {
+        "op": "resume",
+        "batch": True,
+        "sets": sets_name,
+        "count": len(outcomes),
+        "ok": ok,
+        "failed": failed,
+        "unresolved": unresolved,
+        "sessions": [
+            {
+                "session_id": outcome.session_id,
+                "ok": outcome.ok,
+                "status": outcome.status,
+                "job_id": outcome.job_id,
+            }
+            for outcome in outcomes
+        ],
+    }
+    if spill:
+        result_details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=result_details)
+
+
 def _sessions_params_error(
     tool_call_id: str, args: Mapping[str, Any], exc: ValidationError
 ) -> ToolResult:
@@ -15787,6 +16098,11 @@ async def execute_sessions(
         return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
         return await _sessions_stop(tool_call_id, params)
+    if params.op == "resume" and (params.paused or params.failed or params.all):
+        # The SET form: enumerate once and reopen each session as its own
+        # bounded child (see ``_sessions_resume_batch``). Checked before the
+        # single form so a selector can never fall through to it.
+        return await _sessions_resume_batch(tool_call_id, params, context)
     return await _sessions_open(tool_call_id, params, context)
 
 
@@ -16011,6 +16327,16 @@ BROWSER_ACTIONS = (
     # schema, approval tier and dispatch as everything else.
     "scroll",
     "logs",
+    # The structured READ actions: page geometry and computed styles, served by
+    # both non-cmux hosts, cmux-degraded like scroll/logs (no page-script
+    # primitive, no styles access). `styles` reads up to 5 selector matches with
+    # their rects, computed styles and inline `--*` custom properties;
+    # `hit_test` the topmost-first element stack at viewport (x, y); `ancestors`
+    # an element's chain up to `document.documentElement`. They exist so an
+    # agent debugging layout reads NUMBERS instead of guessing at a picture.
+    "styles",
+    "hit_test",
+    "ancestors",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -16055,7 +16381,8 @@ BROWSER_ACTIONS = (
 #: Actions that cmux cannot serve. It is NOT "the extension's actions any more:
 #: the desktop app's browser host serves every one of them, so the only host this
 #: set still describes is cmux (no console-log tap, no background-tab scroll
-#: primitive, no multi-surface registry, no permission model). The name used to be
+#: primitive, no page-script/style access, no multi-surface registry, no
+#: permission model). The name used to be
 #: `BRIDGE_ONLY_BROWSER_ACTIONS`, which on a three-host machine asserted that the
 #: EXTENSION was the only alternative — false, and the source of copy that sent
 #: users of the desktop app into `lop browser install`. Kept as a set beside
@@ -16071,6 +16398,12 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "cancel_access",
         "download",
         "upload",
+        # The read actions need a page-script primitive cmux does not expose
+        # (the same reason scroll is here): the fixed driver functions cannot
+        # run, so the degrade is typed rather than a faked empty result.
+        "styles",
+        "hit_test",
+        "ancestors",
     }
 )
 
@@ -16087,6 +16420,22 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
+
+#: Style property names ``styles`` accepts as caller-requested extras. The
+#: charset is the CSS ident set that matters here: letters, digits, dashes and
+#: underscores — ``_`` is an ident character (``--brand_color`` is a legal
+#: custom property) and dots/brackets are not part of any property spelling,
+#: so those are refused. The page-side function only ever hands these to
+#: `getPropertyValue` (no interpolation, so nothing to inject), but a bad name
+#: would silently read as "" — refuse it here where the model can see why,
+#: rather than returning an empty value that looks like a page fact.
+_STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
+
+#: Ceiling on caller-requested style extras. The page function caps the combined
+#: list at 30 (defaults + extras); this is the caller-facing bound so an absurd
+#: list is REFUSED with copy rather than silently clipped into a result that
+#: looks complete.
+_MAX_STYLE_PROPERTIES = 20
 
 #: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
 #: default availability order). Spellings are the COPY spellings: the paired
@@ -16171,18 +16520,14 @@ _BROWSER_URL_SCHEMES = ("http://", "https://")
 class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: str = Field(
-        description="open (start a surface at a URL) "
-        "| goto | read (page text) | snapshot (accessibility tree with click "
-        "refs) | screenshot | click | type | scroll (move the viewport) | logs "
-        "(console + errors) | tabs (list agent-driven tabs) | request_access "
-        "(raise the site-approval prompt for a not-yet-allowed origin) | "
-        "await_access (wait for the user's decision) | "
-        "cancel_access (cancel YOUR pending exact-origin request) | "
-        "recover (recover YOUR tab) | "
-        "retain (hold it) | release (end that hold) | close (end "
-        "YOUR tab)."
-    )
+    # The per-action breakdown (names in the bare list, what each does) lives
+    # in the tool:// doc's ops table and in guide://browser: this description is
+    # billed on every request of every browser-capable session, and the action
+    # name is the one field a model gets wrong before reading either — the
+    # executor's refusal names the accepted set when it does (`unknown action:
+    # … expected one of …`), which is the self-correction path that makes the
+    # cut safe (slimming wave, audit item 2).
+    action: str = Field(description="The browser action to run.")
     url: str = Field(
         default="",
         description=(
@@ -16192,28 +16537,24 @@ class BrowserParams(BaseModel):
     tab: str = Field(
         default="",
         description=(
-            "'open' only: ADOPT a tab the USER handed to this session, "
-            "named by the FULL handle 'tabs' reported for it. Omit it to create a "
-            "new tab; a redacted handle is not yours to drive."
+            "'open': ADOPT a tab the USER handed to this session (the FULL "
+            "handle 'tabs' reported); omitting it creates a new tab."
         ),
     )
     backend: str = Field(
         default="",
         description=(
-            "'open' only: pick the host for a FRESH surface — '' (default: the "
-            "desktop app's tab first, then the extension, then cmux) | 'ui' | "
-            "'extension' | 'cmux'. 'extension' is the host that carries the "
-            "user's real profile. A held handle or an adoption outranks it; a "
-            "named host that cannot serve refuses instead of falling back."
+            "'open': the host for a FRESH surface — '' (default order), 'ui', "
+            "'extension' (the user's real profile), or 'cmux'. A held handle or "
+            "an adoption outranks it; a host that cannot serve refuses."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
-        "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view; for 'download', the control that starts it; for "
-        "'upload', the file input to fill.",
+        description="CSS selector or a snapshot ref (e5): the click/type "
+        "target, the read scope (default: body), the scroll element, or the "
+        "download/upload control.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
     # One new field for the whole feature (the tool-surface ladder's rung 1):
@@ -16224,9 +16565,9 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload' only: the local files to attach, one or more. Credential "
-            "files and the harness's own config directory are refused; relative "
-            "paths resolve against the session's working directory."
+            "'upload': the local files to attach, one or more (credential files "
+            "and the harness's own config dir are refused; relative paths "
+            "resolve against the session's cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -16234,12 +16575,13 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll' horizontal pixel delta (positive = right). "
-        "Use with 'y' for a precise scrollBy.",
+        description="'scroll': horizontal pixel delta (positive = right); "
+        "with 'y', a precise scrollBy; for 'hit_test', the viewport x to probe.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll' vertical pixel delta (positive = down).",
+        description="'scroll': vertical pixel delta (positive = down); for "
+        "'hit_test', the viewport y to probe.",
     )
     direction: str = Field(
         default="",
@@ -16256,12 +16598,40 @@ class BrowserParams(BaseModel):
         description="'logs' max entries to return (most recent kept); 'scroll' "
         "ignores it. Omit for no cap.",
     )
+    # Read-action params (styles/hit_test/ancestors). Per-op semantics live in
+    # the tool:// doc's ops table; these two descriptions carry only what the
+    # caller must know to shape the value.
+    properties: list[str] = Field(
+        default_factory=list,
+        description="'styles': extra computed properties on top of the defaults "
+        "(max 20; letters, digits, dashes and underscores).",
+    )
+    depth: int | None = Field(
+        default=None,
+        description="'ancestors': how many levels to walk up (1..16, default 12).",
+    )
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
         "(default 120, max 240); 'download' max seconds to wait for one to start "
         "(default 120, max 600).",
     )
+
+    @field_validator("x", "y", mode="before")
+    @classmethod
+    def _refuse_boolean_coordinates(cls, value: Any) -> Any:
+        """Refuse a JSON ``true``/``false`` where a number belongs.
+
+        Pydantic's lax mode coerces ``True`` to 1.0 for a float field, so
+        without this a flag-shaped argument silently scrolls or probes to
+        (1, 1) instead of being refused — the same class of silent wrong action
+        the flag-shaped selector refusals exist for. It applies to every action
+        that reads x/y ('scroll' deltas and 'hit_test' coordinates alike): no
+        caller has a legitimate reason to pass a boolean as a number.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
 
 
 def _cmux_binary() -> str | None:
@@ -16735,6 +17105,34 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"unknown logs level: {params.level!r} "
                 f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
             )
+        return ""
+    if action in ("styles", "ancestors"):
+        # Both name one element, so the selector is mandatory and the same
+        # refusal click/type use keeps the copy consistent. The flag-shaped
+        # check matters more here than anywhere: this selector is handed to a
+        # page script.
+        problem = _validate_selector(params.selector, action)
+        if problem:
+            return problem
+        if action == "styles":
+            if len(params.properties) > _MAX_STYLE_PROPERTIES:
+                return (
+                    f"'styles' takes at most {_MAX_STYLE_PROPERTIES} extra properties "
+                    f"(got {len(params.properties)})"
+                )
+            for name in params.properties:
+                if not _STYLE_PROPERTY_RE.match(name):
+                    return (
+                        f"invalid style property {name!r}: letters, digits, dashes and "
+                        "underscores only (e.g. 'background-color')"
+                    )
+        return ""
+    if action == "hit_test":
+        if params.x is None or params.y is None:
+            return "'hit_test' requires x and y (viewport pixel coordinates)"
+        # Booleans are already refused at the model boundary (a before-validator
+        # on x/y), because pydantic's lax coercion would otherwise turn a JSON
+        # `true` into 1.0 before any check here could see it.
         return ""
     return ""
 
@@ -18141,9 +18539,21 @@ async def _bridge_call(
         BridgeUnreachable,
         format_error,
     )
+    from local_operator.browser_bridge.protocol import CAPABILITY_GATED_METHODS
 
     selected = client if client is not None else BridgeClient()
     host = str(getattr(selected, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # The capability pre-check, driven off the SET so every gated method gets
+    # one: download/upload call `_capability_problem` inside their own flows
+    # (upstream of arming or reading anything), and the generic action path —
+    # which the three reads ride — gets the same typed refusal here. UI-review
+    # M1: without it, a pre-feature APP answered a bare `internal` for the
+    # reads, because the daemon-side gate only covers the extension leg. The
+    # check reads the record, never the socket, so a refusal costs no dial.
+    if action in CAPABILITY_GATED_METHODS:
+        problem = _capability_problem(tool_call_id, action, selected, surface=surface)
+        if problem is not None:
+            return None, problem
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
@@ -18836,6 +19246,150 @@ def _bridge_logs_result(
         "browser",
         f"{len(lines)} log entr{'y' if len(lines) == 1 else 'ies'} " f"(newest last):\n\n{body}",
         details={**details, "log_count": len(lines)},
+    )
+
+
+def _geometry_ident(entry: dict[str, Any]) -> str:
+    """`tag#id.classes` plus `(role=…)` — the identity a CSS selector would read."""
+    ident = str(entry.get("tag", "") or "?")
+    element_id = str(entry.get("id", "") or "")
+    if element_id:
+        ident += f"#{element_id}"
+    classes = str(entry.get("className", "") or "").split()
+    if classes:
+        ident += "." + ".".join(classes)
+    role = str(entry.get("role", "") or "")
+    if role:
+        ident += f" (role={role})"
+    return ident
+
+
+def _geometry_number(value: Any) -> str:
+    """Compact number for the text render: 120.0 -> `120`, 10.55 -> `10.55`."""
+    number = float(value) if isinstance(value, (int, float)) else 0.0
+    return f"{number:g}"
+
+
+def _geometry_rect_text(rect: Any) -> str:
+    """`rect x,y wxh` — position and size; all eight values stay in `details`."""
+    if not isinstance(rect, dict):
+        return ""
+    return (
+        f" rect {_geometry_number(rect.get('x'))},{_geometry_number(rect.get('y'))}"
+        f" {_geometry_number(rect.get('width'))}x{_geometry_number(rect.get('height'))}"
+    )
+
+
+def _geometry_styles_text(styles: Any) -> str:
+    """`name:value` pairs, empty values elided.
+
+    An empty string is a real answer (property unset) and stays present in
+    `details`; in the text it is noise, and the `inline:` line in particular is
+    only printed when something is there.
+    """
+    if not isinstance(styles, dict):
+        return ""
+    return " ".join(f"{name}:{value}" for name, value in styles.items() if str(value) != "")
+
+
+def _geometry_entries_text(entries: list[dict[str, Any]], *, inline: bool = False) -> str:
+    """One block per entry: identity + rect, then the style pairs, then (for
+    `styles`) the element's own inline custom properties when it has any."""
+    lines: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        lines.append(f"[{index}] {_geometry_ident(entry)}{_geometry_rect_text(entry.get('rect'))}")
+        style_text = _geometry_styles_text(entry.get("styles"))
+        if style_text:
+            lines.append(f"    {style_text}")
+        if inline:
+            inline_text = _geometry_styles_text(entry.get("inline"))
+            if inline_text:
+                lines.append(f"    inline: {inline_text}")
+    return "\n".join(lines)
+
+
+def _geometry_entry_list(result: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The one list-shape read every render shares, defensive about the wire."""
+    raw = result.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _bridge_geometry_result(
+    tool_call_id: str,
+    action: str,
+    params: BrowserParams,
+    result: dict[str, Any],
+    details: dict[str, Any],
+) -> ToolResult:
+    """Render the three structured read actions.
+
+    The host already caps every list (5 matches, 8 hit-test elements, a 16-deep
+    chain) and truncates class names and values, so `details` can carry the
+    structured result as-is — it is the payload for renderers and compaction,
+    never serialized to a provider. The TEXT still rides
+    BROWSER_TEXT_LIMIT_CHARS, because 30 style pairs across 5 elements is
+    comfortably more than a line and a call must not be able to spend the
+    context window. `count` is the number of entries the host RETURNED; for
+    `styles`, `truncated` means the page had more matches than the 5-entry cap,
+    and the header says to narrow the selector.
+    """
+    selector = params.selector.strip()
+    if action == "styles":
+        matches = _geometry_entry_list(result, "matches")
+        truncated = bool(result.get("truncated"))
+        details.update(
+            selector=selector,
+            count=result.get("count", len(matches)),
+            truncated=truncated,
+            matches=matches,
+        )
+        head = f"{len(matches)} match{'' if len(matches) == 1 else 'es'} for {selector!r}"
+        if truncated:
+            head += " — more exist on the page; narrow the selector to see the rest"
+        body = _geometry_entries_text(matches, inline=True)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    if action == "hit_test":
+        elements = _geometry_entry_list(result, "elements")
+        details.update(
+            count=result.get("count", len(elements)),
+            x=params.x,
+            y=params.y,
+            elements=elements,
+        )
+        head = (
+            f"{len(elements)} element{'' if len(elements) == 1 else 's'} at "
+            f"({_geometry_number(params.x)}, {_geometry_number(params.y)}), topmost first"
+        )
+        body = _geometry_entries_text(elements)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    chain = _geometry_entry_list(result, "chain")
+    details.update(
+        selector=selector,
+        count=result.get("count", len(chain)),
+        chain=chain,
+    )
+    head = (
+        f"Ancestor chain for {selector!r}: "
+        f"{len(chain)} entr{'y' if len(chain) == 1 else 'ies'}, element upward"
+    )
+    body = _geometry_entries_text(chain)
+    return _text(
+        tool_call_id,
+        "browser",
+        f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+        details=details,
     )
 
 
@@ -19892,6 +20446,26 @@ async def _bridge_action(
         wire["level"] = params.level.strip().lower() or "all"
         if params.limit is not None:
             wire["limit"] = params.limit
+    elif action == "styles":
+        wire["selector"] = params.selector.strip()
+        # Extras only when the caller asked for some: an empty list would be an
+        # argument the peer has to interpret rather than an absent one, and
+        # "absent" is the shape every other action uses for "defaults only".
+        if params.properties:
+            wire["properties"] = list(params.properties)
+    elif action == "hit_test":
+        # Non-None (and non-bool) is guaranteed by _validate_browser_args, which
+        # runs before any action body: a json `true` would otherwise arrive as
+        # 1.0 via pydantic's lax float coercion.
+        wire["x"] = params.x
+        wire["y"] = params.y
+    elif action == "ancestors":
+        wire["selector"] = params.selector.strip()
+        if params.depth is not None:
+            # Clamped here as well as in the page function (which also defaults
+            # 12): the wire value is already honest, and the page-side clamp is
+            # what bounds a peer whose own validation is older.
+            wire["depth"] = max(1, min(16, int(params.depth)))
     result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface, client=client)
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
@@ -19953,6 +20527,8 @@ async def _bridge_action(
         )
     if action == "logs":
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
+    if action in ("styles", "hit_test", "ancestors"):
+        return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -20647,8 +21223,8 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry, site-permission "
-            "model, or file-transfer primitive. "
+            "background-tab scroll primitive, page-script/style access, multi-surface "
+            "registry, site-permission model, or file-transfer primitive. "
             + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
             + demotion,
         )
@@ -20875,35 +21451,26 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         description=(
             # Footprint: this description rides in EVERY session's cache prefix, so
             # the per-action detail lives in `guide://browser` (the playbook the
-            # model is pointed at below) and in the parameter descriptions, and
-            # this string carries only what a model needs to CHOOSE the tool and
-            # call it correctly. The context-budget guard measures the whole
-            # surface and it is why the download/upload sentence is one clause
-            # rather than the four the design first drafted (AGENTS.md,
-            # "tool-surface footprint ladder"; see the round-4 remediation).
-            "Drive the user's REAL browser (the Local Operator desktop app's browser "
-            "tab, their paired browser extension, or a cmux browser "
-            "panel — a fresh 'open' prefers the app's tab; pass 'backend' to name "
-            "another host): open/goto a URL, read text, snapshot for click refs, click, type, "
-            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
-            "across sessions, and the user can sign in by hand when you ask them "
-            "to, so this reaches authenticated pages a throwaway browser cannot. "
-            "Parallel "
-            "sessions each drive their own tab: a fresh 'open' creates one NEW "
-            "tab owned by this session; reuse it because later opens navigate it. "
+            # model is pointed at below) and in the tool:// doc's ops table; this
+            # string carries only what a model needs to CHOOSE the tool and call it
+            # correctly. The context-budget guard measures the whole surface; the
+            # slimming wave (audit item 2) moved the lifecycle/file-transfer clauses
+            # to `read tool://browser`.
+            "Drive the user's REAL browser — the desktop app's tab by default, their "
+            "paired extension, or a cmux panel ('backend' names a host for a fresh "
+            "'open'): open/goto, read, snapshot, click, type, scroll, logs, styles, "
+            "hit_test, ancestors, screenshot, tabs, close. Cookies and logins persist "
+            "across calls and sessions, and the user can sign in by hand when you ask "
+            "them to, so this reaches authenticated pages a throwaway browser cannot. "
+            "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
+            "later opens navigate it. "
             "Before your final response, call 'close' unless the user needs it left "
-            "open for a pending interaction. "
-            "'tabs' lists every agent-driven tab including other sessions' "
+            "open for a pending interaction; 'tabs' lists every agent-driven tab "
             "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
-            "'scroll', 'logs' and "
-            "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
-            "'download' saves what the page offers into this session's private "
-            "download directory, and 'upload' attaches local files to a page's file "
-            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
             "it, and 'await_access' before navigating again. "
-            "Never install or script a browser engine instead."
+            "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
@@ -21073,26 +21640,21 @@ def _console_key_name(key: str) -> str:
 
 #: One tool with a `method` parameter is ONE schema in the prompt-cache prefix,
 #: where ten tools would be ten — the same shape `BrowserParams` uses for the same
-#: reason. The per-method detail lives in the parameter descriptions below (where a
-#: model reads it while choosing arguments) and in `guide://console`; the class
-#: deliberately carries no docstring: pydantic copies a class docstring into the
-#: emitted schema's ``description``, and that schema ships on every request, so a
-#: rationale paragraph here would be a permanent per-call tax on the sentence a
-#: model reads once.
+#: reason. The per-method detail was moved OUT of the description fields by the
+#: slimming wave (audit item 2): it cost every request while being read once, so
+#: it lives in the tool:// doc's ops table and `guide://console`, and the fields
+#: keep one-liners. The class deliberately carries no docstring: pydantic copies a
+#: class docstring into the emitted schema's ``description``, and that schema ships
+#: on every request, so a rationale paragraph here would be a permanent per-call
+#: tax on the sentence a model reads once.
 class ConsoleParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: str = Field(
-        description="list | create | status | read | screenshot | input | keys | resize "
-        "| secure | close. `list` includes surfaces the USER opened; `read` returns text; "
-        "`screenshot` writes a PNG file; `input` types text or a stored secret; `keys` "
-        "sends named keys; `secure` is the user's own do-not-capture switch."
-    )
+    method: str = Field(description="The method to run.")
     surface: str = Field(
         default="",
-        description="The handle from 'list'/'create', e.g. 'con:1:9f2a'. Required for every "
-        "method but 'list'/'create'. A console handle starts with 'con:': a terminal in "
-        "another window has none and is not readable by this tool.",
+        description="The handle from 'list'/'create' (e.g. 'con:1:9f2a'); required for every "
+        "method but 'list'/'create'.",
     )
     cwd: str = Field(
         default="", description="'create': the working directory (default: the user's home)."
@@ -21115,10 +21677,8 @@ class ConsoleParams(BaseModel):
     rows: int | None = Field(default=None, description="'create'/'resize': grid rows (default 30).")
     reveal: str = Field(
         default="",
-        description="'create': none (default, pane untouched) | session (open the pane only "
-        "if the app is showing THIS session) | open (claim and focus the pane, only when "
-        "the app's window is already focused). No value raises the OS window; a downgrade "
-        "comes back as revealed=false.",
+        description="'create': none (default) | session | open; never raises the OS window — "
+        "a downgrade returns revealed=false.",
     )
     retain: bool | None = Field(
         default=None,
@@ -21131,8 +21691,8 @@ class ConsoleParams(BaseModel):
     )
     mode: str = Field(
         default="",
-        description="'read': viewport (default; the visible rows, i.e. what a person looking "
-        "at the pane sees) | scrollback (a history window, positioned by start/count).",
+        description="'read': viewport (default; the visible rows) | scrollback (a history "
+        "window, positioned by start/count).",
     )
     start: int | None = Field(
         default=None, description="'read' scrollback: the first history row to return."
@@ -21149,8 +21709,8 @@ class ConsoleParams(BaseModel):
     secret_ref: str = Field(
         default="",
         description="'input': the NAME of a secret to type instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'). Resolved session-first (the `ask` answer, /credential), then "
-        "the encrypted store; never shown in the result, a trace or a log, and "
+        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
+        "the encrypted store; never shown in results, traces or logs, and "
         "registered for redaction.",
     )
     paste: bool = Field(
@@ -21160,16 +21720,14 @@ class ConsoleParams(BaseModel):
     )
     keys: list[str] = Field(
         default_factory=list,
-        description="'keys': named keys in the encoder's spelling — ['ctrl+c'], ['up'], "
-        "['shift+tab'] — with synonyms ('ctrl-c', 'CTRL+C', 'shift-tab', 'esc', "
-        "'pgup') normalised first. The names are in guide://console; an unknown one "
-        "is refused with the accepted set.",
+        description="'keys': named keys — the encoder's spelling (`ctrl+c`, `up`, `shift+tab`), "
+        "synonyms normalised first; an unknown key is refused with the accepted set. "
+        "Names: `guide://console`.",
     )
     on: bool | None = Field(
         default=None,
         description="'secure': true turns the surface's do-not-capture span on (the app then "
-        "refuses reads and screenshots of it), false turns it off. The user can toggle the "
-        "same switch from the pane.",
+        "refuses reads and screenshots of it), false turns it off.",
     )
     kill: bool | None = Field(
         default=None,
@@ -22050,6 +22608,18 @@ ADVERTISED_EFFORT_KEY = "advertised_effort"
 #: the members it advertises.
 ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
 
+#: Key carrying the ``provider/model`` label of the SESSION that built the tool.
+#:
+#: The third piece of build-time provenance, published beside the two above and
+#: for the same reason: a tier set to the inherit sentinel stores no model of
+#: its own, so a refusal or a schema description that wants to name what that
+#: tier RUNS has to be told, and only the build side was ever handed a
+#: ``ToolContext`` to read it from. Without it the surfaces would either say
+#: the bare word ``default`` (advertising a tier without saying what it runs,
+#: the gap PR #635 closed) or the wrong constant ``this session's model`` from
+#: a surface that could have named the model exactly.
+SESSION_MODEL_LABEL_KEY = "advertised_session_model"
+
 #: The one spelling that means "no tier" on both surfaces: on ``task`` it is a
 #: synonym for omitting the field, and on ``agent`` create/update it is the
 #: sentinel that CLEARS a role's pin. Named once because it is now shared policy
@@ -22105,9 +22675,23 @@ _ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
     "advertised_model_choice", default=None
 )
 
+#: The ``provider/model`` of the session the tool was BUILT FOR, published beside
+#: the two records above and for the same reason: only the build side has the
+#: ``ToolContext``, and it is the build side that renders the schema description
+#: and the refusal copy naming what a sentinel tier resolves to. Unlike the
+#: other two this is not a fault-class input — nothing is billed on it — so it
+#: degrades to an empty string rather than to ``None``, and every reader treats
+#: empty as "cannot say" and falls back to a generic phrase rather than
+#: inventing a model.
+_ADVERTISED_SESSION_MODEL: ContextVar[str] = ContextVar("advertised_session_model", default="")
+
 
 def _with_advertised_effort(
-    executor: ToolExecutor, parameters: dict[str, Any], *, model_choice: bool
+    executor: ToolExecutor,
+    parameters: dict[str, Any],
+    *,
+    model_choice: bool,
+    session_model_label: str = "",
 ) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
@@ -22120,7 +22704,10 @@ def _with_advertised_effort(
     ``model_choice`` is passed in rather than re-read here: it is the SAME value
     the accompanying schema was rendered from, and reading the config a second
     time inside the wrapper would let the two disagree if an edit landed between
-    the build and the call.
+    the build and the call. ``session_model_label`` rides with it for the same
+    reason — it is the label the schema description was rendered from, and the
+    refusal copy must name the SAME model the enum promised, not whatever the
+    session has become by the time a stale tool is invoked.
     """
     advertised = advertised_effort_members(parameters)
 
@@ -22133,11 +22720,13 @@ def _with_advertised_effort(
     ) -> ToolResult:
         token = _ADVERTISED_EFFORT.set(advertised)
         choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
+        label_token = _ADVERTISED_SESSION_MODEL.set(session_model_label)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
             _ADVERTISED_MODEL_CHOICE.reset(choice_token)
+            _ADVERTISED_SESSION_MODEL.reset(label_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
@@ -22149,7 +22738,17 @@ def effort_validation_context() -> dict[str, Any]:
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
+        SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
     }
+
+
+def _advertised_session_model(info: ValidationInfo) -> str | None:
+    """The session model the build advertised, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    label = context.get(SESSION_MODEL_LABEL_KEY)
+    return label if isinstance(label, str) and label else None
 
 
 def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
@@ -22170,7 +22769,27 @@ def _advertised_model_choice(info: ValidationInfo) -> bool | None:
     return choice if isinstance(choice, bool) else None
 
 
-def _operator_choice_task_rejection(tier: str) -> str:
+def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
+    """What ``tier`` would run a child on, or ``None`` when it is unset.
+
+    The operator-choice refusals below exist to say that ``effort`` buys a
+    different MODEL, so they have to name one. A tier set to
+    :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL` stores no
+    model of its own — it follows the
+    launching session — so what it runs on is the SESSION's model, rendered
+    beside the sentinel rather than as a bare ``default``. ``None`` is the
+    unconfigured case: nothing resolves, and inventing a selector there would
+    be a lie.
+    """
+    selector = configured_effort_tiers().get(tier)
+    if not selector:
+        return None
+    if is_inherit_tier_sentinel(selector):
+        return session_model_label or "this session's model"
+    return selector
+
+
+def _operator_choice_task_rejection(tier: str, session_model_label: str | None = None) -> str:
     """The ``task`` refusal for a tier the model may not choose.
 
     Names the tier's MODEL when it resolves, because the whole point of the
@@ -22196,19 +22815,49 @@ def _operator_choice_task_rejection(tier: str) -> str:
     way. Two earlier orders were measured and rejected: fact first put the
     remedy at cell 73 (one word past the cut), and remedy-first with the key
     inline cut the key mid-token.
+
+    The SWAP CLAIM is conditional, for the reason the ``where`` clause is: a
+    tier on :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`
+    resolves to the model the child would
+    have run on anyway, so "it swaps the child's MODEL" is false there. The
+    reader of this message is the delegating model as much as the operator, and
+    a lead asserting a swap beside a clause denying one is exactly the
+    misreading ("`effort: hi` buys a stronger reviewer") the tier vocabulary
+    exists to prevent.
+
+    The closing sentence carries its OWN subject ("Who may pick a child's
+    model") rather than a back-reference: in the sentinel arm the claim ends on
+    "no model swap", so a "That switch" closer pointed at a switch the same
+    sentence had just denied (review round 2, NIT 2). One closer for all three
+    arms, so the card cannot drift between them.
     """
     selector = configured_effort_tiers().get(tier)
-    where = (
-        f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
-    )
-    return (
-        "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
-        f"child's MODEL, not its reasoning level{where}. That switch is "
-        "subagents.model_choice."
-    )
+    runs_on = _tier_runs_on(tier, session_model_label)
+    if runs_on is None:
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+            "child's MODEL, not its reasoning level"
+        )
+    elif is_inherit_tier_sentinel(selector):
+        # No swap to announce: say what is true instead of claiming a move this
+        # tier does not make. The label is parenthesised only when one is known,
+        # so the unlabelled case does not read "...this session's model (this
+        # session's model)".
+        named = f" ({runs_on})" if session_model_label else ""
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and "
+            f"'{tier}' runs on this session's model{named} — no model swap"
+        )
+    else:
+        claim = (
+            "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+            f"child's MODEL, not its reasoning level: '{tier}' would run it on {runs_on} "
+            "instead of this session's model"
+        )
+    return f"{claim}. Who may pick a child's model is subagents.model_choice."
 
 
-def _operator_choice_pin_rejection(tier: str) -> str:
+def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = None) -> str:
     """The ``agent`` create/update refusal for a tier the model may not pin.
 
     This one carries the OPERATOR's remedy as well as the model's, because
@@ -22231,15 +22880,33 @@ def _operator_choice_pin_rejection(tier: str) -> str:
     ``subagents.model_choice`` — a half-drawn key is the one rendering a reader
     can mis-transcribe (R-9), and ``=model``, which reads better, measured 70 and
     would have put the ellipsis inside it.
+
+    The swap sentence is conditional for the same reason as the ``task`` arm's
+    lead, and the same principle the ``where`` clause already followed: a tier
+    on :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL` moves
+    nothing, so the sentence must not say
+    a role is pinned to a different model — it is pinned to the session's own.
     """
     selector = configured_effort_tiers().get(tier)
-    where = f" ('{tier}' → {selector})" if selector else ""
+    runs_on = _tier_runs_on(tier, session_model_label)
+    if runs_on is None:
+        swap = "A pin runs that role on a different MODEL, not at a different reasoning level."
+    elif is_inherit_tier_sentinel(selector):
+        named = f" ({runs_on})" if session_model_label else ""
+        swap = (
+            f"A pin on '{tier}' runs that role on this session's model{named} — "
+            "the same model, not a different one, and not a different reasoning level."
+        )
+    else:
+        swap = (
+            f"A pin runs that role on a different MODEL ('{tier}' → {runs_on}), "
+            "not at a different reasoning level."
+        )
     return (
         "effort is the operator's; pin a role via subagents.model_choice. "
         f"Setting it to 'model' hands the choice over, and a role's own profile can "
-        f"carry the pin instead. A pin runs that role on a different MODEL{where}, "
-        "not at a different reasoning level. Omit 'effort', or pass 'inherit' to "
-        "clear a pin."
+        f"carry the pin instead. {swap} "
+        "Omit 'effort', or pass 'inherit' to clear a pin."
     )
 
 
@@ -22270,8 +22937,11 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     advertised_choice = _advertised_model_choice(info)
     if advertised_choice is None:
         return None
+    label = _advertised_session_model(info)
     message = (
-        _operator_choice_pin_rejection(value) if pin else _operator_choice_task_rejection(value)
+        _operator_choice_pin_rejection(value, label)
+        if pin
+        else _operator_choice_task_rejection(value, label)
     )
     if advertised_choice and value in (_advertised_effort(info) or frozenset()):
         return EnvironmentDependentRejectionError(message)
@@ -22331,7 +23001,7 @@ def _validate_effort_tier(
     refusal = _model_choice_refusal(value, info, pin=pin)
     if refusal is not None:
         raise refusal
-    rejection = effort_tier_rejection(value)
+    rejection = effort_tier_rejection(value, session_model_label=_advertised_session_model(info))
     if rejection is None:
         return value
     advertised = _advertised_effort(info)
@@ -22460,7 +23130,7 @@ def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[st
     return frozenset()
 
 
-def _effort_tier_field_description() -> str:
+def _effort_tier_field_description(session_model_label: str | None = None) -> str:
     """The ``task`` ``effort`` description for the MODEL-CHOICE arm.
 
     Only rendered when the model is allowed to choose and at least one tier
@@ -22470,10 +23140,15 @@ def _effort_tier_field_description() -> str:
     is a provider/model swap, and one word of the model's own prompt is the
     cheapest place to say so. Short on purpose: it is billed on every turn of
     every session that can delegate.
+
+    ``session_model_label`` is passed through so a tier on the inherit
+    sentinel can be advertised as the model it actually resolves to rather
+    than as the bare word ``default``.
     """
     tiers = configured_effort_tiers()
     return (
-        f"Swaps this child's MODEL (not its reasoning level): {describe_effort_tiers(tiers)}. "
+        "Swaps this child's MODEL (not its reasoning level): "
+        f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}. "
         "Omit to inherit this session's model and reasoning effort."
     )
 
@@ -22533,10 +23208,7 @@ def _task_tool_description(model_choice: bool) -> str:
 
 
 class TaskItem(BaseModel):
-    """One slice of a task batch. ``agent`` names the ROLE the child runs as —
-    a registered profile or a packaged starter (reviewer, coder, architect,
-    manager, designer, scout); the role supplies standing guidance and may
-    restrict the child's tools."""
+    """One slice of a task batch."""
 
     # What ``effort`` does is deliberately NOT stated in the docstring above,
     # and the sentence that used to state it ("``effort`` routes to a
@@ -22546,6 +23218,13 @@ class TaskItem(BaseModel):
     # choice — so any sentence here is a claim about a field that may not be
     # present. The field's own description and the tool's description are the
     # two places that know which mode they render for.
+    #
+    # The role wording the docstring used to carry — "``agent`` names the ROLE
+    # the child runs as, a registered profile or a packaged starter … the role
+    # supplies standing guidance and may restrict the child's tools" — moved to
+    # `read tool://task` in the slimming wave (audit item 2); it rides every
+    # request here, and the tool:// doc is the reader that needs it. The
+    # ``agent`` field's own description keeps the call-time contract.
     #
     # It lives here, as a comment, because the docstring above is prompt text:
     # it rides every request and is charged to the context-budget ratchet
@@ -22565,9 +23244,8 @@ class TaskItem(BaseModel):
         default="task",
         description=(
             "Subagent role: 'task' (full child), 'scout' (read-only research), "
-            "any role from the `agent` tool ('reviewer', 'coder', 'architect', "
-            "'manager', 'designer'), or 'team:<name>' (starts that team's "
-            "manager). Roles carry vetted guidance and may restrict tools."
+            "any role from the `agent` tool, or 'team:<name>' (starts that "
+            "team's manager). Roles carry vetted guidance and may restrict tools."
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
@@ -22627,17 +23305,16 @@ class TaskParams(BaseModel):
     context: str = Field(
         default="",
         description=(
-            "Shared context prepended to EVERY task in the batch — the goal, "
-            "constraints, and interfaces every subagent needs. Stated once "
-            "here instead of copy-pasted into each prompt."
+            "Shared context prepended to EVERY task — the goal, constraints "
+            "and interfaces each one needs; stated once instead of per prompt."
         ),
     )
     tasks: list[TaskItem] = Field(
         default_factory=list,
         description=(
             "Batch form: all items launch as CONCURRENT subagents from this "
-            "one call. Independent slices belong here together — one round "
-            "trip instead of one per task."
+            "call; independent slices belong together — one round trip instead "
+            "of one per task."
         ),
     )
 
@@ -23360,7 +24037,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
-        description=_effort_tier_field_description(),
+        description=_effort_tier_field_description(context.session_model_label),
         model_choice=model_choice,
     )
     return AgentTool(
@@ -23374,7 +24051,12 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_task, parameters, model_choice=model_choice),
+        execute=_with_advertised_effort(
+            execute_task,
+            parameters,
+            model_choice=model_choice,
+            session_model_label=context.session_model_label,
+        ),
     )
 
 
@@ -24093,19 +24775,14 @@ class HubParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # The per-op breakdown USED to live here (list/peek/send/ask/steer/pause/
+    # cancel/resume, each with its semantics) at ~260 billed tokens on every
+    # request. It moved to the tool:// doc's ops table in the slimming wave
+    # (audit items 2+3): `read tool://hub` renders the same blurbs, and the
+    # tool description above already names every verb at a fraction of the
+    # cost. The enum literals stay, so a reader still learns the op set here.
     op: Literal["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
-        description=(
-            "list: every subagent you launched with its status and whether it can be "
-            "resumed — including finished, failed and paused ones the 'jobs' tool no "
-            "longer shows. peek: READ the subagent's transcript (ranged, cheap) to see "
-            "its current progress without spending its attention — the fast way to "
-            "check on a running child. send: a note, no reply waited for. ask: a "
-            "question, blocks for the subagent's answer. steer: change what it is doing "
-            "(becomes part of its instructions). pause: stop it now but keep it "
-            "resumable. cancel: stop it for good. resume: relaunch a stopped, paused or "
-            "failed subagent against its own transcript so it continues where it left "
-            "off; names several targets to fan one message out to a whole batch at once."
-        )
+        description="The verb to run."
     )
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
     # ``anyOf``, and this module's schemas reach Gemini verbatim as
@@ -24122,10 +24799,8 @@ class HubParams(BaseModel):
         default=None,
         description=(
             "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
-            'labels, or ["all"] for every running subagent. Several ids address '
-            "several subagents. 'ask' and 'peek' take exactly one; 'resume' fans one "
-            "message out to every target you name, so a batch of failed subagents can "
-            "be resumed in a single call. Omit for op='list', which addresses nobody."
+            "labels, or [\"all\"] for every running subagent; 'ask' and 'peek' take "
+            "exactly one. Omit for op='list'."
         ),
     )
 
@@ -24160,9 +24835,8 @@ class HubParams(BaseModel):
     range: str | None = Field(
         default=None,
         description=(
-            "op='peek' only: which transcript steps to read, as 'start-end' or "
-            "'start-' (1-based inclusive, stable across peeks). Omit for the last "
-            "few steps; use steps= for 'the last N'."
+            "op='peek': transcript steps to read, as 'start-end' or 'start-' "
+            "(1-based, stable across peeks); steps= reads the last N."
         ),
     )
     steps: int | None = Field(
@@ -24754,8 +25428,7 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "this to find out whether a quiet child is stuck), steer one onto a "
             "different course, pause one so it can be picked up later, cancel one, or "
             "resume a stopped, paused or failed one (or a whole batch of them at once) "
-            "against its own transcript so it continues where it left off. Address them "
-            'by job id, by label, or "all".'
+            "against its own transcript so it continues where it left off."
             + (
                 # Only a delegating child reads this; the top session's
                 # description (a cache-prefix string) is unchanged.
@@ -24979,25 +25652,16 @@ _ASK_DESCRIPTION_RESTRAINT = (
     "it, or delegate it to a subagent and decide yourself, then report what you "
     "chose. Use this when the action is destructive or irreversible and the "
     "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
-    "two plausible readings that send the work in different directions and no "
-    "evidence picks between them, when you need something only the user has (a "
-    "credential, an access decision), or when the answer is genuinely theirs to "
-    "state (a preference, a name, a roster, how they want something delivered). "
+    "two plausible readings and no evidence picks between them, when you need "
+    "something only the user has (a credential, an access decision), or when "
+    "the answer is genuinely theirs to state (a preference, a name, a roster). "
     "Two technical approaches is not ambiguity: weigh them, pick one, and say "
     "why. Work the user already asked for is authorized: do not stop to confirm "
     "it, re-ask what the conversation answered, or seek permission to continue "
     "— but that never extends to an irreversible step by implication. "
-    "Once you HAVE decided a question is needed, this tool is the only channel: "
-    "never put the question in your reply text. A question buried in a report is "
-    "not seen and nothing waits on it, so writing one and continuing means you "
-    "decided anyway. Not stopping for an answer? Then do not phrase it as a "
-    "question — state the decision and what would change it. "
-    "When you do ask, do it here INSTEAD of writing lettered options "
-    "into your reply and waiting. Give each question at least two options, put "
-    "the consequence of each in its description, and mark the one you recommend "
-    "(it is moved to the top of the list and preselected). "
-    "Every question also offers the user a free-text answer, so the options do "
-    "not have to be exhaustive. "
+    "Once you have decided a question is needed, this tool is the only channel: "
+    "never put the question in your reply text. Not stopping for an answer? Then "
+    "do not phrase it as a question; full mechanics are in `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS: today's text, byte for byte. The
@@ -25006,11 +25670,11 @@ _ASK_DESCRIPTION_RESTRAINT = (
 _ASK_DESCRIPTION_INLINE = (
     "Ask everything you need in ONE call: the user "
     "answers the questions back to back rather than once per turn. "
-    "If you need a credential, password, or API key, set secret=true on that "
-    "question (options empty, id is the env-var name). The value is stored in "
-    "session memory and injected into bash; you will only ever see the key name. "
-    "Add persist=true when that credential will be needed again after this "
-    "session, and it is also saved to the operator's encrypted long-term store."
+    "For a credential, password or API key, set secret=true on that "
+    "question (options empty, id = the env-var name): the value is stored in "
+    "session memory and injected into bash — you only ever see the key name. "
+    "persist=true also saves it to the operator's encrypted long-term store for "
+    "later sessions."
 )
 
 #: The tail for a host whose ``ask`` QUEUES (design §2.1/§3/§9.1). Three facts a
@@ -25032,12 +25696,11 @@ _ASK_DESCRIPTION_INLINE = (
 #: urgent case needs its own instruction (resolve it another way) because the
 #: timeout notice repeats it.
 _ASK_DESCRIPTION_QUEUED = (
-    "Ask everything you need in ONE call — the ask is answered as a whole, so "
-    "nothing is gained by splitting it across turns. This call returns at once "
+    "Ask everything you need in ONE call. This call returns at once "
     "with a RECEIPT: it confirms the ask is queued and when it will time out. "
     "The ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not "
     "run anything the ask was meant to authorise until the answer arrives. "
-    "Continue with work that does not depend on it, and if nothing else remains, "
+    "Continue with work that does not depend on it; if nothing else remains, "
     "end the turn saying what is queued rather than idling. Set `timeout` to how "
     "long this should really wait — 1 h (3600) is routine, 5-10 minutes when "
     "someone is expected to answer now, up to 24 h for something genuinely "
@@ -25049,12 +25712,11 @@ _ASK_DESCRIPTION_QUEUED = (
     "waiting. At most 8 asks can be open at once — do not re-ask a question you "
     "already queued, and a second ask with identical question text, or a second "
     "open secret question for a key already asked for, is refused. "
-    "If you need a credential, password, or API key, set secret=true on that "
-    "question (options empty, id is the env-var name). The value reaches session "
-    "memory when the user answers it and is injected into bash; you will only "
-    "ever see the key name, and it never appears in this conversation. "
-    "Add persist=true when that credential will be needed again after this "
-    "session, and it is also saved to the operator's encrypted long-term store."
+    "For a credential, password or API key, set secret=true on that question "
+    "(options empty, id = the env-var name): the value reaches session memory "
+    "when the user answers it and is injected into bash — only the key name is "
+    "returned, and it never appears in this conversation. persist=true also "
+    "saves it to the operator's encrypted long-term store."
 )
 
 

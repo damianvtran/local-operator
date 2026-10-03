@@ -338,6 +338,15 @@ from local_operator.tui.widgets.aside_panel import (
     AsideTurn,
 )
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
+from local_operator.tui.widgets.ask_queue import (
+    ASK_TOGGLE_KEY,
+    STATUS_OPEN,
+    STATUS_TIMED_OUT,
+    AskBar,
+    AskQueueList,
+    AskRow,
+    ask_rows,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.command_picker import CommandPicker
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
@@ -388,13 +397,30 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
+from local_operator.tui.widgets.projects_send import (
+    SEND_FAULT_NOTICE,
+    SendTarget,
+    amber_notice,
+    compose_band,
+    error_notice,
+    pending_line,
+    refusal_notice,
+    sent_line,
+)
+from local_operator.tui.widgets.projects_start import StartTarget, start_targets
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
+    ProjectsViewAttachmentCopied,
     ProjectsViewAttachmentOpened,
+    ProjectsViewAttachmentPreviewRequested,
+    ProjectsViewComposeChanged,
     ProjectsViewDismissed,
+    ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
+    ProjectsViewSendRequested,
+    ProjectsViewStartRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
@@ -418,6 +444,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
+from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -432,6 +459,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    ROLE_CEILING,
     Density,
     JobStats,
     SubagentPanel,
@@ -2885,6 +2913,19 @@ COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
 #: aside's placeholder restore correct — and NOT counted as guidance anywhere.
 CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it"
 
+#: The composer's placeholder while a queued ask's answer surface is EXPANDED
+#: (design §5.0's composer-routing rule). The text names BOTH halves of the
+#: rule the placeholder exists to make visible: where Enter goes (the ask) and
+#: how to get back to the conversation (collapse). A placeholder that only
+#: said "answer the question" would leave the user with no way to learn that
+#: Esc is the way out except by pressing it.
+#:
+#: It is written ONLY in ask mode and only while the composer is empty (a
+#: placeholder renders on an empty buffer, never beside one), which is the
+#: same channel bang-mode, the aside and the credential arm share — see
+#: ``_composer_placeholder_for``, the one owner of that swap.
+ASK_ANSWER_PLACEHOLDER = "Answer the question above… — Enter sends it to the ask"
+
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
 #: list that simply vanished would read as the gesture having been dropped —
@@ -4332,6 +4373,20 @@ class OperatorApp(App[None]):
         #
         # Ctrl+B is navigation across platforms; F8 keeps Aside independent of
         # terminal modifier encoding and leaves every TextArea editing key alone.
+        # Queued asks, on a FUNCTION key for the same reason as f8/f9/f10
+        # below: every `ctrl+<letter>` is spoken for. The bar's own Enter
+        # binding cannot be the only route, because nothing focuses a bar the
+        # user cannot see is focusable — measured in round 1, tab six times and
+        # shift+tab all stayed in the Editor, so a keyboard-only user could not
+        # answer a queued ask at all (UX U5). Non-priority, so a live picker
+        # keeps first refusal on the key.
+        #
+        # The key is NOT f7, which is the neighbour this row would suggest:
+        # TextArea binds f6/f7 itself (measured in Textual 8.2.8), so the one
+        # surface that most needs the route — the focused composer — swallowed
+        # it. `ASK_TOGGLE_KEY` is the single spelling, shared with the bar's own
+        # copy so the two cannot drift onto different keys.
+        Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
         Binding("f8", "aside", "Aside", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
@@ -5467,6 +5522,60 @@ class OperatorApp(App[None]):
         # answer a question that has already been reported.
         self._ask_screen: AskPickerScreen | None = None
         self._ask_pending: asyncio.Future[dict[str, list[str]] | None] | None = None
+        # -- the queued ask surfaces (design §5.0/§5.1, flag-on only) --------
+        #
+        # These five fields are the MINIMIZED/EXPANDED interaction model and
+        # nothing else: the wire state lives on the frontend snapshot, and the
+        # queue itself lives on the session. They are always present (not
+        # gated on the flag) so no code path has to ask whether the app was
+        # built with them, but every one of them is INERT while
+        # ``asks.policy.NONBLOCKING_ASK`` is off — `_sync_ask_surface` returns
+        # before touching any of them, which is what makes §5's "flag-off
+        # behaviour is exactly today's" a property of the code rather than a
+        # promise.
+        #
+        # The bar is built HERE rather than in `compose` so the dock can yield
+        # it by name; it paints nothing until `set_state` is given a count.
+        self._ask_bar = AskBar()
+        #: Whether the answer surface is EXPANDED. The ONE bit the composer's
+        #: routing, the placeholder and the bar all read, so they cannot
+        #: disagree about which channel Enter is aimed at.
+        self._ask_mode: bool = False
+        #: The wire's open asks, flattened, as of the last snapshot.
+        self._ask_rows: list[AskRow] = []
+        #: The ask whose picker is mounted, or None while the LIST is up (or
+        #: nothing is). Kept beside the card because the card alone cannot say
+        #: which ask it belongs to, and the answer has to be routed to THAT ask —
+        #: the queue is a store, and a card is only ever a view of one row.
+        self._ask_mounted_id: str | None = None
+        #: The mounted queued picker, if any. A SEPARATE slot from
+        #: ``_ask_screen``: see the section comment on ``_sync_ask_surface``.
+        self._ask_card: AskPickerScreen | None = None
+        #: The queue list widget while it is mounted, else None.
+        self._ask_list: AskQueueList | None = None
+        #: Whether the mounted CARD was opened out of the list. Escaping such a
+        #: card hands the user back to the list they were choosing in rather
+        #: than all the way out to the minimized bar (UX round 1, U6). Cleared
+        #: by every collapse, so a card opened fresh cannot inherit it.
+        self._ask_from_list: bool = False
+        #: ``ask_id -> AskPickerSnapshot`` for collapsed asks, so the free-text
+        #: draft typed into a question survives collapsing and is restored on
+        #: re-expand (R7: "collapsing preserves both drafts").
+        self._ask_drafts: dict[str, Any] = {}
+        #: The conversation draft stashed when the answer surface expanded.
+        #: Restored on collapse, and held OUT of the composer for as long as the
+        #: ask owns the buffer: the invariant §5.0 states is that a chat draft
+        #: may never become an answer, and the only way to keep that true with
+        #: ONE composer is to take it out of the buffer the answer is typed into.
+        self._ask_chat_draft: str = ""
+        #: Its attachments, stashed and restored with it — a draft is its text
+        #: AND its images, and handing back one without the other leaves markers
+        #: the editor can no longer resolve.
+        self._ask_chat_attachments: dict[int, Any] = {}
+        #: The session the queued surfaces were last reconciled against, so a
+        #: swap can collapse them without restoring the previous conversation's
+        #: draft into the incoming composer.
+        self._ask_session: Any = None
         #: The live "paste your API key" prompt, for the same reason the two
         #: references above exist: the login coroutine is parked on a future
         #: only this app resolves, so a teardown that leaves it pending hangs
@@ -8966,9 +9075,7 @@ class OperatorApp(App[None]):
             source.aside_open = False
             editor.set_allows_shell(True)
             editor.set_shell_mode(source.draft.shell_mode)
-            editor.placeholder = (
-                SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
-            )
+            editor.placeholder = self._composer_placeholder_for(editor)
             editor.set_commands(self._offered_commands())
             editor.set_records_history(True)
 
@@ -9728,14 +9835,7 @@ class OperatorApp(App[None]):
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
         editor = self._editor()
-        if editor.read_only:
-            editor.placeholder = READ_ONLY_PLACEHOLDER
-        elif self._aside_is_open():
-            editor.placeholder = ASIDE_PLACEHOLDER
-        elif editor.shell_mode:
-            editor.placeholder = SHELL_PLACEHOLDER
-        else:
-            editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
+        editor.placeholder = self._composer_placeholder_for(editor, connection=status)
 
     def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
         """Whether an ANSWERABLE card is on screen for ``source``'s live gate.
@@ -11045,6 +11145,36 @@ class OperatorApp(App[None]):
                         yield self._todo_panel
                     with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
+                        # The projects compose strip (P5a, D6): the recipient
+                        # band, and then the delivered receipt, as a REAL
+                        # one-row surface above the prompt. It replaced the
+                        # editor-placeholder incarnation, which vanished on the
+                        # first keystroke — exactly when a reader needs to see
+                        # who the message is addressed to. Hidden until the
+                        # projects page composes, so the dock keeps its height
+                        # in every other mode.
+                        #
+                        # Placed ABOVE the minimized ask bar (this branch's fold
+                        # onto a base that added it) so the bar keeps the
+                        # directly-above-the-composer seat its own note claims.
+                        # Both surfaces collapse to zero rows when unset, so the
+                        # order is visible only while a projects compose and a
+                        # queued ask are up at the same time.
+                        yield Static(
+                            "",
+                            id="projects-compose-strip",
+                            classes="projects-compose-strip",
+                            markup=False,
+                        )
+                        # The MINIMIZED ask affordance, directly above the composer
+                        # (design §5.0/R7). A child of the SHELL rather than of
+                        # `#prompt-host`, and that placement is the whole reason it
+                        # can exist while nothing is being answered: the host
+                        # reserves zero rows until a card is mounted in it, so a bar
+                        # living there would disappear exactly when it is the only
+                        # thing to show. Here it is a normal-flow row the shell
+                        # collapses to zero when there is no queue.
+                        yield self._ask_bar
                         editor = Editor(commands=self._offered_commands())
                         with Horizontal(id="input-row"):
                             yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
@@ -12016,6 +12146,14 @@ class OperatorApp(App[None]):
         ):
             self._band_painted_revision = (session, revision)
             self._refresh_band()
+        # The queued ask surfaces follow the same snapshot, and deliberately NOT
+        # behind the revision gate above: the bar's state is derived from a list
+        # this fold may have just replaced, so a delta that moved no roster
+        # entry (a token count, a title) is exactly the delta that can add,
+        # settle or expire an ask. The read is `getattr`-guarded because a
+        # reduced facade in the tests carries no `asks` field at all, which is
+        # also the flag-off shape.
+        self._sync_ask_surface(ask_rows(getattr(state, "asks", None)))
 
     def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
@@ -18560,6 +18698,24 @@ class OperatorApp(App[None]):
         session = self._session
         return getattr(session, "team_registry", None) if session is not None else None
 
+    def _known_team_names(self) -> list[str]:
+        """The team names the create form's hint lists.
+
+        The SAME registry `/team`'s argument list reads (``_team_registry``)
+        and the same name reader its rows are built from
+        (``_team_name_label``), so the form cannot offer a vocabulary the team
+        store does not have and cannot name a team differently from the picker.
+        An absent registry or a read failure leaves the hint's honest fallback
+        rather than failing a keypress.
+        """
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            return []
+        try:
+            return [self._team_name_label(team)[0] for team in registry.list_teams()]
+        except Exception:  # noqa: BLE001 — a hint must never fail a keypress
+            return []
+
     @staticmethod
     def _team_name_label(team: Any) -> tuple[str, str]:
         """``(name, label)`` off any Team-or-double, best-effort.
@@ -19665,98 +19821,45 @@ class OperatorApp(App[None]):
         self._open_org_chart_view(team.name)
 
     # -- /agent -------------------------------------------------------------
-    def _agent_profile_rows(self) -> list[tuple[str, str, str]]:
-        """(name, kind-facts, summary) per role/specialist, roles first.
+    def _agent_profile_rows(self) -> list[tuple[str, str, str, str]]:
+        """(name, label, kind-facts, summary) per role/specialist, roles first.
 
         ONE enumeration feeding both the listing block and the argument
-        picker, so the two can never disagree about which names `/agent`
-        accepts. Scope is deliberate: only rows tagged as delegation roles
-        (``is_role``) or explicitly authored specialists (``is_specialist``).
-        The registry also holds ordinary conversational and autosave agents;
-        offering those here would be noise at best and a privacy leak at
-        worst — the same boundary the `agent` tool's listing draws.
+        picker, so the two can never disagree about which names ``/agent``
+        accepts. The enumeration itself now lives in
+        ``agent_profiles.agent_listing_rows``, because the DETACHED runtime's
+        routed ``/agent`` must send the same rows: a session with no TUI had
+        only the ``noop`` the terminal's own resolver drew, so the phone's sheet
+        offered ``/agent`` and the tap delivered nothing (review round 1,
+        R1-2/U2). This method stays as the app's seam — the settings pane and the
+        picker read it — and is a delegate rather than a copy.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
-        from local_operator.action_class import PROACTIVE, class_from_tags
-        from local_operator.action_class import normalize as normalize_action_class
+        from local_operator.agent_profiles import agent_listing_rows
 
-        rows: list[tuple[str, str, str]] = []
-        seen: set[str] = set()
-        if registry is not None and hasattr(registry, "list_agents"):
-            from local_operator.agent_profiles import (
-                is_role,
-                is_specialist,
-                profile_from_agent,
-            )
-
-            try:
-                agents = list(registry.list_agents())
-            except Exception:
-                agents = []
-            roles: list[tuple[str, str, str]] = []
-            specialists: list[tuple[str, str, str]] = []
-            for agent in agents:
-                try:
-                    if is_role(agent):
-                        profile = profile_from_agent(registry, agent)
-                        facts = "role"
-                        # The CLASS leads the optional facts (design round 1,
-                        # D1): the settings pane truncates this line to 27
-                        # cells, and a marker appended after a configured
-                        # role's model/effort was the first thing cut — the
-                        # surface §8.1.3 puts forward as where the class is
-                        # visible could not show it on exactly the agents that
-                        # carry config detail.
-                        if normalize_action_class(profile.action_class) == PROACTIVE:
-                            facts += " · proactive"
-                        # Model/effort are facts a user picks a hat by; the
-                        # rest of the profile is what the attach applies.
-                        if profile.model:
-                            facts += f" · {profile.model}"
-                        if profile.effort:
-                            facts += f" · effort {profile.effort}"
-                        summary = (profile.when_to_use or profile.description or "").strip()
-                        roles.append((profile.name, facts, summary))
-                        seen.add(profile.name.lower())
-                    elif is_specialist(agent):
-                        summary = str(agent.description or "").strip()
-                        class_fact = (
-                            " · proactive" if class_from_tags(agent.tags) == PROACTIVE else ""
-                        )
-                        specialists.append((str(agent.name), f"specialist{class_fact}", summary))
-                        seen.add(str(agent.name).lower())
-                except Exception:
-                    continue
-            rows.extend(sorted(roles, key=lambda row: row[0].lower()))
-            rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
-        # Packaged starters resolve without being installed (`resolve_profile`
-        # falls through to seeds), so `/agent reviewer` works on a fresh
-        # machine — the listing must therefore offer them too, or it would
-        # deny names the attach path accepts.
-        from local_operator.agent_profiles import list_seeds, load_seed
-
-        seeds: list[tuple[str, str, str]] = []
-        for seed_name in list_seeds():
-            if seed_name.lower() in seen:
-                continue
-            profile = load_seed(seed_name)
-            if profile is None:
-                continue
-            summary = (profile.when_to_use or profile.description or "").strip()
-            seed_facts = "role · packaged"
-            if normalize_action_class(profile.action_class) == PROACTIVE:
-                seed_facts += " · proactive"
-            seeds.append((profile.name, seed_facts, summary))
-        rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
-        return rows
+        return agent_listing_rows(registry)
 
     def _agent_choices(self) -> list[ArgumentChoice]:
-        """Roles/specialists the ``/agent`` argument list offers."""
-        return [
-            ArgumentChoice(name, summary or "no description", detail=facts)
-            for name, facts, summary in self._agent_profile_rows()
-        ]
+        """Roles/specialists the ``/agent`` argument list offers.
+
+        The NAME column stays the raw key -- it is the value completing a row
+        puts in the buffer, and a label is display-only, so completion must
+        never leave the key. The display refinement rides the DESCRIPTION
+        instead, mirroring ``/team``'s picker (D2): only a CHOSEN-and-different
+        label earns the prefix (``enrichment_label``), and a derived default
+        the name column already says stays out.
+        """
+        from local_operator.display_labels import enrichment_label
+
+        choices: list[ArgumentChoice] = []
+        for name, label, facts, summary in self._agent_profile_rows():
+            description = summary or "no description"
+            prefix = enrichment_label(name, label)
+            if prefix:
+                description = f"{prefix} · {description}"
+            choices.append(ArgumentChoice(name, description, detail=facts))
+        return choices
 
     def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
@@ -19839,12 +19942,108 @@ class OperatorApp(App[None]):
             for choice in names
         ]
 
-    def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
+    @classmethod
+    def _agent_display_form(cls, name: str, label: str) -> str:
+        """The shared display rule's form for an agent name/label pair (D2).
+
+        ONE reader for every surface in this app, so two of them cannot
+        disagree about how a profile reads -- the rule itself, and why each of
+        its cases exists, lives in
+        :func:`local_operator.display_labels.display_form`.
+        """
+        from local_operator.display_labels import display_form
+
+        return display_form(name, label)
+
+    @classmethod
+    def _agent_listing_form(cls, name: str, label: str) -> str:
+        """The BOUNDED display form the listing family paints (N1).
+
+        ``display_labels.bounded_display_form`` caps the composed form so an
+        over-long custom label ellipsizes instead of wrapping the key onto a
+        second line; the local block and the wire's first slot both call it
+        here, so both terminals paint the same bytes.
+        """
+        from local_operator.display_labels import bounded_display_form
+
+        return bounded_display_form(name, label)
+
+    def _agent_label_for(self, name: str) -> str:
+        """The RAW stored label for an agent name, or "" when none is known.
+
+        Best-effort and cheap: the session's own registry first, then the
+        packaged seed's canonical frontmatter label (an attached but
+        un-materialised starter is a supported flow). Never raises -- a broken
+        registry or an unreadable seed must not take a display-only segment
+        down -- so every caller pairs it with ``display_labels.display_form``,
+        which falls back to the raw name when this returns nothing.
+        """
+        if not name:
+            return ""
+        session = self._session
+        registry = getattr(session, "agent_registry", None) if session is not None else None
+        if registry is not None and hasattr(registry, "get_agent_by_name"):
+            try:
+                row = registry.get_agent_by_name(name)
+                if row is not None:
+                    return str(getattr(row, "label", "") or "")
+            except Exception:  # noqa: BLE001 — a display lookup must not raise
+                logger.debug("agent label: registry lookup failed", exc_info=True)
+        try:
+            from local_operator.agent_profiles import load_seed
+
+            seed = load_seed(name)
+            if seed is not None:
+                return seed.label
+        except Exception:  # noqa: BLE001 — a missing seed must not raise
+            logger.debug("agent label: seed lookup failed", exc_info=True)
+        return ""
+
+    def _agent_band_text(self, name: str) -> str:
+        """The band's active-agent text, through the shared display rule (U2).
+
+        The segment's value is whatever the SESSION carries -- a key -- while
+        the band is a display, so it paints the shared form: ``UX Reviewer``
+        for a canonical label, the raw key when nothing adds information.
+        """
+        if not name:
+            return ""
+        from local_operator.display_labels import capped_display_form
+
+        # The band's cell is FIXED (:data:`AGENT_PROFILE_CELLS`) and the band
+        # truncates rather than wraps, so a composed form past the cap falls
+        # back to the key it addresses by (design round 1, D2).
+        return capped_display_form(name, self._agent_label_for(name), cap=AGENT_PROFILE_CELLS)
+
+    def _agent_role_display(self, role: str) -> str:
+        """A subagent's role KEY as the display form a dock row may paint.
+
+        Handed to the subagent dock and view as their role resolver so the
+        role column reads ``UX Reviewer`` beside a label rather than the raw
+        slug, with ONE rule shared with the listings (``display_form``). A
+        non-role spelling (``""``, the ``task`` default, a ``team:<name>``
+        launch prefix) has no registry or seed row and returns unchanged, so
+        the resolver is safe on every value the job carries.
+        """
+        if not role:
+            return role
+        from local_operator.display_labels import capped_display_form
+
+        # Same rule as the band, at the dock's narrower :data:`ROLE_CEILING`: a
+        # form that does not fit the cell falls back to the key rather than
+        # truncating the label mid-word and losing the addressable string.
+        return capped_display_form(role, self._agent_label_for(role), cap=ROLE_CEILING)
+
+    def _agent_list_block(self, rows: list[tuple[str, str, str, str]]) -> RichBlock:
         """A structured profile list for bare ``/agent``.
 
         Same row-per-field shape as `_team_list_block`, for the same reason:
         separate rows keep a narrow terminal from wrapping the facts or the
         description into a position that reads as a child of the next entry.
+        The name row paints the shared, BOUNDED display form (the ``/team``
+        listing's N1 rule): a long custom label ellipsizes so the KEY keeps its
+        place on the line -- ``/agent <name>`` addresses by the key, so the row
+        must show what to type.
         """
         # D1: the SECTION header must outrank its entries. Entry names take the
         # muted body-ish `heading` weight; the section header takes bright `fg`
@@ -19856,8 +20055,10 @@ class OperatorApp(App[None]):
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
         out: list[Any] = [Text("agents", style=section)]
-        for name, facts, summary in rows:
-            out.append(Padding(Text(name, style=heading), (0, 0, 0, 2)))
+        for name, label, facts, summary in rows:
+            out.append(
+                Padding(Text(self._agent_listing_form(name, label), style=heading), (0, 0, 0, 2))
+            )
             out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))
             if summary:
                 out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
@@ -19889,11 +20090,15 @@ class OperatorApp(App[None]):
         ``clear_agent_profile`` runs, the resolved name after an attach), so the
         band is synced FROM it rather than handed a string by each call site —
         the two cannot then drift, and a future attach path gets the segment for
-        free. No-op before the band or session exists (early boot).
+        free. The name is resolved through :meth:`_agent_band_text` -- the
+        segment is a display, so an attached slug reads as its label, exactly as
+        the team segment does. No-op before the band or session exists (early
+        boot).
         """
         if self._status is None or self._session is None:
             return
-        self._status.update(agent_profile=str(getattr(self._session, "active_agent", "") or ""))
+        agent_name = str(getattr(self._session, "active_agent", "") or "")
+        self._status.update(agent_profile=self._agent_band_text(agent_name))
 
     def _sync_team_band(self) -> None:
         """Repaint the band's active-team segment from the session (U2).
@@ -23145,6 +23350,14 @@ class OperatorApp(App[None]):
         a task yields the pump, and the aside/shell/slash branches would
         interleave with the next message.
         """
+        # Quick-send FIRST (P5a): while the projects page is composing, the
+        # text is a message to the chosen target, NOT a slash command — a body
+        # that happens to start with `/` is still something a person typed to
+        # send (spec §7.5.2), and running it as a verb would be the page
+        # executing the reader's message.
+        projects_view = self._projects_view
+        if projects_view is not None and projects_view.submit_compose(message.text):
+            return
         if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
@@ -23212,6 +23425,28 @@ class OperatorApp(App[None]):
             # `/btw` command and the inline-command path are the others), and
             # expanding per-route is how two of them would quietly miss it.
             self._ask_aside(expand_pastes(text, message.attachments))
+            return
+        if self._ask_answer_active():
+            # EXPANDED: the composer is the ANSWER box (§5.0's routing rule).
+            #
+            # It sits here, beside the aside's branch and for the same reason:
+            # a mode owns the composer, so EVERY submission goes to that mode
+            # rather than being parsed as a command or a message. The invariant
+            # this exists for is one-directional — with the ask expanded, Enter
+            # sends the ANSWER, never chat — which is why the text is handed to
+            # the card rather than also being recorded as a prompt.
+            #
+            # Empty text accepts the card's current selection, exactly as Enter
+            # on the card itself would: the two are the same key on the same
+            # question, and a user who put the caret in the composer has not
+            # thereby changed what "accept" means.
+            #
+            # An ANSWER is not a conversation message, so it is deliberately
+            # NOT written to this app's history: `answer_current` owns the
+            # card's own answer map, and a submit that also pushed a prompt
+            # would leave the conversation carrying an answer the model never
+            # received as prose.
+            self._submit_ask_answer(text)
             return
         if message.shell:
             if self._shell_card is not None:
@@ -23661,6 +23896,14 @@ class OperatorApp(App[None]):
         picker = self._ask_screen
         if picker is not None and not picker.settled and picker.is_attached:
             return picker
+        # The QUEUED card is a second picker in its own slot, and it claims the
+        # keyboard by the same test for the same reason: its answer keys are
+        # ordinary characters the composer would otherwise swallow. Ordered
+        # after the blocking pair because those two are a turn that cannot
+        # proceed, while a queued ask is one the agent has already moved past.
+        queued = self._ask_card
+        if queued is not None and not queued.settled and queued.is_attached:
+            return queued
         return None
 
     def _focus_is_claimed(self) -> bool:
@@ -23718,6 +23961,16 @@ class OperatorApp(App[None]):
             ):
                 return True
         except Exception:  # noqa: BLE001
+            return True
+        # The OPEN-ASK list IS a hard claim, unlike the Sessions list below:
+        # it is answered with keys the composer swallows (up/down to move,
+        # Enter to open a row, `d`/`x` to settle one), so handing the keyboard
+        # to the composer makes the panel unusable — and the round-1 probe found
+        # exactly that, with `❯` still painted on row 1 (UX U2).
+        try:
+            if self._ask_list is not None:
+                return True
+        except Exception:  # noqa: BLE001 — defensive, see the docstring
             return True
         # The focused Sessions list is deliberately ABSENT from this list, and
         # that absence is the whole content of design round D2: its claim is
@@ -24389,6 +24642,19 @@ class OperatorApp(App[None]):
         # command both die on one press rather than racing.
         self._abort_shell_command()
 
+    def action_toggle_asks(self) -> None:
+        """Open the queued asks, or close them if they are already up.
+
+        The keyboard's door to the surface (UX U5), and it is a TOGGLE rather
+        than an open: the key pressed twice must be the gesture that lets a user look
+        at the queue and then get back to what they were typing, without
+        reaching for the mouse or for Esc (which means "stop" everywhere else).
+        """
+        if self._ask_mode:
+            self._collapse_asks()
+        else:
+            self._expand_asks()
+
     def action_stop(self) -> None:
         """Esc: stop. One press, one meaning, wherever focus happens to be.
 
@@ -24430,6 +24696,18 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        if self._ask_mode:
+            # The ask surface owns Esc first. §5.0/D5 makes Esc the COLLAPSE,
+            # and the state a user is in while they type an answer is the
+            # COMPOSER-focused one — where this key used to fall through the
+            # whole stop ladder and abort the running turn, from a surface whose
+            # own footer said "esc collapse" (round 1: QA Q2).
+            #
+            # The card consumes Esc itself (its own binding, focus on the card),
+            # so what reaches here is the composer and the list: both mean
+            # "leave this surface", and neither is a stop.
+            self._collapse_asks()
+            return
         if self._fork_in_progress:
             # The snapshot may already be copying. Let it settle safely, but
             # withdraw navigation without forwarding Esc to the original tool.
@@ -24467,7 +24745,13 @@ class OperatorApp(App[None]):
         if self._close_settings_view():
             return
         # The projects page sits at the same precedence, and owns no ladder of
-        # its own: Esc on it means exactly one thing — leave the page.
+        # its own: Esc on it means exactly one thing — leave the page. Its
+        # quick-send surfaces are the exception (P5a): the composer holds the
+        # caret while composing, so the key arrives HERE rather than at the
+        # page's own binding, and closing the page instead would throw away a
+        # draft the band promises to keep (`esc cancel`).
+        if self._projects_view is not None and self._projects_view.escape_surface():
+            return
         if self._close_projects_view():
             return
         if not self._allow_source_command():
@@ -25250,6 +25534,648 @@ class OperatorApp(App[None]):
             handle.note_ask_advanced(card)
         except Exception:  # noqa: BLE001 - a phone bridge must never break the ask
             logger.debug("mobile ask-advanced notify failed", exc_info=True)
+
+    # -- the queued ask surfaces (design §5.0/§5.1) ---------------------------
+    #
+    # WHAT IS NOT HERE, and why each absence is deliberate:
+    #
+    # * ``_ask_screen``/``_ask_pending`` are UNTOUCHED by this path. The queued
+    #   card lives in ``_ask_card``. Those two fields are the BLOCKING gate's —
+    #   ``_ask_pending`` is how the app answers "is the turn parked on a
+    #   human", and a queued ask parks nothing: the agent took a receipt and
+    #   kept working. Reusing the slot would make the app report a parked turn
+    #   that is not parked, and it would also make ``_sidebar_gate_card_ready``
+    #   refuse a session SWITCH while an ask is expanded, because that predicate
+    #   reads the app-level slot and answers "a card is owed" for a source with
+    #   no gate at all.
+    #
+    # * No timer, no clock and no notification here. The countdown is derived
+    #   from ``expires_at`` at paint time (§5's copy contract) and the timeout
+    #   itself is the queue's, off in the runtime.
+
+    def _sync_ask_surface(self, rows: list[AskRow]) -> None:
+        """Reconcile the bar, the card and the drafts with the wire's asks.
+
+        The ONE writer of the queued-ask interaction state, called from the
+        frontend snapshot (``_apply_frontend_state``) — so the surfaces follow
+        the same fold every other widget in the dock already follows, rather
+        than a second subscription that could disagree with it.
+
+        Ordering is load-bearing in two places:
+
+        * A session SWAP collapses the surface WITHOUT restoring the chat
+          draft. The stash belongs to the conversation that was on screen when
+          it was taken, and dropping it into the incoming session's composer
+          would put the previous conversation's text into the new one.
+        * The card is taken down when its ask LEAVES the queue — answered from
+          the phone, expired, or dismissed elsewhere. Leaving it up would be a
+          card for a question the runtime no longer has.
+
+        THE FLAG GATES PRODUCTION, NOT RENDERING, and this is the sentence round
+        1's MINOR-4 asked for: with ``NONBLOCKING_ASK`` off nothing here mounts,
+        but a transcript that already CONTAINS an ``ask_response``/``ask_timeout``
+        row (recorded by a flag-on runtime, or read back from disk) still renders
+        as the ask receipt card — ``AskResponseBlock`` has no flag branch, by
+        design, because a stored row is a fact about the past and hiding it would
+        lose the user's own history. The flag decides whether the new surfaces
+        exist, never whether an existing row can be read.
+        """
+        from local_operator.asks import policy
+
+        session = getattr(self, "_session", None)
+        swapped = session is not self._ask_session
+        self._ask_session = session
+        if swapped and self._ask_mode:
+            self._collapse_asks(restore_draft=False)
+        if not policy.enabled():
+            # §5's invariant: with the flag off every new path is inert and the
+            # composer is today's. Return BEFORE the bar is touched, so a
+            # machine that never set ``LOP_ASK_NONBLOCKING`` cannot render a
+            # surface for a feature its runtime does not have.
+            self._ask_rows = []
+            self._ask_bar.set_state(count=0, expanded=False, present=False)
+            return
+        self._ask_rows = list(rows)
+        self._paint_ask_bar()
+        if self._ask_list is not None:
+            # The OPEN LIST follows the wire while it is up, which it did not
+            # before: it was built once from the rows of the moment and never
+            # refreshed, so an ask answered on the phone kept a live-looking row
+            # (and its answerability) until the user collapsed and re-expanded
+            # (round 1: QA Q3 / design D4 — the frame showed "3 open asks" over
+            # the bar's "1 question waiting"). Same rows, same snapshot, one
+            # writer: the two surfaces cannot disagree about the queue.
+            self._ask_list.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
+        if self._ask_card is not None and self._ask_mounted_id is not None:
+            # The CARD's title is derived from the row's STATUS, and a status is
+            # exactly what a snapshot can change under a mounted card (an ask
+            # that times out while its card is open). Re-deriving it here is
+            # what keeps the card from saying "the agent asked and moved on"
+            # over a question the bar has already called timed out (UX U9).
+            row = next(
+                (item for item in self._ask_rows if item.ask_id == self._ask_mounted_id), None
+            )
+            if row is not None:
+                self._ask_card.set_title(self._ask_card_title(row))
+        if self._ask_mounted_id is not None and not any(
+            row.ask_id == self._ask_mounted_id for row in self._ask_rows
+        ):
+            # The mounted ask is gone from the fold. Nothing awaits it here, so
+            # this is a plain collapse — and the chat draft IS restored, because
+            # the user never asked to leave; the surface left them.
+            self._collapse_asks()
+        elif self._ask_mode and not self._ask_rows:
+            # Nothing left to answer at all: a list of zero rows is dead chrome
+            # holding the composer hostage.
+            self._collapse_asks()
+        self._sync_sidebar_asks(
+            len([row for row in self._open_ask_rows() if row.status == STATUS_OPEN])
+        )
+
+    @staticmethod
+    def _ask_now_ms() -> int:
+        """The client's clock, in the unit ``expires_at`` is stated in.
+
+        Passed DOWN to the list rather than read inside it, because the widget
+        is also constructed by tests and captures that want a frozen clock —
+        and because a countdown read at a different instant from the rows it
+        describes is a countdown that can name a deadline the row does not have.
+        (Design D8: before this, ``_now_ms`` was only ever 0, so no expiry ever
+        painted and urgency was carried by hue alone.)
+        """
+        return int(time.time() * 1000)
+
+    def _open_ask_rows(self) -> list[AskRow]:
+        """The rows still waiting on the user: open, or timed out and answerable.
+
+        NOT ``late``, and that is round 1's D6/U3 fix in the second place it
+        had to be made: a late answer is an ANSWER (the agent was told, one
+        deadline too late), so offering it an answer box can only be refused —
+        and the bar counted it as an owed question for as long as it stayed in
+        this list. ``ask_rows`` drops it for the same reason; both gates read
+        the same two statuses.
+        """
+        return [row for row in self._ask_rows if row.status in (STATUS_OPEN, STATUS_TIMED_OUT)]
+
+    @staticmethod
+    def _ask_head_text(rows: list[AskRow]) -> str:
+        """The head question, UNCLIPPED — the bar clips it against its own width.
+
+        The clip used to happen here, at a fixed 48 cells, and that is what
+        design D5/D9 found: a constant cannot know the width the row ends up
+        with, so at 80x24 the copy overflowed its bar and pushed the chevron
+        off the right edge, while at 130 columns it truncated with 38 cells
+        spare. The widget owns the width, so the widget owns the clip (see
+        ``AskBar.render``); this says which question, not how much of it fits.
+        """
+        return rows[0].head_question if rows else ""
+
+    def _queued_ask_session(self) -> Any:
+        """The session the queued-ask OPS act on.
+
+        ``self._session`` is the adopted session, and it is the one a settled
+        ask belongs to; the interaction's facade stands in for the window
+        between boot and adoption, where the dock is already composed and the
+        bar can already be clicked. ``getattr``-guarded rather than asserted
+        because both are legitimately absent in the reduced harnesses the
+        surface tests build.
+        """
+        session = getattr(self, "_session", None)
+        if session is not None:
+            return session
+        interaction = getattr(self, "_interaction", None)
+        return getattr(interaction, "session", None)
+
+    def _sync_sidebar_asks(self, count: int) -> None:
+        """Paint the outstanding-asks mark on the current session's sidebar row.
+
+        Guarded and best-effort like every other sidebar push: the sidebar is
+        optional (``tui.sidebar_visible`` defaults off) and a session with no
+        row in the catalogue is normal, so an absent widget or an unknown id is
+        not an error.
+        """
+        sidebar = getattr(self, "_session_sidebar", None)
+        if sidebar is None:
+            return
+        session_id = str(getattr(self._session, "session_id", "") or "")
+        try:
+            sidebar.set_asking(session_id, count)
+        except Exception:  # noqa: BLE001 — a sidebar never breaks an ask
+            logger.debug("could not paint the sidebar ask mark", exc_info=True)
+
+    def _expand_asks(self, ask_id: str | None = None) -> None:
+        """Enter the EXPANDED state: the list when several are open, else the card.
+
+        ONE ask expands straight to its card, because a one-row list would be a
+        click between the user and the only thing there is to answer. The list
+        exists for the case it is needed in — choosing WHICH of several asks to
+        answer — which is §5.1's "list" and this path's ``ask_id is None``.
+        """
+        if not self._ask_rows:
+            return
+        if ask_id is None and len(self._ask_rows) > 1:
+            self._mount_ask_list()
+            return
+        target = ask_id or self._ask_rows[0].ask_id
+        row = next((item for item in self._ask_rows if item.ask_id == target), None)
+        if row is None:  # pragma: no cover - the id came from this list
+            return
+        self._mount_ask_card(row)
+
+    def _enter_ask_mode(self) -> None:
+        """Flip the composer's routing to the ask, stashing the chat draft.
+
+        The stash is what makes §5.0's invariant true with ONE composer: the
+        conversation draft is held OUT of the buffer the answer is typed into,
+        so no stray Enter can turn it into an answer.
+
+        Called BEFORE the surface is mounted, in both expand paths, because the
+        picker's own ``on_mount`` decides whether to take the caret by asking
+        whether the composer has a draft — and a draft left in the buffer would
+        both hide the ask draft's own row and hand the card the wrong answer.
+        """
+        if self._ask_mode:
+            return
+        editor = self._editor()
+        self._ask_chat_draft = editor.text
+        self._ask_chat_attachments = editor.attachments()
+        if editor.text:
+            editor.load_text("")
+            editor.adopt_attachments({})
+        self._ask_mode = True
+        self._sync_ask_composer()
+        # The chevron is part of the affordance (§5.0 puts it at the bar's right
+        # edge as the collapse control), so the mode change has to reach it in
+        # the same frame as the mount rather than on the next snapshot.
+        self._paint_ask_bar()
+
+    def _clear_ask_surface(self) -> None:
+        """Take the mounted card/list down and FORGET it — mode and drafts stay.
+
+        Split out of :meth:`_collapse_asks` because the swap between the two
+        EXPANDED surfaces (list → card, card → list) is not a change of mode:
+        ask mode stays on, the composer keeps routing to the ask, and the chat
+        draft stays stashed where it was.
+
+        That split is the fix for review round 1's BLOCKER: the swap used to
+        call ``_collapse_asks(restore_draft=False)``, which does not put the
+        stash back and then clears it unconditionally — so expanding the list
+        and picking a row silently destroyed the conversation draft the user
+        had been typing (``_sync_ask_composer`` is where the clear happens).
+        The n>1 path is the one the list exists for, so it was the ordinary
+        path losing the draft.
+        """
+        card = self._ask_card
+        listing = self._ask_list
+        ask_id = self._ask_mounted_id
+        self._ask_card = None
+        self._ask_list = None
+        self._ask_mounted_id = None
+        if card is not None:
+            # Snapshot BEFORE the unmount: this is the ask-side draft (the
+            # free-text row of whichever question was current), and it is kept
+            # rather than discarded, never sent. The card is destroyed by the
+            # removal, so this is the only moment it can be read.
+            if ask_id:
+                try:
+                    self._ask_drafts[ask_id] = card.snapshot_state()
+                except Exception:  # pragma: no cover - defensive, never load-bearing
+                    logger.debug("could not snapshot an ask draft", exc_info=True)
+            self._unmount_prompt(card)
+        if listing is not None:
+            self._unmount_prompt(listing)
+
+    def _collapse_asks(self, *, restore_draft: bool = True) -> None:
+        """Leave the EXPANDED state: take the surface down, give the composer back.
+
+        ``restore_draft=False`` is the session-swap path — see this section's
+        docstring: a switch must drop the surface without writing the previous
+        conversation's text into the incoming composer.
+        """
+        self._clear_ask_surface()
+        # A collapse forgets which surface the user came from, so a later card
+        # opened fresh does not inherit a stale "Esc returns to the list".
+        self._ask_from_list = False
+        if self._ask_mode:
+            self._ask_mode = False
+            self._sync_ask_composer(restore_draft=restore_draft)
+        self._paint_ask_bar()
+
+    def _paint_ask_bar(self) -> None:
+        """Repaint the bar from the current rows — the one place it is written.
+
+        Two counts, deliberately: ``count`` is what the user still OWES (the OPEN
+        asks — "3 questions waiting" must not include one the agent already
+        gave up on), while ``present`` is whether there is anything to open at
+        all. A queue of nothing but timed-out asks is still ANSWERABLE (§5's
+        copy says so on every surface), so hiding the bar on ``count == 0``
+        would make those asks unreachable from the terminal; the bar stays and
+        its copy changes instead.
+        """
+        answerable = self._open_ask_rows()
+        waiting = [row for row in answerable if row.status == STATUS_OPEN]
+        self._ask_bar.set_state(
+            count=len(waiting),
+            head=self._ask_head_text(answerable),
+            expanded=self._ask_mode,
+            urgent=any(row.urgent for row in answerable),
+            # The COUNT of urgent asks, so the row can say "1 urgent" rather
+            # than only turning its glyph amber (design round 2, D13: the hue
+            # was the only channel, and it sat beside a question it did not
+            # describe). Counted over what the user still OWES, the same set
+            # `count` is taken from.
+            urgent_count=len([row for row in waiting if row.urgent]),
+            present=bool(answerable),
+            timed_out=len(answerable) - len(waiting),
+        )
+
+    def _sync_ask_composer(self, *, restore_draft: bool = True) -> None:
+        """Apply the composer's mode: placeholder, draft and focus in one place."""
+        editor = self._editor()
+        if not self._ask_mode:
+            if restore_draft and not editor.text and self._ask_chat_draft:
+                editor.load_text(self._ask_chat_draft)
+                editor.adopt_attachments(self._ask_chat_attachments)
+            # The stash is cleared either way: the composer now OWNS whatever it
+            # shows, and a stash left behind would be restored a second time —
+            # over text the user had typed since — the next time ask mode ended.
+            self._ask_chat_draft = ""
+            self._ask_chat_attachments = {}
+        editor.placeholder = self._composer_placeholder_for(editor)
+        return_focus_to_composer(self, editor)
+
+    def _ask_answer_active(self) -> bool:
+        """Whether the composer is currently the ANSWER box — the ONE condition.
+
+        Read by both the placeholder and the submit router, in place of the two
+        expressions that disagreed in review round 1 (MAJOR-2 / UX U1): the
+        router gated on ``_ask_mode and _ask_card is not None`` while the
+        placeholder gated on ``_ask_mode`` alone, so with the LIST up the
+        composer claimed "Enter sends it to the ask" and Enter sent the text to
+        the conversation instead.
+
+        The CARD is the answer surface, because an answer needs a question and
+        the card is what shows one. The list is a CHOOSER — its own keys pick
+        which ask to answer — so while it is up the composer is an ordinary
+        conversation box and its copy says so. (Its claim on the keyboard is a
+        separate question, answered by ``_focus_is_claimed``.)
+        """
+        return bool(self._ask_mode and self._ask_card is not None)
+
+    def _composer_placeholder_for(self, editor: Any, *, connection: str = "") -> str:
+        """The composer's placeholder for the CURRENT mode — one authority.
+
+        Extracted rather than repeated because the ask's placeholder is the one
+        the user reads to learn where Enter goes, and a second copy of the
+        ladder is how two sites come to disagree about which mode is on — the
+        defect the bang-mode and aside placeholders have each already had to be
+        repaired for.
+
+        NOT quite the one authority the name claims, and this note is the
+        honest version of a comment review round 1 (NIT-6) caught overstating
+        it: the credential arm still writes ``editor.placeholder`` directly
+        (the login prompt's own copy) and two sibling sites restate parts of
+        this ladder. This function owns the MODE ladder; folding those three in
+        is a separate, unrequested change.
+
+        ``connection`` is the sidebar's connection sentence, and only the band
+        path passes one: it is a variant of the RESTING copy ("Draft a
+        message…" while a link is being re-dialled), so it sits below every
+        mode and above the resting invitation.
+        """
+        if editor.read_only:
+            return READ_ONLY_PLACEHOLDER
+        if self._aside_is_open():
+            return ASIDE_PLACEHOLDER
+        if editor.shell_mode:
+            return SHELL_PLACEHOLDER
+        if self._ask_answer_active():
+            return ASK_ANSWER_PLACEHOLDER
+        return "Draft a message…" if connection else editor.resting_placeholder
+
+    def _mount_ask_list(self, highlight: str | None = None) -> None:
+        """Put the open-ask list in the prompt host, replacing any card.
+
+        ``highlight`` names the ask the cursor should start on, which is how a
+        card hands the user back to the row they came from: Escaping a card
+        used to drop them to the ministate with the highlight reset to row 1,
+        so with three asks they had to re-expand and re-hunt (UX round 1, U6).
+        """
+        # `_clear_ask_surface` and NOT `_collapse_asks`: the swap keeps ask mode
+        # on and the stash intact (review round 1, BLOCKER-1).
+        self._clear_ask_surface()
+        widget = AskQueueList(self._ask_rows, widget_id="ask-queue-list", now_ms=self._ask_now_ms())
+        if highlight:
+            widget.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
+            for index, item in enumerate(self._ask_rows):
+                if item.ask_id == highlight:
+                    widget.select(index)
+                    break
+        self._ask_list = widget
+        self._enter_ask_mode()
+        self._mount_prompt(widget)
+        # The list owns its own keys (arrows, Enter, d, x), so it must take the
+        # caret — the composer was focused by `_enter_ask_mode`, which is right
+        # for the CARD (the answer is typed there) and wrong here.
+        widget.focus()
+
+    def _mount_ask_card(self, row: AskRow, *, from_list: bool = False) -> None:
+        """Mount the picker for ONE queued ask, wired to the queue, not a future.
+
+        ``on_settle`` is bound to the ASK rather than to the card, and that is
+        the whole difference from the blocking path: the app is not resolving a
+        parked future, it is writing an answer onto a durable row.
+
+        ``from_list`` records that the user picked this ask OUT of the list, so
+        Escaping the card can hand them back to the list they were working in
+        rather than all the way out (UX round 1, U6). It is interaction state
+        about one surface, so it lives beside the surface fields and is cleared
+        by every collapse.
+        """
+        from local_operator.harness.types import AskQuestion
+
+        # `_clear_ask_surface` and NOT `_collapse_asks`: see `_mount_ask_list`.
+        self._clear_ask_surface()
+        try:
+            questions = [AskQuestion.model_validate(dict(q)) for q in row.questions]
+        except Exception:  # noqa: BLE001 - a malformed row must not break the dock
+            logger.warning("ask %s carries questions this surface cannot draw", row.ask_id)
+            self._system_notice(
+                "that question cannot be shown here — answer it from another surface",
+                "warning",
+            )
+            self._abandon_ask_surface()
+            return
+        if not questions:
+            self._abandon_ask_surface()
+            return
+        card = AskPickerScreen(
+            questions,
+            lambda answers, ask_id=row.ask_id: self._on_queue_ask_settle(ask_id, answers),
+            widget_id=f"ask-queue-card-{row.ask_id}",
+            title=self._ask_card_title(row),
+            exit_hint=("esc", "collapse"),
+        )
+        draft = self._ask_drafts.pop(row.ask_id, None)
+        self._ask_card = card
+        self._ask_mounted_id = row.ask_id
+        self._ask_from_list = from_list
+        self._enter_ask_mode()
+        self._mount_prompt(card)
+        if draft is not None:
+            # AFTER the mount (the card must be composed before it can restore)
+            # and guarded: a snapshot whose question ids no longer match the ask
+            # is stale (the ask was re-asked), and `restore_state` already
+            # refuses that case by returning early.
+            try:
+                card.restore_state(draft)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("could not restore an ask draft", exc_info=True)
+
+    def _abandon_ask_surface(self) -> None:
+        """Give up on mounting a card without leaving ask mode stranded.
+
+        A card that cannot be built (a malformed row, a row with no questions)
+        bails out AFTER the previous surface was cleared, so without this the app
+        stayed in ask mode with nothing mounted: the bar kept painting
+        "collapse" over a surface that was not there, and Enter routed into an
+        answer box the user could not see (review round 2, MINOR-3).
+        """
+        if self._ask_card is None and self._ask_list is None:
+            self._collapse_asks()
+
+    @staticmethod
+    def _ask_card_title(row: AskRow) -> str:
+        """What the card says above the questions — honest about the agent.
+
+        Design round 1 (D1, blocker) flagged the old string, "the agent is
+        waiting for an answer": in the queued model the tool returned a receipt
+        and the agent MOVED ON, so a card claiming it is waiting misstates both
+        the machine's state and the cost of delay (§5: "no surface may say
+        'notified' it cannot substantiate; agent-is-working ≠ waiting for you").
+        The timeout case says what is true for it (UX U9: the card kept the
+        waiting line after its own bar said "timed out").
+
+        The `?` mark is the ask family's glyph (``ASK_MARKER``), so the card
+        announces itself in the same register as the bar and the sidebar mark
+        instead of in a second one (design D10).
+        """
+        from local_operator.tui.widgets.ask_queue import ASK_MARKER
+
+        if row.status == STATUS_TIMED_OUT:
+            return (
+                f"{ASK_MARKER} this ask timed out — the agent moved on; "
+                "your answer still reaches it"
+            )
+        return f"{ASK_MARKER} the agent asked and moved on — your answer still reaches it"
+
+    def _on_queue_ask_settle(self, ask_id: str, answers: dict[str, list[str]] | None) -> None:
+        """The queued picker settled — submit a complete answer, else collapse.
+
+        This is where the two settle routes are told apart, and the CARD is what
+        tells us which one happened: it resolves with the whole map when the
+        user answered the last question, and with a PARTIAL map when they
+        Escaped mid-walk. §5.0's D5 makes Escape a collapse — the ask stays
+        open — so a partial map is never submitted. ``respond`` would refuse it
+        anyway (the row is terminal, and a lost key would lose that question for
+        good), but a refusal copy on a plain Escape would read as a failure when
+        the user was merely closing the card.
+        """
+        row = next((item for item in self._ask_rows if item.ask_id == ask_id), None)
+        expected = {str(q.get("id") or "") for q in (row.questions if row else ())}
+        submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
+        if submitted:
+            session = self._queued_ask_session()
+            reader: Any = getattr(session, "respond_ask", None)
+            if callable(reader):
+                try:
+                    outcome: Any = reader(ask_id, answers or {}, by="terminal")
+                except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+                    logger.warning("could not deliver a queued answer", exc_info=True)
+                    outcome = {"ok": False, "error": "the answer could not be delivered"}
+                self._handle_ask_outcome(outcome, toast=False)
+            self._ask_drafts.pop(ask_id, None)
+        elif self._ask_from_list and self._ask_list is None:
+            # A PARTIAL map means the user Escaped mid-walk (§5.0/D5: a
+            # back-out is never an answer). If they picked this ask out of the
+            # list, the back-out returns them TO the list they were choosing
+            # in, at the row they left — collapsing to minimized made them
+            # re-expand and re-hunt for their place (UX round 1, U6).
+            self._clear_ask_surface()
+            if self._ask_rows:
+                self._mount_ask_list(highlight=ask_id)
+            else:  # pragma: no cover - the fold emptied under the card
+                self._collapse_asks()
+            return
+        # A submit collapses too: §5.0's "answering one collapses the surface
+        # (TUI, which returns to work)". The card is already settled, so the
+        # collapse only has to take it down and give the composer back.
+        self._collapse_asks()
+
+    def _submit_ask_answer(self, text: str) -> None:
+        """Route a composer submission into the expanded queued ask.
+
+        The one place the composer's text becomes an answer, so the channel the
+        routing rule draws — chat while minimized, the ask while expanded —
+        has exactly one door. Called from `on_editor_submitted` after the
+        mode's own branches; see there for why it is not also a history entry.
+        """
+        card = self._ask_card
+        if card is None:
+            return
+        if text:
+            card.answer_current([text])
+        else:
+            card.action_accept()
+
+    def _decline_ask(self, ask_id: str) -> None:
+        """Decline a queued ask explicitly — today's Esc, made an action (§D5)."""
+        session = self._queued_ask_session()
+        # THE RESULT is annotated, not the callable, and that is the whole
+        # subtlety: ``callable()`` is a TypeGuard for ``Callable[..., object]``,
+        # so narrowing an untyped attribute through it makes the call return
+        # ``object`` and the ``error`` key unreadable to the checker. The same
+        # shape (and the same note) as ``AskQueue._secret_answer_lost``'s
+        # probed callable.
+        reader: Any = getattr(session, "decline_ask", None)
+        if not callable(reader):
+            return
+        outcome: Any = reader(ask_id, by="terminal")
+        self._handle_ask_outcome(outcome, toast=True)
+
+    def _handle_ask_outcome(self, outcome: Any, *, toast: bool) -> None:
+        """Report a queued-ask op's verdict, whether it arrived sync or on the wire.
+
+        The three ops the surfaces drive are read off whichever session holds
+        the ask, and there are two kinds of holder: the OWNER, whose ops are
+        synchronous and return the verdict dict, and a VIEWER (``AttachedSession``),
+        whose ops cross the wire and are therefore ``async``. Ignoring the second
+        kind is how this surface used to work on a viewer and silently do
+        NOTHING — the probe returned ``None``, the ``callable`` check declined,
+        and the row looked answered (QA round 4, Q1; the same shape the
+        viewer-protocol guard exists to catch).
+
+        The awaitable rides a worker rather than blocking the key: the desktop
+        is not the owner, so a refusal that comes back has to arrive as a
+        notice, exactly as the owner's does.
+        """
+        if inspect.isawaitable(outcome):
+            self.run_worker(
+                self._await_ask_outcome(outcome, toast=toast),
+                exclusive=False,
+                exit_on_error=False,
+            )
+            return
+        self._ask_refusal(outcome, toast=toast)
+
+    async def _await_ask_outcome(self, pending: Any, *, toast: bool) -> None:
+        """Await a viewer's ask op and report it in the owner's words."""
+        try:
+            outcome = await pending
+        except Exception as exc:  # noqa: BLE001 — a dead transport is not a lost answer
+            logger.warning("a queued-ask op failed on the wire", exc_info=True)
+            outcome = {"ok": False, "error": str(exc) or "the ask was refused"}
+        self._ask_refusal(outcome, toast=toast)
+
+    def _ask_refusal(self, outcome: Any, *, toast: bool) -> None:
+        """The one place a refused ask op becomes words on screen."""
+        if outcome.get("ok"):
+            return
+        text = str(outcome.get("error") or "the ask was refused")
+        if toast:
+            self._ask_gesture_refusal(text)
+        else:
+            self._system_notice(text, "warning")
+
+    def _ask_gesture_refusal(self, text: str) -> None:
+        """Report a refused `d`/`x` where the gesture happened, not in the transcript.
+
+        The refusal is correct and well-worded, but it used to land in the
+        transcript — which is scrolled away while the dock has the user's
+        attention, so the row looked like it had simply ignored the key (UX
+        round 1, U8). A toast is the same surface the picker's own refusals use,
+        and a stripped harness with no toast falls back to the notice.
+        """
+        try:
+            self.query_one(Toast).show(text, duration_ms=TOAST_FAILURE_MS)
+        except Exception:  # noqa: BLE001 — no toast in this harness; still say it
+            self._system_notice(text, "warning")
+
+    def _dismiss_ask(self, ask_id: str) -> None:
+        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+        session = self._queued_ask_session()
+        reader: Any = getattr(session, "dismiss_ask", None)
+        if not callable(reader):
+            return
+        outcome: Any = reader(ask_id, by="terminal")
+        self._handle_ask_outcome(outcome, toast=True)
+
+    def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
+        """A click or Enter on the minimized bar: expand, or collapse if already up."""
+        message.stop()
+        if self._ask_mode:
+            self._collapse_asks()
+        else:
+            self._expand_asks()
+
+    def on_ask_queue_list_picked(self, message: AskQueueList.Picked) -> None:
+        """Enter on a list row: mount that ask's card, which takes the keyboard."""
+        message.stop()
+        row = next((item for item in self._ask_rows if item.ask_id == message.ask_id), None)
+        if row is not None:
+            self._mount_ask_card(row, from_list=True)
+
+    def on_ask_queue_list_collapse(self, message: AskQueueList.Collapse) -> None:
+        message.stop()
+        self._collapse_asks()
+
+    def on_ask_queue_list_decline(self, message: AskQueueList.Decline) -> None:
+        message.stop()
+        self._decline_ask(message.ask_id)
+
+    def on_ask_queue_list_dismiss(self, message: AskQueueList.Dismiss) -> None:
+        message.stop()
+        self._dismiss_ask(message.ask_id)
 
     def _notify_mobile_title(self, name: str) -> None:
         """Push a title (generated, renamed, or provisional) to the phone.
@@ -32171,6 +33097,7 @@ class OperatorApp(App[None]):
                     jobs=jobs,
                     selected_job=selected_job,
                     children_counts=children_counts,
+                    role_display=self._agent_role_display,
                 )
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
@@ -32517,6 +33444,7 @@ class OperatorApp(App[None]):
                 self._session,
                 jobs=scoped_jobs,
                 children_counts=self._subagent_child_counts(scoped_jobs),
+                role_display=self._agent_role_display,
             )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
@@ -32711,7 +33639,7 @@ class OperatorApp(App[None]):
         # pane that fills in a tick later (a visible reflow).
         view.load(
             teams=self._settings_team_rows(),
-            agents=self._agent_profile_rows(),
+            agents=self._settings_agent_rows(),
             providers=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
@@ -32763,6 +33691,26 @@ class OperatorApp(App[None]):
                 rows.append((display, facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: team rows unavailable", exc_info=True)
+        return rows
+
+    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+        """Agents as ``(display, facts, summary)`` for the settings pane.
+
+        The SAME shape ``_settings_team_rows`` returns, so the pane renders
+        both listings through one row renderer rather than carrying a second
+        layout for a second registry. The display form is UNBOUNDED here
+        (mirroring the team pane): the pane truncates cells itself and the
+        composed form is what a reader compares against the picker. Never
+        raises: a broken registry renders as an empty list, and a settings
+        page that crashed on a bad row would be unreachable exactly when it is
+        needed.
+        """
+        rows: list[tuple[str, str, str]] = []
+        try:
+            for name, label, facts, summary in self._agent_profile_rows():
+                rows.append((self._agent_display_form(name, label), facts, summary))
+        except Exception:  # noqa: BLE001 — a bad registry must not break the page
+            logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
     def _settings_provider_rows(self) -> list[tuple[str, str]]:
@@ -32951,6 +33899,10 @@ class OperatorApp(App[None]):
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
         page = ProjectsView()
+        # The manager row is injected, never derived by the page (P5a): only
+        # the app can read the registry, and a page that guessed would offer a
+        # target nobody answers to.
+        page.set_manager_target(self._projects_manager_target())
         self._projects_view = page
         self._transcript_view().display = False
         self.screen.mount(page, before=self.query_one("#input-dock"))
@@ -32974,6 +33926,10 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+        # The start picker's rows ride the same seed (P5b): the page never reads
+        # a registry, so the host hands them over while it is still building the
+        # first frame rather than on the keypress that opens the card.
+        page.set_start_rows(self._start_picker_rows())
 
     def _close_projects_view(self) -> bool:
         """Leave the projects mode and put the conversation back. True if open.
@@ -32995,6 +33951,7 @@ class OperatorApp(App[None]):
         # still be mounted underneath this one.
         self._sync_boot_layout_class()
         self._sync_boot_layout()
+        self._set_projects_strip(None)
         self._set_composer_read_only(False)
         restore = self._projects_focus_restore
         self._projects_focus_restore = None
@@ -33070,6 +34027,41 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+        view.set_start_rows(self._start_picker_rows())
+
+    def _start_picker_rows(self) -> list[StartTarget]:
+        """The start picker's rows, from the SAME catalogues the desktop pane reads.
+
+        ``team_catalogue``/``profile_catalogue`` are the desktop new-chat
+        picker's own two projections, so the TUI and the pane offer one list of
+        teams and agents rather than two that drift — and the names they carry
+        are the ADDRESSING keys ``validate_target`` resolves, which is what the
+        create body and the session's attachment sidecar both need.
+
+        Never raises: an unreadable registry degrades to an empty catalogue, and
+        the card then says so (`no teams registered`) with the plain row still
+        offered — the honest reading of an install that has none.
+        """
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        teams: list[Any] = []
+        agents: list[Any] = []
+        try:
+            from local_operator.server.utils.desktop_profiles import team_catalogue
+            from local_operator.teams import TeamRegistry
+
+            teams = team_catalogue(TeamRegistry(root))
+        except Exception:  # noqa: BLE001 — a picker is not a place to crash
+            logger.debug("projects: could not read the team catalogue", exc_info=True)
+        try:
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import profile_catalogue
+
+            agents = profile_catalogue(AgentRegistry(root))
+        except Exception:  # noqa: BLE001 — same
+            logger.debug("projects: could not read the agent catalogue", exc_info=True)
+        return start_targets(teams=teams, agents=agents)
 
     def on_projects_view_attachment_opened(self, message: ProjectsViewAttachmentOpened) -> None:
         """`↵` on an attachment row: hand the copied file to the OS (spec §7.4).
@@ -33123,6 +34115,121 @@ class OperatorApp(App[None]):
             # on themselves — the rule the link-opener's receipt states.
             view.show_notice(f"could not open {name} — the path is {path}")
 
+    def on_projects_view_attachment_copied(self, message: ProjectsViewAttachmentCopied) -> None:
+        """`y` on an attachment row: put the stored path on the clipboard (§7.4).
+
+        The app's OWN clipboard core (``copy_to_clipboard``, the OSC 52 write the
+        `/copy` picker uses), so the page adds no second way to reach the
+        clipboard — and the receipt names the FILE rather than echoing the path,
+        because the path is the thing the reader has just put somewhere they can
+        see it. No clipboard at all is not a case to invent here: the write is
+        the same one every other copy affordance makes.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        if not message.path:
+            view.show_notice(f"'{message.name}' has no stored path to copy")
+            return
+        self.copy_to_clipboard(message.path)
+        # The receipt names the STORED copy, because that is the name the
+        # clipboard's path ends in: a reader pasting it into a shell or a
+        # report gets `<hash>.png`, and a receipt saying only `copied the path
+        # to board.png` names a file they will not find (UX review round 1,
+        # U3).
+        view.show_notice(f"copied the stored copy's path for {message.name}")
+
+    def on_projects_view_attachment_preview_requested(
+        self, message: ProjectsViewAttachmentPreviewRequested
+    ) -> None:
+        """`space` on an image attachment: read the copy, show the pixels (§7.4).
+
+        The page cannot read a file, so this is the host half of the handshake:
+        the bytes are read off the UI loop (a worker thread, bounded — a stored
+        copy is at most 5 MB, so only a stalled mount can be slow) and then
+        handed back through ``show_attachment_preview``. The in-flight line goes
+        up first because the read is a real await, and it is CLEARED on success
+        rather than replaced: the picture is its own receipt. A read that
+        answers ``None`` states that sentence and changes nothing else — the
+        row stays exactly as it was, which is the opener's own contract.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        path = message.path
+        if not path:
+            view.attachment_preview_failed(path=path)
+            view.show_notice(f"'{message.name}' has no stored path to preview")
+            return
+        from pathlib import Path
+
+        if not Path(path).exists():
+            # Every refusal below must ALSO clear the in-flight mark the page
+            # set when it asked: a path left pending turns the next `space` on
+            # that row into a cancel (agent review round 1, M2).
+            view.attachment_preview_failed(path=path)
+            view.show_notice(
+                f"{message.name} is missing on disk — its stored copy was moved or deleted"
+            )
+            return
+        view.show_notice(f"reading {message.name}…")
+        self.run_worker(
+            self._preview_attachment(message.name, path, message.project_name),
+            group="preview-attachment",
+        )
+
+    async def _preview_attachment(self, name: str, path: str, project_name: str) -> None:
+        """The off-loop half of the preview read (spec §7.4, staged part).
+
+        ``answered`` is what the page's in-flight mark turns on: every exit
+        that does not hand a payload back must drop it, or the path stays
+        pending and the NEXT `space` on that row is read as a cancel — a lit
+        key answering the opposite of what it says. The reader's own contract
+        (``read_for_preview`` answers ``None`` rather than raising) is honoured
+        one level in: an exception is a bug in the read, not something to
+        crash the worker with, so it is logged and answered with the honest
+        sentence — and the ``finally`` covers the exits nobody planned for
+        (agent review round 2, N1).
+        """
+        from local_operator.tui.attachments import read_for_preview
+
+        answered = False
+        try:
+            try:
+                payload = await read_for_preview(path)
+            except Exception:  # noqa: BLE001 — see the docstring: answer, do not raise
+                logger.debug("attachment preview read raised", exc_info=True)
+                payload = None
+            view = self._projects_view
+            if view is None:
+                return
+            if payload is None:
+                view.attachment_preview_failed(path=path)
+                # The sentence names the FACT and nothing else: the earlier
+                # `… the path is <path>` overflowed the footer at every width and
+                # its prefix cut left a plausible-looking but invalid path, while
+                # the path row above already carries the file (design review round
+                # 1, D2).
+                view.show_notice(f"could not read {name} — the stored copy is unreadable")
+                return
+            data_b64, mime_type = payload
+            view.show_attachment_preview(
+                path=path,
+                data_b64=data_b64,
+                mime_type=mime_type,
+                project_name=project_name,
+            )
+            answered = True
+            # The picture is the receipt; the in-flight line must not outlive it.
+            view.show_notice("")
+        finally:
+            if not answered:
+                view = self._projects_view
+                if view is not None:
+                    view.attachment_preview_failed(path=path)
+
     def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
         """`↵` on a milestone row: flip completion through the store, re-show.
 
@@ -33165,6 +34272,597 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+
+    def _projects_manager_target(self) -> SendTarget | None:
+        """This session's MANAGER, when it has one (P5a, spec §7.5.1).
+
+        Resolved the way peer-send resolves the parent: walk the process
+        ancestry (bounded by ``_ANCESTRY_MAX_HOPS``) and take the first hop
+        that IS a live session record. In a lop team the manager is the session
+        that spawned this one, so the first recorded ancestor is it; when
+        nothing resolves, the row is ABSENT rather than dead — a row nobody
+        answers to is worse than no row at all.
+        """
+        from local_operator.mobile import peer_send
+
+        pid = os.getpid()
+        for _ in range(peer_send._ANCESTRY_MAX_HOPS):
+            parent = peer_send._parent_pid(pid)
+            if not parent or parent <= 1:
+                return None
+            pid = parent
+            record = peer_send._record_for_pid(pid)
+            if record is None:
+                continue
+            session_id = str(getattr(record, "session_id", "") or "")
+            if not session_id or session_id == self._own_session_id():
+                continue
+            name = str(getattr(record, "conversation_name", "") or "") or "manager"
+            return SendTarget(
+                kind="manager",
+                session_id=session_id,
+                label=name,
+                state="live",
+                live=True,
+            )
+        return None
+
+    def on_projects_view_compose_changed(self, message: ProjectsViewComposeChanged) -> None:
+        """Give the composer to the page, or take it back (P5a, spec §7.5.2).
+
+        The dock belongs to the APP, so compose mode is entered and left here:
+        the page reports which target it is writing to and the app is the only
+        side that can reach the composer. The recipient strip REPLACES the
+        resting placeholder, so the dock keeps one voice about what the next
+        submit will do.
+        """
+        message.stop()
+        target = message.target
+        if target is None:
+            self._set_projects_strip(None)
+            self._set_composer_read_only(True)
+            return
+        self._set_composer_read_only(False)
+        try:
+            editor = self._editor()
+        except Exception:
+            return  # a stripped harness with no composer
+        # The recipient line lives on the STRIP, not the editor placeholder
+        # (D6): the placeholder vanishes the moment the reader types, which is
+        # exactly when the strip matters most.
+        self._set_projects_strip(compose_band(target))
+        try:
+            # Focus is what makes it a composer rather than a picture of one;
+            # the caret is what the reader aims at.
+            editor.focus()
+        except Exception:
+            pass
+
+    def on_projects_view_start_requested(self, message: ProjectsViewStartRequested) -> None:
+        """`s` picked a row: boot a session for the project and hand off (P5b).
+
+        The whole flow runs in ONE worker, off the loop, because every step is
+        disk or process work: the create writes the session directory and its
+        attachment sidecar, the engage spawns a detached runtime, and the link
+        edits the project store. The card is told it is pending BEFORE the
+        worker's first await, so the surface says what is happening during the
+        seconds a runtime spawn takes.
+
+        FAILURE IS ANSWERED IN THE CARD, and the page never switches: a refusal
+        sentence with the rows still up leaves the reader exactly where they
+        asked, able to pick another row or close. Nothing about the page's
+        state changes on a failed start.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        view.start_pending()
+        # NOT exclusive: an exclusive worker cancels its group's other members,
+        # and the group here is the app's default one — an in-flight quick-send
+        # or engine worker is nobody's business to cancel. The card's own
+        # pending state is what refuses a second start (the sibling send
+        # handler's choice, one surface over).
+        self.run_worker(
+            self._start_project_session_worker(
+                view.start_refusal,
+                lambda: view.start_cancelled,
+                view.show_notice,
+                message.project_id,
+                message.target,
+            ),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _start_project_session_worker(
+        self,
+        refuse: Any,
+        view_cancelled: Any,
+        announce: Any,
+        project_id: str,
+        target: StartTarget,
+    ) -> None:
+        """Create → link → kick off → hand off, in that order and no other.
+
+        THE ORDER IS THE CONTRACT. The desktop create core writes the session
+        directory AND its attachment sidecar, so the team/agent the row names is
+        already in the facts the session LOADS before any runtime exists for it
+        — engaging first would boot a session that resolves its own default and
+        then belong to nobody in particular. The link follows the create because
+        it needs the id the create mints, and the appeal is made before the
+        hand-off so a refusal leaves the reader on the page they asked from.
+
+        ``announce`` is the PAGE's notice row (`show_notice`), the channel this
+        card's other outcomes already use: the transcript copy of the cancelled
+        receipt stays (it is the durable record), but the reader who just
+        escaped an impatient start is standing on the projects page, and a
+        sentence behind it is a sentence nobody reads (UX review round 2, U12).
+
+        The kickoff prompt is the spec's sentence plus the `@project:<name>`
+        reference (§7.6.3), expanded HERE through the app's own resolver: the
+        errand path bypasses the composer, so nothing downstream would expand it,
+        and the reference is what carries the project's title, status,
+        description, progress, milestones and todos into the new session as the
+        snapshot block rather than as a bare sentence.
+
+        ``view_cancelled`` answers whether the reader dismissed the card while
+        this ran; when they did, the session still stands and the hand-off does
+        not (agent review round 1, F5).
+        """
+        registry = self._project_registry()
+        project = None
+        if registry is not None:
+            try:
+                project = await asyncio.to_thread(registry.get_project, project_id)
+            except Exception:  # noqa: BLE001 — the page's own read failed
+                project = None
+        if project is None:
+            refuse("could not start a session: the project is no longer in the store")
+            return
+
+        # THE APP'S OWN ANSWER for "the directory this session works in"
+        # (agent review round 1, F7): identical to `os.getcwd()` for a local
+        # session and correct for an attached one, which is the case the fork
+        # path already opens a child in (app.py's `action_fork_aside`). It
+        # feeds BOTH the create's cwd and the `@project:` expansion, so the two
+        # cannot come from different directories.
+        cwd = self.session_cwd()
+        try:
+            session_id = await self._create_project_session(cwd, target)
+        except KeyError:
+            # The create core validates the target through the registries and
+            # answers an unknown name with a bare ``KeyError`` (its own
+            # contract, shared with the HTTP route). A bare `'ghost'` is not a
+            # sentence, so the row's own words are used instead.
+            refuse(f"could not start a session: no {target.kind} named '{target.name}'")
+            return
+        except Exception as error:  # noqa: BLE001 — every refusal is the reader's
+            refuse(f"could not start a session: {error}")
+            return
+
+        linked = True
+        link_reason = ""
+        try:
+            linked, link_reason = await asyncio.to_thread(
+                self._link_started_session, registry, project_id, session_id
+            )
+        except Exception as error:  # noqa: BLE001 — reported, never swallowed
+            linked, link_reason = False, str(error)
+
+        # ESC MEANS NO, AND THE READER'S ESC OUTRANKS EVERY REMAINING STEP
+        # (agent review round 1, F5 / UX: reproduced — `esc` on `starting
+        # session …` closed the card and the app switched into the new session
+        # anyway). The check sits BEFORE the kickoff as well as before the
+        # hand-off, because both are things done on the reader's behalf: the
+        # create is durable and the session stands — the link follows, since it
+        # costs nothing and makes the session useful — but a cancelled start
+        # sends no turn, takes nobody anywhere, and reports the id and the way
+        # in instead.
+        def cancelled() -> bool:
+            return bool(view_cancelled())
+
+        def receipt() -> None:
+            # THE PAGE GETS THE ACTION, THE TRANSCRIPT GETS THE STORY (QA round 3,
+            # Q5). The full sentence names the project as well, which makes it 81
+            # cells with a two-word name — and the page's footer is 56 cells at
+            # 60×24, where it was ellipsised mid-word (`…; /re…`): the reader who
+            # had just escaped an impatient start could see the id but not the
+            # command that opens it. So the page's copy is the ACTION, and it is
+            # short enough to survive the narrowest footer this card can be read
+            # on; the durable transcript copy keeps the project name.
+            announce(f"started {session_id} · /resume {session_id} opens it")
+            self._notice(
+                f"started {session_id} — it is linked to {project.name}; "
+                f"/resume {session_id} opens it",
+                "info",
+            )
+
+        if cancelled():
+            receipt()
+            return
+
+        try:
+            await self._kick_off_project_session(session_id, cwd, project)
+        except Exception as error:  # noqa: BLE001 — reported, never swallowed
+            # The session exists and is linked; only the first turn did not
+            # land. Say so, name the id, and do NOT switch: the reader can
+            # resume it themselves and nothing is half-created in the page.
+            refuse(
+                f"the session {session_id} was created and linked, but its first "
+                f"message did not send: {error} — /resume {session_id} opens it"
+            )
+            return
+
+        if not linked:
+            # The store's own cap/refusal, named with the route that fixes it.
+            # The session is real and engaged, so the hand-off still happens —
+            # refusing now would strand a working session the reader asked for.
+            self._notice(
+                f"started {session_id}, but it could not be linked to the project: "
+                f"{link_reason} — /project link adds it",
+                "warning",
+            )
+
+        if cancelled():
+            receipt()
+            return
+
+        # THE HAND-OFF IS THE APP'S OWN: `_resume_session` is exactly what
+        # `/resume` and the sidebar's pick use (the remote-owner guard, the
+        # attach, the full reboot) — one way to change sessions, never two. The
+        # page closes first, exactly as the `↵`-to-conversation jump does
+        # (`on_projects_view_jump_requested`): a mode that hides the transcript
+        # must be gone before the conversation it hid comes back.
+        self._close_projects_view()
+        self._resume_session(session_id, self._notice)
+
+    async def _create_project_session(self, cwd: str, target: StartTarget) -> str:
+        """Mint and materialise the session through the DESKTOP create core.
+
+        ``DesktopSessions.create`` is the callable behind
+        ``POST /v1/desktop/sessions`` — the same path the pane's new-chat uses —
+        and it is reached here rather than re-implemented because it is the code
+        that owns the invariants: the target validated through the registries,
+        the attachment sidecar written and read back before the marker is
+        published, and the directory created exclusively. A second writer of
+        those facts is how the TUI's new session and the pane's would come to
+        disagree about what "born as team X" means.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+        body: dict[str, str] | None = None
+        if target.kind in ("team", "agent") and target.name:
+            body = {"kind": target.kind, "name": target.name}
+        return await DesktopSessions(config_dir()).create(cwd, target=body)
+
+    def _link_started_session(
+        self, registry: Any, project_id: str, session_id: str
+    ) -> tuple[bool, str]:
+        """Auto-link the new session to the project as a WORKING link.
+
+        Working, never coordination. The CoS exemption P4 established marks a
+        session that FILED the project without working on it — the chief of
+        staff's own create-time filing — and it exists so a filing is not read
+        as work in progress. A session this picker started exists to work on
+        the project, so it is the link the exemption is the exception TO; the
+        role list has no third value and inventing one here would be the
+        second vocabulary the store's validator exists to forbid.
+
+        Returns ``(linked, reason)``: the store's cap refusal (64 links) is a
+        sentence to show, never an exception thrown at the reader.
+        """
+        try:
+            registry.link_session(project_id, session_id, role="work")
+        except ValueError as refusal:
+            return False, str(refusal)
+        return True, ""
+
+    async def _kick_off_project_session(self, session_id: str, cwd: str, project: Any) -> None:
+        """Deliver the kickoff prompt through the runtime engagement path."""
+        from local_operator.paths import config_dir
+        from local_operator.references import expand_references
+        from local_operator.session.runtime.launch import PromptErrand, engage_runtime
+
+        name = str(getattr(project, "name", "") or "")
+        text = f"review the project details and continue @project:{name}"
+
+        async def _decline(tool_name: str, description: str) -> bool:
+            # The project block is a store read, not a file read, so the gate is
+            # never consulted for it; declining is the honest policy for a
+            # surface with no interactive approval channel (the aside's rule).
+            return False
+
+        result = await expand_references(text, cwd, request_approval=_decline)
+        await engage_runtime(
+            session_id,
+            cwd,
+            PromptErrand(result.sent),
+            config_dir=config_dir(),
+        )
+
+    def on_projects_view_send_requested(self, message: ProjectsViewSendRequested) -> None:
+        """Deliver one quick-send off the loop (P5a, spec §7.5.3).
+
+        The SAME core the `send` tool uses — resolution, the body validator and
+        `deliver_peer_message_outcome` — and no second send path, which is what
+        keeps the two from disagreeing about what "sent" means. The in-flight
+        statement is painted HERE, before the worker's first await: the draft
+        vanished on submit, and without this the surface said nothing at all
+        while a delivery took its seconds (UX U2).
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        # N1 (UX round 2): ONE sentence, in the strip. Submit used to paint the
+        # in-flight line on the page's notice row AND in the strip, so the reader
+        # saw `sending to ◆ …` twice on two adjacent rows for the whole window.
+        # The strip is the composer's own surface and keeps it; the notice row is
+        # CLEARED instead — a previous send's verdict must never stand beside a
+        # new attempt (R2-2), and with nothing to say the footer falls back to
+        # the project detail.
+        view.show_notice("")
+        if view.composing:
+            self._set_projects_strip(pending_line(message.target))
+        self.run_worker(
+            self._quick_send_worker(view, message.target, message.text),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _quick_send_worker(self, view: ProjectsView, target: SendTarget, text: str) -> None:
+        """Resolve, validate, deliver — and report the outcome as a VALUE.
+
+        `mailbox`/`unconfirmed` are honest amber states, not failures, so the
+        receipt is read off `DeliveryOutcome` rather than derived from an
+        exception type; only `RuntimeError` means the peer REFUSED before
+        anything was minted, and only `is_error` is painted as a refusal.
+
+        The receipt's ROUTE follows the outcome class (agent review F4): a
+        DELIVERED send acknowledges in the composer's band (the submit cleared
+        the editor, so the strip is what the reader is looking at), while every
+        other outcome — amber, refused, resolver failure — keeps the DRAFT and
+        speaks on the page's notice row, so the reader can fix and retry
+        without retyping (Q5). Sentences are built from the app's human words
+        (`state_word`) with the target named the way the band named it, never
+        a lone session id (U3).
+        """
+        from local_operator.mobile import peer_send
+
+        sender: dict[str, object] = {}
+        try:
+            sender = await peer_send.peer_sender_identity_async(os.getpid())
+        except Exception:  # noqa: BLE001 — identity is advisory, never blocks
+            sender = {}
+        if not sender:
+            # The reduced-host fallback: the card still has to name somebody.
+            sender = {"session_id": self._own_session_id()}
+        body_error = peer_send.validate_peer_body(text)
+        if body_error:
+            self._quick_send_settled(view, target, body_error, text)
+            return
+        try:
+            record, _candidates, error = await asyncio.to_thread(
+                peer_send.resolve_peer_target,
+                target=None,
+                pid=None,
+                session=target.session_id,
+                pid_hint="a pid",
+                session_hint="a session id",
+                # NO `include_wedged`: that flag is the KILL SWITCH's (the
+                # resolver's own doc: "a send never wants that"), and every
+                # other send path resolves live-only. A wedged row stays
+                # visible and warned in the card, but picking it refuses with
+                # the resolver's own sentence rather than dialling hopefully
+                # (agent review round 1, F6).
+                require_started=True,
+            )
+        except Exception:  # noqa: BLE001 — the resolver owns its refusal
+            # An UNEXPECTED fault on the resolve path is this end's problem, not
+            # the reader's: interpreter text in the notice row reads as a broken
+            # app (UX round 2, U3 — measured: "cannot unpack non-iterable
+            # coroutine object"). The sentence is human; the exception goes to
+            # the log.
+            logger.warning("quick-send resolve failed", exc_info=True)
+            self._quick_send_settled(
+                view,
+                target,
+                SEND_FAULT_NOTICE,
+                text,
+            )
+            return
+        if record is None:
+            self._quick_send_settled(
+                view,
+                target,
+                error_notice(error or "the session is no longer available"),
+                text,
+            )
+            return
+        if record.pid == os.getpid():
+            self._quick_send_settled(
+                view, target, error_notice("that target is this session"), text
+            )
+            return
+        try:
+            outcome = await peer_send.deliver_peer_message_outcome(
+                record,
+                session_id=str(getattr(record, "session_id", "") or target.session_id),
+                text=text,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+            )
+        except RuntimeError as exc:
+            # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
+            self._quick_send_settled(view, target, error_notice(str(exc)), text)
+            return
+        except (ConnectionError, OSError, ValueError):
+            # Unclassifiable transport fault: honest, never the confident arm —
+            # and the reader gets a sentence, not interpreter text (UX round 2,
+            # U3: the exception is logged, `str(exc)` never painted). The
+            # notice is the amber state this ends in: `delivery unconfirmed`,
+            # whose caution is the core's own (the message may have landed, so
+            # check the transcript before resending). The 150-cell sentence
+            # that used to ride the one-row notice clipped its own caution at
+            # every size (UX round 3, U2).
+            logger.warning("quick-send transport fault", exc_info=True)
+            self._quick_send_settled(
+                view,
+                target,
+                amber_notice("delivery unconfirmed"),
+                text,
+            )
+            return
+        if outcome.is_error:
+            # NOT DELIVERED (design note A.1): a refusal, with the draft kept.
+            self._quick_send_settled(view, target, refusal_notice(outcome.detail), text)
+            return
+        sentence = sent_line(target, outcome.state_word)
+        if outcome.partial:
+            # Amber: honest but incomplete. The core's own sentence for exactly
+            # these states warns against resending (`do not send it again` /
+            # `sending again may deliver it twice`), and the restored draft is
+            # the strongest available cue to press enter again — so the notice
+            # leads with the caution in the core's own words (round 2, U2) and
+            # keeps it INSIDE the row (round 3, U2: the advisory is 125-217
+            # cells, so it cannot ride the one-line notice behind a receipt).
+            caution = outcome.advisory
+            self._quick_send_settled(view, target, amber_notice(outcome.state_word), text)
+            # Nothing is lost: the sentence the notice cannot hold is the log's,
+            # at the level this app's logger actually emits at (WARNING).
+            if caution:
+                logger.warning("quick-send amber (%s): %s", outcome.state_word, caution)
+            return
+        # DELIVERED: the band acknowledges (F4); the editor was cleared by the
+        # submit, so the strip is visible and the reader is still in compose.
+        self._paint_band_receipt(sentence)
+
+    def _quick_send_settled(
+        self, view: ProjectsView, target: SendTarget, sentence: str, text: str
+    ) -> None:
+        """A send that did NOT deliver: notice row, band, and the kept draft (R2-2).
+
+        One choke point for every non-delivered exit. Each speaks on the page's
+        notice row — the surface the reader is at — hands the strip back to the
+        compose band (the band names the recipient of the NEXT attempt, and a
+        stale `sent to … delivered` standing over a refusal says the wrong
+        thing about this one), and gives the draft back so a retry costs no
+        retyping (F4/Q5). ``view.composing`` guards the band: a reader who left
+        compose mid-flight has no strip to correct.
+        """
+        view.compose_receipt(sentence)
+        if view.composing:
+            self._set_projects_strip(compose_band(target))
+        self._keep_quick_send_draft(text)
+
+    def _set_projects_strip(self, text: str | None) -> None:
+        """Show (``text``) or hide (``None``) the projects compose strip (D6).
+
+        The strip is the band's real carrier — a one-row `Static` in the
+        composer shell — so the recipient line, and the delivered receipt that
+        replaces it, survive the first keystroke; the editor placeholder they
+        used to ride could not. Best-effort: a stripped harness has no dock,
+        and compose still works without it.
+        """
+        try:
+            strip = self.query_one("#projects-compose-strip", Static)
+        except Exception:  # noqa: BLE001 — a stripped harness has no dock
+            return
+        if text:
+            strip.update(text)
+            strip.display = True
+        else:
+            strip.display = False
+
+    def _paint_band_receipt(self, sentence: str) -> None:
+        """Paint a delivered receipt in the composer's strip (agent review F4).
+
+        The strip is the composer's own statement about the send (D6), and an
+        acknowledged send is the case it carries end to end: the band said
+        `send to: …` and now says the outcome. A reader who already left
+        compose gets the line on the page's notice row instead — the strip is
+        hidden then, and the composer is read-only again.
+        """
+        view = self._projects_view
+        if view is not None and view.composing:
+            # The in-flight line on the notice row is replaced by the strip
+            # statement: leaving `sending to …` up while the strip already says
+            # `sent to …` would contradict itself a row apart.
+            view.show_notice("")
+            self._set_projects_strip(sentence)
+            return
+        if view is not None:
+            view.compose_receipt(sentence)
+
+    def _keep_quick_send_draft(self, text: str) -> None:
+        """Give an unsent draft back to the composer (the F4 draft rule / Q5).
+
+        `Editor._submit` records the body into history and clears the buffer
+        before anything resolves, so an amber or refused outcome would leave
+        the reader with an empty composer and their message only in `↑`
+        recall. This mirrors the app's existing refused-submission shape: the
+        history entry is withdrawn (the submit did not leave as a prompt) and
+        the text is loaded back INTO the buffer — unless the reader has typed
+        new text there in the meantime, in which case their newer words win
+        and the draft stays recallable from history.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        if editor.text:
+            return
+        editor.forget_last_prompt(text)
+        editor.load_text(text)
+
+    def on_projects_view_form_submitted(self, message: ProjectsViewFormSubmitted) -> None:
+        """`ctrl+s` on the create form: write through the SAME core the tool uses.
+
+        The form runs the store's own validators locally before it posts, so
+        what reaches here is a STORE question: a taken name, the schema guard,
+        an i/o failure. All of them come back as an in-form line with the page
+        and the draft intact (spec §7.7) — never a toast over a form that has
+        already closed — and only a landed write leaves the form.
+
+        The auto-link mirrors ``project_tool._op_create`` rather than inventing
+        a second rule: the calling session is linked as a WORKING session,
+        except the chief of staff's, whose create-time link is provenance
+        ("filed by") — her session is live almost always, and a working link
+        would make every row she files read as work in progress.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        import time as _time
+
+        from local_operator.projects import store_error_text
+
+        session_id = self._own_session_id()
+        coordination = False
+        if session_id:
+            from local_operator.aida.state import is_aida_session
+
+            coordination = is_aida_session(registry.config_dir, session_id)
+        try:
+            project = registry.create_project(
+                message.edit,
+                sessions=[] if coordination else ([session_id] if session_id else []),
+                coordination_sessions=[session_id] if (session_id and coordination) else [],
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_form_refusal(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+        view.form_created(project.id, project.title or project.name)
 
     def _own_session_id(self) -> str | None:
         """THIS process's session id, or ``None`` — the detail page's anchor.
@@ -33348,8 +35046,8 @@ class OperatorApp(App[None]):
             # title names them so the page says WHAT kind of child this is; the
             # band below gets the effort by a separate path (`_point_band_at`)
             # because it belongs to the model segment there.
-            agent_role=str(
-                getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or ""
+            agent_role=self._agent_role_display(
+                str(getattr(job, "agent_role", None) or getattr(node, "agent_role", "") or "")
             ),
             effort=str(getattr(job, "effort", None) or getattr(node, "effort", "") or ""),
             # Every deterministic launch identity this lineage owns mapped to
@@ -33376,6 +35074,7 @@ class OperatorApp(App[None]):
                 jobs=scoped_jobs,
                 selected_job=selected_job,
                 children_counts=self._subagent_child_counts(scoped_jobs),
+                role_display=self._agent_role_display,
             )
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
@@ -33489,21 +35188,12 @@ class OperatorApp(App[None]):
         except Exception:
             return  # a stripped harness with no composer
         editor.read_only = read_only
-        # The placeholder is the composer's own voice. Read-only always
-        # wins (the subagent page refuses every key); giving the composer
-        # back restores whichever mode it was actually in, so bang-mode's
-        # invitation is not overwritten by the resting prompt.
-        if read_only:
-            editor.placeholder = READ_ONLY_PLACEHOLDER
-        elif editor.shell_mode:
-            editor.placeholder = SHELL_PLACEHOLDER
-        else:
-            # ASKED, not assumed. The resting copy has one value again now that
-            # the composer no longer advertises the paste key, but every mode
-            # exit goes through the one authority rather than hardcoding a
-            # string here, so a second case cannot come back and leave this
-            # path painting a stale placeholder.
-            editor.placeholder = editor.resting_placeholder
+        # The placeholder is the composer's own voice, and `_composer_placeholder_for`
+        # is its one authority: read-only always wins (the subagent page refuses
+        # every key), and giving the composer back restores whichever mode it was
+        # actually in — bang-mode's invitation, an expanded ask's routing hint, or
+        # the resting prompt — rather than hardcoding one string here.
+        editor.placeholder = self._composer_placeholder_for(editor)
         # Not focusable while inert: a caret in a field that refuses every key
         # is the most misleading thing this mode could paint, and ↑↓ have to
         # reach the transcript that the hint says they scroll. The caret is
@@ -34908,7 +36598,7 @@ class OperatorApp(App[None]):
                 self._append_block(self._team_listing_block(data.get("items") or []))
                 return
             if block_type == "agent_list":
-                self._append_block(self._agent_list_block(data.get("items") or []))
+                self._append_block(self._agent_listing_block(data.get("items") or []))
                 return
             if block_type == "forked":
                 # The OWNER did the fork, so the viewer cannot narrate it the way
@@ -35024,6 +36714,33 @@ class OperatorApp(App[None]):
         # FOLLOWER's routed listing, which is exactly the case that cannot run
         # a team, so the unconditional "Send:" line was wrong most often here.
         rows.append(Text(self._team_listing_footer(), style=body))
+        return RichBlock(Group(*rows))
+
+    def _agent_listing_block(self, items: list[Any]) -> RichBlock:
+        """Rebuild the bare ``/agent`` listing block from wire rows.
+
+        The owner-side producers return ``(display, facts, summary)`` tuples
+        whose first slot is ALREADY the composed bounded form (no live agent
+        objects cross the socket), so this half paints it verbatim -- the same
+        split ``_team_listing_block`` documents, for the same reason. The
+        footer repeats the local block's session-aware guard, spacer included:
+        a follower cannot attach, so the "Send:" line stays off a viewer.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("agents", style=section)]
+        for item in items:
+            name, facts, summary = (list(item) + ["", "", ""])[:3]
+            rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+            if summary:
+                rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
+        if callable(getattr(self._session, "attach_agent_profile", None)):
+            rows.append(Text())
+            rows.append(Text("Send: /agent <name> <message>", style=body))
+            rows.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
@@ -38641,6 +40358,16 @@ class OperatorApp(App[None]):
         answered four presses with four warning rows, which is the noise this
         docstring's first paragraph exists to avoid.
         """
+        # A form that owns the keyboard translates `shift+tab` ITSELF. The
+        # binding is app-wide and `priority=True`, so it is matched BEFORE the
+        # focused widget (the settings capture's recorded trap, measured) — the
+        # projects create form could therefore never see the chord. Delegating
+        # the ONE key to the page keeps every other binding — including ctrl+c
+        # — exactly where disarming the app's hotkeys would have moved them.
+        page = self._projects_view
+        if page is not None and getattr(page, "wants_field_tab", False):
+            page.form_focus_previous()
+            return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming
             # the wrong reason is worse than naming none.
@@ -44766,7 +46493,12 @@ class OperatorApp(App[None]):
                 return
             self._append_block(RichBlock(_tree_listing(items, "providers with interactive login")))
             return
+        from local_operator.providers.auth_cli import LOGIN_STATUS_WORD
+
         provider = arg.lower()
+        if provider == LOGIN_STATUS_WORD:
+            self._login_status_block()
+            return
         if self._providers.provider(provider) is None:
             self._system_notice(f"unknown provider: {provider}", "warning")
             return
@@ -44782,6 +46514,32 @@ class OperatorApp(App[None]):
             else f"logging in to {provider}…"
         )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
+
+    def _login_status_block(self) -> None:
+        """``/login status`` — who is signed in, from the same lines as the CLI.
+
+        TUI/CLI-only by decision (voicing S0): the desktop reaches the same
+        facts through the provider census, and a status word there would need
+        the suggestion machinery extended, which this slice does not do.
+
+        The text is ``auth_cli.format_logins`` -- the function ``lop
+        login-status`` prints -- so the two surfaces cannot disagree about who
+        is signed in. It lists identities and env-var NAMES, never a secret. A
+        store that cannot be read is a notice, not a crash: this runs on a
+        keystroke, and an unreadable store is exactly when a user asks.
+        """
+        assert self._providers is not None
+        from local_operator.providers.auth_cli import format_logins
+
+        try:
+            lines = format_logins(self._providers.auth_store, self._providers.config_dir)
+        except Exception as error:  # noqa: BLE001 - a status read must not take the app down
+            self._system_notice(f"login status unavailable: {error}", "error")
+            return
+        text = Text()
+        for line in lines:
+            text.append(line + "\n")
+        self._append_block(RichBlock(text))
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.
@@ -47308,7 +49066,16 @@ class OperatorApp(App[None]):
                     text="no agents yet. Ask the agent to create one.",
                     style="info",
                 )
-            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+            # The first slot is painted VERBATIM by ``_agent_listing_block`` on
+            # the viewer, so it carries the same BOUNDED display form the
+            # local listing paints (``_agent_listing_form``): one rule, one
+            # cap, or the two terminals would disagree about how one profile
+            # reads.
+            items = [
+                (self._agent_listing_form(name, label), facts, summary)
+                for name, label, facts, summary in rows
+            ]
+            return SlashResult(kind="block", data={"type": "agent_list", "items": items})
         # The reserved word, for the same reason the runtime's handler has it:
         # a session hosted by THIS app answers a follower out of here, and the
         # switch must be reachable from that seam too (review/UX round 1, U1).
@@ -51821,7 +53588,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 136
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 139
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

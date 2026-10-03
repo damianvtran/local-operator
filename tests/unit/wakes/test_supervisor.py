@@ -609,6 +609,84 @@ async def test_the_live_session_skip_reports_how_overdue_it_is(
 
 
 @pytest.mark.asyncio
+async def test_a_live_skip_below_the_stall_bound_stays_informational(
+    tmp_path: Path, engagements, monkeypatch, caplog
+) -> None:
+    """Below ``LIVE_STALL_WARN_S`` the line is unchanged: lateness, not a stall.
+
+    The bound may only ADD an escalation; widening the ordinary report to
+    WARNING would fire for lateness the repo's own measurements call ordinary
+    (silent steps top out around 45 min — one long turn).
+    """
+
+    async def _always_live(config_dir, session_id):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", _always_live)
+    write_entry(
+        tmp_path,
+        "sessionlate5",
+        cwd=str(tmp_path),
+        schedules=[_schedule(NOW_MS - (5 * 3600) * 1000)],
+    )
+
+    with caplog.at_level("INFO"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0 and engagements == []
+    live = [r for r in caplog.records if "sessionlate5" in r.getMessage()]
+    assert live, [r.getMessage() for r in caplog.records]
+    assert {record.levelno for record in live} == {logging.INFO}, [
+        record.getMessage() for record in live
+    ]
+    assert "live: skipping" in live[0].getMessage()
+    assert "18000.0s overdue" in live[0].getMessage(), live[0].getMessage()
+    assert not any("live-stalled" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_live_skip_escalates_to_a_warning(
+    tmp_path: Path, engagements, monkeypatch, caplog
+) -> None:
+    """A live runtime that has not fired a 6 h-overdue wake is a STALLED
+    delivery path, not a busy session.
+
+    A live session fires its own wakes within seconds of due, so an overdue
+    figure past the bound is the delivery path having stopped — and the INFO
+    line ("a live runtime owns it") was the only trace the 2026-10-01/02 leak
+    ever left. The WARNING says what the INFO cannot: the wake is old, the
+    runtime owning it has not fired it, and where to look.
+    """
+    from local_operator.wakes import supervisor as mod
+
+    async def _always_live(config_dir, session_id):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", _always_live)
+    overdue_s = int(mod.LIVE_STALL_WARN_S) + 1800  # just past the bound
+    write_entry(
+        tmp_path,
+        "sessionstall",
+        cwd=str(tmp_path),
+        schedules=[_schedule(NOW_MS - overdue_s * 1000)],
+    )
+
+    with caplog.at_level("INFO"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0 and engagements == []
+    stalled = [r for r in caplog.records if "sessionstall" in r.getMessage()]
+    assert stalled, [r.getMessage() for r in caplog.records]
+    assert {record.levelno for record in stalled} == {logging.WARNING}, [
+        record.getMessage() for record in stalled
+    ]
+    message = stalled[0].getMessage()
+    assert message.startswith("live-stalled:"), message
+    assert "6.5 h overdue" in message, message
+    assert "has not fired it" in message, message
+
+
+@pytest.mark.asyncio
 async def test_a_wake_written_during_the_sleep_is_seen_within_a_slice(
     tmp_path: Path, monkeypatch
 ) -> None:
