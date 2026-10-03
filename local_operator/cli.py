@@ -10086,7 +10086,9 @@ def _wrap_text(
 
     Every render used fixed clip constants measured at a 200-column capture, so
     several lines ran past a default terminal; wrapping to the real width is
-    what makes the flow readable where it is actually watched.
+    what makes the flow readable where it is actually watched. The collapse
+    also eats any leading spaces inside ``text``, so callers pass a leading
+    indent through ``indent`` and never inside the string (ux round 2, R1).
     """
     import textwrap  # lazy: only the render paths pay for it
 
@@ -10104,10 +10106,16 @@ def _wrap_text(
 
 
 def _wrap_keep(text: str, width: int, subsequent: str = "  ") -> "list[str]":
-    """Pass ``text`` through when it fits; word-wrap it only when it does not."""
+    """Pass ``text`` through when it fits; word-wrap it only when it does not.
+
+    A leading run of spaces survives as the first line's indent (the same
+    contract ``_wrap_text`` states): the ``d`` rows carry their own ``  -``/
+    ``  +`` prefix, and a wrap must not strip it (ux round 2, R1).
+    """
     if len(text) <= width:
         return [text]
-    return _wrap_text(text, width, subsequent=subsequent)
+    lead = text[: len(text) - len(text.lstrip(" "))]
+    return _wrap_text(text, width, indent=lead, subsequent=subsequent)
 
 
 def _emit_colored_wrapped(lead: str, runs: "list[tuple[str, Optional[str]]]", width: int) -> None:
@@ -10521,10 +10529,12 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
         print("No personal references found.")
     elif changes:
         count = len(changes)
-        print(
+        heading = (
             f"{count} reference{'s' if count != 1 else ''} would be generalized before "
             "this is published:"
         )
+        for line in _wrap_text(heading, width):
+            print(line)
         print()
         rows: "list[tuple[str, str, str, str, str]]" = []
         for change in changes:
@@ -10546,7 +10556,16 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
         class_w = min(max((len(row[1]) for row in rows), default=0), 12)
         value_w = max((len(row[2]) for row in rows), default=0)
         for field, cls, value, arrow, times in rows:
-            print(f"  {field:<{field_w}}  {cls:<{class_w}}  {value:<{value_w}}  {arrow}{times}")
+            row_text = (
+                f"{field:<{field_w}}  {cls:<{class_w}}  {value:<{value_w}}  {arrow}{times}"
+            ).rstrip()
+            if len(row_text) + 2 <= width:
+                print(f"  {row_text}")
+            else:
+                # Narrow terminal: wrap the row at spaces ourselves rather than
+                # let the terminal split a padded column mid-word (ux round 2, R2).
+                for wrapped in _wrap_text(row_text, width, indent="  ", subsequent="      "):
+                    print(wrapped)
 
     if unresolved:
         n = len(unresolved)
@@ -10556,10 +10575,10 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
             if not isinstance(item, dict):
                 continue
             line = (
-                f"  [{item.get('id', '?')}] {item.get('field', '')}  "
+                f"[{item.get('id', '?')}] {item.get('field', '')}  "
                 f'"{_clip_line(item.get("value"), 60)}" — {item.get("reason", "")}'
             )
-            for row in _wrap_text(line, width, subsequent="      "):
+            for row in _wrap_text(line, width, indent="  ", subsequent="      "):
                 print(row)
 
     if advisories:
@@ -10567,8 +10586,9 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
         for note in advisories:
             if isinstance(note, dict):
                 for row in _wrap_text(
-                    f"  note: {note.get('field', '')} {note.get('note', '')}",
+                    f"note: {note.get('field', '')} {note.get('note', '')}",
                     width,
+                    indent="  ",
                     subsequent="        ",
                 ):
                     print(row)
@@ -10576,9 +10596,10 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
     if changes or unresolved:
         print()
         for row in _wrap_text(
-            "  Your local copy is not changed. Behaviour and wording are never rewritten — "
+            "Your local copy is not changed. Behaviour and wording are never rewritten — "
             "only the values above.",
             width,
+            indent="  ",
             subsequent="  ",
         ):
             print(row)
@@ -10823,7 +10844,7 @@ def _publish_with_preview(
             # The commit was in flight, so unlike the preview the hub may still
             # have received it: the honest line says so (ux round 1, U2).
             print(
-                "\n\033[1;33mCancelled. The hub may still have received this publish — "
+                "\n\033[1;33mCancelled. The hub may still have received this publish; "
                 "check the listing before retrying.\033[0m"
             )
             return 130, None
@@ -11579,6 +11600,7 @@ def _scan_public_teams(client: Any, matches: Any) -> "Optional[tuple[list[dict[s
     found: "list[dict[str, Any]]" = []
     page = 1
     total_pages = 1
+    reached_end = False
     while page <= _PUBLIC_TEAM_SEARCH_MAX_PAGES:
         try:
             envelope = client.list_public_teams(page=page, per_page=100)
@@ -11591,9 +11613,15 @@ def _scan_public_teams(client: Any, matches: Any) -> "Optional[tuple[list[dict[s
                 found.append(record)
         total_pages = int((envelope or {}).get("total_pages") or 1)
         if page >= total_pages:
+            # The flag is set HERE, on the iteration that actually read the last
+            # page: the loop can also exit by incrementing past the bound, and a
+            # post-loop `page >= total_pages` conflates the two -- at exactly
+            # total_pages == bound + 1 the walk read bound pages and still
+            # claimed complete (review round 2, M2 boundary).
+            reached_end = True
             break
         page += 1
-    complete = page >= total_pages
+    complete = reached_end
     if not complete:
         print(
             f"\033[1;33m  note: the listing walk stopped after "
@@ -11689,8 +11717,8 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
                     "listing walk stopped at its bound, so a match may exist past it.\033[0m"
                 )
             return 0
-        teams_label = "team" if len(found) == 1 else "teams"
-        print(f"\n\033[1;33m{len(found)} public {teams_label} match '{query}':\033[0m")
+        teams_label = "team matches" if len(found) == 1 else "teams match"
+        print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
         _print_public_team_rows(found)
         return 0
 
