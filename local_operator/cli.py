@@ -9449,10 +9449,23 @@ def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
     # ``sync_context`` RESOLVES the credential, so the ``login ok|none`` this
     # prints is a checked fact. Building a bare context here left the dataclass
     # default ("ok") in place, so the command claimed a login that the same
-    # root's ``login-status`` denied (QA round 1 on #1943, Q-4). The clients it
-    # also builds are unused by a store read, but they cost nothing and are how
-    # every other surface answers the same question.
-    ctx = svc.sync_context(config_manager)
+    # root's ``login-status`` denied (QA round 1 on #1943, Q-4).
+    #
+    # Resolving can FAIL where the bare context could not: an unreadable
+    # credential store (a corrupt ``auth.db``) raises out of the OAuth read, and
+    # this command's contract is a store read ("no network"), so it must not
+    # turn that into a traceback. A store that cannot be opened yields no
+    # usable credential, so the honest degradation is ``login none`` — not the
+    # pre-fix unchecked "ok", which would be a worse lie (review round 2, M-8).
+    try:
+        ctx = svc.sync_context(config_manager)
+    except Exception:  # noqa: BLE001 - any credential-store failure degrades
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=lambda _tenant: None,
+            credential="none",
+        )
     snapshot = svc.status_snapshot(ctx)
     if getattr(args, "json", False):
         print(_json.dumps(snapshot, indent=2))
