@@ -253,6 +253,32 @@ describe("AsksSheet", () => {
 		expect(screen.getByRole("button", { name: "open" })).toBeTruthy();
 	});
 
+	it("does not count questions a dead row can never have answered", async () => {
+		/* Agent review round 2, MINOR-3: a dead row's status is still `open`, so it
+		   entered `outstandingAsks` and its questions were counted in the title — a
+		   promise of answers the backend refuses, one element above the card that
+		   says the ask can never be read. It is the sheet's own "no contradiction
+		   one element apart" rule, applied to the title. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				ask({ ask_id: "live", session_id: "s-live", runtime_live: true, durable: false }),
+				ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false }),
+			],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 question")).toBeTruthy());
+	});
+
+	it("carries no count at all when every row is dead", async () => {
+		/* The other half: nothing is waiting on the user, so the title states the
+		   surface rather than a number nobody can act on. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks")).toBeTruthy());
+	});
+
 	it("withholds `open` for a conversation that cannot be opened", async () => {
 		/* UX round 2, U7: the control navigated to `#/s/<id>`, which sat on
 		   "connecting to session…" with nothing to do but go back. A row whose

@@ -475,7 +475,9 @@ def test_the_gone_sentence_is_the_ops_own() -> None:
     )
     # ``decline`` and ``revise`` deliver a DECISION: the ask is unreadable and the
     # user has nothing left to re-ask, so they take the handoff wording — which is
-    # also the sentence the phone shows PRE-EMPTIVELY on a non-durable row.
+    # NOT the sentence a surface shows before asking: the phone's pre-emptive
+    # state uses ``_ASK_GONE_RESPONSE`` (the answer's, remedy included) on a DEAD
+    # row, because the row it draws offers no control whose op could be known.
     for op, body in (("ask_decline", {}), ("ask_revise", {"answers": {"q1": ["no"]}})):
         reply = client.post(
             f"/api/sessions/{SESSION_A}/command", json={"op": op, "ask_id": "ask-1", **body}

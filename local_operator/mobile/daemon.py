@@ -2308,8 +2308,12 @@ _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 #: an answer (unread, and still wanted), a decision (unread, and none of the
 #: user's to re-ask) and a dismissal (nothing to record). All keep the register
 #: of the queue's other sentences (lowercase start, em-dash clause, final full
-#: stop), and ``_ASK_GONE_HANDOFF`` is also the sentence the phone shows
-#: PRE-EMPTIVELY on a row the aggregate has already reported as non-durable.
+#: stop). ``_ASK_GONE_RESPONSE`` — the answer's, remedy and all — is also the
+#: sentence the phone shows PRE-EMPTIVELY, without any request, on a row the
+#: aggregate has published as DEAD (``isDeadConversation``: not live AND not
+#: durable, this route's own conjunction); the other two are only ever chosen
+#: when the refusal comes back FROM THE WIRE, which the pre-emptive branch never
+#: does.
 _ASK_GONE_RESPONSE = (
     "this conversation no longer exists — the ask can never be read; "
     "start a new conversation and ask again."
