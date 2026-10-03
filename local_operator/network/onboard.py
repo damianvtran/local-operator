@@ -957,11 +957,18 @@ class OnboardRun:
         """
         expected_fp = str(self.view.device.get("host_key_fp") or "")
         if not expected_fp:
+            # OBSERVE BEFORE HALTING (drill finding, 2026-10-03): a request filed
+            # without the host key halts here, and the auto-refiled replacement
+            # used to be minted with the same hole — the remedy reproduced the
+            # failure. The host key is a credential-free read (the same handshake
+            # step zero runs), so the halt can carry the value the fresh request
+            # needs instead of filing another card that cannot run.
+            found = self.transport.probe()
             raise self._contradiction(
                 {
                     "check": "host_key_fp",
                     "approved": "",
-                    "observed": "",
+                    "observed": found.host_key_fp if found.ok else "",
                     "why": "the request does not say which host key to expect",
                 },
                 "the request does not carry the host-key fingerprint it was approved "

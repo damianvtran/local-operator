@@ -373,8 +373,11 @@ def refile_after_contradiction(
     the corrected facts are the finding's ``observed`` value applied to the
     surface it names — host key, OS, architecture, build — so the fresh card
     describes what the machine ACTUALLY is; every other field is carried from
-    the failed record. ``None`` means the store offers no request surface, and
-    the caller's sentence still says a new request is needed either way.
+    the failed record. ``None`` means the store offers no request surface — or
+    the finding has nothing to correct the fresh request WITH (a host-key halt
+    whose observation failed; minting that replacement would reproduce the very
+    hole the halt names, so the caller's sentence stands instead), and the
+    caller's sentence still says a new request is needed either way.
     """
     module = _module()
     create = getattr(module, "create_request", None)
@@ -388,6 +391,14 @@ def refile_after_contradiction(
     what = dict(record.get("what") or {})
     check = str(finding.get("check") or "")
     observed = str(finding.get("observed") or "")
+    if check == "host_key_fp" and not observed:
+        # A REPLACEMENT THAT CANNOT RUN IS NOT A REMEDY (drill finding,
+        # 2026-10-03): the missing-fingerprint halt used to refile a fresh request
+        # WITHOUT the key — reproducing the exact hole the halt names — because
+        # the finding's ``observed`` was empty. Nothing is minted then; the
+        # caller's sentence says a new request is needed, and the request verb
+        # now OBSERVES the key when one is filed.
+        return None
     if observed:
         if check == "host_key_fp":
             block[block_key]["host_key_fp"] = observed

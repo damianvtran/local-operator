@@ -106,6 +106,83 @@ def test_request_answers_the_frozen_card_shape(
     assert row["approval_id"] == payload["approval_id"]
 
 
+def test_a_request_without_a_host_key_fp_observes_and_records_one(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drill finding, 2026-10-03: a card filed without the host key cannot run —
+    step zero halts on the missing fingerprint, and its auto-refiled replacement
+    was minted with the same hole. The request OBSERVES the key through the
+    credential-free handshake (the whole of pre-approval contact) and records it
+    on the card."""
+    from local_operator.network import onboard
+
+    _make_key(root)
+    calls: list[tuple[str, int, str]] = []
+
+    def recording_probe(host: str, *, port: int = 22, user: str = "", **_: Any) -> Any:
+        calls.append((host, port, user))
+        return onboard.Probe(
+            ok=True,
+            host=host,
+            port=port,
+            user=user,
+            banner="SSH-2.0-OpenSSH_9.2",
+            host_key_fp="SHA256:observed-at-filing",
+            at=0.0,
+        )
+
+    monkeypatch.setattr(onboard, "probe", recording_probe)
+    payload = _request(root, capsys, host_key_fp="")
+    assert calls == [("99.79.190.164", 22, "ec2-user")]
+    assert payload["device"]["host_key_fp"] == "SHA256:observed-at-filing"
+
+
+def test_a_request_whose_host_key_cannot_be_observed_is_refused(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No observation and no flag ⇒ REFUSE, not a card that cannot run: the
+    acceptance is that a card filed by the flow can always execute."""
+    from local_operator.network import onboard
+
+    _make_key(root)
+
+    def dead_probe(host: str, *, port: int = 22, user: str = "", **_: Any) -> Any:
+        return onboard.Probe(
+            ok=False,
+            host=host,
+            port=port,
+            user=user,
+            detail=f"nothing accepted a connection at {host}:{port} (ConnectionRefusedError)",
+            at=0.0,
+        )
+
+    monkeypatch.setattr(onboard, "probe", dead_probe)
+    fields = {**REQUEST_ARGS, "host_key_fp": ""}
+    rc = net_cli.main(Namespace(network_command="approvals", approvals_command="request", **fields))
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == "host_key_unobserved"
+    assert "could not be observed" in payload["message"]
+
+
+def test_a_given_host_key_fp_never_probes(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag is the fallback path and stays hermetic: a supplied fingerprint
+    is used verbatim, with no network read."""
+    from local_operator.network import onboard
+
+    _make_key(root)
+
+    def forbidden_probe(*_: Any, **__: Any) -> Any:
+        raise AssertionError("a supplied --host-key-fp must not be re-probed")
+
+    monkeypatch.setattr(onboard, "probe", forbidden_probe)
+    payload = _request(root, capsys)
+    assert payload["device"]["host_key_fp"] == "SHA256:abc"
+
+
 def test_the_human_list_cues_states_and_separates_records(
     root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

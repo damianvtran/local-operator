@@ -574,6 +574,76 @@ def test_a_changed_host_key_halts_as_a_contradiction(
     assert not [c for c in transport.calls if c[0] == "run"]
 
 
+def test_a_missing_host_key_halts_with_the_observed_key_so_the_refile_carries_it(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill finding, 2026-10-03: a card filed without a host-key fingerprint
+    halted at pre_read, and the auto-refiled replacement was minted with the SAME
+    hole — so the remedy reproduced the failure.
+
+    The halt observes the key (a credential-free read) before halting, and the
+    fresh request carries it: the field lands on the refile.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    record["device"].pop("host_key_fp", None)  # the filed-without-key card
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(fingerprint="SHA256:observed-now")
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    assert payload["error"]["code"] == "pre_read_contradiction"
+    assert "host-key fingerprint" in payload["error"]["message"]
+    failing = payload["steps"][-1]
+    assert failing["step"] == "pre_read" and failing["ok"] is False
+    # The fresh request CARRIES the observed key — the field lands.
+    assert fake.refiled and fake.refiled[0]["device"]["host_key_fp"] == "SHA256:observed-now"
+    assert "A new request ap_fresh000" in failing["detail"]
+    # Nothing state-changing ran: no run/copy before the halt.
+    assert not [c for c in transport.calls if c[0] in ("run", "copy")]
+
+
+def test_a_missing_host_key_with_no_observation_files_no_unrunnable_replacement(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the key cannot even be observed (the machine never answered the
+    read), NOTHING is refiled — a replacement without the key would reproduce
+    the very halt this is, and the sentence says a new request is needed instead.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    record["device"].pop("host_key_fp", None)
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(fingerprint="")  # the probe observes nothing
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    assert payload["error"]["code"] == "pre_read_contradiction"
+    failing = payload["steps"][-1]
+    assert "A new request is needed before anything runs" in failing["detail"]
+    assert fake.refiled == []
+
+
 # ---------------------------------------------------------------------------
 # Failure, refusal and retry
 # ---------------------------------------------------------------------------
