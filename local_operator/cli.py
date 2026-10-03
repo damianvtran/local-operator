@@ -11246,12 +11246,20 @@ def _finish_team_pull(
     return 0
 
 
-_HUB_ID_RE = re.compile(r"[0-9a-fA-F]{24}\Z")
+#: Hub team ids are UUIDs (the shape every row the live hub serves carries; the
+#: first public-team QA run printed one) or, on older rows, 24-hex ObjectIds.
+#: The UUID form is checked first so a UUID can never fall through to the name
+#: search -- the exact mistake the evidence run caught (it printed "no public
+#: team named '<uuid>'" instead of fetching by id).
+_HUB_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+_HUB_OBJECTID_RE = re.compile(r"[0-9a-fA-F]{24}\Z")
 
 
 def _looks_like_hub_id(value: str) -> bool:
-    """A hub team id (a Mongo ObjectId) vs a public team name, for ``teams pull``."""
-    return bool(_HUB_ID_RE.match(value))
+    """A hub team id (UUID or ObjectId) vs a public team name, for ``teams pull``."""
+    return bool(_HUB_UUID_RE.match(value) or _HUB_OBJECTID_RE.match(value))
 
 
 def _scan_public_teams(client: Any, matches: Any) -> "Optional[list[dict[str, Any]]]":
