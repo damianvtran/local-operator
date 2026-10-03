@@ -34,7 +34,7 @@
  * falls back to a plain line when the daemon said nothing usable.
  */
 import { useMemo, useState } from "react";
-import { sendCommand } from "../api";
+import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { answeredPairs, askStateLine, isAnswerable, unansweredQuestions } from "../lib/asks";
 import { clearAskDraft, useAskDraft } from "../store";
@@ -161,6 +161,7 @@ export function AskCard({
 	row,
 	sessionId,
 	nowMs,
+	runtimeLive,
 	onSettled,
 }: {
 	row: PendingAsk;
@@ -168,6 +169,11 @@ export function AskCard({
 	/** The client's clock, for the deadline line (§5: the countdown is rendered
 	    from `expires_at` locally, never from a server-computed at-push string). */
 	nowMs: number;
+	/** Whether the relay can deliver to this conversation right now
+	    (`PendingAsk.runtime_live`, aggregate rows only). `false` is the COLD case
+	    the card must size its wait for (design round 1, D1 = UX U1); `undefined`
+	    is an older daemon and promises nothing. */
+	runtimeLive?: boolean;
 	/** Called after this surface settles, declines or dismisses the ask, so an
 	    aggregate list can re-read the index rather than guess the new state. */
 	onSettled?: () => void;
@@ -181,6 +187,21 @@ export function AskCard({
 	const [draft, setDraft] = useAskDraft(row.ask_id);
 	const [busy, setBusy] = useState<"" | "respond" | "decline" | "dismiss">("");
 	const [error, setError] = useState("");
+	/** Which control produced the refusal, so the sentence can sit beside IT
+	    (design round 1, D5): a dismiss refusal rendered above the send/decline row
+	    landed 60 px from the button that produced it, with the other pair between
+	    them. */
+	const [errorOp, setErrorOp] = useState<"" | "respond" | "decline" | "dismiss">("");
+	/** The conversation is GONE (`ask_session_gone`): terminal, so no control may
+	    stay live (design round 1, D3). */
+	const [gone, setGone] = useState(false);
+
+	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
+	   `runtime_live === false` means the relay will have to bring the conversation
+	   up before the op can land, which is a ~30 s envelope against a warm
+	   answer's 1–3 s. `undefined` (an older daemon, or a row from a projection)
+	   promises nothing and keeps the bare `…`. */
+	const cold = runtimeLive === false;
 
 	const state = askStateLine(row, nowMs);
 	const status = String(row.status || "open");
@@ -230,6 +251,7 @@ export function AskCard({
 		if (busy) return;
 		setBusy(kind);
 		setError("");
+		setErrorOp("");
 		try {
 			await send();
 			/* THE DRAFT IS SPENT ONCE THE ASK SETTLES. Cleared here rather than left
@@ -240,6 +262,15 @@ export function AskCard({
 			onSettled?.();
 		} catch (failure) {
 			setError(refusalText(failure));
+			setErrorOp(kind);
+			/* A GONE CONVERSATION IS TERMINAL (design round 1, D3). The ask can
+			   never be read, so every further tap is a guaranteed 409 — the
+			   sentence, already written for THIS op by the daemon (D2), is the
+			   remedy, and the controls must stop inviting a tap that cannot
+			   work. */
+			if (failure instanceof HttpError && failure.code === "ask_session_gone") {
+				setGone(true);
+			}
 			/* The controls come back: a refusal is a state the user can act on
 			   (answer again, or read who beat them to it), and a card left inert
 			   by its own error is the greyed-out-buttons defect the blocking card
@@ -297,14 +328,31 @@ export function AskCard({
 			data-ask-status={String(row.status || "open")}
 			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
 		>
-			<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
-				<span role="status">{state.text}</span>
-				{row.urgent && answerable ? (
-					<span className="text-ink-dim">· urgent</span>
-				) : null}
-			</span>
+			{/* THE STATE LINE STANDS DOWN WHEN THE CONVERSATION IS GONE. "Queued —
+			    the agent is continuing; expires in 11 m" beside "this conversation no
+			    longer exists" is the same contradiction §5's preamble forbids — the
+			    timer and the agent both belong to a conversation that is not there.
+			    The refusal sentence is the whole state. */}
+			{gone ? null : (
+				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
+					<span role="status">{state.text}</span>
+					{row.urgent && answerable ? (
+						<span className="text-ink-dim">· urgent</span>
+					) : null}
+				</span>
+			)}
 
-			{answerable ? (
+			{gone ? (
+				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3).
+				   The conversation this ask belongs to no longer exists, so the ask can
+				   never be read: the controls are withheld rather than handed back
+				   enabled, because every further tap is a guaranteed 409 and the
+				   surface must not invite one. The remedy is a NEW message in a new
+				   conversation, which is what the daemon's per-op sentence names (D2) —
+				   a dismissal is told nothing was sent, an answer is told to ask
+				   again. */
+				<p className="text-body-sm text-danger">{error}</p>
+			) : answerable ? (
 				<>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
@@ -370,12 +418,28 @@ export function AskCard({
 						</p>
 					) : null}
 
-					{/* THE REFUSAL SITS WITH THE CONTROLS IT ANSWERS (round-1 design, D4):
-					    it used to render after the control row, which put it below the
-					    fold in the frame captured to show it — the same failure
-					    `pending-card.tsx` pinned its own error for. Above the row, the
-					    sentence and the control that produced it are on screen together. */}
-					{error ? <p className="text-body-sm text-danger">{error}</p> : null}
+					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
+					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
+					    measured, against the 1–3 s a warm answer pays — and until this line
+					    existed the whole in-flight affordance was a bare `…` with the state
+					    line still reading "Queued — the agent is continuing". Saying nothing
+					    is also a claim, and it was the wrong one. */}
+					{busy !== "" && cold ? (
+						<p className="text-body-sm text-ink-muted">
+							{busy === "dismiss"
+								? "bringing the session up to record the dismissal — this can take up to ~30 s"
+								: "bringing the session up — this can take up to ~30 s"}
+						</p>
+					) : null}
+
+					{/* THE REFUSAL SITS WITH THE CONTROL IT ANSWERS (design round 1, D5 for
+					    the dismiss arm; round 1's D4 fixed the send/decline pair). A dismiss
+					    refusal rendered here would land 60 px above the button that produced
+					    it, with the send/decline pair between them, so it renders beside
+					    dismiss instead — see the dismiss control below. */}
+					{error && errorOp !== "dismiss" ? (
+						<p className="text-body-sm text-danger">{error}</p>
+					) : null}
 
 					<div className="flex flex-wrap gap-2">
 						<button
@@ -405,14 +469,29 @@ export function AskCard({
 					    buttons would make them look like two ways of saying no. Its own
 					    state line says what happened. */}
 					{dismissible ? (
-						<button
-							type="button"
-							disabled={busy !== ""}
-							onClick={dismiss}
-							className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
-						>
-							{busy === "dismiss" ? "…" : "dismiss — send no reply"}
-						</button>
+						<>
+							<button
+								type="button"
+								disabled={busy !== ""}
+								onClick={dismiss}
+								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+							>
+								{busy === "dismiss" ? "…" : "dismiss — send no reply"}
+							</button>
+							{/* ITS OWN STATE LINE, because on a cold conversation the promise
+							    it makes ("send no reply") is no longer the whole truth: the
+							    relay brings the conversation up to RECORD the dismissal, so the
+							    conversation surfaces as active (UX round 1, U3). Stated before
+							    the tap, in the same quiet register as the deadline lines. */}
+							{cold ? (
+								<p className="text-meta text-ink-dim">
+									sends no reply — bringing the session up to record that can take up to ~30 s
+								</p>
+							) : null}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</>
 					) : null}
 				</>
 			) : (

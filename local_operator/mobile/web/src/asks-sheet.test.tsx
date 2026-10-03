@@ -174,8 +174,35 @@ describe("AsksSheet", () => {
 	it("warns before the tap when the owning conversation has ended", async () => {
 		rows = [summary({ ended: true })];
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() =>
-			expect(screen.getByText(/this conversation has ended/)).toBeTruthy(),
-		);
+		await waitFor(() => expect(screen.getByText(/this conversation has ended/)).toBeTruthy());
+		/* THE COST IS ON THE LINE (design round 1, D4 = UX U1/U4): the relay now
+		   reopens it itself, so "may need it reopened" described a manual remedy
+		   that no longer exists — while the ~30 s the cold arm costs went unsaid. */
+		expect(screen.getByText(/answering will reopen it \(this can take up to ~30 s\)/)).toBeTruthy();
+	});
+
+	it("warns before the tap when the conversation is simply not running", async () => {
+		/* UX round 1, U4: for a durable conversation this daemon never watched die,
+		   the list reports `ended:false`, so the strip did not render at all —
+		   exactly the operator's case. The aggregate's own `runtime_live` is what
+		   makes the cue appear, and the copy says "not running" because "has
+		   ended" would be false about it. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ runtime_live: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText(/this conversation is not running/)).toBeTruthy());
+		expect(screen.getByText(/answering will bring it up \(this can take up to ~30 s\)/)).toBeTruthy();
+	});
+
+	it("says nothing about a wait when the relay can deliver now", async () => {
+		/* The other half of the rule: a live conversation answers in ~1 s, so a
+		   ~30 s promise there would be its own lie. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask({ runtime_live: true })] });
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
 	});
 });

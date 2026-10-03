@@ -2292,14 +2292,46 @@ _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 
 
 #: The refusal for an ask whose conversation is GONE (deleted, or an id that was
-#: never a durable user session). A distinct sentence from the ordinary "session
-#: not connected": engaging cannot help here — there is no transcript a runtime
-#: could own — and a surface that reported success would be worse than one that
-#: refused, because the user would believe a model had been told.
-_ASK_SESSION_GONE = (
-    "this conversation no longer exists, so the ask can never be read — "
-    "open a session and ask again"
+#: never a durable user session), SPLIT BY THE OP (design round 1, D2 = UX U2).
+#: Engaging cannot help here — there is no transcript a runtime could own — and a
+#: surface that reported success would be worse than one that refused, because
+#: the user would believe a model had been told.
+#:
+#: WHY THE OP DECIDES THE SENTENCE. One string was returned for all four ops, so
+#: ``dismiss — send no reply`` — whose whole promise is that NOTHING is sent — was
+#: answered with "…ask again", which is the remedy for an answer that could not
+#: be delivered and the opposite of what the user asked for. The queue's own
+#: refusals are per-STATE (``asks/render.refusal_copy``); this one is per-OP,
+#: because what is lost differs: an answer is unreadable, a dismissal simply had
+#: nothing to record. Both keep the register of the queue's other sentences
+#: (lowercase start, em-dash clause, final full stop).
+_ASK_GONE_RESPONSE = (
+    "this conversation no longer exists — the ask can never be read; "
+    "start a new conversation and ask again."
 )
+_ASK_GONE_DISMISS = (
+    "this conversation no longer exists — nothing was sent; the ask can never be read."
+)
+
+
+def _ask_gone_copy(op: str) -> str:
+    """The gone sentence for ONE ask op — the dismissal's own, or the answer's."""
+    return _ASK_GONE_DISMISS if op == "ask_dismiss" else _ASK_GONE_RESPONSE
+
+
+def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
+    """Whether the relay can deliver an op to this session RIGHT NOW.
+
+    The exact predicate ``api_command`` branches on: an op reaches a live entry
+    through ``daemon.request``, which needs a connected ``writer``, and every
+    other case takes the engage arm. Published per ask row so the phone can say
+    whether answering will have to bring the conversation up first (design round
+    1, D1/D4 = UX U1/U3/U4) — before this the customer of that fact was an error
+    message after the tap, and the in-flight state could not distinguish a warm
+    answer from a ~30 s engage.
+    """
+    entry = _entry_for_session(daemon, session_id)
+    return entry is not None and entry.writer is not None
 
 
 async def _engage_and_publish(
@@ -4679,7 +4711,7 @@ def build_app(daemon: MobileDaemon):
                 # in list SSE and a failed engage retracts the claim.
                 detail = await _engage_and_publish(daemon, session_id, _deliver_prompt)
                 return JSONResponse({"ok": True, "detail": detail})
-            if op in _ASK_ANSWER_OPS and entry is None:
+            if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
                 # THE COLD ANSWER (design §2.4). A queued ask is
                 # durable precisely so the agent can move on, so answering one
                 # after its runtime exited must ENGAGE that session rather than
@@ -4689,6 +4721,15 @@ def build_app(daemon: MobileDaemon):
                 # take this arm; a decline and a dismiss settle the ask just as an
                 # answer does, so they engage too.
                 #
+                # THE CONDITION IS ``_session_is_live``, THE SAME PREDICATE THE
+                # CARD READS. `entry is None` was too narrow: an entry whose dial
+                # has not landed (or whose socket is gone) has no ``writer``, so
+                # ``daemon.request`` could not deliver either and the op fell
+                # through to the generic "session not connected" — while the
+                # published ``runtime_live`` had already told the phone to expect
+                # an engage. One predicate keeps the surface's promise and the
+                # route's behaviour the same statement.
+                #
                 # The rung is the SAME one the prompt branch uses --
                 # ``engage_session_client`` -> ``engage_runtime``, the single
                 # arbitration point -- with an ``AskErrand`` in place of a
@@ -4697,11 +4738,12 @@ def build_app(daemon: MobileDaemon):
                 # inject the response, so there is no second engage implementation
                 # to drift from the prompt path's.
                 if _durable_user_session_dir(session_id) is None:
-                    # NO transcript to own, so no engage can help. Say so in its
-                    # own words rather than the generic "not connected" — an
-                    # answer this surface cannot deliver must not look delivered.
+                    # NO transcript to own, so no engage can help. Say so in the
+                    # op's OWN words rather than the generic "not connected" — an
+                    # answer this surface cannot deliver must not look delivered,
+                    # and a dismissal must not be told to "ask again" (D2).
                     return JSONResponse(
-                        {"error": _ASK_SESSION_GONE, "code": "ask_session_gone"},
+                        {"error": _ask_gone_copy(op), "code": "ask_session_gone"},
                         status_code=409,
                     )
                 if not daemon.dial_registrants:
@@ -5008,6 +5050,13 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         rows = await asyncio.to_thread(index_asks, config_dir())
+        # PER-ROW LIVENESS (design round 1, D1/D4 = UX U1/U3/U4). The index knows
+        # an ask is durable; it does not know whether answering it will be a warm
+        # round trip or a ~30 s engage. That fact lives in this process's dial
+        # table, so the aggregate carries it and every surface can be honest about
+        # the wait BEFORE the tap rather than after it.
+        for row in rows:
+            row["runtime_live"] = _session_is_live(daemon, str(row.get("session_id") or ""))
         return JSONResponse({"asks": rows})
 
     async def api_commands(request: Request) -> Response:
