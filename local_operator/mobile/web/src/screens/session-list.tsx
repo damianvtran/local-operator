@@ -480,19 +480,27 @@ function SessionCard({
 
 				    ABSENT AT ZERO, never a zero badge: the field itself is absent while
 				    the runtime cannot report asks, and `0` is a session with nothing
-				    waiting, which needs no mark. */}
+				    outstanding, which needs no mark. */}
 				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
 					/* THE UNIT IS THE FIELD'S OWN (agent review round 1, R3): `asks_open`
-					   counts open ASKS, and this chip used to print that number with the
+					   counts ASKS (open, or timed-out and still answerable — the
+					   outstanding set), and this chip used to print that number with the
 					   word "questions" — so the PR's own fixture showed "2 questions"
 					   where the bar above it said "4 questions waiting" and the header
 					   said 3. The chip now says what it counts ("2 asks"); the surfaces
 					   that hold the whole ask list state questions, which is §5.0's own
-					   unit for the bar. */
+					   unit for the bar.
+
+					   THE ARIA LABEL IS NOT "waiting" (M1, asks-open widening): the
+					   field's set now includes a timed-out-but-answerable ask, and §5's
+					   header rule is explicit that an outstanding ask "is not a
+					   'waiting for you' state" — the agent keeps working. So the label
+					   uses this client's own word for the set (`outstandingAsks`,
+					   `lib/asks.ts`) rather than the reading the design forbids. */
 					<span
 						className="shrink-0 font-mono text-mono-sm text-accent"
 						aria-label={
-							s.asks_open === 1 ? "1 ask waiting" : `${s.asks_open} asks waiting`
+							s.asks_open === 1 ? "1 ask outstanding" : `${s.asks_open} asks outstanding`
 						}
 					>
 						{s.asks_open} ask{s.asks_open === 1 ? "" : "s"}

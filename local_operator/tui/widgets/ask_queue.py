@@ -52,6 +52,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widget import Widget
 
+from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
@@ -79,12 +80,17 @@ ASK_TOGGLE_KEY = "f4"
 ASK_BAR_CHEVRON_COLLAPSED = "⌄"
 ASK_BAR_CHEVRON_EXPANDED = "⌃"
 
-#: The statuses a row can carry from the wire, spelled once so the bar, the
-#: list and the transcript card cannot drift about what ``timed_out`` is called.
-STATUS_OPEN = "open"
-STATUS_TIMED_OUT = "timed_out"
-STATUS_LATE = "late"
-STATUS_ANSWERED = "answered"
+#: The statuses a row can carry, re-exported from ``asks/store.py``'s fold rather
+#: than spelled here. The bar, the list and the transcript card used to keep
+#: their OWN literals "spelled once" in this module, which is exactly how a
+#: surface ends up disagreeing with the wire about what ``timed_out`` means:
+#: the only spelling that is allowed to be authoritative is the fold's.
+STATUS_OPEN = store.STATUS_OPEN
+STATUS_TIMED_OUT = store.STATUS_TIMED_OUT
+STATUS_LATE = store.STATUS_LATE
+STATUS_ANSWERED = store.STATUS_ANSWERED
+STATUS_DECLINED = store.STATUS_DECLINED
+STATUS_DISMISSED = store.STATUS_DISMISSED
 
 #: Statuses a SURFACE drops, because the user has nothing left to do about
 #: them. ``answered`` and ``declined`` are settled; ``late`` joins them because
@@ -92,10 +98,13 @@ STATUS_ANSWERED = "answered"
 #: receipt is in the transcript, and offering an answer box for it can only be
 #: refused (design round 1, D6/U3: ``late`` was painted "timed out — still
 #: answerable" and stayed in the answerable set).
-SETTLED_STATUSES = frozenset({STATUS_ANSWERED, STATUS_LATE, "declined", "dismissed"})
-#: ...which is to say: everything the reader must not be asked to answer. Kept
-#: as an explicit set so a new status has to decide, rather than defaulting in.
-_ANSWERABLE = (STATUS_OPEN, STATUS_TIMED_OUT)
+SETTLED_STATUSES = frozenset({STATUS_ANSWERED, STATUS_LATE, STATUS_DECLINED, STATUS_DISMISSED})
+#: ...which is to say: everything the reader must not be asked to answer. THE
+#: OUTSTANDING SET, taken from the fold rather than re-listed here: a row the
+#: user can still answer is ``open`` or timed out and unanswered, and that ONE
+#: rule decides the wire's tally, this surface's rows and the sidebar mark, so
+#: it lives in ``asks.store.OUTSTANDING_STATUSES`` and nowhere else.
+_ANSWERABLE = store.OUTSTANDING_STATUSES
 
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
@@ -518,6 +527,23 @@ class AskQueueList(Widget):
         )
         self.refresh(layout=True)
 
+    def set_now(self, now_ms: int) -> None:
+        """Advance the countdown's clock without touching the rows.
+
+        The app's countdown tick calls THIS rather than :meth:`set_rows`: no row
+        changed, and re-deriving the highlight by ask id every 30 s is work that
+        can only get the highlight wrong. A plain ``refresh`` and not
+        ``refresh(layout=True)`` — the words ``expiry_text`` paints are clipped
+        against the width read at paint time, so a countdown that gains a cell
+        (``9m`` → ``10m``) shortens the question under it rather than reflowing
+        the row, which is what keeps the one-painted-row-per-ask invariant the
+        pointer hit test rests on.
+        """
+        if now_ms == self._now_ms:
+            return
+        self._now_ms = now_ms
+        self.refresh()
+
     def select(self, index: int) -> None:
         """Put the cursor on a row by index, clamped — used to hand a card's
         user back to the row they came from (UX round 1, U6, where Escaping a
@@ -693,7 +719,13 @@ class AskQueueList(Widget):
             # puts the cut where it belongs and paints the ellipsis that says
             # something was cut.
             expiry = expiry_text(row, self._now_ms)
-            tail = f"  {expiry}" if expiry else ""
+            # Padded to the widest countdown this row can paint, so the cut in
+            # the question above stays where it was when the clock moves
+            # (`expiry_room`): a row that filled the line used to re-truncate
+            # itself on every tick. A row with no deadline has no tail and no
+            # reservation — nothing about it can move.
+            room = expiry_room(row, expiry) if expiry else 0
+            tail = f"  {expiry}{' ' * max(0, room - 2 - cell_len(expiry))}" if expiry else ""
             fixed = 4 + cell_len(tail)  # two marker cells, two state-glyph cells
             question = _clip_cells(
                 row.head_question or f"(ask {row.ask_id})",
@@ -736,6 +768,40 @@ def expiry_text(row: AskRow, now_ms: int) -> str:
     return f"urgent · expires in {left}" if row.urgent else f"expires in {left}"
 
 
+def expiry_room(row: AskRow, expiry: str) -> int:
+    """Cells a row's ``  <expiry>`` TAIL may need, over its whole life.
+
+    The tail CHANGES WIDTH as the clock runs — ``10m`` is one cell wider than
+    ``9m``, the words change unit at the hour and minute boundaries, and
+    ``expiring`` replaces them all — so a question that filled its line got
+    RE-CUT by its own countdown: ``…which shard …`` became ``…which shard s…``
+    without the user touching anything, on a surface whose whole promise is
+    that a tick repaints and changes nothing else (design round 1, D2).
+    Reserving the widest form the row can reach keeps the question's clip
+    budget fixed, which is what makes the tick a pure repaint.
+
+    Derived from the row's OWN span (``expires_at - created_at``, the deadline
+    the ask was given) rather than a global constant: a constant wide enough
+    for ``expires in 999h`` would eat ten cells of question from every ask
+    forever. ``expiry_text`` prints minutes and seconds below an hour — always
+    at most two digits — so only the hours form can be wider, and the digits
+    it can reach are the ones the row's own span implies.
+
+    The returned width includes the two separator cells, and it never returns
+    less than what ``expiry`` already needs: a client clock skewed far ahead
+    of the wire's can paint a longer word than the span implies, and a tail is
+    the one thing on this row that must not be cropped (the expiry and its
+    urgency word are the meaning the hue alone cannot carry).
+    """
+    if row.status == STATUS_TIMED_OUT:
+        widest = cell_len("timed out — still answerable")
+    else:
+        prefix = "urgent · expires in " if row.urgent else "expires in "
+        span_s = (row.expires_at - row.created_at) // 1000 if row.created_at else 0
+        widest = cell_len(prefix) + max(2, len(str(max(0, span_s) // 3600))) + 1
+    return 2 + max(widest, cell_len(expiry))
+
+
 __all__ = [
     "ASK_BAR_CHEVRON_COLLAPSED",
     "ASK_BAR_CHEVRON_EXPANDED",
@@ -749,6 +815,7 @@ __all__ = [
     "AskQueueList",
     "AskRow",
     "ask_rows",
+    "expiry_room",
     "expiry_text",
     "queue_headline",
 ]

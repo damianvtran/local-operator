@@ -46,11 +46,11 @@ afterEach(() => {
 });
 
 describe("session row outstanding asks", () => {
-	it("states the count when asks are waiting", () => {
+	it("states the count when asks are outstanding", () => {
 		sessionList = [summary({ asks_open: 2 })];
 		render(<SessionListScreen />);
 		/* The chip states ASKS, the field's own unit (agent review round 1, R3):
-		   `asks_open` counts open asks and it was labelled with the bar's unit. */
+		   `asks_open` counts outstanding asks and it was labelled with the bar's unit. */
 		expect(screen.getByText("2 asks")).toBeTruthy();
 	});
 

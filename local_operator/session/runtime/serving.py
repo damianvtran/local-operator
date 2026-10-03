@@ -1189,18 +1189,20 @@ class ServingSessionHandle(SessionHandle):
         if callable(install_sink):
             install_sink(self._ask_state_changed)
 
-    def _ask_state_changed(self, rows: Any, open_count: Any) -> None:
+    def _ask_state_changed(self, rows: Any, outstanding_count: Any) -> None:
         """The session's ask fold moved: re-front the mirror and repaint.
 
         Called by ``Session.publish_ask_state`` (which the queue drives on every
         enqueue/answer/decline/dismiss/reconcile) so the phone projection carries
-        the new asks WITHOUT waiting for the next unrelated refresh. The legacy
-        card is re-fronted by the same call, because ``_publish_pending_gate``
+        the new asks WITHOUT waiting for the next unrelated refresh. The count is
+        the session's OUTSTANDING tally (open + timed-out-and-answerable), passed
+        through rather than re-derived here. The legacy card is re-fronted by the
+        same call, because ``_publish_pending_gate``
         reads the fold's ``pending`` — which now falls back to the head open
         ask's mirrored card when no real gate is waiting (design §4).
         """
         try:
-            self._fold.set_asks(list(rows) if rows is not None else None, open_count)
+            self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
         self._publish_pending_gate()
@@ -5787,7 +5789,8 @@ class ServingSessionHandle(SessionHandle):
 
         Read through the ONE derivation every publisher uses
         (``session.frontend_state.ask_wire``), so the phone, the desktop and the
-        list rows cannot disagree about which asks are open. Absence (``None``)
+        list rows cannot disagree about which asks are OUTSTANDING. Absence
+        (``None``)
         is carried through rather than flattened to an empty list: presence is
         the client-side capability proxy, and a runtime without queued asks must
         look exactly like the old runtime it is.
@@ -5795,8 +5798,8 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.session.frontend_state import ask_wire
 
         try:
-            rows, open_count = ask_wire(self._session)
-            self._fold.set_asks(rows, open_count)
+            rows, outstanding_count = ask_wire(self._session)
+            self._fold.set_asks(rows, outstanding_count)
         except Exception:  # noqa: BLE001 -- the card is chrome; the gate is not
             logger.debug("could not publish the ask fold", exc_info=True)
 
