@@ -1,6 +1,6 @@
 ---
 name: teams
-description: "Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers org pull/push/update."
+description: "Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers pull/push/update, including the public hub."
 ---
 
 # Teams
@@ -186,10 +186,16 @@ local-operator teams show feature-release
 local-operator teams delete --name feature-release
 local-operator teams sync --name feature-release   # check the hub and merge its updates
 local-operator teams link feature-release <hub-team-id> --org <tenant>   # adopt a team pulled before tracking
+local-operator teams push --public feature-release   # publish to the public hub
+local-operator teams push --org <tenant> --id <hub-team-id> feature-release   # republish (overwrite) a hub team
+local-operator teams pull <hub-team-id>   # pull by id; a public team also pulls by name
+local-operator teams search <query>   # browse the public teams
 ```
 
 Do not list the team registry at every session start. Discover it when the user asks about teams or when a task would benefit from one.
 
 ## Teams on the Agent Hub
 
-Teams are organization-only on the hub (`teams push|pull --org`). A pulled team remembers its hub id and the text it pulled; `teams sync` (and the background update check) merges hub changes three-way into description, manager, roster, collaboration brief and project brief. The local **name** never changes. The roster merges per slot (added / removed / count) and a slot you removed stays removed. Roles the roster names but you lack produce a `missing-role` warning, not a failure. Teams pulled before this feature are unlinked until `teams link`. Auto-update is `hub.auto_update.teams`; `--check`, `--prefer local|remote` and `--replace --yes` work as for agents (see the agents guide, "Agent Hub: pull, push, update", for the FAQ).
+Teams live on the Agent Hub, in an organization (`teams push --org`) or in the public catalogue (`teams push --public`; `teams pull` takes a hub id or a public team's name without `--org`; `teams search` browses the public teams). A pulled team remembers its hub id and the text it pulled; `teams sync` (and the background update check) merges hub changes three-way into description, manager, roster, collaboration brief and project brief. The local **name** never changes. The roster merges per slot (added / removed / count) and a slot you removed stays removed. Roles the roster names but you lack produce a `missing-role` warning, not a failure. Teams pulled before this feature are unlinked until `teams link`. Auto-update is `hub.auto_update.teams`; `--check`, `--prefer local|remote` and `--replace --yes` work as for agents (see the agents guide, "Agent Hub: pull, push, update", for the FAQ).
+
+Every push previews first: the hub checks the document for personal references and shows what would be replaced before anything is published, then asks you to confirm the pinned result (`--preview-only` stops after the diff and exits 2; a scripted push needs `--yes`; declining exits 3). `teams push --id <hub-team-id>` republishes (overwrites) an existing hub row: the row is read first, so a wrong organization is refused before anything is spent. A public push leaves the local-only `project` field out of the published copy and says so before sending.
