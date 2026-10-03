@@ -21,8 +21,13 @@ always the state its filename claims):
                  follows the wire; it used to keep the stale rows)
     list-long    the list with questions too wide for one row — the fixture the
                  wrap defect needed (round 3)
+    list-next    the list after an ask was answered OUT of it: the wire's next
+                 snapshot has dropped the answered row and the highlight has
+                 ADVANCED to the next outstanding ask
     response     the ask_response card COLLAPSED
     response-open the same card with its Q&A open (ROW is ignored)
+    late         the ask_response card for an answer that landed AFTER its own
+                 deadline — the receipt that must read as warning, not dim
     timeout      the ask_timeout card collapsed, then opened with ROW=1
 
 WHY THE TRANSCRIPT IS SEEDED FIRST. Every frame here has to answer "can the
@@ -39,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +55,8 @@ from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 isolate_capture()
 
 from local_operator.asks import policy  # noqa: E402
-from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.widgets.ask_queue import ask_rows  # noqa: E402
+from local_operator.tui.widgets.ask_queue import AskQueueList, ask_rows  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     AskResponseBlock,
@@ -62,6 +67,10 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 #: The flag is an env seam (D9). Set for the CAPTURE only: these frames are the
 #: flag-ON surface, and the before-frames on `origin/main` are the flag-off app.
 policy.NONBLOCKING_ASK = True
+
+#: When the fixture's asks were created: a minute ago, so `created_at` precedes
+#: `expires_at` by roughly the deadline the row carries.
+_CREATED_AT = int(time.time() * 1000) - 60_000
 
 
 def _row(
@@ -74,7 +83,12 @@ def _row(
 ) -> dict[str, Any]:
     return {
         "ask_id": ask_id,
-        "created_at": 1_700_000_000_000,
+        # CREATED BEFORE IT EXPIRES BY ABOUT ITS OWN TIMEOUT, because the list
+        # reserves the widest countdown a row can reach — derived from
+        # ``expires_at - created_at`` — and a fixture with a 2023 creation and
+        # a live deadline claims a three-year countdown, which reserves five
+        # digits of hours and steals question cells no real ask would lose.
+        "created_at": _CREATED_AT,
         # Overridable so a frame can show a deadline the client clock can still
         # measure; the fixed value is the "expiring" case, which is honest too.
         "expires_at": 1_700_003_600_000 if expires_at is None else expires_at,
@@ -112,9 +126,21 @@ _URGENT_MIN = 4
 
 
 def _deadline(minutes: int) -> int:
-    import time
-
     return int(time.time() * 1000) + minutes * 60_000
+
+
+class _AnswerableSession(FakeSession):
+    """``FakeSession`` plus the ONE queued-ask op a submit needs.
+
+    ``respond_ask`` is what tells the app that a card's settle was the LAST
+    question answered (a submit) rather than an Escape (a partial map), so a
+    frame that claims an ask was answered has to stand in front of a session
+    that can take the answer. Its verdict is the owner's shape — ``{"ok": ...}``
+    — because that is what the surfaces read.
+    """
+
+    def respond_ask(self, ask_id, answers, *, by="unknown"):
+        return {"ok": True}
 
 
 #: Longer than any width this capture set uses, so it MUST wrap if the row is
@@ -166,6 +192,18 @@ RESPONSE = {
     "text": "Answered — the whole ask was answered in one write.",
 }
 
+#: The late twin of RESPONSE: the SAME ``response`` kind, one status apart
+#: (``late``), which is the whole point of the frame — the ink must follow the
+#: severity the shared row computes, not the kind, or this receipt reads dim
+#: beside an amber timeout that reports the same missed deadline (audit C).
+LATE = {
+    **RESPONSE,
+    "ask_id": "a2",
+    "status": "late",
+    "text": "Answered late — the agent was told, one deadline too late.",
+}
+
+
 TIMEOUT = {
     "ask_id": "a3",
     "status": "timed_out",
@@ -200,8 +238,13 @@ async def main() -> None:
     if len(sys.argv) > 4:
         reveal = sys.argv[4].strip() in {"1", "reveal", "open", "true"}
 
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    session = _AnswerableSession()
+    app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
+        # The queued-ask OPS are the session's and the surfaces resolve them
+        # through the ADOPTED session, so the submit path has to be reachable
+        # from the app (the surface tests adopt the same way before answering).
+        app._session = session
         await pilot.pause()
         # `ASK_QUEUE_SHOT_THEME=light` renders the same state on the paper ramp.
         # An env seam rather than an argument, because the frame's FILENAME is
@@ -209,8 +252,15 @@ async def main() -> None:
         # name is how two runs of "the same" frame end up labelled alike.
         wanted = os.environ.get("ASK_QUEUE_SHOT_THEME", "").strip()
         if wanted:
-            theme_mod.set_theme(wanted)
-            app.refresh_css()
+            # The APP's own switch rather than ``theme_mod.set_theme`` +
+            # ``refresh_css``. The theme is spread across four systems and the
+            # markdown console theme is one of them (``_apply_theme``'s own
+            # docstring) — and it is pushed at MOUNT, so the short spelling
+            # re-inked the TCSS variables while every markdown block kept the
+            # ramp it was BUILT with. That is how a light frame came out with
+            # near-white prose on paper: half the frame, honestly unreadable
+            # (design D16).
+            app._apply_theme(wanted)
             await pilot.pause()
         for turn in range(1, 5):
             app._append_block(UserBlock(f"Turn {turn}: what should we do about the stale rows?"))
@@ -269,6 +319,25 @@ async def main() -> None:
             app._expand_asks()
             await pilot.pause()
             app._sync_ask_surface(ask_rows(THREE[:1]))
+        elif mode == "list-next":
+            # The re-entry frame (audit B): an ask answered OUT of the list must
+            # hand the list back at the NEXT outstanding ask, not collapse to
+            # the bar and make the user re-expand for every remaining ask. The
+            # sequence is the real one — expand, pick a2, settle it, then the
+            # wire's next snapshot drops the answered row — and the frame is the
+            # state the user settles on: two rows with the highlight advanced to
+            # a3. On the pre-fix tree the same sequence paints the minimized bar.
+            app._sync_ask_surface(ask_rows(THREE))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            app.on_ask_queue_list_picked(AskQueueList.Picked("a2"))
+            await pilot.pause()
+            app._on_queue_ask_settle("a2", {"q1": ["Rotate after the cutover"]})
+            await pilot.pause()
+            # The next snapshot: the answered ask is gone, so this is also what
+            # proves the highlight survives the wire dropping the row under it.
+            app._sync_ask_surface(ask_rows([THREE[0], THREE[2]]))
         elif mode == "card-timeout":
             # Round 1 (UX U9): the card kept saying the agent was waiting after
             # the ask's own deadline had fired. The status changes UNDER the
@@ -282,8 +351,8 @@ async def main() -> None:
             app._sync_ask_surface(ask_rows([THREE[0]]))
             await pilot.pause()
             app._expand_asks()
-        elif mode in {"response", "response-open", "timeout"}:
-            details = TIMEOUT if mode == "timeout" else RESPONSE
+        elif mode in {"response", "response-open", "timeout", "late"}:
+            details = {"timeout": TIMEOUT, "late": LATE}.get(mode, RESPONSE)
             kind = "timeout" if mode == "timeout" else "response"
             block = AskResponseBlock(details, kind=kind)
             app._append_block(block)

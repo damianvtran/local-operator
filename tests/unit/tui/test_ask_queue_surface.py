@@ -18,6 +18,9 @@ the first test in this file proves the OFF state renders nothing at all.
 
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from typing import Any
 
 import pytest
@@ -124,6 +127,17 @@ def _app(session: FakeSession) -> OperatorApp:
 async def _settle(pilot, turns: int = 3) -> None:
     for _ in range(turns):
         await pilot.pause()
+
+
+def _countdown_seconds(painted: str) -> int:
+    """The first ``expires in Ns`` in a painted list, or 0 once it expired.
+
+    A frame is a rendering, not a struct: the countdown test has to read the
+    number back out of the pixels it is asserting about, and ``expiring`` (the
+    row past its deadline) is the floor of that scale, not an unparsed value.
+    """
+    match = re.search(r"expires in (\d+)s", painted)
+    return int(match.group(1)) if match else 0
 
 
 # -- the flag-off invariant --------------------------------------------------
@@ -1233,7 +1247,14 @@ async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
         app._submit_ask_answer("eu-west-1")
         await _drain(pilot)
         assert session.wire == [("respond", "a1", {"q1": ["eu-west-1"]}, "terminal")], session.wire
-        assert app._ask_mode is False
+        # The surface STAYS UP and advances to the next ask (audit B): a1 was
+        # picked out of a two-row list, and the collapse this asserted was the
+        # rule the audit replaced. The viewer's verdict arrives later and does
+        # not move the surface — a refusal leaves the row where the wire still
+        # has it, so the advance costs nothing on that path.
+        assert app._ask_mode is True
+        listing = app.query_one(AskQueueList)
+        assert listing.rows[listing.index].ask_id == "a2"
 
 
 async def test_a_viewer_refusal_reaches_the_screen_in_the_owners_words(enabled):
@@ -1285,3 +1306,251 @@ async def test_a_row_too_wide_for_the_box_keeps_its_expiry_and_shows_the_cut(ena
         assert "…" in row, row
         assert "expiring" in row or "expires in" in row, row
         assert cell_len(row) <= listing.content_size.width, row
+
+
+# -- the audited gaps: the frozen countdown, the re-expand, the dim receipt ---
+#
+# The audit of the MERGED surface found three gaps the four review rounds did
+# not: a painted countdown that only moved on a frontend snapshot, a queue that
+# cost one re-expand per answer, and a late answer painted ``dim`` while the
+# timeout row beside it painted amber. One test each, driven through the real
+# app, because all three are claims about what the user SEES between events.
+
+
+async def test_the_countdown_repaints_between_snapshots(enabled, monkeypatch):
+    """The countdown is derived at paint time, so a paint must fire on its own.
+
+    ``_sync_ask_surface`` runs only on a frontend snapshot, so a surface left
+    open froze its "expires in 42m" until the next wire event — past the very
+    deadline it was counting down to. The tick is that missing event. The period
+    is patched to a test-sized one so it is the FIRING that is asserted rather
+    than the wiring, and the second half pins the other edge: no rows, no clock.
+    """
+    from local_operator.tui import app as app_module
+
+    monkeypatch.setattr(app_module, "ASK_COUNTDOWN_TICK_S", 0.05)
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        assert app._ask_tick is None, "a session with no asks carries no clock"
+        # TWO asks with a deadline five seconds out: two rows keep the LIST up
+        # (one ask expands straight to its card), and a five-second deadline
+        # leaves room for the second hand to move inside the test rather than
+        # an hour from now.
+        expires_at = int(time.time() * 1000) + 5_000
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a1", "Deploy now?", expires_at=expires_at),
+                    _row("a2", "Which region?", expires_at=expires_at),
+                ]
+            )
+        )
+        await _settle(pilot)
+        assert app._ask_tick is not None, "the countdown was never armed"
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        armed_at = listing._now_ms
+        first = listing.render().plain
+        assert "expires in" in first, first
+        # No snapshot, no keypress, nothing but the clock: the row must re-derive.
+        # A whole second has to pass before the WORDS can move, so the frame is
+        # read a second after a tick period of 0.05 s.
+        await asyncio.sleep(1.2)
+        await _settle(pilot)
+        after = listing.render().plain
+        assert listing._now_ms > armed_at, "the row's clock never advanced"
+        assert _countdown_seconds(after) < _countdown_seconds(first), (first, after)
+
+        # The last row leaving stops the clock rather than letting it tick on.
+        app._sync_ask_surface([])
+        await _settle(pilot)
+        assert app._ask_tick is None
+        assert app._ask_mode is False
+
+
+def _countdown_token(painted: str) -> str:
+    """The ``expires in 42m`` word a painted row carries, or "".
+
+    Design D2's tests are about the WORD moving while the layout does not, so
+    they read the token out of the frame rather than asserting a fixed string:
+    the exact value depends on a live clock, and the claim is the CHANGE.
+    """
+    match = re.search(r"expires in \d+[smh]", painted)
+    return match.group(0) if match else ""
+
+
+def test_the_expiry_field_reserves_its_widest_point():
+    """Design round 1, D2: the tail's own width must not move under the question.
+
+    ``10m`` is one cell wider than ``9m``, and the words change unit at the hour
+    and minute boundaries, so a row that had filled its line re-cut its own
+    question on every tick — the one thing a repaint-only tick must not do. The
+    reservation is what keeps the clip budget fixed; this asserts it is CONSTANT
+    across every word one row can paint, and never narrower than the word it
+    reserves for. Spelled out as a unit test because the invariant is arithmetic
+    on the row, not on any frame.
+    """
+    from local_operator.tui.widgets.ask_queue import AskRow, expiry_room, expiry_text
+
+    created = 1_700_000_000_000
+    for urgent in (False, True):
+        row = AskRow(
+            ask_id="a1",
+            status=STATUS_OPEN,
+            created_at=created,
+            expires_at=created + 3_600_000,
+            urgent=urgent,
+            questions=(),
+        )
+        words = [
+            expiry_text(row, created + offset)
+            for offset in (0, 1_800_000, 3_540_000, 3_599_000, 3_600_000, 3_601_000)
+        ]
+        rooms = {expiry_room(row, word) for word in words}
+        assert len(rooms) == 1, (urgent, words, rooms)
+        room = rooms.pop()
+        assert all(cell_len(word) + 2 <= room for word in words), (urgent, words, room)
+
+    # A timed-out row's word is not a countdown and does not move, so its
+    # reservation is exactly that word rather than a countdown's worst case.
+    timed = AskRow(
+        ask_id="a2",
+        status="timed_out",
+        created_at=created,
+        expires_at=created + 60_000,
+        urgent=False,
+        questions=(),
+    )
+    word = expiry_text(timed, created)
+    assert expiry_room(timed, word) == cell_len(word) + 2
+
+
+async def test_a_clock_tick_does_not_re_cut_the_question(enabled):
+    """Design round 1, D2, through the app: the tick moves the tail and nothing else.
+
+    Driven by advancing the widget's own clock (``set_now``, exactly what the
+    interval calls) rather than by sleeping: the claim is about the PAINT, and
+    the timer's own firing is the countdown test's evidence.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        # TWO asks, because one expands straight to its card and this is about
+        # the LIST's rows.
+        deadline = int(time.time() * 1000) + 600_000
+        app._sync_ask_surface(
+            ask_rows([_row("a1", LONG_QUESTION, expires_at=deadline), _row("a2", "Which region?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        # The clock is SET rather than nudged: the discriminating case is a
+        # DIGIT leaving the tail ("10m" -> "9m"), and reading it off the wall
+        # clock would land on "9m" -> "8m" — one cell either way — which is the
+        # tick this test would then pass without the reservation.
+        listing.set_now(deadline - 600_000)
+        await _settle(pilot)
+        before = listing.render().plain.splitlines()[1]
+        assert "expires in 10m" in before, before
+        assert "…" in before, before
+        listing.set_now(deadline - 599_000)
+        await _settle(pilot)
+        after = listing.render().plain.splitlines()[1]
+        assert _countdown_token(after) != _countdown_token(before), (before, after)
+        # The question is cut in EXACTLY the same place, and the row is the same
+        # width: the minute that left the tail did not become question.
+        assert before.split("expires in")[0] == after.split("expires in")[0], (before, after)
+        assert cell_len(before) == cell_len(after), (before, after)
+
+
+async def test_answering_one_ask_advances_the_list_to_the_next(enabled):
+    """Audit B: a queue of N used to cost N re-expands.
+
+    A submit collapsed the surface, so answering three asks meant expanding,
+    hunting for the place and answering, three times. The list is a PLACE — the
+    answered row leaves and its successor slides into the space it held — so the
+    surface stays up with the highlight advanced to the next outstanding ask,
+    and the highlight survives the wire's own snapshot dropping the row under it.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._session = session
+        app._sync_ask_surface(
+            ask_rows(
+                [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.on_ask_queue_list_picked(AskQueueList.Picked("a2"))
+        await _settle(pilot)
+        assert app._ask_mounted_id == "a2"
+
+        app._on_queue_ask_settle("a2", {"q1": ["Yes"]})
+        await _settle(pilot)
+        assert session.answered and session.answered[0][0] == "a2"
+        listing = app.query_one(AskQueueList)
+        assert listing.is_attached, "answering out of the list collapsed the surface"
+        assert app._ask_mode is True
+        assert listing.rows[listing.index].ask_id == "a3", "the highlight did not advance"
+
+        # The wire's next snapshot drops the answered row: the list follows it
+        # and keeps the user where the advance put them.
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a3", "Roll back?")]))
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        assert [row.ask_id for row in listing.rows] == ["a1", "a3"]
+        assert listing.rows[listing.index].ask_id == "a3"
+
+
+async def test_answering_the_last_row_falls_back_to_the_one_before_it(enabled):
+    """The other half of the walk: the last ask has no successor to hand over.
+
+    Answering the BOTTOM row must not throw the user back to the top of the
+    list — the row that moves up into the freed space is the row they were
+    about to reach, so that is the one the surface lands on.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._session = session
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.on_ask_queue_list_picked(AskQueueList.Picked("a2"))
+        await _settle(pilot)
+        app._on_queue_ask_settle("a2", {"q1": ["Yes"]})
+        await _settle(pilot)
+        assert session.answered and session.answered[0][0] == "a2"
+        listing = app.query_one(AskQueueList)
+        assert listing.is_attached
+        assert listing.rows[listing.index].ask_id == "a1"
+
+
+def test_an_answer_that_landed_late_takes_the_warning_ink():
+    """Audit C: a late answer is a RESPONSE, and a response was dim by definition.
+
+    The shared row already distinguishes the three statuses and calls the late
+    one ``warning``; the surface branched on ``kind`` instead, so the late
+    receipt painted ``dim`` beside the amber timeout row that reports the same
+    missed deadline.
+    """
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    late = AskResponseBlock({"text": "…", "status": "late"}, kind="response")
+    answered = AskResponseBlock({"text": "…", "status": "answered"}, kind="response")
+    assert late._summary_ink() == "warning"
+    assert answered._summary_ink() != "warning"
+    # The same weight as the timeout row, which is the whole point of the ink.
+    assert late._summary_ink() == AskResponseBlock({"text": "…"}, kind="timeout")._summary_ink()
+    assert late._build_content(80).plain
