@@ -100,6 +100,38 @@ def _enqueue(queue: Any, questions: list[dict[str, Any]]) -> str:
     return str(outcome["details"]["ask_id"])
 
 
+def _secret_and_plain(
+    secret_id: str = "API_KEY", plain_id: str = "q1", *, text: str = ""
+) -> list[dict[str, Any]]:
+    """One SECRET question and one ordinary one, in that order.
+
+    The order is the point: the hop walks the questions, so a secret cell in the
+    map is the thing that used to make the hop return a cell for the OTHER
+    question too (see the partial-map cell below). ``text`` keeps two asks in one
+    test from tripping the "do not re-ask" guard while the first is still open.
+    """
+    return [
+        {
+            "id": secret_id,
+            "question": f"Paste the key{text}",
+            "options": [],
+            "multi": False,
+            "secret": True,
+            "persist": False,
+            "recommended": None,
+        },
+        {
+            "id": plain_id,
+            "question": f"Which one?{text}",
+            "options": [{"label": "yes"}, {"label": "no"}],
+            "multi": False,
+            "secret": False,
+            "persist": False,
+            "recommended": None,
+        },
+    ]
+
+
 def test_the_ask_op_family_carries_the_session_loop_hop() -> None:
     """Every ask op the dispatch reaches must be hopped onto the session's loop.
 
@@ -178,6 +210,50 @@ async def test_a_refused_revision_never_stores_or_announces_its_secret(
     assert SENTINEL not in log
     record = queue.find(open_ask)
     assert record is not None and record["answers"] == {"API_KEY": ["API_KEY"]}
+
+
+@pytest.mark.asyncio
+async def test_a_partial_map_is_refused_even_when_the_ask_carries_a_secret(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """PRE-EXISTING defect found en route, identical in ``respond_ask`` (round 2).
+
+    REPRODUCTION, kept as a test: with a SECRET question in the ask, the hop
+    returned a cell for EVERY question id — ``[]`` for the ones the caller never
+    supplied — so ``_whole_ask_cells``' completeness check saw a full map and an
+    omitted question was recorded as "no answer" instead of being refused. Asked
+    for here because the contract is already open in this PR: the hop now returns
+    ONLY the cells the caller supplied, so the check sees the true key set.
+
+    BOTH ops are pinned, and each gets a FRESH session, because the defect shipped
+    in the shared hop and ``respond_ask`` is where it shipped: the queued revision
+    path must not inherit it either. The store is real, so the assertion about the
+    refusal is about the op and not about a missing credential backend.
+    """
+    from local_operator.variables import VariableStore
+
+    for op in ("respond_ask", "revise_ask"):
+        home = tmp_path / op
+        home.mkdir(parents=True, exist_ok=True)
+        session, queue = _ask_session(home)
+        session._variables = VariableStore(cwd=str(home))  # noqa: SLF001 — the store the hop writes
+        secret_id = f"{op.upper()}_API_KEY"
+        ask_id = _enqueue(queue, _secret_and_plain(secret_id=secret_id, text=f" ({op})"))
+
+        # The caller supplies ONLY the secret cell and omits the other question.
+        outcome = getattr(session, op)(ask_id, {secret_id: [secret_id.upper()]})
+
+        assert outcome["ok"] is False, (op, outcome)
+        assert "'q1'" in outcome["error"], (op, outcome)
+        assert "empty list" in outcome["error"], (op, outcome)
+        # The refusal is the whole effect: no answer was recorded for THIS ask, so
+        # the omitted question cannot be read back as a deliberate "no answer".
+        kinds = [
+            event["kind"]
+            for event in store.read_events(queue.session_dir)
+            if event["ask_id"] == ask_id
+        ]
+        assert kinds == [store.EVENT_QUEUED], (op, kinds)
 
 
 @pytest.mark.asyncio

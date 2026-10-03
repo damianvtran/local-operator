@@ -388,8 +388,17 @@ class AskQueue:
         sees the map, and a revision the queue is going to refuse must not be the
         reason a pasted credential is stored and announced to later turns. The
         decision itself is ``_revision_decision``, shared with the write path, so
-        a probe that disagreed with the answer would be impossible rather than
-        merely unlikely.
+        the two can never disagree BY RULE — the sentence a caller sees here is
+        the sentence the write would return.
+
+        THE CLOCK IS THE CALLER'S, and that is the one place they can part in
+        fact: ``revise`` reads ``now`` again for its own fold, so a probe and a
+        write straddling the ``LATE_WINDOW_S`` horizon — where an ask moves to
+        ``expired`` and the verdict flips from admissible to refused — can land on
+        opposite sides of it. Every other state transition is verdict-neutral
+        (``open``/``timed_out`` are both admissible, ``answered``/``late`` are the
+        same window), so that 7-day boundary is the whole of the difference, and
+        it is why this is documented rather than papered over with a guard.
 
         It writes nothing and delivers nothing: the fold the write path reads, and
         the sentence it would return.
