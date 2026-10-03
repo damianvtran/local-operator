@@ -36,6 +36,13 @@
 /** The custom property the session view publishes its pinned height as. */
 export const COLUMN_HEIGHT_VAR = "--lo-vvh";
 
+/** The custom property the session view publishes its pinned TOP as.
+ *
+ *  Same writer, same handler, same instant as {@link COLUMN_HEIGHT_VAR}: an
+ *  overlay that read one of them from somewhere else would drift from the pin
+ *  the moment the other moved. */
+export const COLUMN_TOP_VAR = "--lo-vvh-top";
+
 /**
  * A question awaiting an answer outranks a task list (branding §7), so the
  * card may claim more of the column than the panels beside it. Fractions
@@ -49,5 +56,37 @@ export const PANEL_FRACTION = 0.4;
 export function columnCap(fraction: number): { maxHeight: string } {
 	return {
 		maxHeight: `calc(var(${COLUMN_HEIGHT_VAR}, 100dvh) * ${fraction})`,
+	};
+}
+
+/**
+ * The box a VIEWPORT-anchored overlay must cover, in column units.
+ *
+ * `position: fixed` resolves against the LAYOUT viewport, and a virtual
+ * keyboard does not shrink that one (`resizes-visual`) — it is the VISUAL
+ * viewport that shrinks, which is the box the column is pinned to. So an
+ * overlay that simply says `fixed inset-0` sits half under the keyboard on the
+ * phone this surface exists for. Reading the pin's own two numbers
+ * ({@link COLUMN_TOP_VAR} + {@link COLUMN_HEIGHT_VAR}) makes the overlay and
+ * the column the same box by construction rather than by agreement.
+ *
+ * `0px`/`100dvh` is the fallback for a surface outside the session view — the
+ * list, new-session and pair screens mount sheets too, publish no pin, and
+ * their columns are `h-dvh` — and for a browser without `visualViewport`, where
+ * the two viewports coincide anyway.
+ *
+ * WHY `position` IS RETURNED FROM HERE rather than left as a Tailwind class.
+ * The anchoring is the half of this fix that a revert would silently undo: back
+ * to `absolute` and the overlay is a child of whichever ancestor is positioned
+ * again (measured on the real bundle: a 390x53 box, panel top -263). A class
+ * string is unassertable at the happy-dom layer — it resolves no stylesheet —
+ * while an inline declaration resolves, so the anchoring lives beside the rest
+ * of the box and a test can fail on it.
+ */
+export function columnBox(): { position: "fixed"; top: string; height: string } {
+	return {
+		position: "fixed",
+		top: `var(${COLUMN_TOP_VAR}, 0px)`,
+		height: `var(${COLUMN_HEIGHT_VAR}, 100dvh)`,
 	};
 }
