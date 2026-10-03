@@ -257,6 +257,40 @@ async def test_a_partial_map_is_refused_even_when_the_ask_carries_a_secret(
 
 
 @pytest.mark.asyncio
+async def test_a_complete_map_with_a_secret_question_still_records_every_cell(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """THE FILTER'S OTHER SIDE: a COMPLETE map still records every cell.
+
+    The cell above proves an omitted question stays omitted; this pins the arm that
+    must not move — the secret cell recorded as its KEY NAME (never the pasted
+    bytes) and the ordinary cell as the value chosen.
+
+    A behavioural guard rather than a teeth-bearing one, and worth saying so:
+    ``Session.respond_ask`` merges the hop's output OVER the caller's own map, so a
+    filter that dropped a SUPPLIED cell would not change the record — and a dropped
+    secret cell would still be caught downstream by ``_guard_secret_cells``. The
+    filter's whole job is to withhold the cells nobody supplied, which is the cell
+    above; this one pins the post-fix shape of the complete path so a later change
+    to the hop has to face both arms at once.
+    """
+    from local_operator.variables import VariableStore
+
+    session, queue = _ask_session(tmp_path)
+    session._variables = VariableStore(cwd=str(tmp_path))  # noqa: SLF001 — the store the hop writes
+    ask_id = _enqueue(queue, _secret_and_plain())
+
+    outcome = session.respond_ask(ask_id, {"API_KEY": [SENTINEL], "q1": ["yes"]})
+
+    assert outcome["ok"] is True, outcome
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["answers"]["q1"] == ["yes"], record["answers"]
+    assert SENTINEL not in record["answers"]["API_KEY"], record["answers"]
+    assert SENTINEL not in store.asks_log_path(queue.session_dir).read_text()
+
+
+@pytest.mark.asyncio
 async def test_a_revision_is_accepted_through_the_op_while_delivery_has_not_run(
     isolated_config: Path, tmp_path: Path
 ) -> None:
