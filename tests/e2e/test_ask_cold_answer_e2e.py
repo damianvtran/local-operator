@@ -50,13 +50,26 @@ SESSION = "coldask00001"
 ASK_ID = "a-coldask00001"
 QUESTION = "ship the queued-ask engage?"
 
+#: A credential-shaped ask: the id IS the key name (``AskQuestion`` id is the
+#: key, design §2.2), and the value the phone pastes must never reach disk.
+SECRET_SESSION = "coldsecret0001"
+SECRET_ASK_ID = "a-coldsecret0001"
+SECRET_KEY = "API_KEY"
+SENTINEL = "sentinel-value-8f13c0"
+
 #: Generous, because it covers a real process spawn and a real boot reconcile
 #: on a fleet that runs dozens of suites at once (AGENTS.md). The watchdog
 #: turns a hang into a named ``TimeoutError`` rather than a silent stall.
 BOUND_S = 120.0
 
 
-def _seed(config_dir: Path) -> Path:
+def _seed(
+    config_dir: Path,
+    *,
+    session: str = SESSION,
+    ask_id: str = ASK_ID,
+    question: dict[str, object] | None = None,
+) -> Path:
     """A durable user session with one OPEN queued ask and no runtime.
 
     The transcript is seeded (not just the directory) because the relay's own
@@ -70,7 +83,7 @@ def _seed(config_dir: Path) -> Path:
     (config_dir / "config.yml").write_text(
         "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
     )
-    directory = config_dir / "sessions" / SESSION
+    directory = config_dir / "sessions" / session
     directory.mkdir(parents=True, exist_ok=True)
     asyncio.run(Transcript(directory).append_message(Message.user("hello", id="seed-user")))
     now = int(time.time() * 1000)
@@ -79,7 +92,7 @@ def _seed(config_dir: Path) -> Path:
         {
             "v": ask_store.EVENT_SCHEMA,
             "kind": ask_store.EVENT_QUEUED,
-            "ask_id": ASK_ID,
+            "ask_id": ask_id,
             "at": now,
             "created_at": now,
             # Well inside the window, so the answer is an ordinary answer and
@@ -89,7 +102,8 @@ def _seed(config_dir: Path) -> Path:
             "urgent": False,
             "tool_call_id": "",
             "questions": [
-                {
+                question
+                or {
                     "id": "q1",
                     "question": QUESTION,
                     "options": [{"label": "yes", "description": ""}],
@@ -204,6 +218,73 @@ def test_answering_a_queued_ask_on_a_stopped_session_engages_and_delivers(
         payload = json.dumps(row)
         assert QUESTION in payload
         assert "yes" in payload
+    finally:
+        client.close()
+        _reap()
+
+
+def test_a_secret_cold_answer_engages_without_the_value_reaching_disk(
+    headless_tui_env: Path,
+) -> None:
+    """§2.4's SECRET ordering, exercised on the NEW cold path.
+
+    The cold arm engages FIRST and only then sends the op, so the pasted value is
+    handed to a runtime that is already live — which is exactly the ordering §2.4
+    requires ("Cold → engage first, then send") and the reason the value may ride
+    the ``ask_respond`` body at all. The engaged runtime's own ``Session.
+    respond_ask`` stores it in session memory and records the KEY NAME, so the
+    sentinel must be absent from every artefact this route can leave behind —
+    asserted by grep across the queue's own three, the same bar the queue's
+    secret cell sets.
+
+    THE SUBSTITUTION IS THE PROOF THE RUNTIME RAN IT: ``{key: [key]}`` in the
+    durable row can only be produced by the live secret hop
+    (``asks/render.apply_secret_answers``), so a relay that never engaged could
+    not have written it.
+    """
+    directory = _seed(
+        headless_tui_env,
+        session=SECRET_SESSION,
+        ask_id=SECRET_ASK_ID,
+        question={
+            "id": SECRET_KEY,
+            "question": "Paste the key",
+            "options": [],
+            "multi": False,
+            "secret": True,
+            "persist": False,
+        },
+    )
+    client = _client()
+    try:
+        with bounded(BOUND_S, "a cold secret answer engages without leaking"):
+            reply = client.post(
+                f"/api/sessions/{SECRET_SESSION}/command",
+                json={
+                    "op": "ask_respond",
+                    "ask_id": SECRET_ASK_ID,
+                    "answers": {SECRET_KEY: [SENTINEL]},
+                },
+            )
+            assert reply.status_code == 200, reply.text
+            row_id = ask_store.response_row_id(SECRET_ASK_ID)
+            _wait_until(
+                lambda: row_id in _transcript_text(directory),
+                timeout_s=60,
+                what="the secret response row to reach the transcript",
+            )
+
+        log = ask_store.asks_log_path(directory).read_text(encoding="utf-8")
+        index = ask_store.entry_path(headless_tui_env, SECRET_SESSION).read_text(encoding="utf-8")
+        transcript = _transcript_text(directory)
+        for name, blob in (("asks.jsonl", log), ("index", index), ("transcript", transcript)):
+            assert SENTINEL not in blob, f"the secret value reached {name}"
+        assert SECRET_KEY in log
+        assert SECRET_KEY in transcript
+        answered = next(
+            event for event in _events(directory) if event.get("kind") == ask_store.EVENT_ANSWERED
+        )
+        assert answered["answers"] == {SECRET_KEY: [SECRET_KEY]}
     finally:
         client.close()
         _reap()

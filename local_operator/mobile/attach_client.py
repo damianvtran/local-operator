@@ -40,7 +40,15 @@ import logging
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
+
+if TYPE_CHECKING:
+    # The engage-and-dial seam takes ANY errand (a prompt, or a queued ask's cold
+    # answer), so its parameter is the union rather than ``Any``: a caller that
+    # invents a payload then fails the type gate instead of the engage. Imported
+    # under TYPE_CHECKING because ``launch`` imports THIS module function-locally
+    # on its own side, and the annotation is a string either way (PEP 563).
+    from local_operator.session.runtime.launch import Errand
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -2493,7 +2501,7 @@ class AttachClient:
 async def engage_session_client(
     config_dir: Path,
     session_id: str,
-    work: Any,
+    work: "Errand",
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
