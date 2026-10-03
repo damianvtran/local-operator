@@ -1414,6 +1414,33 @@ def test_render_wraps_to_the_terminal_width(
         and not line.startswith("Successfully ")
     ]
     assert over == []
+    # R1: a wrapped paragraph keeps its first-line indent. The collapse in
+    # _wrap_text must never eat the caller's leading spaces.
+    assert any(line.startswith("  [u1]") for line in out.splitlines())
+    assert any(line.startswith("  Your local copy") for line in out.splitlines())
+
+
+def test_render_wraps_at_a_narrow_width(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """At COLUMNS=40 the changes table wraps at spaces instead of splitting
+    padded columns mid-word (ux round 2, R2)."""
+    monkeypatch.setenv("COLUMNS", "40")
+    _make_team()
+    hub.preview_queue.append(_preview({}, status="ready", changes=_CHANGES))
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "teams", "push", "--org", "org-a", "--preview-only", "release-crew"],
+    )
+
+    assert main() == 2
+
+    out = _plain(capsys.readouterr().out)
+    over = [line for line in out.splitlines() if len(line) > 40]
+    assert over == []
+    # The row's content survives the narrow fallback.
+    assert "Damian Tran" in out and "[PERSON_1]" in out
 
 
 def test_resolution_summary_reminder_and_headings(
@@ -1532,6 +1559,26 @@ def test_public_walk_stops_at_the_bound_and_says_so(
     assert "listing walk stopped after 2 pages of 5" in out
     assert "a match may exist past it" in out
 
+    # The boundary case: exactly bound + 1 total pages must ALSO report the
+    # bound. The pre-fix formula (`page >= total_pages` after the loop) claimed
+    # complete=True here, because the loop had incremented to 3 (review round
+    # 2, M2 boundary).
+    def listing_exact(*, page: int = 1, per_page: int = 20):
+        return {
+            "page": page,
+            "per_page": per_page,
+            "total_pages": 3,
+            "total_records": 240,
+            "records": [{"id": f"t{page}", "name": f"page-{page}-crew"}],
+        }
+
+    hub.list_public_teams = listing_exact  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.argv", ["program", "teams", "search", "still-not-there"])
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "listing walk stopped after 2 pages of 3" in out
+    assert "a match may exist past it" in out
+
 
 def test_public_pull_name_past_the_bound_does_not_claim_absence(
     hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1555,3 +1602,35 @@ def test_public_pull_name_past_the_bound_does_not_claim_absence(
 
     out = capsys.readouterr().out
     assert "listing walk stopped at its 2-page bound" in out
+
+
+def test_teams_search_singular_count_reads_matches(
+    hub: _Hub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """n == 1 is "1 public team matches", not "...match" (copy round 2, C10 residual)."""
+    hub.public_teams = [
+        {
+            "id": "t1",
+            "name": "open-crew",
+            "description": "Open.",
+            "manager": "m",
+            "version": "1.0.0",
+        }
+    ]
+    monkeypatch.setattr("sys.argv", ["program", "teams", "search", "open-crew"])
+
+    assert main() == 0
+    assert "1 public team matches 'open-crew':" in capsys.readouterr().out
+
+    # Plural stays plural.
+    hub.public_teams.append(
+        {
+            "id": "t2",
+            "name": "open-crew-2",
+            "description": "Open.",
+            "manager": "m",
+            "version": "1.0.0",
+        }
+    )
+    assert main() == 0
+    assert "2 public teams match 'open-crew':" in capsys.readouterr().out
