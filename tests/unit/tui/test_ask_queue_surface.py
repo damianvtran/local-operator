@@ -1371,6 +1371,103 @@ async def test_the_countdown_repaints_between_snapshots(enabled, monkeypatch):
         assert app._ask_mode is False
 
 
+def _countdown_token(painted: str) -> str:
+    """The ``expires in 42m`` word a painted row carries, or "".
+
+    Design D2's tests are about the WORD moving while the layout does not, so
+    they read the token out of the frame rather than asserting a fixed string:
+    the exact value depends on a live clock, and the claim is the CHANGE.
+    """
+    match = re.search(r"expires in \d+[smh]", painted)
+    return match.group(0) if match else ""
+
+
+def test_the_expiry_field_reserves_its_widest_point():
+    """Design round 1, D2: the tail's own width must not move under the question.
+
+    ``10m`` is one cell wider than ``9m``, and the words change unit at the hour
+    and minute boundaries, so a row that had filled its line re-cut its own
+    question on every tick — the one thing a repaint-only tick must not do. The
+    reservation is what keeps the clip budget fixed; this asserts it is CONSTANT
+    across every word one row can paint, and never narrower than the word it
+    reserves for. Spelled out as a unit test because the invariant is arithmetic
+    on the row, not on any frame.
+    """
+    from local_operator.tui.widgets.ask_queue import AskRow, expiry_room, expiry_text
+
+    created = 1_700_000_000_000
+    for urgent in (False, True):
+        row = AskRow(
+            ask_id="a1",
+            status=STATUS_OPEN,
+            created_at=created,
+            expires_at=created + 3_600_000,
+            urgent=urgent,
+            questions=(),
+        )
+        words = [
+            expiry_text(row, created + offset)
+            for offset in (0, 1_800_000, 3_540_000, 3_599_000, 3_600_000, 3_601_000)
+        ]
+        rooms = {expiry_room(row, word) for word in words}
+        assert len(rooms) == 1, (urgent, words, rooms)
+        room = rooms.pop()
+        assert all(cell_len(word) + 2 <= room for word in words), (urgent, words, room)
+
+    # A timed-out row's word is not a countdown and does not move, so its
+    # reservation is exactly that word rather than a countdown's worst case.
+    timed = AskRow(
+        ask_id="a2",
+        status="timed_out",
+        created_at=created,
+        expires_at=created + 60_000,
+        urgent=False,
+        questions=(),
+    )
+    word = expiry_text(timed, created)
+    assert expiry_room(timed, word) == cell_len(word) + 2
+
+
+async def test_a_clock_tick_does_not_re_cut_the_question(enabled):
+    """Design round 1, D2, through the app: the tick moves the tail and nothing else.
+
+    Driven by advancing the widget's own clock (``set_now``, exactly what the
+    interval calls) rather than by sleeping: the claim is about the PAINT, and
+    the timer's own firing is the countdown test's evidence.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        # TWO asks, because one expands straight to its card and this is about
+        # the LIST's rows.
+        deadline = int(time.time() * 1000) + 600_000
+        app._sync_ask_surface(
+            ask_rows([_row("a1", LONG_QUESTION, expires_at=deadline), _row("a2", "Which region?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        # The clock is SET rather than nudged: the discriminating case is a
+        # DIGIT leaving the tail ("10m" -> "9m"), and reading it off the wall
+        # clock would land on "9m" -> "8m" — one cell either way — which is the
+        # tick this test would then pass without the reservation.
+        listing.set_now(deadline - 600_000)
+        await _settle(pilot)
+        before = listing.render().plain.splitlines()[1]
+        assert "expires in 10m" in before, before
+        assert "…" in before, before
+        listing.set_now(deadline - 599_000)
+        await _settle(pilot)
+        after = listing.render().plain.splitlines()[1]
+        assert _countdown_token(after) != _countdown_token(before), (before, after)
+        # The question is cut in EXACTLY the same place, and the row is the same
+        # width: the minute that left the tail did not become question.
+        assert before.split("expires in")[0] == after.split("expires in")[0], (before, after)
+        assert cell_len(before) == cell_len(after), (before, after)
+
+
 async def test_answering_one_ask_advances_the_list_to_the_next(enabled):
     """Audit B: a queue of N used to cost N re-expands.
 
