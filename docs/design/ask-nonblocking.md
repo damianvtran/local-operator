@@ -511,8 +511,12 @@ expanded → "Answering the agent's question — Esc to collapse"; minimized/nor
 existing placeholder, unchanged.
 
 **Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
-opens the list/picker (TUI) or the sheet (others). Answering one collapses the surface (TUI,
-which returns to work) or advances to the next ask (sheet surfaces, which stay open).
+opens the list/picker (TUI) or the sheet (others). Answering one advances to the **next
+outstanding ask** when it was picked out of a list — the TUI returns to that list at the row
+that takes the answered one's place, and the sheet surfaces stay open and advance — and
+collapses when there is nothing left to answer. (Audit of the merged TUI surface: the TUI
+collapsed on every answer, so a queue of N cost N re-expands. A single ask's card still
+collapses — there was no list to return to.)
 
 ### 5.1 TUI (PR B)
 - **Entry/badge:** a count chip in the working line/status band (`◆ 2 asks`), sidebar/`/resume`

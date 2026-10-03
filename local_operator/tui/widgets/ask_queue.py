@@ -526,6 +526,23 @@ class AskQueueList(Widget):
         )
         self.refresh(layout=True)
 
+    def set_now(self, now_ms: int) -> None:
+        """Advance the countdown's clock without touching the rows.
+
+        The app's countdown tick calls THIS rather than :meth:`set_rows`: no row
+        changed, and re-deriving the highlight by ask id every 30 s is work that
+        can only get the highlight wrong. A plain ``refresh`` and not
+        ``refresh(layout=True)`` — the words ``expiry_text`` paints are clipped
+        against the width read at paint time, so a countdown that gains a cell
+        (``9m`` → ``10m``) shortens the question under it rather than reflowing
+        the row, which is what keeps the one-painted-row-per-ask invariant the
+        pointer hit test rests on.
+        """
+        if now_ms == self._now_ms:
+            return
+        self._now_ms = now_ms
+        self.refresh()
+
     def select(self, index: int) -> None:
         """Put the cursor on a row by index, clamped — used to hand a card's
         user back to the row they came from (UX round 1, U6, where Escaping a

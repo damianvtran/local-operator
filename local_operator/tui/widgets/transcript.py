@@ -3379,24 +3379,28 @@ class AskResponseBlock(WakeBlock):
         return identity, str(self._details.get("text") or "")
 
     def _summary_ink(self) -> str:
-        """The timeout row keeps the notice's ``warning`` ink; a response stays dim.
+        """The receipt's ink is the SEVERITY the shared row computed, not the kind.
 
-        The two rows are NOT the same fact: one says the agent was answered, the
-        other says its deadline fired with nothing given. The notice this row
-        replaced carried the warning ink and a ``!``, and the comment beside it
-        claimed that ink was "unchanged" while the shared row builder painted
-        both in ``dim`` (round 1, MINOR-3 / design D3). This is the ink the
-        comment was already promising.
+        ``ask_response_notice`` / ``ask_timeout_notice`` already decide the ink —
+        ``harness/rows`` states the rule the two surfaces fold: an answer is a
+        receipt, a LATE answer is a receipt the user should notice, and a
+        decline is a plain state. This widget is the terminal half of that one
+        decision, so it reads the verdict off the notice rather than off
+        ``kind``. Branching on the kind alone is what painted a late answer in
+        ``dim`` beside the amber timeout row that reports the SAME missed
+        deadline (audit C: ``late`` is a ``response``, and a ``response`` was
+        dim by definition).
 
-        It is ``_summary_ink`` and not a hook of this row's own: that is the
-        seam the shared row builder reads (``WakeBlock._summary_ink``, which
-        :class:`MonitorDeltaBlock` already overrides for the same reason), and
-        the fold onto ``main`` is where the branch's duplicate ``_summary_style``
-        was retired in its favour — one ink, one seam, and the icon takes it too.
+        Only the warning tier is mapped here: ``info`` is this band's own ink
+        (``super()``), and a future ``error`` severity would have to be given
+        one here rather than passed through, because ``_build_row`` hands this
+        name to ``theme_mod.semantic_color``, which raises on a non-token.
         """
-        if self._kind == "timeout":
-            return "warning"
-        return super()._summary_ink()
+        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
+
+        notice = ask_timeout_notice if self._kind == "timeout" else ask_response_notice
+        _, severity = notice(self._details)
+        return "warning" if severity == "warning" else super()._summary_ink()
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]
         """The summary row, plus the Q&A when the row is opened."""
