@@ -291,6 +291,16 @@ export interface PendingAsk {
 	    ABSENT is not `false`: an older daemon omits it, and a reader must then
 	    promise nothing about the wait rather than promise the wrong one. */
 	runtime_live?: boolean;
+	/** Whether this ask's conversation still has a durable transcript for an
+	    answer to land in (design round 2, D6). `runtime_live` answers "can the
+	    relay deliver right now"; this answers "will anything EVER read this".
+	    Both are false over a conversation whose transcript is gone, but only
+	    this one tells a surface that the tap is a terminal refusal — the state
+	    the daemon answers with `ask_session_gone`.
+
+	    ABSENT is not `false` here either: an older daemon omits it, and a reader
+	    must not withdraw an answer affordance it cannot vouch against. */
+	durable?: boolean;
 	created_at: number;
 	expires_at: number;
 	timeout_s: number;

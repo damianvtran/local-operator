@@ -54,6 +54,19 @@ function refusalText(error: unknown): string {
 	return message;
 }
 
+/** The sentence a row shows when the aggregate ALREADY reports its conversation
+ *  as having no durable transcript (`durable: false`) — the state the daemon
+ *  refuses every op on with `ask_session_gone` (design round 2, D6).
+ *
+ *  IT MIRRORS `daemon._ASK_GONE_HANDOFF` rather than waiting for the refusal,
+ *  and that duplication is the point of a pre-emptive state: fetching the
+ *  sentence would mean buying the guaranteed 409 the state exists to avoid. It
+ *  is the HANDOFF wording (the ask can never be read, no remedy addressed to a
+ *  question nobody asked) because this branch cannot know which op the user
+ *  would have chosen — and for the two ops that carry their own sentence
+ *  (a full answer, a dismissal) the card is not offering a control at all. */
+const CONVERSATION_GONE_COPY = "this conversation no longer exists — the ask can never be read.";
+
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
 	question,
@@ -162,6 +175,7 @@ export function AskCard({
 	sessionId,
 	nowMs,
 	runtimeLive,
+	durable,
 	onSettled,
 }: {
 	row: PendingAsk;
@@ -174,6 +188,12 @@ export function AskCard({
 	    the card must size its wait for (design round 1, D1 = UX U1); `undefined`
 	    is an older daemon and promises nothing. */
 	runtimeLive?: boolean;
+	/** Whether this ask's conversation still has a durable transcript at all
+	    (`PendingAsk.durable`). `false` means every op on this row is a terminal
+	    refusal, so the card must state that instead of offering a tap (design
+	    round 2, D6 + UX U7). `undefined` is an older daemon and withholds
+	    nothing. */
+	durable?: boolean;
 	/** Called after this surface settles, declines or dismisses the ask, so an
 	    aggregate list can re-read the index rather than guess the new state. */
 	onSettled?: () => void;
@@ -206,6 +226,17 @@ export function AskCard({
 	const state = askStateLine(row, nowMs);
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
+
+	/* A ROW THE AGGREGATE ALREADY KNOWS IS DEAD IS TERMINAL BEFORE THE TAP
+	   (design round 2, D6 + UX U7). `durable: false` is the same predicate the
+	   route refuses on, so the sentence the user would have got from a 409 is
+	   known in advance: rendering it pre-emptively keeps the guarantee the
+	   refusal makes WITHOUT buying a refused request, and it is the only way the
+	   sheet's strip and the card can agree — the strip goes silent on exactly
+	   these rows (see `asks-sheet.tsx`). Gated on `answerable`: a SETTLED row in a
+	   dead conversation is a receipt, not a dead end, and must keep its receipt. */
+	const goneFromWire = durable === false && answerable;
+	const terminal = gone || goneFromWire;
 	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
 	   accepts no other status (`asks/queue.py`), and the design states the rule twice
 	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
@@ -275,6 +306,19 @@ export function AskCard({
 			   (answer again, or read who beat them to it), and a card left inert
 			   by its own error is the greyed-out-buttons defect the blocking card
 			   already paid for. */
+		} finally {
+			/* THE OUTCOME ENDS THE IN-FLIGHT STATE, WHICHEVER OUTCOME IT IS (UX round
+			   2, U5). `setBusy("")` lived only in the catch, so a SUCCESSFUL answer
+			   left the card asserting `bringing the session up — this can take up to
+			   ~30 s` over a dead `…` until — and only if — the sheet's aggregate
+			   re-read replaced the row. A refused read (the sheet's own 8 s bound, or
+			   a hung backstop) left that lie on screen indefinitely. The promise has
+			   settled, so the claim that it is still settling must stop.
+
+			   The controls coming back after a refusal is deliberate: a refusal is a
+			   state the user can act on (answer again, or read who beat them to
+			   it), and a card left inert by its own error is the
+			   greyed-out-buttons defect the blocking card already paid for. */
 			setBusy("");
 		}
 	}
@@ -328,12 +372,12 @@ export function AskCard({
 			data-ask-status={String(row.status || "open")}
 			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
 		>
-			{/* THE STATE LINE STANDS DOWN WHEN THE CONVERSATION IS GONE. "Queued —
-			    the agent is continuing; expires in 11 m" beside "this conversation no
+			{/* THE STATE LINE STANDS DOWN WHEN THE CARD IS TERMINAL. "Queued — the
+			    agent is continuing; expires in 11 m" beside "this conversation no
 			    longer exists" is the same contradiction §5's preamble forbids — the
 			    timer and the agent both belong to a conversation that is not there.
 			    The refusal sentence is the whole state. */}
-			{gone ? null : (
+			{terminal ? null : (
 				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
 					<span role="status">{state.text}</span>
 					{row.urgent && answerable ? (
@@ -342,16 +386,20 @@ export function AskCard({
 				</span>
 			)}
 
-			{gone ? (
-				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3).
-				   The conversation this ask belongs to no longer exists, so the ask can
-				   never be read: the controls are withheld rather than handed back
-				   enabled, because every further tap is a guaranteed 409 and the
-				   surface must not invite one. The remedy is a NEW message in a new
-				   conversation, which is what the daemon's per-op sentence names (D2) —
-				   a dismissal is told nothing was sent, an answer is told to ask
-				   again. */
-				<p className="text-body-sm text-danger">{error}</p>
+			{terminal ? (
+				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3 for
+				   the refusal that arrived; design round 2, D6 for the row the aggregate
+				   already reported dead, where the same sentence is shown BEFORE the tap
+				   that could only ever be refused). The controls are withheld rather
+				   than handed back enabled, because every further tap is a guaranteed
+				   409 and the surface must not invite one. The remedy is a NEW message
+				   in a new conversation, which is what the daemon's per-op sentence
+				   names (D2) when the refusal came from the wire — a dismissal is told
+				   nothing was sent, an answer is told to ask again, a decision is told
+				   the ask can never be read (U9). */
+				<p className="text-body-sm text-danger">
+					{gone ? error : CONVERSATION_GONE_COPY}
+				</p>
 			) : answerable ? (
 				<>
 					{open_questions.map((question, index) => {
@@ -482,10 +530,14 @@ export function AskCard({
 							    it makes ("send no reply") is no longer the whole truth: the
 							    relay brings the conversation up to RECORD the dismissal, so the
 							    conversation surfaces as active (UX round 1, U3). Stated before
-							    the tap, in the same quiet register as the deadline lines. */}
+							    the tap, in the same quiet register as the deadline lines.
+
+							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
+							    up already states `this can take up to ~30 s` for this row, and a
+							    second copy of the number buys nothing the first line did not. */}
 							{cold ? (
 								<p className="text-meta text-ink-dim">
-									sends no reply — bringing the session up to record that can take up to ~30 s
+									sends no reply — the conversation is brought up to record it.
 								</p>
 							) : null}
 							{error && errorOp === "dismiss" ? (

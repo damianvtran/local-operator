@@ -53,13 +53,19 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	};
 }
 
-function renderCard(row: PendingAsk, onSettled?: () => void, runtimeLive?: boolean) {
+function renderCard(
+	row: PendingAsk,
+	onSettled?: () => void,
+	runtimeLive?: boolean,
+	durable?: boolean,
+) {
 	return render(
 		<AskCard
 			row={row}
 			sessionId="s1"
 			nowMs={Date.now()}
 			runtimeLive={runtimeLive}
+			durable={durable}
 			onSettled={onSettled}
 		/>,
 	);
@@ -350,9 +356,45 @@ describe("AskCard", () => {
 		   conversation the relay also brings it up to RECORD the dismissal — the
 		   conversation surfaces as active, which the copy owed the reader. */
 		const cold = renderCard(ask({ status: "timed_out" }), undefined, false);
-		expect(screen.getByText(/bringing the session up to record that/)).toBeTruthy();
+		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
 		cold.unmount();
 		renderCard(ask({ status: "timed_out" }));
-		expect(screen.queryByText(/bringing the session up to record that/)).toBeNull();
+		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
+	});
+
+	it("stops claiming an engage the moment the outcome is known", async () => {
+		/* UX round 2, U5: `setBusy("")` lived only in the catch, so a SUCCESSFUL
+		   answer left the card asserting `bringing the session up — this can take up
+		   to ~30 s` over a dead `…` until the sheet's re-read landed — and if that
+		   read failed or hung, indefinitely. */
+		renderCard(ask(), undefined, false);
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		await waitFor(() => expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull());
+		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+	});
+
+	it("states a dead conversation before the tap, and withholds every control", () => {
+		/* Design round 2, D6 = UX U7: `durable: false` is the same predicate the
+		   route refuses on, so the sentence a 409 would have returned is known in
+		   advance — showing it pre-emptively keeps the guarantee without buying the
+		   refused request, and no control invites a tap that cannot work. */
+		renderCard(ask(), undefined, false, false);
+		expect(
+			screen.getByText(/this conversation no longer exists — the ask can never be read\./),
+		).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+
+	it("keeps a settled receipt in a dead conversation", () => {
+		/* The other side of the same gate: `durable: false` must not turn a receipt
+		   into a dead end — a row already answered in a conversation that has since
+		   gone still has its own record to show. */
+		renderCard(ask({ status: "answered", delivered: true }), undefined, false, false);
+		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.getByRole("status")).toBeTruthy();
 	});
 });

@@ -205,4 +205,47 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
 	});
+
+	it("says nothing about a wait above a settled receipt", async () => {
+		/* UX round 2, U6: `runtime_live === false` is true of a cold conversation
+		   whatever the ask's status, so the strip rendered above a receipt that
+		   offers nothing to answer — a wait promised for a tap that does not exist. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ status: "answered", delivered: true, runtime_live: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("stays silent on a row with no durable transcript, and the card states it", async () => {
+		/* Design round 2, D6: on this row `runtime_live` is false for the OTHER
+		   reason — nothing can ever read the answer — so a strip promising a ~30 s
+		   bring-up would contradict the card's own sentence one element below it. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ runtime_live: false, durable: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() =>
+			expect(screen.getByText(/the ask can never be read\./)).toBeTruthy(),
+		);
+		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("withholds `open` for a conversation that cannot be opened", async () => {
+		/* UX round 2, U7: the control navigated to `#/s/<id>`, which sat on
+		   "connecting to session…" with nothing to do but go back. A row whose
+		   transcript is gone has no conversation to open. */
+		rows = [];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ session_id: "gone", durable: false })],
+		});
+		render(
+			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
+		);
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+		expect(screen.queryByRole("button", { name: "open" })).toBeNull();
+	});
 });

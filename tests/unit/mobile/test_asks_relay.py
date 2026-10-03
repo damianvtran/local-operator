@@ -446,13 +446,15 @@ def test_answering_an_ask_for_a_gone_conversation_says_it_can_never_be_read() ->
 
 
 def test_the_gone_sentence_is_the_ops_own() -> None:
-    """ONE code, TWO sentences — and the op is what picks (design round 1,
-    D2 = UX U2).
+    """ONE code, THREE sentences — and the op picks (design round 1, D2 = UX U2;
+    UX round 2, U9 for the third).
 
     ``dismiss — send no reply`` promises that NOTHING is sent, so answering it
-    with "…ask again" prescribed the opposite of what the user asked for. The
-    queue's refusals are per-STATE; this one is per-OP, because what is lost
-    differs: an answer is unreadable, a dismissal had nothing to record.
+    with "…ask again" prescribed the opposite of what the user asked for. A
+    ``decline``/``revise`` was then given the same re-ask clause, which is
+    addressed to someone who was not asking: handing the decision over leaves no
+    question for the user to put again. The queue's refusals are per-STATE; this
+    one is per-OP, because what is lost differs.
     """
     client = _client()
     answer = client.post(
@@ -471,24 +473,29 @@ def test_the_gone_sentence_is_the_ops_own() -> None:
     assert dismissed.json()["error"] == (
         "this conversation no longer exists — nothing was sent; the ask can never be read."
     )
-    # ``decline`` and ``revise`` settle an ANSWER, so they take the answer's
-    # sentence — a dismissal is the only op whose promise is the opposite.
+    # ``decline`` and ``revise`` deliver a DECISION: the ask is unreadable and the
+    # user has nothing left to re-ask, so they take the handoff wording — which is
+    # also the sentence the phone shows PRE-EMPTIVELY on a non-durable row.
     for op, body in (("ask_decline", {}), ("ask_revise", {"answers": {"q1": ["no"]}})):
         reply = client.post(
             f"/api/sessions/{SESSION_A}/command", json={"op": op, "ask_id": "ask-1", **body}
         )
-        assert reply.json()["error"] == answer.json()["error"]
+        assert reply.json()["error"] == (
+            "this conversation no longer exists — the ask can never be read."
+        )
 
 
 def test_the_aggregate_says_whether_answering_will_have_to_engage() -> None:
-    """``runtime_live`` is the fact the card cannot derive (design round 1, D1/D4
-    = UX U1/U3/U4).
+    """``runtime_live`` and ``durable`` are the two facts the card cannot derive
+    (design round 1, D1/D4 = UX U1/U3/U4; design round 2, D6 = UX U7).
 
     An index row is durable but knows nothing about whether answering it is a
     warm round trip or a ~30 s engage — that is a property of the relay's own
-    dial table, and the columns where the phone must be honest (the pre-tap cue,
-    the in-flight state, the dismissal's copy) all key on it. Absent is NOT
-    false for an older daemon, so the reader treats absence as "unknown".
+    dial table. ``durable`` is the second half: `runtime_live` answers "can the
+    relay deliver right now", not "will anything EVER read this", and over a
+    conversation with no transcript both are false while the op is a terminal
+    409. Each is absent (not false) from an older daemon, so a reader must treat
+    absence as unknown.
     """
     for session, ask_id in ((SESSION_A, "ask-open-1"), (SESSION_B, "ask-open-b")):
         _session_dir(session)
@@ -500,6 +507,8 @@ def test_the_aggregate_says_whether_answering_will_have_to_engage() -> None:
     ask_store.write_entry(
         config_dir(), "ccc777888999", cwd="/tmp/ccc", asks=[_pending({"ask_id": "ask-open-c"})]
     )
+    # ONE durable conversation: a transcript is what the refusal predicate reads.
+    _write_transcript(SESSION_A)
 
     daemon = MobileDaemon(port=0, password="pw123")
     # A dialled, CONNECTED owner for A...
@@ -517,6 +526,16 @@ def test_the_aggregate_says_whether_answering_will_have_to_engage() -> None:
     assert rows["ask-open-1"]["runtime_live"] is True
     assert rows["ask-open-b"]["runtime_live"] is False
     assert rows["ask-open-c"]["runtime_live"] is False
+    assert rows["ask-open-1"]["durable"] is True
+    assert rows["ask-open-b"]["durable"] is False
+    assert rows["ask-open-c"]["durable"] is False
+
+
+def _write_transcript(session_id: str) -> None:
+    """A transcript is what ``_durable_user_session_dir`` looks for, so an ask
+    can be answered INTO it; a session directory without one is the state the
+    route refuses with ``ask_session_gone``."""
+    (config_dir() / "sessions" / session_id / "transcript.jsonl").write_text("")
 
 
 class _FakeAskClient:

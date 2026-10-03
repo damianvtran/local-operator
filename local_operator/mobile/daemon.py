@@ -2297,26 +2297,36 @@ _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 #: surface that reported success would be worse than one that refused, because
 #: the user would believe a model had been told.
 #:
-#: WHY THE OP DECIDES THE SENTENCE. One string was returned for all four ops, so
-#: ``dismiss — send no reply`` — whose whole promise is that NOTHING is sent — was
-#: answered with "…ask again", which is the remedy for an answer that could not
-#: be delivered and the opposite of what the user asked for. The queue's own
-#: refusals are per-STATE (``asks/render.refusal_copy``); this one is per-OP,
-#: because what is lost differs: an answer is unreadable, a dismissal simply had
-#: nothing to record. Both keep the register of the queue's other sentences
-#: (lowercase start, em-dash clause, final full stop).
+#: WHY THE OP DECIDES THE SENTENCE, and why there are THREE of them (UX round 2,
+#: U9). One string was returned for all four ops, so ``dismiss — send no reply``
+#: — whose whole promise is that NOTHING is sent — was answered with "…ask
+#: again", which is the remedy for an answer that could not be delivered and the
+#: opposite of what the user asked for. The split then left ``decline``/``revise``
+#: carrying the same re-ask clause, which is addressed to someone who was not
+#: asking: a decline HANDS THE DECISION OVER, so there is no question left for
+#: the user to put again. Three constants, one per thing that is actually lost —
+#: an answer (unread, and still wanted), a decision (unread, and none of the
+#: user's to re-ask) and a dismissal (nothing to record). All keep the register
+#: of the queue's other sentences (lowercase start, em-dash clause, final full
+#: stop), and ``_ASK_GONE_HANDOFF`` is also the sentence the phone shows
+#: PRE-EMPTIVELY on a row the aggregate has already reported as non-durable.
 _ASK_GONE_RESPONSE = (
     "this conversation no longer exists — the ask can never be read; "
     "start a new conversation and ask again."
 )
+_ASK_GONE_HANDOFF = "this conversation no longer exists — the ask can never be read."
 _ASK_GONE_DISMISS = (
     "this conversation no longer exists — nothing was sent; the ask can never be read."
 )
 
 
 def _ask_gone_copy(op: str) -> str:
-    """The gone sentence for ONE ask op — the dismissal's own, or the answer's."""
-    return _ASK_GONE_DISMISS if op == "ask_dismiss" else _ASK_GONE_RESPONSE
+    """The gone sentence for ONE ask op — the dismissal's, the decision's, or the answer's."""
+    if op == "ask_dismiss":
+        return _ASK_GONE_DISMISS
+    if op in ("ask_decline", "ask_revise"):
+        return _ASK_GONE_HANDOFF
+    return _ASK_GONE_RESPONSE
 
 
 def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
@@ -5056,7 +5066,17 @@ def build_app(daemon: MobileDaemon):
         # table, so the aggregate carries it and every surface can be honest about
         # the wait BEFORE the tap rather than after it.
         for row in rows:
-            row["runtime_live"] = _session_is_live(daemon, str(row.get("session_id") or ""))
+            session_id = str(row.get("session_id") or "")
+            row["runtime_live"] = _session_is_live(daemon, session_id)
+            # DURABILITY IS THE OTHER HALF (design round 2, D6). `runtime_live`
+            # answers "can the relay deliver right now", NOT "will anything ever
+            # read this". Over a conversation with no durable transcript both are
+            # false, and the op is a terminal 409 (`ask_session_gone`) — so a
+            # strip promising a ~30 s bring-up would be a claim about a backend
+            # that does not exist, and a tap it invites cannot work. Same
+            # predicate the refusal itself branches on, so the surface's words
+            # and the route's behaviour stay one statement.
+            row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
 
     async def api_commands(request: Request) -> Response:
