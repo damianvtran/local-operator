@@ -1621,11 +1621,15 @@ class ProjectsView(Vertical):
         # the `s start` variant rule exactly — each rides a one-extra-wider
         # VARIANT of the shipped row rather than an extra element inside it, so
         # a variant can only ADD a key and no shipped label is ever displaced
-        # at any budget (the F4 sweep). The chain is a strict prefix, so
-        # widening the terminal only ever ADDS a key (QA Q3's monotonicity).
-        # `y` is offered wherever a path exists — a gone copy still has a path
-        # worth pasting — and `space` only where there are pixels to read.
+        # at any budget (the F4 sweep). The chain is a strict prefix of the
+        # extras, so widening the terminal only ever ADDS a key (QA Q3's
+        # monotonicity). `y` is offered wherever a path exists — a gone copy
+        # still has a path worth pasting — and `space` only where there are
+        # pixels to read. COPY COMES FIRST so the pair spec §3.3 names,
+        # `↵ open · y copy`, stays adjacent at every width that carries both.
         extras: list[tuple[HintButton, str, bool]] = []
+        if self._detail_page.selected_can_copy():
+            extras.append((self._copy_hint, " copy", True))
         if self._detail_page.selected_can_preview():
             extras.append(
                 (
@@ -1634,8 +1638,6 @@ class ProjectsView(Vertical):
                     True,
                 )
             )
-        if self._detail_page.selected_can_copy():
-            extras.append((self._copy_hint, " copy", True))
         head = [move, page] if named is None else [move, page, open_hint]
         # Shedding among the extras goes WIDEST LABEL FIRST, so a narrower
         # terminal keeps the cheaper key: the reader reaches `↵ open · y copy`
@@ -1644,7 +1646,7 @@ class ProjectsView(Vertical):
         # the one that follows (the variants are never shadowed).
         variants: list[list[tuple[HintButton, str, bool]]] = [extras]
         if len(extras) > 1:
-            variants.append(extras[1:])
+            variants.append(extras[:1])
         if named is None:
             return [
                 *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
@@ -2696,6 +2698,14 @@ class ProjectsView(Vertical):
         if self._detail_page.selected_preview_open():
             self._detail_page.close_preview(path)
             return
+        if self._detail_page.preview_pending(path):
+            # A second press while the host is still reading that copy: the
+            # reader means "never mind". The in-flight line goes with it, and
+            # the answer is DROPPED when it lands rather than re-opening what
+            # they just dismissed (agent review round 1, M2).
+            self._detail_page.cancel_pending_preview(path)
+            self.show_notice("")
+            return
         if not self._detail_page.selected_can_preview():
             if not path:
                 self.show_notice(f"'{name}' has no stored path to preview")
@@ -2708,20 +2718,39 @@ class ProjectsView(Vertical):
                 # work for it instead of leaving the press unanswered.
                 self.show_notice(f"{name} is not an image — ↵ opens it instead")
             return
+        if not self._detail_page.request_preview(path):
+            # Already in flight: the page refuses to ask the host twice for the
+            # same 5 MB copy, and the press above already handled the cancel.
+            return
         self.post_message(
             ProjectsViewAttachmentPreviewRequested(
                 path=path, name=name, project_name=self._detail_page.project_name
             )
         )
 
-    def show_attachment_preview(self, *, path: str, data_b64: str, mime_type: str) -> None:
+    def show_attachment_preview(
+        self, *, path: str, data_b64: str, mime_type: str, project_name: str
+    ) -> None:
         """Hand the page the bytes the app just read for ``path`` (spec §7.4).
 
         The app-side reader's answer, and the ONLY way a picture reaches the
         page: the file was read off the UI loop by the host, and this relays
-        it without the page ever touching the filesystem.
+        it without the page ever touching the filesystem. The project name
+        travels with it so a read that lands after the reader has moved on is
+        dropped instead of mounted (agent review round 1, M2).
         """
-        self._detail_page.apply_preview(path, data_b64=data_b64, mime_type=mime_type)
+        self._detail_page.apply_preview(
+            path, data_b64=data_b64, mime_type=mime_type, project_name=project_name
+        )
+
+    def attachment_preview_failed(self, *, path: str) -> None:
+        """The host could not read ``path``: the page stops holding it in flight.
+
+        Without this the path would stay pending forever and the NEXT `space`
+        on that row would be read as a cancel — a lit key that answers the
+        opposite of what it says.
+        """
+        self._detail_page.preview_failed(path)
 
     # -- start session (P5b, spec §7.6) -------------------------------------
     def set_start_rows(self, rows: list[StartTarget] | None) -> None:

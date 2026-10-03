@@ -34057,7 +34057,12 @@ class OperatorApp(App[None]):
             view.show_notice(f"'{message.name}' has no stored path to copy")
             return
         self.copy_to_clipboard(message.path)
-        view.show_notice(f"copied the path to {message.name}")
+        # The receipt names the STORED copy, because that is the name the
+        # clipboard's path ends in: a reader pasting it into a shell or a
+        # report gets `<hash>.png`, and a receipt saying only `copied the path
+        # to board.png` names a file they will not find (UX review round 1,
+        # U3).
+        view.show_notice(f"copied the stored copy's path for {message.name}")
 
     def on_projects_view_attachment_preview_requested(
         self, message: ProjectsViewAttachmentPreviewRequested
@@ -34079,19 +34084,27 @@ class OperatorApp(App[None]):
             return
         path = message.path
         if not path:
+            view.attachment_preview_failed(path=path)
             view.show_notice(f"'{message.name}' has no stored path to preview")
             return
         from pathlib import Path
 
         if not Path(path).exists():
+            # Every refusal below must ALSO clear the in-flight mark the page
+            # set when it asked: a path left pending turns the next `space` on
+            # that row into a cancel (agent review round 1, M2).
+            view.attachment_preview_failed(path=path)
             view.show_notice(
                 f"{message.name} is missing on disk — its stored copy was moved or deleted"
             )
             return
         view.show_notice(f"reading {message.name}…")
-        self.run_worker(self._preview_attachment(message.name, path), group="preview-attachment")
+        self.run_worker(
+            self._preview_attachment(message.name, path, message.project_name),
+            group="preview-attachment",
+        )
 
-    async def _preview_attachment(self, name: str, path: str) -> None:
+    async def _preview_attachment(self, name: str, path: str, project_name: str) -> None:
         """The off-loop half of the preview read (spec §7.4, staged part)."""
         from local_operator.tui.attachments import read_for_preview
 
@@ -34100,12 +34113,21 @@ class OperatorApp(App[None]):
         if view is None:
             return
         if payload is None:
-            # The path is repeated for the same reason the opener repeats it:
-            # this is the failure a reader can act on themselves.
-            view.show_notice(f"could not read {name} — the path is {path}")
+            view.attachment_preview_failed(path=path)
+            # The sentence names the FACT and nothing else: the earlier
+            # `… the path is <path>` overflowed the footer at every width and
+            # its prefix cut left a plausible-looking but invalid path, while
+            # the path row above already carries the file (design review round
+            # 1, D2).
+            view.show_notice(f"could not read {name} — the stored copy is unreadable")
             return
         data_b64, mime_type = payload
-        view.show_attachment_preview(path=path, data_b64=data_b64, mime_type=mime_type)
+        view.show_attachment_preview(
+            path=path,
+            data_b64=data_b64,
+            mime_type=mime_type,
+            project_name=project_name,
+        )
         # The picture is the receipt; the in-flight line must not outlive it.
         view.show_notice("")
 

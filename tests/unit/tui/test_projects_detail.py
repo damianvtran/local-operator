@@ -7,6 +7,7 @@ and a style resolver); the page and state machine are driven through the real
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 from pathlib import Path
@@ -1663,7 +1664,7 @@ async def test_y_puts_the_stored_path_on_the_clipboard(
         await pilot.pause()
         assert copied == [attachment["path"]]
         assert copied[0].endswith(".png") and "attachments" in copied[0]
-        assert "copied the path to board-60x20.png" in view.rendered_rows()[-1]
+        assert "copied the stored copy's path for board-60x20.png" in view.rendered_rows()[-1]
 
 
 @pytest.mark.asyncio
@@ -1899,3 +1900,398 @@ async def test_the_preview_read_answers_a_payload_or_nothing_at_all(
     assert read_attachment_for_preview(str(tmp_path)) is None
     assert await read_for_preview(str(shot)) == payload
     assert await read_for_preview(str(tmp_path / "gone.png")) is None
+
+
+# ---------------------------------------------------------------------------
+# P6 remediation round 1: the reveal, the read's bounds, and the row affordance
+# ---------------------------------------------------------------------------
+
+
+def _feed_registry_with_images(tmp_path: Path, *, images: int = 2) -> ProjectRegistry:
+    """A feed long enough to page, whose every update carries a TALL image.
+
+    The picture is tall on purpose: a block taller than the page's box is the
+    case QA round 1's Q1 measured, and it is the case a fix cannot satisfy by
+    showing the whole picture — only by choosing which end of it to show.
+    """
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="parity-spec", title="TUI parity spec"))
+    attachments: list[Path] = []
+    for index in range(images):
+        shot = tmp_path / f"shot-{index}.png"
+        shot.write_bytes(_png_bytes(400, 300))
+        attachments.append(shot)
+    notes = tmp_path / "notes.md"
+    notes.write_text("# notes\n")
+    for index in range(3):
+        registry.update_project(
+            project.id,
+            ProjectEdit(
+                progress=f"report {index}\n\nbody\n"
+                + "\n".join(f"filler {n}" for n in range(1, 14))
+            ),
+            reporter="operator",
+            attachments=[*attachments, notes],
+        )
+    return registry
+
+
+async def _open_preview_after_paging(
+    pilot: Any, page: Any, pages: int
+) -> DetailAttachmentPreviewRow | None:
+    """Cursor on the first image row, page the feed away, press `space`."""
+    for _ in range(60):
+        row: Any = page._selectables[page.selected_index]
+        getter: Any = getattr(row, "attachment", None)
+        record: Any = getter() if callable(getter) else None
+        if isinstance(record, dict) and record.get("kind") == "image":
+            break
+        await pilot.press("down")
+        await pilot.pause()
+    page.scroll_to(y=0, animate=False)
+    await pilot.pause()
+    for _ in range(pages):
+        await pilot.press("pgdn")
+        await pilot.pause()
+    await pilot.press("space")
+    for _ in range(8):
+        await pilot.pause()
+    return next(
+        (child for child in page.children if isinstance(child, DetailAttachmentPreviewRow)),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_opening_a_preview_shows_its_block_wherever_the_feed_was_paged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1 + UX round 1, U1: one authority, and the block is visible.
+
+    Measured on the previous head: at 60x24 with the feed paged to the bottom
+    the picture sat at screen rows −4..1 against a box of 4..12 — **zero** rows
+    visible — and even where it was partly visible the owning row and its path
+    line were above the box, so the picture on screen named nothing (a
+    half-cell block paints no caption). The rule under test is the ONE unit:
+    the affordance row, its path line, and the TOP of the picture, at every
+    page count and at both shipped sizes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _feed_registry_with_images(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    cases = ((100, 30), (0, 1, 2, 4, 8)), ((60, 24), (0, 1, 2, 10))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        for size, pages in cases:
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            for count in pages:
+                preview = await _open_preview_after_paging(pilot, page, count)
+                assert preview is not None, f"{size} pgdn={count}: no preview mounted"
+                box_top = page.region.y
+                box_bottom = page.region.y + page.region.height - 1
+                selected = page._selectables[page.selected_index]
+                path_row = page.children[list(page.children).index(selected) + 1]
+                where = f"{size}x pgdn={count}"
+                # The row that OWNS the picture, and the path line that names
+                # it, are both inside the box...
+                assert box_top <= selected.region.y <= box_bottom, where
+                assert box_top <= path_row.region.y <= box_bottom, where
+                # ...and the picture reads from its first row down, with ink.
+                assert box_top <= preview.region.y <= box_bottom, where
+                assert preview.region.y + preview.region.height - 1 >= box_top, where
+                await pilot.press("space")
+                await pilot.pause()
+                assert not any(
+                    isinstance(child, DetailAttachmentPreviewRow) for child in page.children
+                ), where
+
+
+@pytest.mark.asyncio
+async def test_a_preview_taller_than_the_box_leaves_the_cursor_and_its_identity_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reveal anchors the BLOCK's top; it does not chase the cursor's row.
+
+    The cursor is on the affordance row above the picture, so a reveal that
+    only satisfies the cursor leaves the picture below the fold — the defect
+    the first P6 frame caught — and one that satisfies the picture alone pushes
+    the row and its path line off the top (QA Q1). Both are inside the box, and
+    the picture starts directly under its own path line.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _feed_registry_with_images(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        preview = await _open_preview_after_paging(pilot, page, 4)
+        assert preview is not None
+        selected = page._selectables[page.selected_index]
+        assert page._current() is selected, "the cursor moved off the owning row"
+        path_row = page.children[list(page.children).index(selected) + 1]
+        assert preview.region.y == path_row.region.y + 1, "the picture is not under its own path"
+
+
+@pytest.mark.asyncio
+async def test_the_selected_image_row_advertises_the_space_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design review round 1, D1: the row that owns the verb says so.
+
+    The ladder cannot afford `space preview` at 100 columns (17 cells against a
+    96-cell footer), so without a row-level affordance the capability is
+    invisible to anyone who has not read the spec — and with a preview open the
+    only advertised verb there is `↵ open`, which hands the file to the OS
+    opener. A data row has no pixels and does not advertise it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        image = await _press_until_attachment(pilot, page, image=True)
+        row = page._selectables[page.selected_index]
+        painted = str(row.content.plain)
+        assert "· space" in painted
+        assert painted.endswith("· space")
+        # The affordance never costs a WRAP: at the 60-column floor the row is
+        # still one painted line, still inside the box, name and all.
+        await pilot.resize_terminal(60, 24)
+        for _ in range(3):
+            await pilot.pause()
+        painted = str(row.content.plain)
+        assert row.region.height == 1
+        assert cell_len(painted) <= row.region.width
+        assert "· space" in painted
+        assert image["name"] in painted
+        # A data row: no pixels, so no offer.
+        await _press_until_attachment(pilot, page, image=False)
+        data_row = page._selectables[page.selected_index]
+        assert "space" not in str(data_row.content.plain)
+
+
+def test_a_long_attachment_name_is_fitted_around_the_affordance() -> None:
+    """The `· space` affordance may never be what wraps a row (spec §7.4).
+
+    A ``Static`` wraps what it is given whatever its ``no_wrap`` says — the
+    defect the path row's own fit exists for — and the affordance lengthens
+    every selected image row, so the name is what gives way, from its
+    MIDDLE: the file's tail is the end that names it.
+    """
+    from local_operator.tui.projects_render import attachment_row_text
+
+    attachment = {
+        "name": "a-very-long-screenshot-name-" + "x" * 60 + ".png",
+        "kind": "image",
+        "bytes": 4096,
+    }
+    for width in (56, 96):
+        line = attachment_row_text(attachment, selected=True, width=width, previewable=True)
+        assert cell_len(line.plain) <= width
+        assert line.plain.endswith("· space")
+        assert ".png" in line.plain
+
+
+@pytest.mark.asyncio
+async def test_a_second_press_while_the_read_is_in_flight_cancels_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, M2: one read per press, and an answer can be dismissed.
+
+    Before this the path was not marked until its payload landed, so a second
+    `space` started a second read of the same (up to 5 MB) copy and looked like
+    a dead key, and the first read's answer then re-opened what the reader had
+    just closed.
+    """
+    import local_operator.tui.attachments as attachments_mod
+
+    calls: list[str] = []
+    gate = asyncio.Event()
+
+    async def slow_read(path: str) -> tuple[str, str] | None:
+        calls.append(path)
+        await gate.wait()
+        return (base64.b64encode(_png_bytes(4, 4)).decode("ascii"), "image/png")
+
+    monkeypatch.setattr(attachments_mod, "read_for_preview", slow_read)
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=True)
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert calls, "the first press never asked the host to read"
+        assert "reading" in view.rendered_rows()[-1]
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert "reading" not in view.rendered_rows()[-1], "the in-flight line outlived the cancel"
+
+        gate.set()
+        for _ in range(6):
+            await pilot.pause()
+        assert len(calls) == 1, "the second press started a second read"
+        assert not any(
+            isinstance(child, DetailAttachmentPreviewRow) for child in page.children
+        ), "the dismissed read mounted its picture anyway"
+        assert page.preview_pending(calls[0]) is False
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_lands_after_the_reader_moved_on_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, M2: a payload is scoped to the project that asked."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        attachment = await _press_until_attachment(pilot, page, image=True)
+        path = str(attachment["path"])
+        payload = base64.b64encode(_png_bytes(4, 4)).decode("ascii")
+
+        assert page.request_preview(path) is True
+        assert page.request_preview(path) is False, "a second request for the same copy"
+        page.apply_preview(
+            path, data_b64=payload, mime_type="image/png", project_name="somewhere-else"
+        )
+        assert not any(
+            isinstance(child, DetailAttachmentPreviewRow) for child in page.children
+        ), "a payload for another project was mounted"
+        assert page.preview_pending(path) is False
+
+        assert page.request_preview(path) is True
+        page.apply_preview(
+            path, data_b64=payload, mime_type="image/png", project_name=page.project_name
+        )
+        for _ in range(3):
+            await pilot.pause()
+        assert any(
+            isinstance(child, DetailAttachmentPreviewRow) for child in page.children
+        ), "the owning project's payload did not mount"
+
+
+@pytest.mark.asyncio
+async def test_the_cache_bound_drops_the_oldest_picture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, M4: the advertised cap is a test, not a comment.
+
+    Four opens leave the newest :data:`PREVIEW_CACHE_MAX`, in both the cache and
+    the OPEN set — the row that loses its payload paints closed again rather
+    than mounted-with-nothing.
+    """
+    from local_operator.tui.widgets.projects_detail import PREVIEW_CACHE_MAX
+
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _feed_registry_with_images(tmp_path, images=4)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        opened: list[str] = []
+        while len(opened) < 4:
+            row: Any = page._selectables[page.selected_index]
+            getter: Any = getattr(row, "attachment", None)
+            record: Any = getter() if callable(getter) else None
+            if isinstance(record, dict) and record.get("kind") == "image":
+                path = str(record["path"])
+                if path not in opened:
+                    await pilot.press("space")
+                    for _ in range(6):
+                        await pilot.pause()
+                    opened.append(path)
+                    continue
+            await pilot.press("down")
+            await pilot.pause()
+        assert len(page._previews) == PREVIEW_CACHE_MAX
+        assert len(page._preview_open) == PREVIEW_CACHE_MAX
+        assert opened[0] not in page._previews
+        assert opened[0] not in page._preview_open
+        mounted = sum(1 for child in page.children if isinstance(child, DetailAttachmentPreviewRow))
+        assert mounted == PREVIEW_CACHE_MAX
+
+
+@pytest.mark.asyncio
+async def test_the_read_refuses_a_copy_over_the_store_s_own_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, M1: the write-time cap is re-checked at read time.
+
+    The cap is enforced when the copy is stored, so only a hand-edited record or
+    a file replaced after the copy can exceed it — and either would otherwise be
+    read whole into memory (base64 is ~1.37x it, plus the decoded frame).
+    """
+    import local_operator.tui.attachments as attachments_mod
+
+    monkeypatch.setattr(attachments_mod, "ATTACHMENT_MAX_BYTES", 32)
+    shot = tmp_path / "board.png"
+    shot.write_bytes(b"x" * 33)
+    assert attachments_mod.read_attachment_for_preview(str(shot)) is None
+    shot.write_bytes(b"x" * 32)
+    assert attachments_mod.read_attachment_for_preview(str(shot)) is not None
+
+
+def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
+    """Agent review round 1, N1: `↵ open · y copy`, then `space preview`.
+
+    The spec names the `↵ open · y copy` pair (§3.3), and copy is the key that
+    survives the narrower terminal, so it must sit next to `↵` on every rung
+    that carries both.
+    """
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    class _Selection:
+        def selected_action_label(self) -> str:
+            return "open"
+
+        def selected_action_verb(self) -> str:
+            return "open"
+
+        def selected_can_copy(self) -> bool:
+            return True
+
+        def selected_can_preview(self) -> bool:
+            return True
+
+        def selected_preview_open(self) -> bool:
+            return False
+
+    view = ProjectsView()
+    view._detail_page = _Selection()  # type: ignore[assignment]
+    rungs = view._detail_hint_rungs()
+    widest = [(label, hint) for hint, label, _lead in rungs[0][0] if label.strip()]
+    names = [
+        (
+            "copy"
+            if hint is view._copy_hint
+            else "preview" if hint is view._preview_hint else label.strip()
+        )
+        for label, hint in widest
+    ]
+    assert names.index("copy") + 1 == names.index("preview")
+    assert names[names.index("open") + 1] == "copy"
+    # The narrow sibling keeps the pair's first half and sheds the preview.
+    second = [hint for hint, _label, _lead in rungs[1][0]]
+    assert view._copy_hint in second
+    assert view._preview_hint not in second
