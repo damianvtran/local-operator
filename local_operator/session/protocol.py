@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 136 public members and a POSITIVE
+    than stylistic. This protocol carries 139 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -685,7 +685,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     still deliver, 136 once the queued-ask answer rung needed ``ask_respond`` —
     an ask outlives the runtime that queued it, so answering one from a front end
     must be able to BIND an owner that is not running, and only the facade owns a
-    dial), so
+    dial — 139 once that same rung had to answer in the DOCK's own names
+    (``respond_ask``/``decline_ask``/``dismiss_ask``: the dock looks the owner's
+    spelling up on whichever session holds the ask, so a viewer without them made
+    the surface silently do nothing; three members, because a queued ask has one
+    answer and two refusals), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -796,6 +800,31 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         viewer cold, which is the same class of lie in the other direction.
         """
         ...
+
+    async def respond_ask(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """Answer a queued ask — the OWNER's name, on the viewer's async side.
+
+        Declared here, and NOT on ``SessionProtocol``, because the two holders
+        answer differently rather than identically: an owner's op is synchronous
+        and returns the verdict directly, while a viewer's crosses the wire and
+        is awaited. The dock looks the name up on whichever session holds the
+        ask (``tui/app.py::_decline_ask`` and its two siblings) and handles both
+        — see ``OperatorApp._handle_ask_outcome``.
+
+        The name is the owner's rather than the facade's own ``ask_respond``
+        because a surface that answers asks should not have to know which kind
+        of session it is talking to; the facade forwards.
+        """
+        ...
+
+    async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
+    async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
 
     async def verify_live(self, timeout: float) -> bool:
         """Ask the owner to answer, and stamp the verification if it does.

@@ -1497,3 +1497,64 @@ async def test_the_wake_path_carries_the_annotation_to_a_capable_owner(
         assert frame["input_path"] == "provider_stt_elevenlabs"
     finally:
         r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_refusal_frame_reaches_the_raiser_as_a_typed_refusal() -> None:
+    """The frame → exception half of the fork classification.
+
+    THIS IS WHERE THE OUTAGE WAS INVENTED. An error frame with no recognised
+    ``error_code`` is re-raised here as a plain ``RuntimeError`` carrying the
+    owner's sentence, and the control plane's ladder has no way to read that as
+    anything but an unreachable owner — a 503 whose remedy is to reconnect, for a
+    request the owner answered promptly and deliberately. With the code and its
+    closed-set reason on the frame, the raise is typed and the route can answer
+    the refusal.
+
+    The two halves are pinned separately on purpose: this cell is what THIS side
+    does with the fields, and
+    ``tests/unit/session/runtime/test_server_fork_refusal_facts.py`` is what the
+    owner puts in them. A construction-free double is enough — the decoder reads
+    the frame and nothing else, and the one member it may consult
+    (``_drain_phrase``) is absent here exactly as it is on the frame path that
+    names a category.
+    """
+    from local_operator.session.errors import ForkRefused
+
+    client = object.__new__(AttachClient)
+
+    with pytest.raises(ForkRefused) as refused:
+        client._raise_for_reply_error(
+            {
+                "op": "error",
+                "req": 1,
+                "error_code": ForkRefused.code,
+                "error_reason": "entry_unknown",
+                # Never read: the sentence is rebuilt from the reason, so an
+                # owner's prose cannot reach the surface through it.
+                "message": "IGNORED - the sentence is rebuilt from the reason",
+            }
+        )
+    assert refused.value.reason == "entry_unknown"
+    assert str(refused.value) == (
+        "that message is not part of this conversation; "
+        "pick a message from this session to fork from"
+    )
+
+    # A reason this build does not know (a NEWER owner) and a bare raise land on
+    # the same generic sentence rather than rendering or raising.
+    for reason in (None, "a-cause-from-the-future"):
+        frame = {"op": "error", "req": 2, "error_code": ForkRefused.code}
+        if reason is not None:
+            frame["error_reason"] = reason
+        with pytest.raises(ForkRefused) as degraded:
+            client._raise_for_reply_error(frame)
+        assert degraded.value.reason == ""
+        assert str(degraded.value) == ForkRefused.fallback
+
+    # FAIL-SAFE: an un-enumerated frame keeps today's path exactly — the owner's
+    # own sentence, as a plain RuntimeError. This is the arm the route's 503
+    # owner-outage answer still rests on.
+    with pytest.raises(RuntimeError) as plain:
+        client._raise_for_reply_error({"op": "error", "req": 3, "message": "the owner's own words"})
+    assert str(plain.value) == "the owner's own words"

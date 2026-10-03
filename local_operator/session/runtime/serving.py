@@ -527,6 +527,68 @@ def _on_session_loop(method: _F) -> _F:
     return cast(_F, marshalled)
 
 
+def _fork_entry_target(args: str) -> str | None:
+    """The transcript entry a routed ``/fork`` was asked to cut through, if any.
+
+    The desktop fork route carries its cut point in the slash ARGS, because the
+    routed-slash seam transports only strings — the same convention
+    ``/checkpoints_warm``, ``/wake``, ``/monitor`` and ``/desktop_mcp`` already
+    use for their own payloads.
+
+    Two outcomes, and the split is the point:
+
+    * ``None`` means "this caller is not naming a cut point" — the legacy call,
+      and a typed ``/fork <text>``'s trailing text, which is not a JSON object;
+    * a payload that IS a JSON object and is not EXACTLY ``{"entry_id":
+      <non-blank string>}`` RAISES. It is a caller that meant to cut and got the
+      shape wrong (or a newer client this runtime does not know), and falling
+      through to "no cut point" would fork the WHOLE conversation — more history
+      than it asked for, which is the one failure shape worth refusing loudly.
+      Fail-closed is also what makes version skew safe in the direction that
+      matters: an older runtime ignores the args entirely, a newer one refuses a
+      payload it cannot read.
+    """
+    if not args.strip():
+        return None
+    try:
+        payload = json.loads(args)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    entry_id = payload.get("entry_id")
+    if set(payload) != {"entry_id"} or not isinstance(entry_id, str) or not entry_id.strip():
+        raise ValueError(
+            "the message to fork from was not understood; " "pick a message in this conversation"
+        )
+    return entry_id.strip()
+
+
+def _fork_store(session: Any) -> Path:
+    """Where a fork of ``session`` must land: the session's OWN store root.
+
+    ONE placement rule for the whole fork branch, and it is the one
+    ``Session.fork_snapshot`` already uses (and the TUI's ``/fork`` with it): a
+    clone lands beside its parent. Resolving it here is what lets both arms
+    agree — the arm that forks at the next safe boundary used to read
+    ``config_dir()`` instead, which is the same directory whenever the session
+    was opened from this process's own store (always, in production) and a
+    DIFFERENT one for a session served out of another store, where a clone would
+    otherwise be scattered somewhere the catalogue that listed its parent is not
+    looking.
+
+    ``config_dir()`` remains the fallback for a handle whose session exposes no
+    transcript at all: that is the one case where the two answers used to
+    disagree, and it is not a session any catalogue could have listed.
+    """
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    if directory is None:
+        from local_operator.paths import config_dir
+
+        return config_dir()
+    return Path(directory).parent.parent
+
+
 class ServingSessionHandle(SessionHandle):
     """SessionHandle over a Session that the process hosting ``loop`` owns.
 
@@ -1961,23 +2023,48 @@ class ServingSessionHandle(SessionHandle):
 
         ``False`` when no drain was latched, so a caller need not check first.
 
-        WHAT IT DOES NOT UNDO, stated because the omission is deliberate: the wakes
-        already diverted to the inbox stay there. Undiverting would mean re-installing
-        the resume catch-up shim :meth:`Session.retire_wakes_to_inbox` replaced, and
-        the rows are not lost either way — ``process._keep_loaded_build`` drains that
-        same spool back IN as part of the abandon, which is the whole reason it runs
-        before this returns.
+        WHAT IT UNDOES, and why BOTH halves: the job-delivery divert and the wake
+        divert both come back with the latch, because the premise they were armed
+        on is gone — ``begin_drain`` diverts them for a build whose files are about
+        to be replaced, and a KEPT build is not being replaced. A runtime that
+        serves again must deliver again: a settled child reaches it, and a fire
+        that comes due after this release runs rather than spooling for a successor
+        that is not coming (``Session.resume_wakes_from_inbox``; without the
+        restore, every fire for the rest of the process's life landed in an inbox
+        nobody drained until a successor booted — measured at ~14 h of fires on
+        one desk session, invisible on every surface).
+
+        WHAT IT DOES NOT UNDO, and the omission is still deliberate: the wakes
+        already spooled during the drain stay in the inbox. Those rows are durable
+        and ``process._keep_loaded_build`` drains that same spool back IN as part
+        of the abandon, so the kept runtime receives them either way; the restore
+        above is about every fire after this release, which is the half a release
+        has to make true.
+
+        AND THE RETRIED DEPARTURE RE-ARMS NOTHING, which is ordinary-exit
+        behaviour rather than a gap (agent review round 1, finding 4): it exits
+        through ``_drain_for``'s success arm, which commits via ``begin_retire``
+        — a rung that never diverts wakes — so a fire in the window between
+        this release and that exit is handled as it is around any ordinary idle
+        exit: the pump persists the occurrence it advances, ``_deliver_wake``
+        runs it, and a final fire's re-arm rides ``_hand_wakes_to_successor``
+        at the exit. Spooling that window again would mean re-latching
+        ``begin_drain``, which ``_abandon_move`` records against: a second
+        retire discards the ``_wake_rearms`` the drain already swallowed.
         """
         if not getattr(self, "_draining", False):
             return False
         self._draining = False
         self._retiring_cause = ""
         self._retiring_detail = ""
-        # ...and the DELIVERY divert goes with the latch, which the wake divert
-        # deliberately does not: a kept runtime is serving again, so a child that
-        # settles for the rest of its life must reach it without someone having
-        # to type something first. The rows already held need no undoing -- they
-        # are durable and ride the next turn either way.
+        # ...and BOTH diverts come back with the latch, because the premise they
+        # were armed on is gone: ``begin_drain`` diverts the job deliveries and
+        # the wakes for a build whose files are about to be replaced, and a kept
+        # build is not being replaced. A kept runtime is serving again, so a child
+        # that settles for the rest of its life must reach it without someone
+        # having to type something first — and so must a fire. The rows already
+        # held need no undoing -- they are durable and ride the next drain either
+        # way.
         session = getattr(self, "_session", None)
         resume = getattr(session, "resume_job_deliveries_to_turns", None)
         if callable(resume):
@@ -1985,6 +2072,17 @@ class ServingSessionHandle(SessionHandle):
                 resume()
             except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
                 logger.debug("could not release the job-delivery divert", exc_info=True)
+        resume_wakes = getattr(session, "resume_wakes_from_inbox", None)
+        if callable(resume_wakes):
+            try:
+                # ``False`` is an answer, not a failure: no drain spool was in
+                # force (or another path owns the hook now), so there is nothing
+                # to undo and nothing is touched.
+                resume_wakes()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+                logger.debug(
+                    "could not restore wake delivery after an abandoned drain", exc_info=True
+                )
         return True
 
     def end_retire(self) -> bool:
@@ -2224,7 +2322,8 @@ class ServingSessionHandle(SessionHandle):
         runtime with the turn parked: a non-streaming prompt (``prompt_and_wait``
         — the shape a loop, a second viewer, a supervisor or a CLI caller uses)
         is refused within milliseconds of the signal, while the same runtime's
-        record and ``/info`` row say "signalled; leaving when its turn ends". The
+        record and ``/info`` row say "signalled; finishing its turn (cut if
+        silent 2 min)". The
         interactive composer does not reach it mid-turn, because its text rides
         the running turn as a steer; a peer wake or steer is spooled for the
         successor for as long as the drain runs and reaches this refusal only
@@ -6320,30 +6419,95 @@ class ServingSessionHandle(SessionHandle):
             )
         if command == "fork":
             from local_operator.fork import fork_session
-            from local_operator.paths import config_dir
+            from local_operator.session.errors import ForkRefused
 
             if getattr(session, "_compacting", False):
-                raise ValueError("Wait for compaction to finish before forking")
+                # A TYPED refusal, not a bare ``ValueError``: unclassified it left
+                # this process as an untagged error frame, which the attach client
+                # re-raises as a plain ``RuntimeError`` and the desktop route's
+                # ladder can only read as an unreachable owner — a 503 whose
+                # remedy is "reconnect and reconcile", for a request the owner
+                # answered promptly and deliberately (measured on PR #1917). The
+                # reason token is what lets that route show this sentence.
+                #
+                # ONE OF TWO COMPACTION GUARDS, and it keeps its own reason and
+                # its own sentence: it fires for BOTH fork arms and its copy is
+                # published today, while ``Transcript.fork_snapshot``'s inner
+                # ``is_compacting`` check has its own wording.
+                raise ForkRefused(reason="compaction_pending")
+            through_entry_id = _fork_entry_target(args)
+            if through_entry_id is not None:
+                # A NAMED cut point does NOT wait for a boundary, and that is a
+                # property of the request rather than an optimisation: the point
+                # it names is already committed, so the copy is the same whether
+                # it is taken now or after the live turn ends (``request_fork``
+                # below exists because "the next safe boundary" is still in the
+                # FUTURE). The transcript's own writer lock is what keeps the
+                # copy from racing an append or a compaction, exactly as the
+                # TUI's /fork relies on mid-turn.
+                #
+                # It is INDEPENDENT of a pending ``next_safe`` request, and
+                # deliberately does not test ``has_pending_fork()``: that check
+                # below exists because a second boundary request would REPLACE
+                # the first and silently drop a request the user made, while a
+                # cut touches neither — the pending fork still fires at its turn
+                # boundary and the user gets the two forks they asked for. A
+                # named cut is also the one gesture a user makes WHILE a fork is
+                # already waiting, so refusing it would put a "try again later"
+                # in front of the common case.
+                snapshot = await session.fork_snapshot(through_entry_id=through_entry_id)
+                return SlashResult(
+                    kind="block",
+                    data={
+                        "type": "forked",
+                        "session_id": snapshot["fork_id"],
+                        # The row the copy ACTUALLY stopped at: equal to the named
+                        # entry unless the cut landed at-or-before an unfinished
+                        # tool batch. The desktop route passes it on so a UI can
+                        # say "started one message earlier" instead of silently
+                        # cutting somewhere the user did not point at.
+                        "cut_entry_id": snapshot["cut_entry_id"],
+                    },
+                )
+            store = _fork_store(session)
             if getattr(session, "is_streaming", False):
                 if session.has_pending_fork():
-                    raise ValueError("A fork is already waiting for a safe boundary")
+                    # A SECOND boundary fork during a turn is an ordinary gesture
+                    # (a double-click, or two windows), and its refusal used to
+                    # cross as a bare ``ValueError`` — arriving as the owner-outage
+                    # 503, which is exactly the wrong answer this seam exists to
+                    # stop giving. Its own sentence, unchanged.
+                    raise ForkRefused(reason="fork_pending")
                 settled: asyncio.Future[str] = self._loop.create_future()
 
                 def complete(fork_id: str, error: str) -> None:
                     if not settled.done():
                         if error:
-                            settled.set_exception(RuntimeError("The fork could not be created"))
+                            # THE CAUSE, not a fabricated constant. ``error`` is what
+                            # ``Session._drain_pending_fork`` handed back — a
+                            # ``ForkError``'s own sentence, or an unexpected
+                            # failure's — and replacing it with one vetted line
+                            # threw away the only diagnosis the operator had.
+                            # Still a ``RuntimeError`` rather than ``ForkRefused``:
+                            # a clone that FAILED is not a refusal of the gesture
+                            # (nothing about this conversation's state said no), so
+                            # it must not claim to be one; the route's owner-outage
+                            # answer is unchanged either way, because the ladder's
+                            # ``RuntimeError`` arm carries the vetted sentence.
+                            settled.set_exception(
+                                RuntimeError(f"The fork could not be created: {error}")
+                            )
                         else:
                             settled.set_result(fork_id)
 
-                session.request_fork(config_dir(), on_complete=complete)
+                session.request_fork(store, on_complete=complete)
                 try:
                     fork_id = await settled
                 except BaseException:
                     session.cancel_fork()
                     raise
             else:
-                fork_id = await asyncio.to_thread(fork_session, config_dir(), session.session_id)
+                fork_id = await asyncio.to_thread(fork_session, store, session.session_id)
             return SlashResult(kind="block", data={"type": "forked", "session_id": fork_id})
         if command == "context":
             return self._context_slash(session, SlashResult)
@@ -7325,12 +7489,33 @@ class ServingSessionHandle(SessionHandle):
             },
         )
 
-    async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/agent``: list in the invoker, ATTACH and CLASS here.
+    @staticmethod
+    def _agent_row_display(name: str, label: str) -> str:
+        """The ``agent_list`` row's first slot: the shared, BOUNDED display form.
 
-        The listing stays ``noop`` on purpose: its rows carry role/specialist
-        facts assembled by the frontend's own profile resolver, and a second
-        assembly here would be a second source of truth for the same list.
+        The same rule and cap the local listing paints (N1), so a follower and
+        an owner read one profile the same way; a reduced double degrades to
+        its plain name rather than failing the listing. The slot is painted
+        VERBATIM by the viewer, so both producers must agree byte for byte.
+        """
+        from local_operator.display_labels import bounded_display_form
+
+        try:
+            return bounded_display_form(str(name or ""), str(label or ""))
+        except Exception:  # noqa: BLE001 — a listing is never worth an error
+            return str(name or "")
+
+    async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/agent``: list, ATTACH and CLASS all happen HERE.
+
+        THE LISTING IS A BLOCK, NOT A ``noop`` (review round 1, R1-2/U2). It used
+        to answer a bare ``/agent`` with ``noop {"type": "agent_list"}`` on the
+        argument that only the terminal's frontend resolver draws those rows — but
+        a surface with no terminal (the phone) then painted the command it offered
+        in its sheet as silence. The rows now come from
+        ``agent_profiles.agent_listing_rows``, the ONE enumeration
+        ``OperatorApp._agent_profile_rows`` also delegates to, so this is not a
+        second assembly of the same list: both hosts send the same rows.
 
         The mutating forms do NOT stay ``noop``, for the reason spelled out in
         ``_team_slash``: attaching a profile mutates session state (the
@@ -7345,7 +7530,27 @@ class ServingSessionHandle(SessionHandle):
         only the local half existed).
         """
         if not arg:
-            return SlashResult(kind="noop", data={"type": "agent_list", "args": arg})
+            from local_operator.agent_profiles import agent_listing_rows
+
+            rows = agent_listing_rows(getattr(session, "agent_registry", None))
+            if not rows:
+                # The same sentence the app-hosted path answers, so one empty
+                # state cannot be worded two ways depending on which process
+                # happens to own the session.
+                return SlashResult(
+                    kind="notice", text="no agents yet. Ask the agent to create one.", style="info"
+                )
+            # ``agent_listing_rows`` carries ``(name, label, facts, summary)``
+            # -- the RAW label, so each surface composes for its own geometry.
+            # The viewer paints this block's first slot VERBATIM, so it must
+            # arrive already composed through the shared bounded form (the
+            # ``team_list`` shape): emitting the raw four-tuple left the viewer
+            # slicing a label into the facts slot and dropping the summary.
+            items = [
+                (self._agent_row_display(name, label), facts, summary)
+                for name, label, facts, summary in rows
+            ]
+            return SlashResult(kind="block", data={"type": "agent_list", "items": items})
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() == "class":
             return await self._agent_class_slash(session, rest.strip(), SlashResult)
@@ -7560,7 +7765,19 @@ class ServingSessionHandle(SessionHandle):
                     style="warning",
                 )
         if names:
-            return SlashResult(kind="block", data={"type": "mcp"})
+            # THE ROSTER TRAVELS WITH THE BLOCK (review round 1, R1-1). A terminal
+            # draws this block from its own live MCP panel, so the bare
+            # ``{"type": "mcp"}`` was enough there — but a surface WITHOUT a panel
+            # (the phone) was handed nothing to paint and fell back to "ran /mcp"
+            # with the roster it had just read thrown away. ``text`` is the line
+            # for those surfaces; the terminal's renderer returns on the block
+            # type before reading it, so nothing paints twice.
+            listed = ", ".join(sorted(names))
+            return SlashResult(
+                kind="block",
+                text=f"{len(names)} MCP {'server' if len(names) == 1 else 'servers'}: {listed}",
+                data={"type": "mcp"},
+            )
         # AN EMPTY ROSTER IS THE QUESTION — not an absent manager (QA round 1,
         # Q2). ``discover_and_load_mcp_tools`` does NOT raise for a discovery
         # failure: it catches, logs, and returns the manager alongside a

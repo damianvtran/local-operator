@@ -2475,3 +2475,66 @@ def test_the_latest_signal_decides_when_a_run_is_signalled_twice(tmp_path: Path)
     assert facts["signal"]["sanction"] == "marker", "the latest arrival must win"
     status, detail = exec_mode.classify_exit(130, facts)
     assert status == "cancelled" and detail["stop_class"] == "deliberate", detail
+
+
+# --- the waiters' ledger reader: the appended bytes, and only those ---------
+
+
+def test_read_job_records_since_reads_only_appended_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The readiness loop's reader: O(new bytes), partial-line tolerant.
+
+    The old shape called ``job_status`` on a 50 ms grid and ``job_status``
+    re-parses the WHOLE ledger per call (~682 KB of live history on the
+    operator's machine; a bulk resume paid that parse again in every child).
+    The delta reader exists so a quiet poll costs ~microseconds and never
+    re-parses rows already folded. This pins the four properties the wait
+    relies on: the offset advances positionally; an append yields exactly the
+    new rows; a PARTIAL trailing line stays pending (a waiter must never see
+    a torn row — the writer's ``O_APPEND`` is atomic per row but a reader can
+    still catch one mid-write); and a SHRUNK ledger desynchronises nothing —
+    the next poll re-reads from zero, because the durable fold always remains
+    ``job_status``'s job.
+    """
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    ledger = logs_dir / exec_mode.JOBS_FILE
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"id": "a", "status": "starting"}) + "\n", encoding="utf-8")
+
+    offset, rows = exec_mode.read_job_records_since(ledger, 0)
+    assert [r["id"] for r in rows] == ["a"]
+    assert offset == ledger.stat().st_size
+
+    # A quiet poll reads nothing new and costs one stat.
+    offset2, rows2 = exec_mode.read_job_records_since(ledger, offset)
+    assert rows2 == [] and offset2 == offset
+
+    # An append yields exactly the appended row.
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"id": "a", "status": "running"}) + "\n")
+    offset3, rows3 = exec_mode.read_job_records_since(ledger, offset2)
+    assert [r["status"] for r in rows3] == ["running"]
+
+    # A PARTIAL trailing line is left unconsumed until its newline arrives.
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write('{"id": "a", "status": "succ')
+    partial_offset, partial_rows = exec_mode.read_job_records_since(ledger, offset3)
+    assert partial_rows == []
+    assert partial_offset == offset3
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write('eeded"}\n')
+    _offset4, rows4 = exec_mode.read_job_records_since(ledger, partial_offset)
+    assert [r["status"] for r in rows4] == ["succeeded"]
+
+    # A SHRUNK ledger answers (0, []) once; the next poll re-reads from zero.
+    ledger.write_text(json.dumps({"id": "b", "status": "failed"}) + "\n", encoding="utf-8")
+    reset_offset, reset_rows = exec_mode.read_job_records_since(ledger, offset3)
+    assert reset_offset == 0 and reset_rows == []
+    _offset5, rows5 = exec_mode.read_job_records_since(ledger, reset_offset)
+    assert [r["id"] for r in rows5] == ["b"]
+
+
+def test_read_job_records_since_never_raises_on_a_missing_ledger(tmp_path: Path) -> None:
+    """A waiter on a root that has no ledger keeps polling, not crashing."""
+    assert exec_mode.read_job_records_since(tmp_path / "nope.jsonl", 0) == (0, [])

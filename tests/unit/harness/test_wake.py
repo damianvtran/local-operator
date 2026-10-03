@@ -660,3 +660,56 @@ async def test_scheduler_max_arm_bounds_timer():
     loop_now = asyncio.get_running_loop().time()
     assert when - loop_now <= 61.0  # ~MAX_ARM_MS + slack
     harness.scheduler.dispose()
+
+
+# -- update()'s removal report (the wake-spool flood, part 2) --------------------
+
+
+def _scheduler(**kw: Any) -> WakeScheduler:
+    return WakeScheduler(
+        now=lambda: NOW,
+        deliver=lambda due: None,
+        persist=lambda schedules: None,
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_reports_exactly_what_it_removed():
+    """One site sees every removal, so the purge of a cancelled schedule's
+    spooled tail lives here rather than on the wake tool's own path."""
+    seen: list[list[WakeSchedule]] = []
+    scheduler = _scheduler(on_removed=lambda rows: seen.append(list(rows)))
+    a = WakeSchedule(id="a", message="m", next_due_at=NOW + 1, created_at=NOW)
+    b = WakeSchedule(id="b", message="m", next_due_at=NOW + 1, created_at=NOW)
+
+    await scheduler.update([a, b])
+    assert seen == [], "an initial write removes nothing"
+
+    await scheduler.update([a])
+    assert [[row.id for row in rows] for rows in seen] == [["b"]]
+
+    # An in-place rewrite of the SAME id is not a removal, which is what keeps
+    # patience's armed_after flush from purging a live schedule's spool.
+    await scheduler.update([a.model_copy(update={"message": "edited"})])
+    assert len(seen) == 1
+    scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_broken_removal_hook_cannot_break_scheduling():
+    """Observation, not ownership: the schedules are already persisted, and the
+    change notification must still go out when the purge throws."""
+    changes: list[int] = []
+
+    async def boom(rows: list[WakeSchedule]) -> None:
+        raise RuntimeError("purge exploded")
+
+    scheduler = _scheduler(on_removed=boom, on_change=lambda: changes.append(1))
+    a = WakeSchedule(id="a", message="m", next_due_at=NOW + 1_000, created_at=NOW)
+    await scheduler.update([a])
+    await scheduler.update([])
+
+    assert scheduler.schedules == ()
+    assert changes == [1, 1], "the cancel still landed"
+    scheduler.dispose()

@@ -59,12 +59,19 @@ report block.
 the phone is not a rung of the local banner ladder and ``claim_delivery`` is
 untouched, because a claim is per conversation and per machine, so a push that
 claimed would silence the desktop banner on this machine and a desktop claim
-would silence the phone (ADR §2.3, decision 1). It does not consume a ``/seen``
-nudge (S6): an ack this worker sees changes the *badge* and is emitted as an
-attention push, but nothing here is wired to a relay-side read. And it does not
-decide WHO the cloud wakes: the ``Idempotency-Key`` and the payloads come from
-``push_payload`` (S3's freeze), and the per-device skip belongs to the emit-side
-gate in the cloud, fed by the S4c report block.
+would silence the phone (ADR §2.3, decision 1). It NEVER acknowledges anything:
+the attention emit is a consequence of a read that already moved, so
+:meth:`PushWorker.note_ack` takes the acting device's id and writes no receipt —
+the route acks, and the worker only asks the OTHER devices to re-read (S6). That
+nudge emits nothing itself: the pass that follows reads the store and does the
+emitting, so §3.1's "the nudge consumes the change" is kept in OUTCOME — at most
+one emit per change, with the entry's detector state advanced by the pass —
+rather than in the entry's literal spelling of an immediate emit that the next
+tick then has to suppress; there is no immediate emit here to duplicate. And it
+does not decide WHO the cloud wakes: the ``Idempotency-Key`` and the payloads
+come from ``push_payload`` (S3's freeze), the ``exclude`` list is carried
+verbatim, and the per-device skip belongs to the emit-side gate in the cloud,
+fed by the S4c report block.
 """
 
 from __future__ import annotations
@@ -338,6 +345,13 @@ class _PendingEmit:
     #: The conversations this emit names, so a deferral can be re-evaluated
     #: against the store (an ack terminates it early — §2.3).
     conversations: tuple[str, ...] = ()
+    #: The devices that must NOT be woken by this emit — §3.2's ``exclude``, and
+    #: the device that just acknowledged when the nudge path named one. Empty
+    #: means "exclude nobody", which is what a TICK-detected change sends because
+    #: it never knows who acked. It rides the ATTENTION emit only: §3.2 permits
+    #: the field on a digest and never requires it there, and a digest's trigger
+    #: is a burst rather than an ack.
+    exclude: tuple[str, ...] = ()
 
     @property
     def sequences(self) -> tuple[int, ...]:
@@ -365,7 +379,7 @@ class PushWorker:
         computer: str,
         clock: Callable[[], float] = time.time,
         presence: Callable[[], bool] | None = None,
-        live_device: Callable[[], bool] | None = None,
+        live_devices: Callable[[], Sequence[str]] | None = None,
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         unread_count: Callable[[], int] | None = None,
     ) -> None:
@@ -373,10 +387,15 @@ class PushWorker:
 
         Injected for the reason ``CredentialReport`` injects it: it is the
         account's name for this machine rather than the machine's, so nothing
-        here can mint it. ``presence``/``live_device``/``unread_count`` default
+        here can mint it. ``presence``/``live_devices``/``unread_count`` default
         to the machine-local reads §2.3 names, each behind a parameter so a test
         can put the gate in the state under test instead of manufacturing a
         desktop lease or a registered phone.
+
+        ``live_devices`` answers §2.3's gate 4 with the live devices' IDS rather
+        than a yes/no, because S6 has a second question for the same read: which
+        devices a correction would actually reach once §3.2's ``exclude`` has
+        been subtracted (`[]` is "no device this machine may deliver to").
 
         ``report_block`` is the S4c coalescer's ``piggyback(CARRIER_EMIT)``. It
         is OPTIONAL and the body falls back to the bare §3.2 payload rather than
@@ -390,7 +409,7 @@ class PushWorker:
         self.computer = computer
         self._clock = clock
         self._presence = presence if presence is not None else _desktop_attended
-        self._live_device = live_device if live_device is not None else self._registry_gate
+        self._live_devices = live_devices if live_devices is not None else self._live_device_ids
         self._report_block = report_block
         self._unread_count = unread_count if unread_count is not None else self._store_count
         self._cursors = WorkerCursors()
@@ -415,6 +434,13 @@ class PushWorker:
         #: The previous tick's ``{conversation: acknowledged}``. In-memory on
         #: purpose (see :meth:`_load`).
         self._acks: dict[str, int] = {}
+        #: The ``(device, conversation, acknowledged)`` hints a ``/seen`` nudge has
+        #: left since the last pass. The ONE piece of state an off-tick thread may
+        #: write (the route's), so it carries its own lock and is held for a
+        #: set-add only — it must never be able to block a pass, and a pass must
+        #: never block on it while holding a store read.
+        self._nudge_lock = threading.Lock()
+        self._nudge_exclude: set[tuple[str, str, int]] = set()
 
     # -- the tick ------------------------------------------------------------
 
@@ -520,6 +546,72 @@ class PushWorker:
         self._acks = self.store.acknowledgement_map()
         self._save()
 
+    # -- the /seen nudge -----------------------------------------------------
+
+    def note_ack(self, *, device_id: str, conversation: str, acknowledged: int) -> None:
+        """A ``/seen`` landed: this device acted, on this conversation (ADR §3.1).
+
+        A HINT, not an emit: the caller has already written the receipt, and the
+        correction is a consequence of that read moving rather than a second ack
+        path — so nothing here acknowledges, writes a receipt or touches a
+        ``deliveries`` row, and the next pass decides from the store whether
+        there is anything to correct. What the hint buys is §3.2's ``exclude``:
+        without it a tick-detected change cannot name the acting device ("absent
+        means exclude nobody"), so the device the user just read on would be
+        woken to re-read state it already has.
+
+        BOTH HALVES ARE CARRIED, and they are what make the exclusion exact
+        rather than approximate. A hint is a claim about ONE change, and the pass
+        applies it only when that change is one it is actually carrying: the
+        conversation must have moved in the read being diffed, and the receipt's
+        own ``acknowledged`` value must be the one that read returned. Without
+        them a hint that outlived its change would be subtracted from whatever
+        change came next — on another conversation (review round 1, m1) or on a
+        NEWER receipt of the same one (review round 2, m2), where the acting
+        devices would both be excluded and, with no device left, the correction
+        dropped outright.
+
+        NOT CONSUMED HERE, and that is the point of the split. The pass takes the
+        hints BEFORE it reads the acknowledgement map, so a hint it takes always
+        describes a receipt written before that read — the receipt precedes the
+        nudge, because the route acks first — and therefore a change in the map
+        that pass diffs. The one case that order alone cannot cover (a receipt an
+        earlier pass already consumed while its nudge was still in flight) is
+        covered by the two match terms above: the hint matches neither a later
+        pass's movement of that conversation nor a newer receipt of it, so it is
+        spent rather than applied, the acting device is corrected like every other
+        device, and a correction is never dropped for lack of a recipient — one
+        benign extra silent wake, the window §3.1 states, and the badge is right
+        on its next read either way.
+
+        ``device_id``, ``conversation`` and ``acknowledged`` are the worker's own
+        vocabulary: the conversation is the store key (``session/<id>``), not a
+        handle, and ``acknowledged`` is the value the receipt moved it to
+        (``state()["revision"][1]`` — the same watermark
+        ``acknowledgement_map()`` returns), so a later receipt on that
+        conversation is a DIFFERENT value and cannot match this hint. A desk ack
+        sends no hint at all — the TUI and the desktop write straight into the
+        store and the tick detects them — which is the same thing as a device
+        list that excludes nobody.
+        """
+        if not device_id or not conversation:
+            return
+        with self._nudge_lock:
+            self._nudge_exclude.add((device_id, conversation, int(acknowledged)))
+
+    def _take_nudged_devices(self) -> set[tuple[str, str, int]]:
+        """The ``(device, conversation, acknowledged)`` hints left since the last pass.
+
+        ONE CALL PER PASS, taken BEFORE the acknowledgement-map read and cleared
+        whether or not anything moved: a hint describes the change the pass is
+        about to read, and one held over would describe a pass that has already
+        happened.
+        """
+        with self._nudge_lock:
+            taken = set(self._nudge_exclude)
+            self._nudge_exclude.clear()
+        return taken
+
     # -- the three deltas ----------------------------------------------------
 
     def _collect(self, now: float, attended: bool) -> None:
@@ -533,9 +625,11 @@ class PushWorker:
         # Gate 4 is a property of the COMPUTER, not of the row (§2.3), so it is
         # read once per pass: a computer with no device it may deliver to has
         # nothing to emit for, and every candidate below resolves rather than
-        # waits (see :meth:`_registry_gate` for why it is a skip, not a
-        # deferral).
-        deliverable = self._live_device()
+        # waits (see :meth:`_live_device_ids` for why it is a skip, not a
+        # deferral). The IDS are read rather than a yes/no because the
+        # attention emit below subtracts §3.2's ``exclude`` from them.
+        devices = self._live_devices()
+        deliverable = bool(devices)
 
         # Positions a PENDING emit already speaks for. A digest covers a whole
         # batch, and while it is in the queue the rows it covers must not be
@@ -603,8 +697,19 @@ class PushWorker:
         # 3. The acknowledgement map, diffed against the last tick. An ack is a
         #    durable change to the same watermark ``unseen`` is computed from, and
         #    the phone has to be told to re-read: that is the attention emit.
-        #    ``exclude`` is absent — a tick-detected change never knows WHO
-        #    acknowledged (§3.2), which is S6's nudge to add.
+        #    ``exclude`` comes from the nudges the ``/seen`` route left since this
+        #    pass's predecessor — a tick-detected change (the TUI's or the
+        #    desktop's ack) never knows who acknowledged, and sends none (§3.2).
+        #
+        #    THE HINTS ARE TAKEN BEFORE THE MAP IS READ, and that order is what
+        #    makes a hint mean something. A route acks its receipt and only then
+        #    nudges, so a hint taken here describes a receipt written before this
+        #    read, and its change is therefore in the map being diffed. Taking it
+        #    after the read would let a receipt that landed inside the gap sit in
+        #    ``exclude`` while its conversation sits outside ``acked``, which is
+        #    how one change's actor gets skipped on another change's correction
+        #    (review round 1, m1).
+        hints = self._take_nudged_devices()
         current = self.store.acknowledgement_map()
         acked = sorted(
             conversation
@@ -612,11 +717,55 @@ class PushWorker:
             if self._acks.get(conversation) != value
         )
         self._acks = current
-        if acked and deliverable:
+        # ... and each hint is applied ONLY to the change it names, because the
+        # order above cannot cover the case where a hint outlives its own change:
+        # a pass that read the receipt and consumed it while the nudge was still
+        # in flight. Two terms, and both are needed. The conversation must be one
+        # this read moved, or a spent hint would be subtracted from somebody
+        # else's change (review round 1, m1); and the value must be the one this
+        # read returned, or a hint survives a NEWER receipt on the same
+        # conversation, excludes a device that did not cause that later read, and
+        # — with every live device excluded — drops the correction outright
+        # (review round 2, m2).
+        moved = set(acked)
+        exclude = {
+            device
+            for device, conversation, acknowledged in hints
+            if conversation in moved and current.get(conversation) == acknowledged
+        }
+        # §3.2's exclusion, applied where it means something: the recipients are
+        # the live devices MINUS the ones that just acted, so a correction
+        # addressed at nobody is not sent at all — "an ack with no other device
+        # emits nothing", because the only device that could render it already
+        # has the state it would be asked to re-read. The change is still
+        # consumed either way: ``self._acks`` has moved above, which is what
+        # keeps the same ack from being emitted again on the next pass (the
+        # detector state §3.1 says the nudge consumes).
+        #
+        # NOT GATED BY PRESENCE, deliberately (QA round 1, O-1). §2.3's presence
+        # gate is a DEFERRAL for a completion banner, and it cannot apply to an
+        # emit whose trigger IS the ack; this form carries no ``alert``, so a
+        # desktop window being attended is no reason to leave every other device
+        # stale. The ADR's own Q5/Q6 read it the same way — gate 1 (``unseen``)
+        # cannot suppress a correction that exists because the read moved.
+        #
+        # ONE EMIT PER PASS, not one per changed conversation (QA round 1, O-2):
+        # the form names no conversation and carries no record, so N frames would
+        # be N identical silent wakes telling each device to do the same one
+        # thing — re-read the machine — which is what §2.1's "at most one emit per
+        # change" asks for. A shape that needs per-conversation addressing would
+        # be a different emit type, not this one.
+        recipients = [device for device in devices if device not in exclude]
+        if acked and recipients:
             key = self._mint_emit()
             self._pending.setdefault(
                 key,
-                _PendingEmit(key=key, kind=EVENT_ATTENTION, emit_id=uuid.uuid4().hex),
+                _PendingEmit(
+                    key=key,
+                    kind=EVENT_ATTENTION,
+                    emit_id=uuid.uuid4().hex,
+                    exclude=tuple(sorted(exclude)),
+                ),
             )
 
     def _is_candidate(self, conversation: str) -> bool:
@@ -961,7 +1110,15 @@ class PushWorker:
         else:
             # The badge correction: it stands for no record at all and carries a
             # count and nothing the app could deep-link to.
-            payload = attention_payload(computer=self.computer, count=count, emit_id=emit_id)
+            payload = attention_payload(
+                computer=self.computer,
+                count=count,
+                emit_id=emit_id,
+                # ``None``, not ``[]``: §3.2 reads "absent means exclude nobody",
+                # and an empty list would be a second spelling of it. A tick-
+                # detected change has nothing here at all.
+                exclude=list(item.exclude) if item.exclude else None,
+            )
         if self._report_block is None:
             return payload
         return emit_body(payload, self._report_block())
@@ -1096,8 +1253,8 @@ class PushWorker:
 
     # -- the machine-local gates --------------------------------------------
 
-    def _registry_gate(self) -> bool:
-        """Gate 4 of §2.3: is there a device this machine may deliver to?
+    def _live_device_ids(self) -> list[str]:
+        """Gate 4 of §2.3: which devices this machine may deliver to.
 
         The ADR's own words are "the worker skips such a device entirely — no
         emit is attempted for it", and a computer whose every device is marked or
@@ -1105,6 +1262,11 @@ class PushWorker:
         deferral: a row held back for a device that does not exist yet would
         pin the cursor until one is registered, and "nothing from before
         enabling is ever pushed" is the rule the design already chose.
+
+        The IDS rather than a count, because §3.2's ``exclude`` is subtracted
+        from exactly this list: an excluded device is a device, so "are there
+        devices?" is the wrong question once a nudge has named one — the right
+        one is "is there one LEFT", and only the identities can answer it.
 
         An unreadable registry is treated as "no device is live" rather than
         raised: this runs on the ~2 s scan, and a per-tick traceback is the log
@@ -1114,12 +1276,13 @@ class PushWorker:
         try:
             facts = mobile_push_devices.credential_facts(self.config_dir)
         except (mobile_push_devices.PushRegistryCorrupt, OSError):
-            return False
-        return any(
-            fact.get("state") == mobile_push_devices.STATE_LIVE
-            and bool(fact.get("credential_live"))
+            return []
+        return [
+            str(fact["device_id"])
             for fact in facts
-        )
+            if fact.get("state") == mobile_push_devices.STATE_LIVE
+            and bool(fact.get("credential_live"))
+        ]
 
     def _count(self) -> int:
         """§3.2's ``count``: the machine's unread count at composition time."""

@@ -1321,6 +1321,7 @@ def validate_model_selection(
         get_provider_definition,
         is_decision_only,
         is_speech_only,
+        speech_wire_noun,
     )
 
     if get_provider_definition(provider) is None:
@@ -1337,7 +1338,7 @@ def validate_model_selection(
         raise ModelSelectionRefused(
             "provider_speech_only",
             (
-                f"'{provider}' serves speech-to-text, not chat completions, "
+                f"'{provider}' serves {speech_wire_noun(provider)}, not chat completions, "
                 "so no session can run on it."
             ),
         )

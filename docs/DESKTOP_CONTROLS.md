@@ -247,10 +247,36 @@ the one the desktop client reads): nothing is rolled back, the
   owner's RPC is a dedicated `mcp_credentials` op, never a `mcp.control` argument
   — values must not reach the slash argument, the command journal, or a request
   receipt.
-- `POST /fork`: stable request_id, optional message, boundary=`next_safe`.
-  The runtime refuses compaction and uses `Session.request_fork` during a turn;
-  otherwise it uses `fork_session`. This is the canonical complete-history fork
-  at a safe boundary, not an arbitrary transcript rewrite. The parent is unchanged.
+- `POST /fork`: stable request_id, optional message, boundary=`next_safe` (the
+  historic form) or `at_entry` with `entry_id` (a cut at-or-before a named
+  transcript entry). The runtime refuses compaction and uses `Session.request_fork`
+  during a turn; otherwise it uses `fork_session`. This is the canonical
+  complete-history fork at a safe boundary, not an arbitrary transcript rewrite.
+  The parent is unchanged. **Every fork refusal the desktop route can produce is a
+  `409`, not an owner outage**: the conversation's own state can refuse the cut —
+  an `entry_id` this conversation does not hold, a point before the newest
+  summary's anchor, an anchor the unpaired-tail trim would drop, a malformed
+  interior the strict pairing check rejects (a tool result with no call, or an
+  unanswered call with rows after it), a compaction in flight, and a second
+  boundary fork while one is already pending — and each arrives as
+  `409 {"detail": {"code": "fork_refused", "message": <that cause's sentence>,
+  "reason": <one token>}}`. `reason` is the machine half a surface keys on to offer
+  the right way forward without parsing prose; it is one of `entry_unknown`,
+  `before_anchor`, `unfinished_batch`, `history_rewriting`, `compaction_pending`,
+  `fork_pending`, `unmatched_tool_result`, `incomplete_tool_calls`, and it is empty
+  (with `message` the generic sentence) when the owner names a cause this build does
+  not know. For a refusal, `message` is character-for-character the sentence the
+  terminal's `/fork` renders. The one fork-branch refusal that does NOT carry the
+  code is the routed payload decoder's fail-closed shape check
+  (`_fork_entry_target`), which this route cannot produce — it always composes the
+  exact payload — so only a raw or newer runtime client can meet it, and it keeps
+  the generic answer. An owner that could not be DIALLED at all is likewise still
+  `503 runtime_unreachable`, whose body is the vetted outage sentence and never any
+  cause's. A clone that FAILED is not a refusal — nothing about the conversation's
+  state said no — so it keeps that same owner-outage answer, body included; the
+  cause the owner reported rides the runtime frame's own `message`, which is what a
+  client that renders it (the terminal) shows, and it deliberately does not reach
+  that 503 body.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
 - `POST /asides`: request_id, text, optional previous aside_id, optional

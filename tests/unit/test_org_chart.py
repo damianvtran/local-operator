@@ -39,7 +39,10 @@ def test_one_agent_team(registry: TeamRegistry) -> None:
     # manager first, then the one member.
     assert [c.kind for c in node.children] == ["manager", "seed"]
     assert node.children[0].label == "boss"
-    assert node.children[1].label == "coder"
+    # ``coder`` is an UNMATERIALISED packaged seed, so the leaf paints the
+    # seed's canonical label through the shared display rule (D1) -- the same
+    # spelling the listings and the settings pane paint for that starter.
+    assert node.children[1].label == "Coder"
 
 
 def test_empty_team_is_manager_only(registry: TeamRegistry) -> None:

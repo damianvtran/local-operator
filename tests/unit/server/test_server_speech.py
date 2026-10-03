@@ -1,5 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,8 +10,39 @@ from pydantic import SecretStr, ValidationError
 
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.clients._http import APIError
+from local_operator.config import ConfigManager
+from local_operator.providers.auth_store import AuthStore
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.routes.speech import create_agent_speech, create_speech
+from local_operator.tts.descriptor import DEFAULT_SPEECH_INSTRUCTIONS
+
+
+def _speech_store(
+    tmp_path: Path, *, radient: bool = True, elevenlabs: Optional[str] = None
+) -> AuthStore:
+    """A REAL store on an isolated root, optionally holding logins.
+
+    The route's rung decision comes from the store's PERSISTED rows, so a mock
+    here would answer a question the resolver never asks. A real store is also
+    what makes ``test_create_agent_speech_requires_a_credential_before_any_work``
+    mean "nothing is stored" rather than "the mock happened to be falsy".
+    """
+    store = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path / "config")
+    if radient:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "refresh": "r",
+                "access": "a",
+                "expires": int(datetime.now().timestamp() * 1000) + 3_600_000,
+            },
+        )
+    if elevenlabs:
+        store.upsert_credential(
+            "elevenlabs", {"type": "api_key", "source": "login", "key": elevenlabs}
+        )
+    return store
 
 
 @pytest.fixture
@@ -67,6 +100,10 @@ async def test_create_speech_success(speech_request_data, mock_radient_client):
     assert response.status_code == 200
     assert response.body == b"audio_data"
     assert response.media_type == "audio/mp3"
+    # An ABSENT descriptor means exactly the pre-voicing request: the pass-through
+    # forwards the caller's own fields and adds no `voice_descriptor`, so a
+    # client that names a voice keeps today's semantics (the agent speak-aloud
+    # route is the one that builds and sends a descriptor).
     mock_radient_client.create_speech.assert_called_once_with(
         input_text="Hello, world!",
         instructions="Please speak in a friendly and engaging tone.",
@@ -77,6 +114,180 @@ async def test_create_speech_success(speech_request_data, mock_radient_client):
         provider="openai",
         language_code=None,
     )
+
+
+def _agent_less_request(**overrides: Any) -> SpeechRequest:
+    """The UI's fallback shape: ``input`` and nothing else (see ``_speech_request``).
+
+    Built through a typed dict for the same reason `_speech_request` is: the
+    type checker treats a pydantic model's defaulted fields as required keyword
+    arguments, so naming only what the caller sends does not type-check.
+    """
+    fields: Dict[str, Any] = {"input": "Hello"}
+    fields.update(overrides)
+    return SpeechRequest(**fields)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_less_descriptor_request_synthesizes(tmp_path):
+    """The UI's fallback payload -- ``{"input": ...}`` and nothing else -- speaks.
+
+    This is the shape the desktop UI posts when no agent binding is available
+    (cross-repo: its companion PR's fallback). ``model`` and ``voice`` used to be
+    REQUIRED here, so that request answered 422 and the fallback had nowhere to
+    go. The daemon now builds the same descriptor the agent route builds -- with
+    ``gender`` mapped off ``auto`` by the descriptor itself, since there is no
+    agent to classify -- and sends it with no legacy pin beside it, so the hub's
+    own cascade and model choice stay server-owned.
+    """
+    client = _credentialed_client()
+
+    response = await create_speech(
+        _agent_less_request(),
+        client,
+        _speech_store(tmp_path),
+        _voiced_config(tmp_path),
+        _env_config(),
+    )
+
+    assert response.status_code == 200
+    assert response.body == b"audio_data"
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
+    sent = client.create_speech_response.call_args.kwargs
+    # No legacy pin: not provider, not speed, not an empty voice string.
+    assert sent["provider"] is None
+    assert sent["model"] is None
+    assert sent["voice"] is None
+    assert sent["speed"] is None
+    # `auto` is the default configured gender and the hub refuses it, so the
+    # descriptor resolves it onto the map's unknown-gender row.
+    assert sent["voice_descriptor"]["gender"] == "female"
+
+
+@pytest.mark.asyncio
+async def test_the_agent_less_descriptor_request_runs_a_byo_key(tmp_path, monkeypatch):
+    """And on a machine with no Radient account, the same payload still speaks.
+
+    The resolver's order is Radient -> ElevenLabs -> OpenAI, so an ElevenLabs
+    key alone serves the agent-less fallback through the daemon's own mapping:
+    this is the follower case, and it is why the descriptor path goes through
+    the cascade rather than the direct hub pass-through.
+    """
+    from local_operator.tts import clients as tts_clients
+    from local_operator.tts.clients import TtsClientResult
+
+    class _Serving:
+        def __init__(self, _api_key, **_kwargs):
+            # The key is never kept: this fake exists to prove the RESOLVER
+            # routed to ElevenLabs, not to exercise transport.
+            pass
+
+        async def synthesize(self, *_args, **_kwargs):
+            return TtsClientResult(
+                audio=b"byo-audio", model="eleven_turbo_v2_5", provider="elevenlabs"
+            )
+
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _Serving)
+
+    response = await create_speech(
+        _agent_less_request(),
+        _credentialed_client(),
+        _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+        _voiced_config(tmp_path),
+        _env_config(),
+    )
+
+    assert response.status_code == 200
+    assert response.body == b"byo-audio"
+    assert response.headers["x-radient-speech-path"] == "provider_tts_elevenlabs"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_provider_keeps_the_direct_pass_through(tmp_path):
+    """A caller naming a provider is asking for the legacy shape, and gets it.
+
+    The descriptor has no field that could carry ``provider``, so letting this
+    request take the descriptor path would silently DROP the caller's pin. It
+    takes the pass-through instead, unchanged from before this slice.
+    """
+    client = _credentialed_client()
+
+    response = await create_speech(
+        _agent_less_request(provider="elevenlabs"),
+        client,
+        _speech_store(tmp_path),
+        _voiced_config(tmp_path),
+        _env_config(),
+    )
+
+    assert response.status_code == 200
+    client.create_speech.assert_called_once_with(
+        input_text="Hello",
+        instructions=None,
+        model=None,
+        voice=None,
+        response_format="mp3",
+        speed=1.0,
+        provider="elevenlabs",
+        language_code=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_half_specified_legacy_request_is_forwarded_as_sent(tmp_path):
+    """M4: `model` alone / `voice` alone / `provider` alone keep the pass-through.
+
+    These three answered 422 while the pair was required, so nothing can regress
+    on this, and forwarding is the more useful half of the trade: naming only a
+    provider ("use ElevenLabs, your default voice") and naming only a model are
+    both coherent requests, and the hub owns provider and voice validation — so
+    refusing them here would be this route re-deciding a question that is not
+    its own. The absent fields travel as ``None``, which the hub's own
+    ``omitempty`` reads as "your default", never as an explicit pin.
+    """
+    for fields, expected in (
+        ({"model": "tts-1"}, {"model": "tts-1", "voice": None, "provider": "openai"}),
+        ({"voice": "alloy"}, {"model": None, "voice": "alloy", "provider": "openai"}),
+        (
+            {"provider": "elevenlabs"},
+            {"model": None, "voice": None, "provider": "elevenlabs"},
+        ),
+    ):
+        client = _credentialed_client()
+        response = await create_speech(
+            _agent_less_request(**fields),
+            client,
+            _speech_store(tmp_path),
+            _voiced_config(tmp_path),
+            _env_config(),
+        )
+        assert response.status_code == 200
+        sent = client.create_speech.call_args.kwargs
+        for name, value in expected.items():
+            assert sent[name] == value, f"{fields}: {name}"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_speed_pins_pace_on_the_descriptor_path(tmp_path):
+    """``speed`` IS a legacy field the hub can pin, so the descriptor path keeps it.
+
+    The difference from ``provider`` above is deliberate: the hub's per-field pin
+    rule has somewhere to put a speed (it WINS over the descriptor's pace) and
+    nowhere to put a provider. So the speed rides as ``speed`` and is not folded
+    into the descriptor.
+    """
+    client = _credentialed_client()
+
+    await create_speech(
+        _agent_less_request(speed=0.5),
+        client,
+        _speech_store(tmp_path),
+        _voiced_config(tmp_path),
+        _env_config(),
+    )
+
+    sent = client.create_speech_response.call_args.kwargs
+    assert sent["speed"] == 0.5
 
 
 @pytest.mark.asyncio
@@ -261,12 +472,44 @@ def _credentialed_client() -> MagicMock:
     client = MagicMock()
     client.api_key = SecretStr("test-key")
     client.create_speech.return_value = b"audio_data"
+    # The cascade calls the HEADER-CARRYING variant so it can relay the hub's
+    # own ``X-Radient-Speech-Provider`` (the echoed-actual-path rule: a
+    # descriptor-bearing request names no leg, so only the hub's receipt knows
+    # which one served). ``create_speech`` stays wired for the untouched
+    # ``/v1/tools/speech`` pass-through.
+    client.create_speech_response.return_value = (b"audio_data", {})
     return client
 
 
+def _env_config() -> Any:
+    """The route reads exactly one field off this: the Radient base URL.
+
+    A URL must be a string, so a MagicMock here is not a stand-in for the real
+    object — it is an input the resolver will try to parse.
+    """
+    return SimpleNamespace(radient_api_base_url="https://api.radienthq.com/v1")
+
+
+def _voiced_config(tmp_path: Path) -> ConfigManager:
+    """A real config manager over an isolated root: ``speech.voice.*`` unset.
+
+    Unset means the DEFAULTS, which is what makes ``determine_voice`` the
+    patched classifier call these tests expect — the configured gender is
+    ``auto``.
+    """
+    return ConfigManager(config_dir=tmp_path / "config")
+
+
 @pytest.mark.asyncio
-async def test_create_agent_speech_uses_the_elevenlabs_contract():
-    """The payload is provider=elevenlabs, the alias voice, no instructions/model."""
+async def test_create_agent_speech_uses_the_elevenlabs_contract(tmp_path):
+    """The descriptor is sent; no legacy provider/voice/speed/instructions ride along.
+
+    A descriptor-bearing request names NO leg on purpose: the hub owns provider
+    and model choice, and an explicit ``voice``/``speed`` sent beside the
+    descriptor would PIN those fields and defeat it (the hub's per-field pin
+    rule). ``language_code`` stays, because it is the CALLER's own per-call
+    value and the hub's pin rule is how it survives.
+    """
     radient_client = _credentialed_client()
     agent_registry = MagicMock()
     agent_registry.get_agent.return_value = _agent()
@@ -284,22 +527,243 @@ async def test_create_agent_speech_uses_the_elevenlabs_contract():
             _agent_speech_request(language_code="es"),
             radient_client,
             agent_registry,
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
+            _speech_store(tmp_path),
+            _voiced_config(tmp_path),
+            _env_config(),
         )
 
     assert response.status_code == 200
     assert response.body == b"audio_data"
-    # assert_called_once_with pins the ABSENCE of `instructions`/`model` too.
-    radient_client.create_speech.assert_called_once_with(
-        input_text="Hello",
-        voice="female",
+    # The daemon's own receipt names the rung that ran, even though the hub
+    # named no leg back in this fake (``provider_tts_radient`` is the rung).
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
+    # assert_called_once_with pins the ABSENCE of provider/voice/speed/model too.
+    radient_client.create_speech_response.assert_called_once_with(
+        "Hello",
+        model=None,
+        voice=None,
+        instructions=None,
         response_format="mp3",
-        speed=1.0,
-        provider="elevenlabs",
+        speed=None,
+        provider=None,
         language_code="es",
+        voice_descriptor={
+            "version": 1,
+            "gender": "female",
+            "tone": "warm",
+            "expressiveness": "medium",
+            "language": "auto",
+            "accent": "",
+            "pace": 1.0,
+            "instructions": DEFAULT_SPEECH_INSTRUCTIONS,
+        },
     )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_speech_relays_the_hubs_own_voicing_headers(tmp_path):
+    """The echoed-actual-path rule: the hub's receipt is what says who spoke.
+
+    A descriptor-bearing request names no leg, so ``X-Radient-Speech-Provider``
+    on the response is the ONLY place the serving leg exists. Relaying it (with
+    the map version and the degraded tokens) is what stops the daemon from
+    claiming a leg the hub did not use.
+    """
+    radient_client = _credentialed_client()
+    radient_client.create_speech_response.return_value = (
+        b"audio",
+        {
+            "X-Radient-Speech-Map": "1.0",
+            "X-Radient-Speech-Provider": "openai",
+            "X-Radient-Speech-Applied": "gender,pace",
+            "X-Radient-Speech-Degraded": "tone:emulated=instructions",
+            # A header that is none of our business must not be copied.
+            "X-Internal-Trace": "secret",
+        },
+    )
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="female",
+        ),
+    ):
+        response = await create_agent_speech(
+            "test-agent",
+            _agent_speech_request(),
+            radient_client,
+            agent_registry,
+            _speech_store(tmp_path),
+            _voiced_config(tmp_path),
+            _env_config(),
+        )
+
+    assert response.headers["x-radient-speech-provider"] == "openai"
+    assert response.headers["x-radient-speech-map"] == "1.0"
+    assert response.headers["x-radient-speech-degraded"] == "tone:emulated=instructions"
+    # TWO DIFFERENT FACTS, deliberately kept apart (voicing S2 review round 1,
+    # M1): Path is the DAEMON RUNG that executed (the closed VoicePath
+    # vocabulary), while Provider is the leg the HUB says it used. Filling Path
+    # from the hub's header made "the hub used the platform's ElevenLabs" and
+    # "my own ElevenLabs key ran" the same string.
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
+    assert "x-internal-trace" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
+    """Q1/C1: a vendor refusal names the user's own vendor AND its real condition.
+
+    On a BYO-only machine there is no Radient account in the exchange, so
+    "your Radient sign-in has stopped working" and "add credits in the Radient
+    Console" both name the wrong system and send the user to the wrong place
+    (Q1). And the CONDITION cannot be read off the status (C1): ElevenLabs
+    reports an exhausted quota as 401 and OpenAI reports one as 429, so a
+    status-keyed table told users with a good key to replace it. The body
+    markers decide, and the two conditions have two different remedies.
+    """
+    from local_operator.clients._http import APIError
+    from local_operator.tts import clients as tts_clients
+
+    class _Refusing:
+        #: Set per case below; declared so the type checker sees it as a class
+        #: attribute rather than an assignment to an unknown name.
+        status: int = 401
+        body: Optional[str] = None
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def synthesize(self, *_args, **_kwargs):
+            raise APIError("vendor said no", status_code=_Refusing.status, body=_Refusing.body)
+
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _Refusing)
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+
+    key_sentence = "ElevenLabs refused your API key. Replace it."
+    credit_sentence = (
+        "Your ElevenLabs credit balance is too low for speech. "
+        "Add credits with ElevenLabs to continue."
+    )
+    for status, body, expected_status, expected in (
+        # A plain 401 with no credit language is the only key refusal.
+        (401, '{"detail":{"status":"invalid_api_key"}}', 401, key_sentence),
+        # ElevenLabs' exhausted quota, on the status it actually uses.
+        (
+            401,
+            '{"detail":{"status":"quota_exceeded","message":"You have insufficient '
+            'quota to complete the request."}}',
+            402,
+            credit_sentence,
+        ),
+        # OpenAI's exhausted balance, on the status it actually uses.
+        (
+            429,
+            '{"error":{"code":"credit_balance_exhausted"}}',
+            402,
+            credit_sentence,
+        ),
+        (429, '{"error":{"code":"rate_limit_exceeded"}}', 429, None),
+        # S-8: a bare 402 keeps the credit remedy on its STATUS. A gateway's
+        # prose, a localized message or an intermediary's HTML page carries no
+        # marker, and reading only the markers turned those into a 502 quoting
+        # the upstream body -- the opposite of the remedy, on the one status
+        # that names it.
+        (402, None, 402, credit_sentence),
+        (402, '{"error":"Payment required"}', 402, credit_sentence),
+        # S-9: the marker arm is fenced to the statuses a credit refusal
+        # arrives on, so a fault or a rejected request that merely ECHOES a
+        # marker is not presented as a top-up the user can act on.
+        (500, '{"error":"insufficient_quota"}', 502, None),
+        (400, '{"error":"credit_balance_exhausted"}', 502, None),
+    ):
+        _Refusing.status = status
+        _Refusing.body = body
+        with (
+            patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+            patch(
+                "local_operator.server.routes.speech.determine_voice",
+                new_callable=AsyncMock,
+                return_value="female",
+            ),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await create_agent_speech(
+                    "test-agent",
+                    _agent_speech_request(),
+                    _credentialed_client(),
+                    agent_registry,
+                    _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+                    _voiced_config(tmp_path),
+                    _env_config(),
+                )
+        assert exc_info.value.status_code == expected_status
+        if expected is None:
+            # A rate limit, a fault and a rejected request are not credit
+            # conditions: they keep the sentence that names nobody, so it is not
+            # asserted as a vendor literal.
+            assert "ElevenLabs" not in exc_info.value.detail
+        else:
+            assert exc_info.value.detail == expected
+        assert "Radient" not in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_generic_vendor_refusal_keeps_the_provider_neutral_sentence(tmp_path, monkeypatch):
+    """429 has no vendor sentence: the generic one already names nobody."""
+    from local_operator.clients._http import APIError
+    from local_operator.tts import clients as tts_clients
+
+    class _Refusing:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def synthesize(self, *_args, **_kwargs):
+            raise APIError("slow down", status_code=429)
+
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _Refusing)
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="female",
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await create_agent_speech(
+                "test-agent",
+                _agent_speech_request(),
+                _credentialed_client(),
+                agent_registry,
+                _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+                _voiced_config(tmp_path),
+                _env_config(),
+            )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "Speech is unavailable right now. Try again in a moment."
+
+
+def test_an_over_long_speak_aloud_input_is_refused_at_the_schema():
+    """S-1: the agent route carries no identity, so the cap IS the bound.
+
+    It matches the hub's own 10,000-character cap, so the daemon refuses at the
+    same boundary rather than forwarding a body the hub would reject — and on a
+    BYO leg nothing else bounds what one call can spend of the operator's key.
+    """
+    from local_operator.server.models.schemas import MAX_SPEECH_INPUT_CHARS
+
+    assert _agent_speech_request(input_text="x" * MAX_SPEECH_INPUT_CHARS).input_text
+    with pytest.raises(ValidationError):
+        _agent_speech_request(input_text="x" * (MAX_SPEECH_INPUT_CHARS + 1))
 
 
 @pytest.mark.asyncio
@@ -336,8 +800,13 @@ async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path, caplog):
 
 
 @pytest.mark.asyncio
-async def test_create_agent_speech_requires_a_credential_before_any_work():
-    """No credential answers 401 before configuration or any model call."""
+async def test_create_agent_speech_requires_a_credential_before_any_work(tmp_path):
+    """No STORED credential answers 401 before configuration or any model call.
+
+    The resolver decides that, so an ambient key is not a credential: only the
+    persisted rows in the store can light a rung, and an empty store lights
+    none.
+    """
     radient_client = MagicMock()
     radient_client.api_key = SecretStr("")
     agent_registry = MagicMock()
@@ -353,9 +822,9 @@ async def test_create_agent_speech_requires_a_credential_before_any_work():
                 _agent_speech_request(),
                 radient_client,
                 agent_registry,
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
+                _speech_store(tmp_path, radient=False),
+                _voiced_config(tmp_path),
+                _env_config(),
             )
 
     assert exc_info.value.status_code == 401
@@ -366,10 +835,10 @@ async def test_create_agent_speech_requires_a_credential_before_any_work():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_speech_passes_refusals_through():
+async def test_create_agent_speech_passes_refusals_through(tmp_path):
     """The agent route shares the direct route's refusal classification."""
     radient_client = _credentialed_client()
-    radient_client.create_speech.side_effect = APIError(
+    radient_client.create_speech_response.side_effect = APIError(
         "insufficient credits for this request", status_code=402
     )
     agent_registry = MagicMock()
@@ -389,9 +858,9 @@ async def test_create_agent_speech_passes_refusals_through():
                 _agent_speech_request(),
                 radient_client,
                 agent_registry,
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
+                _speech_store(tmp_path),
+                _voiced_config(tmp_path),
+                _env_config(),
             )
 
     assert exc_info.value.status_code == 402
@@ -402,10 +871,10 @@ async def test_create_agent_speech_passes_refusals_through():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_speech_500_logs_the_stack(caplog):
+async def test_create_agent_speech_500_logs_the_stack(tmp_path, caplog):
     """The one fault class that needs a traceback gets it (review r2, f1)."""
     radient_client = _credentialed_client()
-    radient_client.create_speech.side_effect = RuntimeError("boom")
+    radient_client.create_speech_response.side_effect = RuntimeError("boom")
     agent_registry = MagicMock()
     agent_registry.get_agent.return_value = _agent()
 
@@ -423,9 +892,9 @@ async def test_create_agent_speech_500_logs_the_stack(caplog):
                 _agent_speech_request(),
                 radient_client,
                 agent_registry,
-                MagicMock(),
-                MagicMock(),
-                MagicMock(),
+                _speech_store(tmp_path),
+                _voiced_config(tmp_path),
+                _env_config(),
             )
 
     assert exc_info.value.status_code == 500

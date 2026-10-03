@@ -1039,6 +1039,15 @@ def _apply_agent_locked(
     name = str(row["name"])
     registry = AgentRegistry(root)
     local = registry.get_agent_by_name(name)
+    # The display label is LOCAL-ONLY and deliberately OFF the wire (see
+    # AGENT_DEFINITION_FIELDS): a label is this device's display metadata, and
+    # carrying it would re-shape every mirror's recorded digest so an unchanged
+    # bundle reported a false local-edits conflict. The rebuild below must
+    # therefore carry the EXISTING row's own label -- reading it from ``fields``
+    # would always be "" (it is not sent) and re-deriving a fresh row would
+    # silently discard the operator's retitle on every apply. A brand-new mirror
+    # has none, so "" derives from the name, which is correct.
+    local_label = str(getattr(local, "label", "") or "") if local is not None else ""
     current = None
     local_id = str(getattr(local, "id", "") or "") if local is not None else ""
     if local is not None:
@@ -1139,6 +1148,10 @@ def _apply_agent_locked(
             AgentData(
                 id=agent_id,
                 name=name,
+                # The EXISTING row's label (see ``local_label`` above); a label
+                # is never on the wire, and an empty one re-derives in
+                # ``save_agent``.
+                label=local_label,
                 created_date=_parse_iso(row.get("created_date")),
                 version=str(getattr(local, "version", "") or _local_version()),
                 hosting=str(fields.get("hosting") or ""),
@@ -1171,6 +1184,10 @@ def _apply_agent_locked(
         created = registry.create_agent(
             AgentEditFields(
                 name=name,
+                # A create branch means no local row exists, so there is no
+                # stored label to carry: "" reads as "derive" on the create path
+                # (AgentEditFields.label's reset spelling).
+                label="",
                 hosting=str(fields.get("hosting") or ""),
                 model=str(fields.get("model") or ""),
                 description=str(fields.get("description") or ""),

@@ -713,6 +713,7 @@ def row_facts(
     current: bool,
     paused: bool = False,
     child_count: int = 0,
+    role_display: Callable[[str], str] | None = None,
 ) -> RowFacts:
     """Read one job into the strings a row paints. Never raises.
 
@@ -726,6 +727,10 @@ def row_facts(
     ``child_count`` is handed THROUGH rather than read off the job, for the
     same reason ``paused`` is: it belongs to the tree, not to the row, and
     only the app holds the graph (see :attr:`RowFacts.child_count`).
+
+    ``role_display`` is the same kind of hand-through for the role column: the
+    app owns the registry a label comes from, so it supplies the resolver and
+    this widget stays a renderer (see :attr:`SubagentRow._role_display`).
     """
     try:
         return _read_row(
@@ -734,6 +739,7 @@ def row_facts(
             current=current,
             paused=paused,
             child_count=child_count,
+            role_display=role_display,
         )
     except Exception:
         # The count is NOT part of what just failed: it came from the graph, so
@@ -760,6 +766,7 @@ def _read_row(
     current: bool,
     paused: bool = False,
     child_count: int = 0,
+    role_display: Callable[[str], str] | None = None,
 ) -> RowFacts:
     """:func:`row_facts` without the net. Everything here may raise."""
     status = str(getattr(job, "status", "running"))
@@ -875,6 +882,18 @@ def _read_row(
     if agent_role == "task":
         # The no-role default carries no information (see ``RowFacts``).
         agent_role = ""
+    if agent_role and role_display is not None:
+        # The dock paints the display form for the same reason every listing
+        # does. Guarded: the resolver touches a registry, and a row that could
+        # not name its role still renders (this function is called from the
+        # 1 Hz poll, where an exception is the whole app). A resolver that
+        # raises or returns nothing degrades to the raw role.
+        try:
+            resolved = role_display(agent_role)
+            if resolved:
+                agent_role = strip_control_sequences(str(resolved)).strip()
+        except Exception:  # noqa: BLE001 — a display lookup must not take the row down
+            pass
     return RowFacts(
         label=strip_control_sequences(str(getattr(job, "label", "") or fallback_id)),
         status=status,
@@ -1969,6 +1988,15 @@ class SubagentPanel(Container):
         #: spinner tick repaints from it between refreshes rather than
         #: re-querying the manager eight times a second.
         self._jobs_by_id: dict[str, Any] = {}
+        #: A resolver turning a child's role KEY into the display form a row
+        #: paints (the app's ``_agent_role_display``), or None. Handed in by
+        #: ``sync`` rather than read here because the panel is a pure renderer
+        #: that never touches a registry: the dock's role column then reads
+        #: ``UX Reviewer`` beside a model-authored label instead of the raw
+        #: slug, through ONE shared rule, without this widget knowing what a
+        #: label is. None (every pre-existing caller, every other test) leaves
+        #: the row painting its bare ``agent_role``, unchanged.
+        self._role_display: Callable[[str], str] | None = None
         #: Job ids the parent PAUSED, refreshed from the comms graph on every
         #: sync. Held here rather than passed to each render call because a
         #: pause is invisible on the job row itself (it reads ``cancelled``),
@@ -2494,6 +2522,7 @@ class SubagentPanel(Container):
         jobs: Sequence[Any] | None = None,
         selected_job: Any = None,
         children_counts: Mapping[str, int] | None = None,
+        role_display: Callable[[str], str] | None = None,
     ) -> None:
         """Re-read ``session.jobs`` and schedule a repaint.
 
@@ -2522,6 +2551,10 @@ class SubagentPanel(Container):
                 jobs = []
         job_rows = jobs or []
         self._model_label = str(getattr(session, "model_label", "") or "")
+        # Resolved by the caller (see :attr:`_role_display`); the panel never
+        # reads a registry itself. Stored before any early return so a roster
+        # that empties keeps the last resolver for the rows that remain.
+        self._role_display = role_display
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
         selected_id = str(getattr(selected_job, "id", "") or "")
         self._selected_job_id = selected_id
@@ -2687,6 +2720,7 @@ class SubagentPanel(Container):
                 current=row.current,
                 paused=job_id in self._paused_ids,
                 child_count=self._children_counts.get(job_id, 0),
+                role_display=self._role_display,
             )
             measured.append((job_id, row, facts, self._stats_for(job_id, job, reread_stats)))
         self._rung, self._column, self._clock, self._role_column = panel_layout(
@@ -3109,6 +3143,7 @@ class SubagentPanel(Container):
                             current=row.current,
                             paused=job_id in self._paused_ids,
                             child_count=self._children_counts.get(job_id, 0),
+                            role_display=self._role_display,
                         ),
                         stats=self._stats_for(job_id, job, False),
                         spinner_glyph=glyph,

@@ -459,7 +459,8 @@ async def test_a_failed_bridged_tool_call_reaches_the_result_text(context) -> No
                     "type": "text",
                     "text": (
                         "invalid arguments: `timeout_ms` is not a sessions parameter. "
-                        "`resume` takes: session|target|pid, prompt, background."
+                        "`resume` takes: session|target|pid, prompt, background, "
+                        "paused, failed, all, dry_run, limit."
                     ),
                 }
             ],

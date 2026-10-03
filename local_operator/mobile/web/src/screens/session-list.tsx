@@ -40,6 +40,7 @@ import {
 	usePinMarks,
 	useSessions,
 } from "../store";
+import { WideViewButton } from "../components/wide-view-button";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
 import { MARK_DATA_URI } from "../lib/mark";
@@ -1101,7 +1102,7 @@ export function SessionListScreen() {
 	}, []);
 
 	return (
-		<div className="relative mx-auto flex h-dvh w-full max-w-md flex-col">
+		<div className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col">
 			<header className="flex items-center gap-2 px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<img
 					src={MARK_DATA_URI}
@@ -1275,6 +1276,12 @@ export function SessionListScreen() {
 				>
 					◐
 				</button>
+				{/* WIDE VIEW (issue #1870): the same control the session screen's
+				    header carries — one component, so the label and the pressed state
+				    cannot drift between the two places a reader can reach it. Lives
+				    here beside the theme because it is the same kind of preference
+				    (per-phone, persisted, not content). */}
+				<WideViewButton />
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
 			<ProjectsSheet open={projectsOpen} onClose={() => setProjectsOpen(false)} />

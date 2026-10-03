@@ -6,6 +6,9 @@ import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
+import { styles } from "./commands/styles";
+import { hitTest } from "./commands/hit-test";
+import { ancestors } from "./commands/ancestors";
 import { upload } from "./commands/upload";
 import { download } from "./commands/download";
 import { disabledCapabilities, hasConsentSwitch } from "./consent";
@@ -51,6 +54,14 @@ const HANDLERS: Record<
   tabs,
   scroll,
   logs,
+  // The structured READ actions: page geometry and computed styles, so an agent
+  // debugging a layout can ask for numbers instead of guessing from a picture.
+  // Non-cmux only (cmux is told so by the tool); both non-cmux hosts serve
+  // them, and the page-side functions live in driver/geometry-read.ts so the
+  // desktop app runs the same code rather than a second copy.
+  styles,
+  hit_test: hitTest,
+  ancestors,
   // Attach local files to a page's file input, and save a file the page offers.
   // BOTH are gated by the operator's own switches (`consent.ts`), which is why
   // this table is no longer the same thing as what gets advertised: `upload`

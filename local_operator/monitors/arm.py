@@ -789,6 +789,12 @@ def _compose_index_rows(
                 "consecutive_failures": counters.get("consecutive_failures", 0),
                 "disabled": bool(counters.get("disabled")),
                 "disabled_reason": counters.get("disabled_reason", ""),
+                # The health fields (§D6). This composer and
+                # ``MonitorScheduler.index_rows`` must keep an IDENTICAL key
+                # set — the index is one file written by both — so a field
+                # added to one belongs in the other in the same change.
+                "unavailable_since": counters.get("unavailable_since", 0),
+                "last_error": counters.get("last_error", ""),
             }
         )
     return rows

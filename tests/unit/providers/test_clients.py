@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import unicodedata
@@ -25,6 +26,7 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
     StreamReasoningDelta,
+    StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -803,6 +805,29 @@ async def test_mock_client_tool_branch() -> None:
     arguments = "".join(e.argument_delta for e in tool_events if e.argument_delta)
     assert json.loads(arguments) == {"text": "hi"}
     assert events[-1].stop_reason == "toolUse"
+
+
+async def test_mock_client_hang_branch_never_ends_the_stream() -> None:
+    """``[hang]``: the one request that never returns — the drain's reap shape.
+
+    The marker exists for the signal-drain e2e: the progress-gated drain
+    (2026-10-01) only disposes a turn with nothing executing and nothing moving,
+    and a parent provider request that has yielded nothing is exactly that —
+    the stream counter the runtime reads is child-only. Pinned here at the wire
+    level: the stream-start boundary IS emitted (the mock's contract), and then
+    nothing — no text, no tool call, no end — so the consumer stays awaiting a
+    request that is genuinely outstanding.
+    """
+    client = MockClient()
+    request = ChatRequest(model=_spec("test", "mock"), messages=[Message.user("please [hang] now")])
+    stream = client.stream(request, None)
+    first = await anext(stream)
+    assert isinstance(first, StreamStartEvent)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(anext(stream), timeout=0.25)
+    # No close call: ``wait_for`` delivers its cancellation into the suspended
+    # generator before it re-raises, so the stream above is already closed —
+    # and the declared return type (``AsyncIterator``) carries no ``aclose``.
 
 
 # ---------------------------------------------------------------------------

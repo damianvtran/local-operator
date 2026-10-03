@@ -1738,10 +1738,62 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             AsideUnanswered,
             AttachmentUnavailable,
             AudioInputUnsupported,
+            ForkRefused,
             ProfileRegistryUnavailable,
             RuntimeRetiring,
         )
 
+        if isinstance(error, ForkRefused):
+            # THE REFUSAL IS THE ANSWER, exactly as it is for the arms around it.
+            # The fork ran on the owner, which answered promptly and
+            # deliberately, so nothing is broken and nothing needs reconnecting:
+            # the conversation's own state is what refused the cut. Unclassified
+            # this arrived as the owner's plain ``RuntimeError``, which the
+            # ``(RuntimeError, asyncio.TimeoutError)`` arm far below can only read
+            # as an unreachable owner and answer 503 ``runtime_unreachable``
+            # ("reconnect and reconcile") — a remedy that cannot help and a
+            # sentence that never rendered (measured on PR #1917, for the new cut
+            # refusals and for the pre-existing compaction one alike).
+            #
+            # 409, not 422, and the distinction is the ladder's own. 422 is this
+            # route family's "the BODY is the thing that has to change": the
+            # malformed boundaries (an ``at_entry`` with no target, a cut id on
+            # ``next_safe``) already answer 422 from the request model, before a
+            # runtime is engaged. Every arm here is instead a well-formed request
+            # against a conversation whose CURRENT state cannot honour it right
+            # now — the shape ``aside_unanswered``, ``session_delete_refused`` and
+            # ``loop_busy`` all take, each a 409 carrying the session's own
+            # sentence. That is also literally true of the causes: the cut point
+            # may exist a moment later (an uncommitted echo), and the compaction
+            # or the unfinished batch the other three name are transients the
+            # reader retries.
+            #
+            # THE CONTRACT SAYS BOTH HALVES OUT LOUD (``docs/DESKTOP_API.md``,
+            # the control routes' refusal/status section): a session-scoped 503
+            # ``runtime_unreachable`` is the answer for an owner that could not be
+            # reached and "keeps its meaning — nothing could be dialled", with the
+            # vetted sentence and no retry fields. So the status is what separates
+            # a refusal from an outage here, and answering 503 for a fork the owner
+            # answered was never merely unhelpful copy: it said something FALSE
+            # about the transport. (The 422/409 split above is this file's own
+            # convention; the contract quote is the general one, not a
+            # route-specific rule.)
+            #
+            # ``code`` is the machine contract the renderer keys on; ``reason``
+            # narrows it to WHICH of the family's causes fired (one token from the
+            # closed set ``ForkRefused`` enumerates, never prose) so a surface can
+            # offer the right way forward instead of parsing the sentence, and
+            # ``message`` carries the cause-specific sentence rebuilt on this side
+            # — the same reconstruction the TUI renders, character for character.
+            # An additive field beside ``code``/``message`` is the established
+            # shape on this ladder (``retryable``/``retry_after_ms`` on the 503s,
+            # ``cold_reason``/``attaching`` on the snapshot), and it is present
+            # (empty when the owner named no cause this build knows) so the body's
+            # keys never vary.
+            raise HTTPException(
+                409,
+                {"code": error.code, "message": str(error), "reason": error.reason},
+            ) from None
         if isinstance(
             error,
             (

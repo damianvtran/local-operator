@@ -1,0 +1,1495 @@
+{
+  "_comment": "Golden vectors for the canonical speech voicing map. The SAME file is vendored by the daemon (local-operator) and run against its Python adapters, which is how the two implementations are kept from drifting: neither repo is allowed to change what a vector means. A vector's expectation is derived from speech_voicing_map.v1.json's matrix (capabilities, voices, tone_phrase, expressiveness, fixed, nearest), not from whatever the code currently prints. Changing any expectation for an existing (descriptor, map_version) is a MAJOR map bump.",
+  "map_version": "1.0",
+  "vectors": [
+    {
+      "name": "elevenlabs-default-female-warm",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-male-calm",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "8dEUmyPMdDdK91vboYih",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-female-bright-shares-the-talia-id",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "bright",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-bright",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-male-authoritative-shares-the-sawyer-id",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "authoritative",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "m-auth",
+        "params": {
+          "voice_id": "8dEUmyPMdDdK91vboYih",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-unknown-tone-degrades-to-nearest",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "sassy",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "nearest",
+            "detail": "neutral"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-language-dropped-by-multilingual-v2",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "hi",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "ignored",
+            "detail": "eleven_multilingual_v2"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-language-honoured-by-flash-v2-5",
+      "provider": "elevenlabs",
+      "model": "eleven_flash_v2_5",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "hi",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_flash_v2_5",
+          "language_code": "hi",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-pace-clamped-to-the-vendor-range",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.5,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5,
+          "speed": 1.2
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "clamped",
+            "detail": "1.2"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-accent-and-instructions-have-no-field",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "en-GB",
+        "instructions": "Whisper it."
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "ignored",
+            "detail": "no-field"
+          },
+          {
+            "field": "instructions",
+            "action": "ignored",
+            "detail": "no-field"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-expressiveness-high-lowers-stability",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "high",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.35
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-legacy-voice-pins-gender-and-tone",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "legacy": {
+        "voice": "EXAVITQu4vr4xnSDxMaL"
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "",
+        "params": {
+          "voice_id": "EXAVITQu4vr4xnSDxMaL",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "pinned",
+            "detail": "voice"
+          },
+          {
+            "field": "tone",
+            "action": "pinned",
+            "detail": "voice"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-legacy-speed-and-language-code-pin-their-fields",
+      "provider": "elevenlabs",
+      "model": "eleven_flash_v2_5",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.5,
+        "language": "hi",
+        "accent": "",
+        "instructions": null
+      },
+      "legacy": {
+        "speed": 1.4,
+        "language_code": "fr"
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_flash_v2_5",
+          "language_code": "fr",
+          "stability": 0.5,
+          "speed": 1.4
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "pinned",
+            "detail": "speed"
+          },
+          {
+            "field": "language",
+            "action": "pinned",
+            "detail": "language_code"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-default-female-warm-emulates-tone",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a warm, friendly tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-male-calm",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "onyx",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a calm, unhurried tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-female-bright",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "bright",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-bright",
+        "params": {
+          "voice_id": "shimmer",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a bright, upbeat tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-expressiveness-high-adds-a-sentence",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "high",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a warm, friendly tone. Sound expressive and lively."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-language-emulated-in-instructions",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "hi",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a warm, friendly tone. Speak the text in the language it is written in, and pronounce foreign words as a native speaker of that language would."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-accent-emulated-in-instructions",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "en-GB",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a warm, friendly tone. Adapt the pronunciation for the en-GB accent."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-caller-instructions-are-kept-verbatim",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": "Read the text as a news anchor."
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Read the text as a news anchor. Speak in a warm, friendly tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-legacy-instructions-pin-the-emulated-axes",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "high",
+        "pace": 1.0,
+        "language": "hi",
+        "accent": "en-GB",
+        "instructions": null
+      },
+      "legacy": {
+        "instructions": "Read this exactly."
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "nova",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Read this exactly."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "pinned",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "pinned",
+            "detail": "instructions"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "pinned",
+            "detail": "instructions"
+          },
+          {
+            "field": "accent",
+            "action": "pinned",
+            "detail": "instructions"
+          },
+          {
+            "field": "instructions",
+            "action": "pinned",
+            "detail": "legacy"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai-pinned-elevenlabs-voice-cannot-apply-on-this-leg",
+      "_why": "S-1: the descriptor caller's voice is an ElevenLabs id; the OpenAI leg cannot use it. The mapping keeps the descriptor's pool voice (male+calm -> onyx) and says in the degraded channel that the pin did not apply here, so the fallback is not lost in silence.",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "legacy": {
+        "voice": "8dEUmyPMdDdK91vboYih"
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "onyx",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak in a calm, unhurried tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          },
+          {
+            "field": "voice",
+            "action": "ignored",
+            "detail": "openai"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-pinned-openai-voice-cannot-apply-on-this-leg",
+      "_why": "S-1 mirror: the pin is a name the ElevenLabs id shape refuses, so it does not reach that vendor's URL either; the descriptor's pool voice stands and the note says the pin did not apply here.",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "legacy": {
+        "voice": "alloy"
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          },
+          {
+            "field": "voice",
+            "action": "ignored",
+            "detail": "elevenlabs"
+          }
+        ]
+      }
+    },
+    {
+      "name": "elevenlabs-alias-voice-pins-gender-only",
+      "_why": "M1: `voice: male` is an explicit legacy field, so it wins the GENDER field while the descriptor's tone still chooses the row.",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "legacy": {
+        "voice": "male"
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "8dEUmyPMdDdK91vboYih",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "pinned",
+            "detail": "voice"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "radient-rung-maps-onto-its-primary-leg",
+      "provider": "radient",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "female",
+        "tone": "warm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": null
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "f-warm",
+        "params": {
+          "voice_id": "OZ0L6eISlOejga3XjDFt",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "follower-primary-leg-elevenlabs-ignores-instructions",
+      "provider": "elevenlabs",
+      "model": "eleven_multilingual_v2",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": "Speak the text in the text's own language."
+      },
+      "expect": {
+        "provider": "elevenlabs",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "8dEUmyPMdDdK91vboYih",
+          "model_id": "eleven_multilingual_v2",
+          "stability": 0.5
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "applied"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "ignored",
+            "detail": "no-field"
+          }
+        ]
+      }
+    },
+    {
+      "name": "follower-fallback-leg-openai-speaks-the-same-descriptor",
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "descriptor": {
+        "version": 1,
+        "gender": "male",
+        "tone": "calm",
+        "expressiveness": "medium",
+        "pace": 1.0,
+        "language": "auto",
+        "accent": "",
+        "instructions": "Speak the text in the text's own language."
+      },
+      "expect": {
+        "provider": "openai",
+        "voice_key": "m-warm",
+        "params": {
+          "voice_id": "onyx",
+          "model_id": "gpt-4o-mini-tts",
+          "instructions": "Speak the text in the text's own language. Speak in a calm, unhurried tone."
+        },
+        "notes": [
+          {
+            "field": "gender",
+            "action": "applied"
+          },
+          {
+            "field": "tone",
+            "action": "emulated",
+            "detail": "instructions"
+          },
+          {
+            "field": "expressiveness",
+            "action": "applied"
+          },
+          {
+            "field": "pace",
+            "action": "applied"
+          },
+          {
+            "field": "language",
+            "action": "applied",
+            "detail": "auto"
+          },
+          {
+            "field": "accent",
+            "action": "applied"
+          },
+          {
+            "field": "instructions",
+            "action": "applied"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from local_operator.harness.types import BrowserSurface, ToolContext
 from local_operator.tools import builtin
@@ -132,6 +133,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             # are the same set so they cannot drift apart.
             "download",
             "upload",
+            # The structured reads need a page-script primitive cmux does not
+            # expose — the same limitation that puts `scroll` here — so they
+            # degrade with a typed error rather than a fabricated empty result.
+            "styles",
+            "hit_test",
+            "ancestors",
         }
     )
 
@@ -2172,3 +2179,274 @@ async def test_a_bridge_open_result_names_the_host_that_served_it(monkeypatch) -
     )
     assert ui_result.is_error is False, ui_result.text
     assert "on the Local Operator desktop app's browser host:" in ui_result.text
+
+
+# ---------------------------------------------------------------------------
+# styles / hit_test / ancestors — the structured read actions. They answer
+# "what are the numbers" (rects, computed styles, the stacking at a point) so
+# an agent debugging a layout does not have to guess from a picture. These
+# tests pin the argument validation, the wire params (including the clamps the
+# page function re-applies), the bounded rendering, and the cmux degrade.
+# ---------------------------------------------------------------------------
+
+
+def test_read_actions_are_advertised_actions() -> None:
+    for action in ("styles", "hit_test", "ancestors"):
+        assert action in builtin.BROWSER_ACTIONS
+        # Served by both non-cmux hosts; cmux degrades with the typed error.
+        assert action in builtin.CMUX_UNSUPPORTED_BROWSER_ACTIONS
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "ok"),
+    [
+        ({}, False),  # the action names an element, so the selector is mandatory
+        ({"selector": ".card"}, True),
+        ({"selector": ".card", "properties": ["background-color", "--brand", "Z9"]}, True),
+        # `_` is a legal CSS ident character, and custom properties use it:
+        # `--brand_color` must be readable, not refused (review R1-2).
+        ({"selector": ".card", "properties": ["--brand_color", "my_prop"]}, True),
+        # A dot is not a CSS property-name character; refusing beats a silent "".
+        ({"selector": ".card", "properties": ["font.size"]}, False),
+        # Over the cap is REFUSED, not silently clipped: a result that looks
+        # complete while dropping requested properties is worse than an error.
+        ({"selector": ".card", "properties": ["p"] * 21}, False),
+    ],
+)
+def test_validate_styles_args(kwargs: dict[str, Any], ok: bool) -> None:
+    problem = builtin._validate_browser_args(
+        "styles", builtin.BrowserParams(action="styles", **kwargs)
+    )
+    assert (problem == "") is ok
+
+
+def test_a_boolean_coordinate_is_refused_before_it_can_become_one() -> None:
+    # Pydantic's lax mode coerces `true` to 1.0, so without the before-validator
+    # a flag-shaped argument would silently probe (1, 1) or scroll by one pixel.
+    with pytest.raises(ValidationError):
+        builtin.BrowserParams(action="hit_test", x=True, y=2)
+    with pytest.raises(ValidationError):
+        builtin.BrowserParams(action="scroll", x=False)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "ok"),
+    [
+        ({}, False),
+        ({"x": 10.0}, False),  # both coordinates are required
+        ({"x": 10.0, "y": 20.5}, True),
+    ],
+)
+def test_validate_hit_test_args(kwargs: dict[str, Any], ok: bool) -> None:
+    problem = builtin._validate_browser_args(
+        "hit_test", builtin.BrowserParams(action="hit_test", **kwargs)
+    )
+    assert (problem == "") is ok
+
+
+def test_validate_ancestors_requires_a_selector() -> None:
+    assert builtin._validate_browser_args("ancestors", builtin.BrowserParams(action="ancestors"))
+    assert (
+        builtin._validate_browser_args(
+            "ancestors", builtin.BrowserParams(action="ancestors", selector="#card", depth=4)
+        )
+        == ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_styles_wire_and_rendering(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        captured["params"] = params
+        return {
+            "count": 2,
+            "truncated": True,
+            "matches": [
+                {
+                    "tag": "div",
+                    "id": "card",
+                    "role": "",
+                    "className": "a b",
+                    "rect": {
+                        "x": 10.5,
+                        "y": 20.0,
+                        "top": 20.0,
+                        "right": 310.5,
+                        "bottom": 170.0,
+                        "width": 300.0,
+                        "height": 150.0,
+                    },
+                    "styles": {"display": "block", "opacity": "1", "transform": ""},
+                    "inline": {"--brand": "#f00"},
+                },
+                {
+                    "tag": "span",
+                    "id": "",
+                    "role": "note",
+                    "className": "",
+                    "rect": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "top": 0.0,
+                        "right": 0.0,
+                        "bottom": 0.0,
+                        "width": 0.0,
+                        "height": 0.0,
+                    },
+                    "styles": {"display": "inline"},
+                    "inline": {},
+                },
+            ],
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    result = await builtin._bridge_action(
+        "t",
+        surface,
+        "styles",
+        builtin.BrowserParams(action="styles", selector=".card", properties=["background-color"]),
+        None,
+    )
+    assert captured["params"]["selector"] == ".card"
+    assert captured["params"]["properties"] == ["background-color"]
+    assert "[1] div#card.a.b rect 10.5,20 300x150" in result.text
+    assert "display:block" in result.text and "opacity:1" in result.text
+    assert "inline: --brand:#f00" in result.text
+    assert "more exist on the page" in result.text
+    # Empty computed values are elided from the TEXT but stay in `details`.
+    assert "transform:" not in result.text
+    assert result.details is not None
+    assert result.details["truncated"] is True
+    assert result.details["matches"][0]["styles"]["transform"] == ""
+    assert result.details["selector"] == ".card"
+
+
+@pytest.mark.asyncio
+async def test_styles_without_properties_keeps_the_key_absent(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        captured["params"] = params
+        return {"count": 0, "matches": [], "truncated": False}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    result = await builtin._bridge_action(
+        "t", surface, "styles", builtin.BrowserParams(action="styles", selector=".card"), None
+    )
+    # "Only send what the caller set" matches scroll/logs: an empty list would
+    # be an argument to interpret, and absent is what "defaults only" means.
+    assert "properties" not in captured["params"]
+    assert result.text.startswith("0 matches for '.card'")
+
+
+@pytest.mark.asyncio
+async def test_hit_test_wire_and_rendering(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        captured["params"] = params
+        return {
+            "count": 1,
+            "elements": [
+                {
+                    "tag": "button",
+                    "id": "save",
+                    "role": "button",
+                    "className": "btn primary",
+                    "rect": {
+                        "x": 100.0,
+                        "y": 230.0,
+                        "top": 230.0,
+                        "right": 180.0,
+                        "bottom": 260.0,
+                        "width": 80.0,
+                        "height": 30.0,
+                    },
+                    "styles": {"display": "inline-block", "pointer-events": "auto"},
+                }
+            ],
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    result = await builtin._bridge_action(
+        "t",
+        surface,
+        "hit_test",
+        builtin.BrowserParams(action="hit_test", x=120.0, y=48.5),
+        None,
+    )
+    assert captured["params"]["x"] == 120.0
+    assert captured["params"]["y"] == 48.5
+    assert "1 element at (120, 48.5), topmost first" in result.text
+    assert "[1] button#save.btn.primary (role=button) rect 100,230 80x30" in result.text
+    assert result.details is not None
+    assert result.details["x"] == 120.0 and result.details["y"] == 48.5
+
+
+@pytest.mark.asyncio
+async def test_ancestors_depth_is_clamped_on_the_wire(monkeypatch) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        captured.append(params)
+        return {"count": 0, "chain": []}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+
+    await builtin._bridge_action(
+        "t", surface, "ancestors", builtin.BrowserParams(action="ancestors", selector="#card"), None
+    )
+    # An unset depth stays ABSENT so the page function's own default (12) applies.
+    assert "depth" not in captured[-1]
+
+    await builtin._bridge_action(
+        "t",
+        surface,
+        "ancestors",
+        builtin.BrowserParams(action="ancestors", selector="#card", depth=99),
+        None,
+    )
+    assert captured[-1]["depth"] == 16
+
+    await builtin._bridge_action(
+        "t",
+        surface,
+        "ancestors",
+        builtin.BrowserParams(action="ancestors", selector="#card", depth=0),
+        None,
+    )
+    assert captured[-1]["depth"] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_actions_degrade_on_cmux(monkeypatch) -> None:
+    # A cmux-backed surface cannot serve these — its browser panel exposes no
+    # page-script primitive — so the refusal must name the two non-cmux hosts
+    # rather than dispatching (or faking an empty result). Valid arguments are
+    # passed so the argument validation cannot be what refuses instead.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "_stale_surface_error", AsyncMock(return_value=None))
+    surface = BrowserSurface()
+    surface.surface_id = "surface:cmux-open"
+    context = ToolContext(browser=surface)
+    for action, extra in (
+        ("styles", {"selector": ".card"}),
+        ("hit_test", {"x": 10.0, "y": 20.0}),
+        ("ancestors", {"selector": ".card"}),
+    ):
+        result = await builtin.execute_browser(
+            "t", {"action": action, **extra}, None, None, context
+        )
+        assert "not supported on the cmux backend" in result.text, action
+        assert "desktop app" in result.text and "browser extension" in result.text

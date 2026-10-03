@@ -1400,19 +1400,14 @@ def test_a_reused_create_reports_the_existing_key_and_not_a_new_one(
         rung="kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
     )
 
-    class _Signer:
-        def __init__(self) -> None:
-            self.handle = handle
-
-        def close(self) -> None:
-            self.handle = handle
-
     probes: list[int] = []
 
     def probe(root: Path, preference: str) -> Any:
         probes.append(1)
-        # NOTHING THERE when `init` looked; the key arrives while it creates.
-        return None if len(probes) == 1 else _Signer()
+        # NOTHING THERE when `init` looked; the key arrives while it creates. What the
+        # probe returns is the HANDLE, matching ``_existing_key``'s contract — the signer
+        # shape it unwraps is ``backend.load()``'s, one level below this seam.
+        return None if len(probes) == 1 else handle
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root", raising=False)

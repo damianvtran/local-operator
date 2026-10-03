@@ -1563,6 +1563,33 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         return True
     if any(char in value for char in _EXPRESSION_CHARS):
         return True
+    # A token spelled the way a stored secret's NAME is spelled (caps, digits and at
+    # least one underscore) is a NAME under ANY credential word, weak or strong. This
+    # sits BEFORE the ``strong`` arms below on purpose: ``strong`` relaxes the
+    # digit-shaped clauses, and a name is not a digit-shaped value.
+    #
+    # The measured failure: the secret-sink refusal prints a ``secret:`` line naming the
+    # store entry it refused, which is a ``credential-assignment`` under the strong name
+    # ``secret``. The line was masked, and — worse — the name was REGISTERED, so the
+    # store name was deleted from every later occurrence in the session (transcripts,
+    # tool echoes, later tool calls, shell interpolations of the variable) and agents
+    # copied the mask marker as if it were the name. Consistent with
+    # :func:`_is_a_name_in_the_store_grammar`, whose reading the flag arms already take.
+    #
+    # ACCEPTED RESIDUAL, the same one those arms state: a real credential spelled
+    # all-caps-and-underscore is read as a NAME and released here, on every ASSIGNMENT
+    # spelling (plain ``=``, ``:``, quoted, JSON) and not only after a flag. It is still
+    # masked by every rule that does not consult this predicate (vendor prefixes, DSNs,
+    # PEM, bearer, query, headers), and the cost of the other direction — deleting a
+    # store name the operator must be able to read — is the incident above. The released
+    # class is pinned as corpus negatives (R1-1) so it cannot widen silently.
+    #
+    # THE BOUNDARY IS CASE: a lowercase or mixed-case store name (the store keeps case)
+    # is NOT released — it is indistinguishable from a passphrase, and the lowercase
+    # corpus positives pin that — so a ``secret:`` line naming one still masks and
+    # registers exactly as it did before this change (QA Q1; not a regression).
+    if _is_a_name_in_the_store_grammar(value):
+        return True
     if value.startswith("_") and not strong:
         # A generated secret may START with ``_`` (base64url), so the leading
         # underscore is evidence of code only when the name is ambiguous.
@@ -1979,6 +2006,12 @@ _CLI_CREDENTIAL_FLAG_BEFORE = re.compile(r"(?:^|[\s|;&])(?i:--" + _CREDENTIAL_FL
 _CLI_CREDENTIAL_FLAG_NAME = re.compile(r"(?i)^--" + _CREDENTIAL_FLAG_WORDS + r"$")
 
 
+#: The word the harness's own help text and refusal footer put where a stored secret's
+#: name goes. Built from parts for the reason the corpus gives: this source is read
+#: through the pass it configures.
+_REFERENCE_PLACEHOLDER = "NA" + "ME"
+
+
 def _is_a_name_in_the_store_grammar(token: str) -> bool:
     """Whether ``token`` is spelled the way a stored secret's NAME is spelled.
 
@@ -2075,6 +2108,24 @@ def _value_is_a_reference_to_a_credential(value: str) -> bool:
     negatives, one with a separator in each half and one with none, instead of being
     narrowed into breaking a ``--secret`` argument that is a name=name pair.
     """
+    # The harness's own reference placeholder is a reference by construction. It has no
+    # underscore, so the store-grammar test below cannot see it. Measured 2026-10-01:
+    # the secret-sink refusal footer and the credentials help text write
+    # the ``secret`` flag's reference slot where a store name goes, the shape layer masked
+    # that word, and agents copied the marker as if it were a name, so the lookup failed
+    # with a "no secret named <marker>" error (an operator-visible incident).
+    #
+    # EXACT and case-sensitive, and deliberately NOT a ``_PLACEHOLDER_WORDS`` entry:
+    # that set is consulted by every masking and registration path, and it already holds
+    # ``password``/``token``/``secret``, which is why routing this through
+    # :func:`is_placeholder_component` released the pinned corpus positives for the
+    # capitalised ``password`` and ``token`` words in a flag's value position (the R1-1
+    # class). Judged here, in the shared predicate, so the flag rule and the assignment
+    # rule's reading of the equals spelling (:func:`_is_a_credential_flags_argument`)
+    # keep ONE verdict. Residual: the four-letter literal after ANY credential flag
+    # reads as a reference.
+    if value == _REFERENCE_PLACEHOLDER:
+        return True
     if _is_a_name_in_the_store_grammar(value):
         return True
     left, sep, right = value.partition("=")
@@ -3895,6 +3946,21 @@ def is_registerable_component(value: str) -> bool:
     the word was then masked in every subsequent result). The floor is well
     floor is the masking floor and the discriminator is the SHAPE: a value that
     is a plain word is never registered, whatever its length.
+
+    **Only genuine secret VALUES can enter a redaction set** (operator directive): a
+    token spelled the way a stored secret's NAME is spelled
+    (:func:`_is_a_name_in_the_store_grammar`) is never registered, whichever rule
+    masked it. This is the amplifier's gate: a rule firing on a name-bearing token
+    (a query parameter named for a secret, or a refusal's own line naming the entry it
+    refused) used to promote the token here, and a promoted name is deleted from every
+    later result in the session.
+
+    The accepted tradeoff: a real value spelled all-caps-and-underscore stops being
+    contained session-wide. It is still masked IN PLACE wherever a rule that does not
+    consult the value proof fires (DSN, bearer, query, header, vendor); the assignment
+    and flag spellings read it as a reference and release it, as the clause in
+    :func:`_value_is_not_a_credential` states — the same read the flag arms already
+    take for a credential flag's one-part argument.
     """
     # Length only. The word-shape refusal was added to stop ``Basic
     # authentication`` poisoning a session, and the header rules now need their
@@ -3903,6 +3969,8 @@ def is_registerable_component(value: str) -> bool:
     # `-pswordfish`, a DSN whose password is a word) — masked in place, then free
     # to reappear in the next result.
     if is_placeholder_component(value):
+        return False
+    if _is_a_name_in_the_store_grammar(value):
         return False
     return len(value) >= DETECTED_COMPONENT_FLOOR
 

@@ -1339,6 +1339,53 @@ def test_setup_env_linux_same_path(mock_get_posix, mock_get_win, mock_system):
         mock_get_posix.assert_called_once()
 
 
+def test_setup_env_marks_the_lineage_and_skips_the_second_round_trip(monkeypatch):
+    """A primed environment is not captured again (2026-10-01, the bulk-resume
+    startup cut).
+
+    The login-shell round-trip measured 0.9-1.3 s on the operator's machine —
+    the single most expensive step of a ``lop exec`` launch — and a child of a
+    primed parent already CARRIES the capture's answer in its PATH, so
+    re-earning it down a tree of spawned runs is pure repeated work. The
+    marker travels by inheritance exactly like PATH does, so it can only ever
+    claim "an ancestor of this process primed this environment".
+    """
+    calls = []
+    monkeypatch.setattr("local_operator.helpers.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "local_operator.helpers.get_posix_shell_path",
+        lambda: calls.append(1) or "/opt/homebrew/bin:/usr/bin",
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("LOCAL_OPERATOR_PATH_PRIMED", raising=False)
+
+    setup_cross_platform_environment()
+    assert os.environ["LOCAL_OPERATOR_PATH_PRIMED"] == "1"
+    assert "/opt/homebrew/bin" in os.environ["PATH"]
+    assert calls == [1]
+
+    # Every later call in this process — and every child that inherits the
+    # marked environment — skips the capture entirely.
+    setup_cross_platform_environment()
+    assert calls == [1]
+
+
+def test_setup_env_does_not_mark_a_failed_capture(monkeypatch):
+    """A fallback must not pin the lineage: children stay free to retry.
+
+    Marking a broken capture would freeze the inherited PATH onto the whole
+    process tree for its lifetime; the marker is therefore set only when the
+    OS-specific getter actually answered.
+    """
+    monkeypatch.setattr("local_operator.helpers.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("local_operator.helpers.get_posix_shell_path", lambda: None)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("LOCAL_OPERATOR_PATH_PRIMED", raising=False)
+
+    setup_cross_platform_environment()
+    assert "LOCAL_OPERATOR_PATH_PRIMED" not in os.environ
+
+
 @patch("local_operator.helpers.platform.system", return_value="Windows")
 @patch("local_operator.helpers.get_windows_registry_path", return_value=None)
 @patch("local_operator.helpers.get_posix_shell_path")

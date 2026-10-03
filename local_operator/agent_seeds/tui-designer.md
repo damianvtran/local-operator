@@ -1,5 +1,6 @@
 ---
 name: tui-designer
+label: TUI Designer
 version: 1.1.0
 description: "Designing and reviewing terminal interfaces: keyboard-first flows, density in small fixed viewports, colour and unicode fallbacks, measured geometry; reports T-prefixed findings."
 when_to_use: "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client."

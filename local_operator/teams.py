@@ -53,7 +53,6 @@ import shutil
 import stat
 import tempfile
 import time
-import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -67,6 +66,15 @@ from pydantic import BaseModel, Field, field_validator
 # Shared identity with ``local_operator.types`` (see its docstring): the CLI
 # catches this at zero startup cost while ``teams`` raises it where the lock
 # times out. Importing the name (not redefining it) keeps the two identical.
+# The ONE label rule's shared primitives (see ``local_operator.display_labels``):
+# deriving, normalizing, validating and bounding are identical for teams and
+# agents and live there; the team-side compositions (``display_form``'s
+# exact-match arm, ``enrichment_label``) stay here because their frozen cases
+# differ from the agent side's ONE refinement (the casefold derived match).
+from local_operator.display_labels import LABEL_MAX_CHARS, bounded_form
+from local_operator.display_labels import default_label as _default_label
+from local_operator.display_labels import normalize_label as _normalize_label
+from local_operator.display_labels import validate_label
 from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
 from local_operator.procstate import O_BINARY
 from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
@@ -99,21 +107,16 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 #: excluding every separator, absolute path, and dot segment.
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-#: Cap on a team's display LABEL (see ``_validate_label``). The label is free
-#: text shown in every listing, so the bound keeps one runaway paste from
-#: silencing the rows it rides in; the derived default is at most the 64-char
-#: name, so both shapes fit the same surfaces.
-_TEAM_LABEL_MAX_CHARS = 80
-
-#: Tokens whose display form is upper-case rather than Title Case (D3): six
-#: common initialisms whose Title-Cased spelling reads as a bug (``qa-tester``
-#: -> ``QA Tester``). Case-insensitive; deliberately small -- every entry is a
-#: bet on how a token reads, and Title Case stays the rule.
-_DEFAULT_LABEL_INITIALISMS = frozenset({"qa", "ai", "api", "tui", "ux", "ui"})
+#: Cap on a team's display LABEL (see ``_validate_label``): the SHARED cap
+#: (:data:`local_operator.display_labels.LABEL_MAX_CHARS`), imported rather
+#: than restated so the team and agent sides cannot drift. The private name
+#: stays because this module's own call sites speak in team terms.
+_TEAM_LABEL_MAX_CHARS = LABEL_MAX_CHARS
 
 #: Cap on a LISTING row's composed display form (see ``bounded_display_form``,
 #: N1). 48 cells leaves room for the row's indentation and border at 80x24,
-#: the narrow terminal the wrap was measured in.
+#: the narrow terminal the wrap was measured in. This domain's own name (the
+#: agent listing keeps its own constant) because each sizes its own rows.
 _TEAM_LISTING_CAP = 48
 
 #: Cap on a team's alias list (see ``_validate_aliases``). Aliases are EXTRA
@@ -499,29 +502,12 @@ def validate_team_name(name: str) -> str:
     ).name
 
 
-def _default_label(name: str) -> str:
-    """The display label a team with no stored one derives from its name.
-
-    Names are keys (``data-quality``), so the derived default is the
-    human-readable form of the same tokens: split on the separators the name
-    rule allows, uppercase each token's first character and keep the rest
-    (``data-quality`` -> ``Data Quality``; ``radient-net`` -> ``Radient Net``;
-    a token that starts with a digit or symbol passes through). Six common
-    INITIALISMS stay upper-cased instead (:data:`_DEFAULT_LABEL_INITIALISMS`)
-    -- ``qa-tester`` reading ``Qa Tester`` is the defect the allowlist closes;
-    it stays deliberately small because every entry is a bet on how a token
-    reads, and Title Case remains the rule. The value is persisted on the next
-    write, so a legacy row's rendering is stable once it has been written.
-    """
-    tokens = [token for token in re.split(r"[._-]+", name) if token]
-    return " ".join(_render_label_token(token) for token in tokens)
-
-
-def _render_label_token(token: str) -> str:
-    """One name token as its display form: initialism upper-case, else Title Case."""
-    if token.casefold() in _DEFAULT_LABEL_INITIALISMS:
-        return token.upper()
-    return token[0].upper() + token[1:]
+# ``_default_label`` is the SHARED implementation imported at the top of this
+# module (``local_operator.display_labels.default_label``): ONE derivation for
+# both domains, because a second copy is how the team and agent sides would
+# later spell the same slug differently. (The shared spelling of the per-token
+# renderer is ``render_label_token``; this module imports only ``default_label``,
+# which already calls it.)
 
 
 def display_form(name: str, label: str) -> str:
@@ -569,68 +555,33 @@ def bounded_display_form(name: str, label: str, *, cap: int = _TEAM_LISTING_CAP)
     An over-cap custom label wraps the row and pushes ``(name)`` onto a second
     line, so the reader loses the string that addresses the team (measured: an
     80-character label at 80x24). The composed form is truncated on the LABEL
-    side -- the key is the part that must survive -- with a single-character
-    ellipsis. Forms that do not end in `` (name)`` pass through untouched:
-    they are bounded by the name/label caps already, and ellipsizing a NAME
-    would hide the very string a reader types.
-
-    When the key alone leaves no room under the cap (a name past ~44 cells),
-    the WHOLE form is returned as-is and the row wraps: there is no label cell
-    left to ellipsize, and slicing ``form[:room]`` with a negative room cut
-    INTO the keyed tail before re-appending it, duplicating the key on the
-    very rows that need it most (R2-1). A wrapped row is the honest bound here;
-    a maimed or repeated key is not.
+    side and the ``…`` is re-appended before the keyed tail, so the one string
+    that ADDRESSES the team keeps its place on the line; the mechanics are the
+    shared :func:`local_operator.display_labels.bounded_form`, applied to THIS
+    domain's composition (``display_form`` above). When the key alone leaves no
+    room under the cap the WHOLE form is returned as-is and the row wraps --
+    there is no label cell left to ellipsize, and a maimed or repeated key is
+    worse than a wrapped row (R2-1).
 
     Deliberately a listing-only concern: the other sites bound themselves (the
     band truncates, chart boxes clamp) and both sides of the listing family --
     the local block and the wire's first slot -- must agree byte for byte.
     """
-    form = display_form(name, label)
-    keyed = f" ({name})"
-    if len(form) <= cap or not form.endswith(keyed):
-        return form
-    room = cap - len(keyed) - 1
-    if room >= 1:
-        truncated = form[:room].rstrip()
-        if truncated:
-            return f"{truncated}…{keyed}"
-    return form
-
-
-def _normalize_label(value: str) -> str:
-    """The stored shape of a label: ends trimmed, runs of whitespace to one space.
-
-    The same normalization agent-server is moving published names to
-    (``dev-name-spaces``), so a pulled name round-trips as a label unchanged.
-    """
-    return " ".join((value or "").split())
+    return bounded_form(display_form(name, label), name, cap=cap)
 
 
 def _validate_label(value: str) -> str:
-    """Normalize a label and enforce the storage rules, or raise ``ValueError``.
+    """Normalize a team label and enforce the shared storage rules, or raise.
 
-    Whitespace is collapsed FIRST: a control character that is also whitespace
-    (a tab, a form feed) folds into the spacing, while the ones that would
-    paint invisibly or not at all (a NUL, a bidi override, a zero-width
-    joiner) survive normalization and are refused. The check is the whole
-    ``C*`` family -- every category whose characters render as nothing or as a
-    control -- not just Cc, because a label is a display string and a Cf
-    character is exactly the invisible difference the listings must not
-    carry. Empty is legal and means "no custom label".
+    The rule itself -- whitespace collapsed first, the 80-character cap, the
+    refusal of every ``C*`` category (a character that paints as nothing or
+    as a control) -- lives in
+    :func:`local_operator.display_labels.validate_label`; ``_normalize_label``
+    is imported from that same module. This wrapper supplies the team
+    domain's noun so the refusal reads in team terms, byte for byte as it
+    always has.
     """
-    label = _normalize_label(value)
-    if len(label) > _TEAM_LABEL_MAX_CHARS:
-        raise ValueError(
-            f"a team label must be at most {_TEAM_LABEL_MAX_CHARS} characters; "
-            f"this one is {len(label)} after whitespace was collapsed"
-        )
-    for character in label:
-        if unicodedata.category(character).startswith("C"):
-            raise ValueError(
-                "a team label cannot contain control characters "
-                f"({character!r} is Unicode category {unicodedata.category(character)})"
-            )
-    return label
+    return validate_label(value, max_chars=_TEAM_LABEL_MAX_CHARS, subject="a team label")
 
 
 def _validate_aliases(raw: Iterable[str]) -> list[str]:

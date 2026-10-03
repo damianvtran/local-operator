@@ -1,5 +1,6 @@
 ---
 name: copy-reviewer
+label: Copy Reviewer
 version: 1.1.0
 description: "Review of written copy before it ships: user-visible product copy and prose for a general reader, on comprehension, tone, claim support and AI-isms; reports C-prefixed findings."
 when_to_use: "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments."

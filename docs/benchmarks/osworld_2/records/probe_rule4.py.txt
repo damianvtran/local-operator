@@ -1,0 +1,77 @@
+from __future__ import annotations
+import asyncio, json, sys, time, uuid
+from pathlib import Path
+BUILD = Path.home() / "worktrees/osworld/build-1830"
+sys.path.insert(0, str(BUILD))
+from local_operator.harness.types import ChatRequest, Message, Usage
+from local_operator.model.configure import build_model_spec, create_stream_fn
+from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.replay import credential_scope
+
+AUTH_DB = Path.home() / ".local-operator" / "auth.db"
+A = ("seed phrase for the cache experiment with enough tokens. " * 1500)  # ~12k tokens
+x1 = "first small append"
+x2 = "second small append"
+BIG = ("large appended body with several words. " * 500)
+
+CASES = [
+    ("R1 seed [A]", [A]),
+    ("R2 resend [A]", [A]),
+    ("R3 append [A,x1]", [A, x1]),
+    ("R4 resend [A,x1]", [A, x1]),
+    ("R5 append [A,x1,x2]", [A, x1, x2]),
+    ("R6 resend [A,x1,x2]", [A, x1, x2]),
+    ("R7 append big", [A, x1, x2, BIG]),
+    ("R8 resend big", [A, x1, x2, BIG]),
+    ("R9 append [..,x4]", [A, x1, x2, BIG, "fourth"]),
+]
+
+class P:
+    def __init__(self): self.pending=None; self.rows=[]
+    async def run(self):
+        auth = AuthStore(AUTH_DB)
+        settings = {"retry": {"enabled": False, "usageAwareFallback": False}, "effort": {"auto": False}}
+        stream = create_stream_fn(auth, settings, session_id=f"p-{uuid.uuid4().hex[:8]}")
+        real = stream._client_for
+        probe = self
+        class Cap:
+            def __init__(self, c): self.c = c
+            async def stream(self, request, api_key, oauth_access=None):
+                u = await probe.send(self.c, request, api_key, oauth_access)
+                from local_operator.harness.types import StreamStartEvent, StreamEndEvent
+                yield StreamStartEvent(response_id="x")
+                yield StreamEndEvent(stop_reason="stop", usage=u)
+        stream._client_for = lambda spec: Cap(real(spec))
+        spec = build_model_spec("openrouter", "qwen/qwen3.8-max-0902")
+        key = f"lo-p4-{uuid.uuid4().hex[:8]}"
+        for name, msgs in CASES:
+            req = ChatRequest(model=spec, system_blocks=["You are a cache probe."],
+                              messages=[Message.user(m) for m in msgs], tools=[], prompt_cache_key=key)
+            self.pending = name
+            t0 = time.time()
+            async for _ in stream(req, None): pass
+            time.sleep(1.0)
+        await stream.close(); auth.close()
+        print()
+        for r in self.rows: print(json.dumps(r))
+    async def send(self, client, request, api_key, oauth_access):
+        body = client._build_body(request, scope=credential_scope(api_key, oauth_access))
+        body.pop("stream", None); body.pop("stream_options", None)
+        body["max_tokens"] = 4
+        r = await client._http.post(f"{client._request_base_url(oauth_access)}/chat/completions",
+                                    json=body, headers=client._headers(api_key, oauth_access))
+        row = {"case": self.pending, "status": r.status_code, "t": round(time.time() % 10000, 1)}
+        if r.status_code == 200:
+            d = r.json(); u = d.get("usage") or {}; det = u.get("prompt_tokens_details") or {}
+            row.update({"provider": d.get("provider"), "id": (d.get("id") or "")[:18],
+                        "prompt": u.get("prompt_tokens"), "cached": det.get("cached_tokens"),
+                        "write": det.get("cache_write_tokens"), "raw_det": det})
+        else:
+            row["error"] = r.text[:200]
+        self.rows.append(row)
+        print(json.dumps(row), flush=True)
+        return Usage(input_tokens=int(row.get("prompt") or 0), output_tokens=0,
+                     cache_read_tokens=int(row.get("cached") or 0),
+                     cache_write_tokens=int(row.get("write") or 0))
+
+asyncio.run(P().run())

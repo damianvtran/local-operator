@@ -208,6 +208,40 @@ async def resolve_radient_credential(
             store.close()
 
 
+async def has_persisted_radient_credential(
+    config_dir: Path | None,
+    base_url: str,
+    *,
+    store: AuthStore | MeshAwareAuthStore,
+) -> bool:
+    """Whether Radient is LOGGED IN, from persisted rows alone (never env).
+
+    The availability twin of :func:`resolve_radient_credential`, for the speech
+    cascades' "advertise this rung" question. It mirrors that resolver's two
+    branches and drops only what is not a stored login:
+
+    - CANONICAL destination: the store's persisted rows
+      (:meth:`AuthStore.has_persisted_credential`). The call-time resolver's
+      trailing ``_radient_api_key`` seam -- which falls through to the process
+      environment -- is deliberately NOT consulted: an exported
+      ``RADIENT_API_KEY`` must not make a phone's voice picker offer a rung the
+      user never signed in to.
+    - LEGACY gateway: the provider-class store row for ``RADIENT_API_KEY`` and
+      nothing else. The call-time legacy branch reads that row and THEN the
+      environment; this keeps the first half. It is "a STORE row", never env.
+
+    Never raises: any failure reads as "not logged in".
+    """
+    try:
+        if not canonical_radient_destination(base_url):
+            from local_operator.providers.registry import provider_secret_value
+
+            return bool(provider_secret_value("RADIENT_API_KEY", base=config_dir))
+        return await store.has_persisted_credential("radient")
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        return False
+
+
 def resolve_radient_credential_sync(config_dir: Path | None, base_url: str) -> SecretStr:
     """CLI-only bridge; async hosts must await the shared resolver directly."""
     try:

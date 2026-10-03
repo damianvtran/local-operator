@@ -83,6 +83,16 @@ class MonitorRow(BaseModel):
     #: tick never reads as merely late), with the rendered clock left to the
     #: client.
     state: str = "armed"
+    #: When an unavailable episode began (epoch ms; 0 = none). An episode is a
+    #: tool that is temporarily out of reach — an MCP server reconnecting — and
+    #: it is deliberately NOT a failure: the watch keeps retrying without
+    #: counting strikes.
+    unavailable_since: int = 0
+    #: The §D6 health line every monitor surface shares (``store.health_hint``),
+    #: or ``None`` when there is nothing to say. Rendered, not re-derived: the
+    #: CLI, the agent tool and the TUI band read the same sentence, so one
+    #: monitor cannot read as healthy here and stalled there.
+    health: str | None = None
 
 
 class MonitorEntry(BaseModel):

@@ -1167,8 +1167,11 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
         rows = _user_rows(app)
         painted = _painted(app)
     assert rows == [], rows
-    assert "auditor" in painted, painted
-    assert "dashboard-sme" in painted, painted
+    # The name column paints the shared display form (D1): a single-token slug
+    # carries its title-case label, and a multi-token one paints the label
+    # alone. `/agent` is still typed by the KEY the picker completes.
+    assert "Auditor" in painted, painted
+    assert "Dashboard Sme" in painted, painted
     assert "specialist" in painted, painted
     assert "private-chat" not in painted, painted
     assert "Send: /agent <name> <message>" in painted, painted
@@ -1190,8 +1193,9 @@ async def test_agent_name_alone_attaches_without_a_turn() -> None:
     assert session.attached_agents == ["auditor"]
     assert session.prompts == []
     assert rows == [], rows
-    # U2: the band names the active profile after the attach.
-    assert "auditor" in band, band
+    # U2: the band names the active profile after the attach, through the
+    # shared display rule (the key on the session resolves to its label).
+    assert "Auditor" in band, band
     # U3/U4: the notice states the profile now governs the session and points
     # at the detach verb, rather than the thinner "is active".
     assert any("auditor is ready and now governs" in n for n in notices), notices
@@ -1278,8 +1282,8 @@ async def test_agent_clear_detaches_the_active_profile() -> None:
         band_cleared = _band_text(app)
         notices = _notice_texts(app)
     # U2: the band named the profile while attached, and drops it on clear.
-    assert "auditor" in band_attached, band_attached
-    assert "auditor" not in band_cleared, band_cleared
+    assert "Auditor" in band_attached, band_attached
+    assert "Auditor" not in band_cleared, band_cleared
     assert cleared_brief == "", "clear must blank the agent brief"
     assert cleared_count == 1, "clear must reach the session detach"
     # `clear` was the verb, not an attach — attached_agents stays as it was.
@@ -1411,7 +1415,7 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
         assert _colour(entry_style) == muted, entry_style
 
     _assert_header_outranks(
-        app._agent_list_block([("auditor", "role", "Audit changes")]), "agents", "auditor"
+        app._agent_list_block([("auditor", "", "role", "Audit changes")]), "agents", "auditor"
     )
 
     # /team gets the identical treatment (needs a real team object).
@@ -2624,7 +2628,7 @@ async def test_the_agent_listing_does_not_end_on_a_dangling_spacer(tmp_path) -> 
         attach_agent_profile = None  # type: ignore[assignment]
 
     def _trailing_blanks(app: OperatorApp) -> tuple[int, list[str]]:
-        block = app._agent_list_block([("architect", "role", "Decide how")])
+        block = app._agent_list_block([("architect", "", "role", "Decide how")])
         console = Console(width=100, no_color=True)
         with console.capture() as captured:
             console.print(getattr(block, "_renderable", None) or block.renderable)

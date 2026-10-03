@@ -208,3 +208,53 @@ async def test_a_flip_with_no_cleanup_seam_still_lands_the_tag(routed) -> None:
 
     assert "is now proactive" in outcome["text"]
     assert class_from_tags(_row(session).tags) == "proactive"
+
+
+@pytest.mark.asyncio
+async def test_the_routed_bare_agent_lists_the_roster_instead_of_going_silent(
+    routed: tuple[ServingSessionHandle, _ClassSession],
+) -> None:
+    """A bare ``/agent`` must DELIVER its listing to a surface with no terminal.
+
+    ``serving.py`` used to answer this with ``noop {"type": "agent_list"}``, on the
+    argument that only the terminal's own resolver draws those rows. True — and it
+    made the phone's sheet, which offers ``/agent`` and whose receipt is the only
+    thing the reader sees, paint a tap as silence (review round 1, R1-2/U2). The
+    rows now come from the ONE enumeration ``OperatorApp._agent_profile_rows``
+    also delegates to, so this asserts the routed half carries the same shape the
+    app-hosted half does rather than a second assembly of it.
+    """
+    handle, _session = routed
+
+    result = await handle.run_slash_authoritative("agent", "")
+
+    assert result["kind"] == "block", result
+    assert result["data"]["type"] == "agent_list"
+    rows = result["data"]["items"]
+    assert all(len(row) == 3 for row in rows), rows
+    # The first slot is the COMPOSED display form the viewer paints verbatim
+    # (the shared bounded form), so a canonical label paints alone -- the same
+    # bytes the app-hosted listing block shows (design round 1, D1).
+    assert "Reviewer" in [row[0] for row in rows], rows
+
+
+@pytest.mark.asyncio
+async def test_a_routed_bare_agent_lists_the_packaged_starters_too(tmp_path: Path) -> None:
+    """A registry with no installed agents still lists the seeds.
+
+    ``resolve_profile`` falls through to the packaged starters, so ``/agent
+    reviewer`` works on a fresh machine — and the listing must therefore offer
+    them, or it would deny names the attach path accepts. That is why the empty
+    registry here is not an empty answer, and why the two hosts share ONE
+    enumeration instead of each drawing its own boundary.
+    """
+    registry = AgentRegistry(tmp_path)
+    session = _ClassSession(registry)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+
+    result = await handle.run_slash_authoritative("agent", "")
+
+    assert result["kind"] == "block", result
+    # The seeds paint their canonical labels too, through the one shared rule.
+    names = [row[0] for row in result["data"]["items"]]
+    assert "Reviewer" in names, names

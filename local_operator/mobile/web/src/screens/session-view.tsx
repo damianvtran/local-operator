@@ -29,6 +29,7 @@ import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
+import { WideViewButton } from "../components/wide-view-button";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -252,6 +253,13 @@ function Header({
 			    `blockingPending`, not `projection.pending`: once the runtime publishes
 			    `asks`, a mirrored ask is not a gate and must not make the approvals
 			    control claim this session "needs you" (design §4, client rule N3). */}
+			{/* THE READING WIDTH, where the reading happens (design round 1, D2).
+			    The toggle used to exist only on the conversation list, so a reader who
+			    noticed the narrow column had to leave the session, toggle it, and
+			    reopen — the state that motivated issue #1870 is discovered HERE. It is
+			    the same `WideViewButton` the list footer renders, so the two cannot
+			    disagree about the label or the pressed state. */}
+			<WideViewButton className="px-1.5" />
 			<button
 				type="button"
 				onClick={() => setGateOpen(true)}
@@ -376,9 +384,13 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					    (measured at 390 fitting beside the button, and at 320 on its own
 					    line inside the row). Inside the row's text cell: at 390 it costs
 					    no height at all beside the 44px button, and the row's growth at
-					    320 is bounded by the sentence it belongs to. */}
+					    320 is bounded by the sentence it belongs to.
+
+					    AND THAT A SEND DOES IT TOO (issue #1875): the daemon wakes a host for
+					    a prompt to an ended session, so resume is the way to reopen WITHOUT
+					    composing, not a prerequisite for continuing. */}
 					<p className="mt-0.5 text-meta text-ink-dim">
-						resume reopens it in your home folder
+						a send or resume reopens it in your home folder
 					</p>
 				</div>
 				{/* A real 44px target inside a `pointer-events-none` overlay: the
@@ -592,7 +604,7 @@ export function SessionScreen({
 		return (
 			<div
 				ref={rootRef}
-				className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
 				<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 					<button
@@ -625,7 +637,7 @@ export function SessionScreen({
 	return (
 		<div
 			ref={rootRef}
-			className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+			className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 		>
 			{jobId ? (
 				<AgentScreen

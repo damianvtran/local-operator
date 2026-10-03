@@ -969,7 +969,143 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ~37,701 billed against the 37,756 ceiling — ~55 billed of headroom, +0.4
 #: of it this change — while the tiers-configured reading sits above by the
 #: same documented 762-char config gap, not by anything here.
-BUDGET_BILLED_TOKENS = 37_756
+
+#: RAISED 37,756 -> 37,938 for the bulk-resume SET form
+#: (``feat/sessions-bulk-resume-1001``), stated with the arithmetic because the
+#: guard exists to make copy growth an explicit decision. Re-derived on the
+#: MERGED tree (this branch folded onto ``8a7ba1dd0``, the team-label raise
+#: above already in) with this file's own method, the clean arm via ``env -i``:
+#: 105,315 chars = ~37,883 billed, so the ceiling is that reading plus the
+#: 55-token band this file keeps = 37,938. The change's own components,
+#: measured on the assembled tool entry (this file's own ``tool_schema_chars``
+#: shape, name+description+JSON schema): ``sessions`` description 746 -> 838
+#: chars (the four new accepted inputs in the derived per-op summary and one
+#: prose clause naming the set form) and ``sessions`` schema 2,938 -> 3,351
+#: chars (four boolean fields -- ``paused``/``failed``/``all``/``dry_run`` --
+#: with lean one-clause descriptions); +505 of the +506-char fold delta
+#: (104,809 -> 105,315), the two raises composing because their measured
+#: surfaces are disjoint (one tool each).
+#:
+#: LOWERED 37,756 -> 34,746 for the slimming wave (audit items 2+3,
+#: ``feat/tool-slimming-1001``): the JSON schema descriptions of the eight
+#: top-offender tools (project, console, browser, ask, hub, agent, network,
+#: task) and the ``## Tools`` section of ``system.md`` gave up detail that now
+#: lives in the ``read tool://<name>`` docs — which cost nothing until read —
+#: and in the existing guides (browser/console/system-tools/peer-messaging/
+#: network/sessions). The move is pinned, not asserted: one representative cut
+#: phrase per tool is asserted BOTH ways in
+#: ``tests/unit/tools/test_tool_docs.py::test_cut_wire_prose_moved_into_the_tool_doc``
+#: (absent from the wire bytes AND present in the doc render), and every
+#: cue/boundary the audit named as keep-here stayed put (C1, C4, the
+#: ``tool://`` cue, the query-discipline bullet, the send/console/browser
+#: prohibitions).
+#:
+#: RE-DERIVED 2026-10-01 after the fold onto ``origin/main`` ``0dac063b9``
+#: (#1837/#1901 moved the base): same machine, the base in a detached
+#: worktree of that commit, the clean arm via ``env -i`` (the arm CI
+#: renders), both arms of THIS script, deterministic char counts each side:
+#:
+#:   clean arm        before 104,810 chars = ~37,701   after 96,442 = ~34,691
+#:   configured arm   before 105,572 chars = ~37,976   after 97,204 = ~34,965
+#:
+#: (The configured arm still sits exactly the +762-char subagents-tiers delta
+#: above the clean arm that the entries above document; the gap is expected
+#: and not this change's.)
+#:
+#: The saving is 8,368 clean-arm chars = 3,010 billed, split:
+#:
+#:   + tool_schemas    68,827 -> 63,529 = -5,298 chars = -1,906 billed
+#:     (project -579, browser -1,136, console -708, ask -697, hub -996,
+#:      agent -828, task -334, network -58; the bash `eval` boundary clause
+#:      ADDS +38 back. Per-tool figures use this script's own per-tool
+#:      formula — ``len(name) + len(description) + len(json.dumps(parameters))``
+#:      — so they sum EXACTLY to the -5,298 total; every other tool is
+#:      byte-identical.)
+#:   + instructions    34,971 -> 31,901 = -3,070 chars = -1,104 billed
+#:     (the ``## Tools`` section; the content pins in
+#:      ``tests/unit/test_prompts_api.py``, ``test_prompts_console_flags.py``
+#:      and ``tests/unit/guides`` are what floor this number)
+#:
+#: Target was ~-3.7k billed (the audit's -15% of the tool schemas); the
+#: actual is -3,010, and the gap is the pins rather than the effort: the
+#: ask-tool and browser/console description phrases are asserted at the
+#: PHRASE level by their own suites, the effort-tier mappings are
+#: config-bound (their tests pin the rendered bytes in both arms), and the
+#: ``i`` field's pointer is documented in ``harness/intent.py`` as a
+#: deliberate trade. The next ~700 billed needs one of those decisions
+#: revisited, not another copy edit.
+#:
+#: The ceiling is the measured clean head plus the 55-token band this file
+#: keeps: 34,691 + 55 = 34,746. (The first cut of this constant left 41 and
+#: then 22 of slack — the item-7 bash clause and the #1837 fold each moved
+#: the head after the constant was written; this re-derivation applies the
+#: band exactly, so every term closes to the token.) A local configured run
+#: reads 219 over (34,965 vs 34,746) — the recorded +762 config gap minus
+#: the band — as every configured local run has since the tiers delta
+#: existed; CI renders the clean arm and is the binding reading. If any
+#: reading disagrees, the script wins.
+#:
+#: RAISED 34,746 -> 34,928 for the bulk-resume SET form
+#: (``feat/sessions-bulk-resume-1001``), on top of the entry above, stated with
+#: the arithmetic because the guard exists to make copy growth an explicit
+#: decision. Re-derived on the MERGED tree (this branch folded onto
+#: ``31f981550``, the slimming wave above already in) with this file's own
+#: method, the clean arm via ``env -i`` (the arm CI renders): 96,947 chars =
+#: ~34,873 billed, so the ceiling is that reading plus the 55-token band this
+#: file keeps = 34,928. The change's own components, measured on the assembled
+#: tool entry (this file's own ``tool_schema_chars`` shape,
+#: name+description+JSON schema): ``sessions`` description 746 -> 838 chars
+#: (the four new accepted inputs in the derived per-op summary and one prose
+#: clause naming the set form) and ``sessions`` schema 2,938 -> 3,351 chars
+#: (four boolean fields — ``paused``/``failed``/``all``/``dry_run`` — with lean
+#: one-clause descriptions); +505 chars = ~+182 billed, EXACTLY the fold delta
+#: (96,442 -> 96,947), because the two changes' surfaces are disjoint — the
+#: wave slimmed the eight worked tools, this one grows ``sessions`` alone,
+#: re-measured on the merged tree rather than summed from the two entries.
+#:
+#: The raise is not a regression of the wave: the wave's own -3,010 billed
+#: stands, and the net after this fold (96,947 = ~34,873) is still 2,828
+#: billed under the pre-wave head (105,315 = ~37,883).
+#:
+#: RAISED 34,928 -> 35,088 for the browser read actions
+#: (``feat/browser-read-actions``), on top of the entry above and with the
+#: same arithmetic. Re-derived on the MERGED tree (this branch folded onto
+#: ``65ca8eaee``, the slimming wave already in) with this file's own method,
+#: the clean arm via ``env -i`` (the arm CI renders): base 96,947 chars =
+#: ~34,873 billed, head 97,393 = ~35,033 billed; the ceiling is the head
+#: reading plus the 55-token band this file keeps = 35,088. The change's own
+#: components, measured on the assembled ``browser`` entry (this file's own
+#: ``tool_schema_chars`` shape): description 979 -> 1,008 chars (the three
+#: verb names — the per-op detail went to ``tool://browser``, where the three
+#: new ops and their caps render on demand) and schema 2,583 -> 3,000 chars
+#: (two fields — ``properties`` list[str], ``depth`` int|None — plus the
+#: hit_test clause on the shared x/y descriptions); +446 chars = ~+160
+#: billed, EXACTLY the fold delta (96,947 -> 97,393). The two new fields are
+#: the feature's floor, so the raise is not a wording trade: with their
+#: descriptions trimmed to empty the delta shrinks by ~75 chars and the
+#: feature would still sit outside the old band. Review round 1 (R1-2) then
+#: widened the ``properties`` copy to name underscores: +13 chars, head
+#: re-read at 97,406 = ~35,038, still inside the band (50 left).
+#:
+#: RAISED 35,088 -> 35,150 for the agent display label's ``AgentParams.label``
+#: (remediation round 1, Q4), with the arithmetic the guard exists to force.
+#: The base is THIS branch's base, ``origin/main`` c3b2500bf, measured with
+#: this same script on this machine: 97,406 chars = ~35,038 billed, i.e. the
+#: 50 tokens of headroom the paragraph above recorded. The added field costs
+#: 139 schema chars (39 of description, the rest the JSON scaffolding an
+#: optional ``str | None`` property carries), so the head reads 97,545 =
+#: ~35,088 — EXACTLY the old ceiling, 0 headroom, and therefore a CI failure:
+#: the ~25-token local-vs-CI gap the ``memory_mb`` raise below recorded applies
+#: here too (``tool_schemas`` is built from the real pydantic models and one is
+#: platform-shaped). The ceiling is set with CI as the binding reading, the
+#: same derivation that raise used: 62 above this machine's head, i.e. 37 above
+#: CI's — just under the 46-51 band the ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises chose. The field is the feature's floor, not a
+#: wording trade: ``agent create``/``update`` must be able to set a label the
+#: way ``team create``/``update`` already can, and with its description trimmed
+#: to the 39-char minimum the head still lands on the old ceiling. The tighten
+#: band (1,200) is nowhere near tripped.
+BUDGET_BILLED_TOKENS = 35_150
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -3526,6 +3526,30 @@ class AskPickerScreen(Container):
             return ("esc", "decline")
         return self._exit_hint
 
+    def set_title(self, title: str) -> None:
+        """Re-title a MOUNTED card whose ask has moved on (queued asks only).
+
+        The queued card's title states something ABOUT the ask — whether the
+        agent is still holding the question or has given up on it — so it is a
+        fact that can change while the card is open, and the app re-derives it
+        on every snapshot (UX round 1, U9: the card kept saying "waiting" after
+        the bar had begun saying "timed out"). Set by the owner, drawn by the
+        card, so the wording stays with whoever knows the state.
+
+        The blocking approval and the single blocking ask never call this: their
+        title says what the GATE is for, which cannot change under them.
+        """
+        if title == self._title:
+            return
+        self._title = title
+        # `_repaint` and NOT `refresh`: the card's lines are built once into a
+        # `Static` body, so a plain refresh redraws the stale text — and the
+        # fingerprint shortcut (`repaint_if_stale`) would not fire either, since
+        # the title is not one of the footer's inputs. Measured in the capture:
+        # the bar beneath the card updated while the card's own header still
+        # said the agent was waiting.
+        self._repaint()
+
     def _reveal_hint(self) -> tuple[str, str] | None:
         """``^e more`` / ``^e less``, or nothing where the key does nothing.
 

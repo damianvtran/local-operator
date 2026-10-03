@@ -123,11 +123,11 @@ def test_the_env_key_is_the_primary_name() -> None:
     assert registry.credential_file_names("elevenlabs") == ["ELEVENLABS_API_KEY"]
 
 
-def test_only_the_elevenlabs_row_is_speech_only() -> None:
+def test_only_the_speech_rows_are_speech_only() -> None:
     """The flag is not a broad brush: every other row stays selectable."""
     flagged = {row.id for row in registry.PROVIDER_REGISTRY if row.speech_only}
 
-    assert flagged == {"elevenlabs"}
+    assert flagged == {"elevenlabs", "openai-key"}
     assert registry.is_speech_only("elevenlabs") is True
     # Normalisation matches the sibling predicate's contract: case, padding,
     # aliases; None and unknown ids answer False.

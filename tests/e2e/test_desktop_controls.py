@@ -13,6 +13,7 @@ import httpx
 import pytest
 import uvicorn
 
+from local_operator.harness.types import Message, ToolCall
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
 from local_operator.session.aside import ASIDE_PROMPT
@@ -37,6 +38,22 @@ STANDING_GOAL = "Complete two steps"
 #: The goal-mode loop's own text, so its prompt is labelled rather than
 #: counted as a user turn.
 LOOP_GOAL_TEXT = "Verify the fixture goal"
+
+
+def _message_row_ids(transcript: Path) -> list[str]:
+    """The ids of a transcript's conversation rows, oldest first.
+
+    Read off the FILE rather than through the reader route, because the claim
+    these cells make ("everything after the cut was not copied") is about bytes
+    on disk: a renderer's filter is exactly what a broken copy would still pass.
+    """
+    return [
+        row["id"]
+        for row in (
+            json.loads(line) for line in transcript.read_text().splitlines() if line.strip()
+        )
+        if row.get("type") == "message"
+    ]
 
 
 def _census(stream: ScriptedStream) -> list[str]:
@@ -827,6 +844,277 @@ async def test_desktop_interrupt_stops_the_turn_and_keeps_the_session(
                 "SHAPES: non-uuid request_id 422, an extra field 422, an unknown session "
                 "404 and a malformed id 404"
             )
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, 30)
+        listener.close()
+        if runtime is not None:
+            await runtime.aclose()
+        if handle is not None:
+            await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_cut_through_a_named_entry(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """A fork taken AT a message — "fork the conversation from that point on".
+
+    Its own test rather than a cell inside ``test_desktop_control_surface``, and
+    that is structural: the neighbouring fork cells ride that test's whole
+    fixture (goals, asides, an MCP server), any of which can fail for its own
+    reason and mask this contract. What is claimed here is about BYTES on the
+    child's own transcript file — the thing a renderer's filter would still hide
+    even if the copy were wrong.
+
+    The refusal cells DO pin their status now: they read the classification the
+    control plane used to answer with an owner outage (see the comment at them),
+    and the last one closes the runtime to keep the genuine owner-outage answer
+    itself under test.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    runtime = handle = None
+    try:
+        await until(lambda: server.started)
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            client.headers["Authorization"] = "Bearer " + token
+            created = await client.post(
+                "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
+            )
+            assert created.status_code == 200, created.text
+            sid = created.json()["result"]["session_id"]
+            target = "/v1/desktop/sessions/" + sid
+            # Generous tape, because the headless naming worker makes model calls
+            # of its own through this same stream (see the interrupt test below):
+            # pinning answers to exact indices lets the harness's bookkeeping,
+            # rather than the contract under test, decide whether this passes.
+            stream = ControlledStream(
+                [text_turn(f"Answer {n}") for n in range(1, 4)] + [text_turn("Spare")] * 4
+            )
+            session = build_session(root / "sessions" / sid, stream, cwd=workspace)
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            runtime = RuntimeServer(handle, kind="daemon")
+            await runtime.start_in_process()
+            (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
+
+            # Real turns, admitted through the route the composer uses.
+            for text in ("First question", "Second question", "Third question"):
+                admitted = await client.post(
+                    target + "/messages", json={"request_id": request_id(), "text": text}
+                )
+                assert admitted.status_code == 200, admitted.text
+
+            parent_transcript = root / "sessions" / sid / "transcript.jsonl"
+            parent_ids = _message_row_ids(parent_transcript)
+            assert len(parent_ids) >= 3, parent_ids
+            # A row with conversation on BOTH sides of it, so the cut has
+            # something to keep and something to drop.
+            cut_index = len(parent_ids) // 2
+            parent_bytes = parent_transcript.read_bytes()
+            sessions_before = sorted(p.name for p in (root / "sessions").iterdir())
+
+            cut_fork = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": parent_ids[cut_index],
+                },
+            )
+            assert cut_fork.status_code == 200, cut_fork.text
+            assert cut_fork.json()["result"]["data"]["boundary"] == "at_entry"
+            # The landed row rides the answer: a client can tell the fork started
+            # where it pointed rather than having to diff the child's rows.
+            assert cut_fork.json()["result"]["data"]["cut_entry_id"] == parent_ids[cut_index]
+            cut_child = cut_fork.json()["result"]["data"]["session_id"]
+            assert cut_child != sid
+            # EQUALITY, not "contains": the child's conversation rows are exactly
+            # the parent's prefix through the named entry, so nothing after it was
+            # copied AND nothing before it was dropped.
+            child_ids = _message_row_ids(root / "sessions" / cut_child / "transcript.jsonl")
+            assert child_ids == parent_ids[: cut_index + 1], child_ids
+            assert parent_transcript.read_bytes() == parent_bytes
+            print(
+                f"Fork at a named entry: {len(parent_ids)} parent rows -> "
+                f"{len(child_ids)} child rows, exactly the prefix through "
+                f"{parent_ids[cut_index]}; parent byte-unchanged"
+            )
+
+            # A point this conversation does not have REFUSES, and the refusal is
+            # its OWN answer rather than an owner outage. This cell used to pin
+            # nothing: the runtime's sentence came back on an unrecognised error
+            # frame, the attach client re-raised it as a plain RuntimeError, and
+            # this route's ladder could only read that as an unreachable owner — so
+            # every fork refusal (the cut's own, and the pre-existing compaction
+            # one) arrived as 503 runtime_unreachable, "reconnect and reconcile",
+            # for a request the owner answered promptly and deliberately. The
+            # classification carries the CAUSE (PR #1917's review/QA rounds), so
+            # the status, the cause and the sentence are pinned here.
+            before_refusal = sorted(p.name for p in (root / "sessions").iterdir())
+            refused_fork = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": "ffffffffffffffffffffffffffffffff",
+                },
+            )
+            assert refused_fork.status_code == 409, refused_fork.text
+            refusal = refused_fork.json()["detail"]
+            assert refusal["code"] == "fork_refused", refusal
+            assert refusal["reason"] == "entry_unknown", refusal
+            assert refusal["message"] == (
+                "that message is not part of this conversation; "
+                "pick a message from this session to fork from"
+            ), refusal
+            assert sorted(p.name for p in (root / "sessions").iterdir()) == before_refusal
+            assert parent_transcript.read_bytes() == parent_bytes
+            print(
+                f"A foreign entry id: 409 {refusal['code']}/{refusal['reason']} — "
+                f"{refusal['message']}"
+            )
+
+            # The ABSENT target is still the call this route has always made.
+            whole_fork = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert whole_fork.status_code == 200, whole_fork.text
+            assert whole_fork.json()["result"]["data"]["boundary"] == "next_safe"
+            whole_child = whole_fork.json()["result"]["data"]["session_id"]
+            assert (
+                root / "sessions" / whole_child / "transcript.jsonl"
+            ).read_bytes() == parent_bytes
+            # ...and the cut added exactly one session and the refusal none.
+            assert set(before_refusal) - set(sessions_before) == {cut_child}
+            print(
+                "No target: still boundary=next_safe, and the child is a byte-identical "
+                "copy of the parent; a foreign entry id refused without creating anything"
+            )
+
+            # A CUT BEFORE THE NEWEST SUMMARY'S ANCHOR refuses too, in the runtime
+            # and with its OWN cause: the child's whole history would be rows the
+            # parent had summarized away, so the cut is refused rather than made
+            # from the resurrected context. Driven against the live session by
+            # recording a compaction whose anchor is the last row, then cutting at
+            # the first — nothing but the transcript's own API is faked.
+            await session._transcript.append_compaction(
+                summary="earlier context, summarized away",
+                first_kept_entry_id=parent_ids[-1],
+                tokens_before=500,
+            )
+            anchored_bytes = parent_transcript.read_bytes()
+            anchor_refusal = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": parent_ids[0],
+                },
+            )
+            assert anchor_refusal.status_code == 409, anchor_refusal.text
+            anchor_detail = anchor_refusal.json()["detail"]
+            assert anchor_detail["code"] == "fork_refused", anchor_detail
+            assert anchor_detail["reason"] == "before_anchor", anchor_detail
+            assert anchor_detail["message"] == (
+                "that message sits before the conversation's last summary; "
+                "fork from a message after the summary instead"
+            ), anchor_detail
+            assert parent_transcript.read_bytes() == anchored_bytes
+            print(
+                f"A cut before the newest anchor: 409 {anchor_detail['code']}/"
+                f"{anchor_detail['reason']} — {anchor_detail['message']}"
+            )
+
+            # A MALFORMED INTERIOR refuses the cut too, with its own cause. The
+            # strict pairing check (``session._paired_prefix``'s strict arm, the
+            # only strict caller being this snapshot) used to raise a bare
+            # ``ValueError``, so a broken tool pairing reached the operator as the
+            # same owner-outage 503 — advice that cannot change a pairing, under a
+            # status claiming the owner was never reached. Built on the live
+            # transcript: an assistant row whose call never gets its result,
+            # followed by another row, then a cut past them.
+            malformed_call = Message.assistant(
+                "",
+                tool_calls=[ToolCall(id="parked-call", name="bash", arguments={"command": "true"})],
+            )
+            await session._transcript.append_messages(
+                [malformed_call, Message.user("a row after the unanswered call")]
+            )
+            malformed_ids = _message_row_ids(parent_transcript)
+            broken_bytes = parent_transcript.read_bytes()
+            broken = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": malformed_ids[-1],
+                },
+            )
+            assert broken.status_code == 409, broken.text
+            broken_detail = broken.json()["detail"]
+            assert broken_detail["code"] == "fork_refused", broken_detail
+            assert broken_detail["reason"] == "incomplete_tool_calls", broken_detail
+            assert broken_detail["message"] == (
+                "history has incomplete tool calls before later messages"
+            ), broken_detail
+            assert parent_transcript.read_bytes() == broken_bytes
+            print(
+                f"A malformed interior: 409 {broken_detail['code']}/"
+                f"{broken_detail['reason']} — {broken_detail['message']}"
+            )
+
+            # A SECOND BOUNDARY FORK WHILE ONE IS ALREADY WAITING refuses with its
+            # own cause — the ordinary gesture (a double-click, or two windows),
+            # which used to arrive as the same owner-outage 503. A PARKED real turn
+            # is what makes the state reachable at all: the refusal lives inside
+            # the runtime's streaming arm, and ``request_fork`` is the very call
+            # the first request makes before it waits.
+            stream.block = True
+            parked = await client.post(
+                target + "/messages", json={"request_id": request_id(), "text": "park me"}
+            )
+            assert parked.status_code == 200, parked.text
+            await asyncio.wait_for(stream.started.wait(), 15)
+            assert session.is_streaming, "the turn must be in flight for this refusal"
+            assert session.request_fork(root, on_complete=lambda *_: None) is False
+            assert session.has_pending_fork()
+            second = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert second.status_code == 409, second.text
+            pending_detail = second.json()["detail"]
+            assert pending_detail["code"] == "fork_refused", pending_detail
+            assert pending_detail["reason"] == "fork_pending", pending_detail
+            assert pending_detail["message"] == "A fork is already waiting for a safe boundary"
+            print(
+                f"A second boundary fork: 409 {pending_detail['code']}/"
+                f"{pending_detail['reason']} — {pending_detail['message']}"
+            )
+            # Release the parked turn before teardown: the pending fork then lands
+            # at its boundary, which is exactly what the refusal protected.
+            await client.post(target + "/interrupt", json={"request_id": request_id()})
+            await until(lambda: not session.is_streaming)
+            stream.block = False
+
+            # A GENUINELY UNREACHABLE OWNER STILL READS AS ONE, and this is the
+            # cell that says the classification did not swallow that answer: with
+            # the runtime closed the route sees a dead owner rather than an
+            # enumerated refusal, and answers the owner-outage 503 (retryable,
+            # "reconnect and reconcile") exactly as it did before this seam existed.
+            await runtime.aclose()
+            runtime = None  # the finally must not close it twice
+            orphaned = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert orphaned.status_code == 503, orphaned.text
+            assert orphaned.json()["detail"]["code"] == "runtime_unreachable", orphaned.text
+            print("A closed runtime: 503 runtime_unreachable, not a fork refusal")
     finally:
         server.should_exit = True
         await asyncio.wait_for(serving, 30)
