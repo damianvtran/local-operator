@@ -3913,15 +3913,18 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # this leg for tokens minted before the rollout, which keep working
             # until they expire.
             r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}\b"
-            # The stateless installation format, `ghs_<APPID>_<JWT>`: three
-            # base64url segments of 20+ characters — real ones measure 36 (a
-            # minimal header) to 342 (an RS256 signature) — ending greedily at
+            # The stateless installation format, `ghs_<APPID>_<JWT>`: exactly
+            # THREE base64url segments of 20+ characters — real ones measure 36
+            # (a minimal header) to 342 (an RS256 signature) — ending greedily at
             # the first character that cannot continue a segment, which keeps a
             # trailing `-` or `_` inside the mask while a sentence's own `.`
-            # stays outside it. The 20-character floor is the over-match guard:
-            # it is what keeps a dotted spelling like `ghs_2024_q3.release-notes`
-            # readable. `_VENDOR_TAIL`'s "no dot" rule cannot apply here — this
-            # format IS dotted — so the floor does that duty instead.
+            # stays outside it. Two guards hold the over-match boundary: the
+            # segment COUNT (a JWS has three; a fourth, JWE-style segment would
+            # leave its tail readable, so the corpus row is where such a format
+            # lands — not a silent widening here) and the 20-character FLOOR
+            # (dotted artifact names must survive; `_VENDOR_TAIL`'s "no dot"
+            # rule cannot apply because this format IS dotted, so the floor does
+            # that duty instead).
             r"|\bghs_[0-9A-Za-z]+_[A-Za-z0-9_\-]{20,}\."
             r"[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}(?![A-Za-z0-9_\-])"
             # Refresh tokens (`ghr_`), absent from the family before this change
