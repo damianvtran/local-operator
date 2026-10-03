@@ -158,6 +158,29 @@ def test_every_guide_cross_reference_resolves() -> None:
     assert not self_refs, f"a guide must not tell the model to read itself: {self_refs}"
 
 
+def test_a_guide_section_named_by_another_guide_exists() -> None:
+    """A guide may send a reader to another guide BY SECTION NAME, and must land.
+
+    ``guides/teams/GUIDE.md`` closes its hub paragraph with "see the agents
+    guide, \"Agent Hub: pull, push, update\", for the FAQ". The walk above only
+    checks ``guide://<name>`` targets, so it stayed green while that section did
+    not exist: the reader who followed the pointer found no such heading (found
+    2026-10-03 — the section the hub-auto-update design's B7 planned had never
+    been written). Pin the named heading so the pointer cannot dangle again
+    without a red test. Scoped to the one named reference the corpus carries;
+    this is a dead-end guard, not a general markdown link checker.
+    """
+    guides = {guide.name: guide for guide in discover_guides()}
+    teams_body = guides["teams"].file_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r'the agents guide, "([^"]+)"', teams_body)
+    assert match, "the teams guide no longer names an agents-guide section to check"
+    agents_body = guides["agents"].file_path.read_text(encoding="utf-8", errors="replace")
+    assert f"## {match.group(1)}" in agents_body, (
+        f"the teams guide points at the agents guide's {match.group(1)!r}, "
+        "but the agents guide has no such section"
+    )
+
+
 def test_every_guide_reference_in_the_code_resolves() -> None:
     """The other half of the dead end, one directory over (review round 1, R1-8).
 
