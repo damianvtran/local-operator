@@ -975,6 +975,10 @@ def _summarise(record: Any, links: int = 0) -> dict[str, Any]:
     authoritative one (Q-R2-1). The state sentence is the same one the relay's own
     row carries (:func:`membership_state`), so a removed device reads the truth
     whether or not its relay is up — which is precisely when it has nothing else.
+    The marker (:func:`relay.membership_marker`) reads this block too, and its
+    empty ``not_answered`` is what makes it say "no table read has completed yet"
+    rather than claim "no peer answered" about a read nobody ran — the same words
+    the relay's own placeholder carries.
     """
     from local_operator.network.relay import membership_state
 
@@ -999,8 +1003,8 @@ def _summarise(record: Any, links: int = 0) -> dict[str, Any]:
                 "oldest_answer_age_s": None,
                 "learned": [],
                 "sentence": (
-                    "members NOT verified: this device's relay did not answer, so no "
-                    "peer was asked for its table"
+                    "members NOT verified: no table read has completed yet — this "
+                    "device's relay did not answer, so no peer was asked for its table"
                 ),
             },
         },
@@ -4747,7 +4751,13 @@ def _status_membership_lines(row: dict[str, Any]) -> list[str]:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     relay_mod = _import_relay()
-    payload = relay_mod.status()
+    # ASK FOR A FRESH TABLE PASS (bounded — see ``relay._fresh_membership_read``):
+    # `status` prints member blocks, and a block read at the last cadence tick is
+    # the "contradiction" class this read exists to end — the count must reflect a
+    # read this command asked for, not one that happened to run recently. A pass
+    # that does not land is reported with the age it actually has, never dressed as
+    # fresh.
+    payload = relay_mod.status(refresh=True)
     # THE HUMAN LINE IS DERIVED FROM THE SAME FIELDS AS THE PAYLOAD, so the two
     # cannot disagree: `relay_running` and `relay_answering` are the facts, and a
     # relay that is up but silent says so here instead of reading as "not running"
@@ -4793,8 +4803,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
         # A network whose own standing is not `active` says so here too: `status` is
         # the first command an agent runs (the guide's step 1), so it is where a
         # removed device must find the sentence rather than the member list it
-        # holds (Q-R3-2). The member-count marker is NOT printed here — this command
-        # does not refresh the table, and the row's own `membership.table` says so.
+        # holds (Q-R3-2). The member-count marker is NOT printed here — this block
+        # is the device's own standing, and the row's `membership.table` is what
+        # `--json` and the agent digest render; the read above now asks the relay
+        # for a fresh pass, so that table is one THIS command asked for, and an
+        # unlanded pass carries its age rather than reading as current.
         lines.extend(_status_membership_lines(network))
     return _emit(args, {"ok": True, **payload}, lines)
 

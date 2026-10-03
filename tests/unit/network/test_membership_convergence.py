@@ -1109,3 +1109,250 @@ def test_an_invite_falls_back_to_the_record_when_nothing_is_detected(devices: An
     )
 
     assert minted["hosts"] == [f"127.0.0.1:{recorded}"], minted["hosts"]
+
+
+# ---------------------------------------------------------------------------
+# The unanswered read: an age, a retry, and a status read that asks
+# ---------------------------------------------------------------------------
+
+
+def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
+    """The "contradiction" class: a failed read must name WHEN and say it is retried.
+
+    `lop network ls` printed `[members NOT verified: no peer answered]` for a read
+    that runs again within seconds (a peer that accepts and then does not answer
+    its table read costs one four-second pull, ``MEMBERSHIP_PULL_TIMEOUT_S``),
+    while `lop network peers` reported the same peer reachable — different
+    questions at different instants, made to look contradictory by a wording with
+    no date and no next step. The sentence (`show`) and the marker (`ls`, the
+    agent digest) now carry the read's age and "— retrying"; a row NO read has
+    fed says so instead of borrowing the failure's words.
+    """
+    device = "d_" + "1" * 32
+    report = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=time.time() - 42.0)
+    report.silent.append({"device_id": device, "reason": "no_table:no_answer"})
+    sentence = report.sentence()
+    assert "no peer answered the last table read" in sentence, sentence
+    assert ("42s ago" in sentence) or ("43s ago" in sentence), sentence
+    assert sentence.endswith(
+        "— retrying — d_1111111111 (it did not answer the table read)"
+    ), sentence
+
+    row = {"members": 2, "membership": {"table": report.to_json()}}
+    marker = relay.membership_marker(row)
+    assert "no peer answered the last table read" in marker, marker
+    assert ("42s ago" in marker) or ("43s ago" in marker), marker
+    assert marker.endswith("— retrying: d_1111111111 (it did not answer the table read)]"), marker
+
+    # A row built by an older build (no stamps) OMITS the age rather than inventing
+    # one, and still says the retry the cadence performs.
+    bare = relay.membership_marker(
+        {
+            "members": 2,
+            "membership": {
+                "table": {
+                    "complete": False,
+                    "answered": [],
+                    "not_answered": [{"device_id": device, "reason": "no_live_link"}],
+                }
+            },
+        }
+    )
+    assert "no peer answered the last table read — retrying" in bare, bare
+    assert "s ago" not in bare and "just now" not in bare, bare
+
+    # A row NO read has fed says that — "no peer answered" about a read nobody ran
+    # is the same lie in the other direction, and it is what every `status` row
+    # said before the read learned to ask.
+    unread = relay.membership_marker(
+        {
+            "members": 2,
+            "membership": {"table": {"complete": False, "answered": [], "not_answered": []}},
+        }
+    )
+    assert unread == "  [members NOT verified: no table read has completed yet]", unread
+
+    # THE SOLO-NETWORK ARM: a pass that had nobody to ask says so — its `--json`
+    # sentence used to claim "no peer answered" about a network with no peers.
+    lonely = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=time.time())
+    assert lonely.sentence() == "members verified: no other members to ask", lonely.sentence()
+
+    # The VERIFIED arms carry the oldest answer's age too (it was already in the
+    # report; it is now on the line). A row without it keeps the pre-age bytes, so
+    # a fixture from an older relay renders exactly what it always did.
+    aged = relay.membership_marker(
+        {
+            "members": 2,
+            "membership": {
+                "table": {
+                    "complete": True,
+                    "answered": ["d_1"],
+                    "not_answered": [],
+                    "oldest_answer_age_s": 3.2,
+                }
+            },
+        }
+    )
+    assert aged == "  [members verified with all 1 peer(s) (3s ago)]", aged
+    defunct = relay.membership_marker(
+        {
+            "members": 2,
+            "membership": {"table": {"complete": True, "answered": ["d_1"], "not_answered": []}},
+        }
+    )
+    assert defunct == "  [members verified with all 1 peer(s)]", defunct
+
+
+def test_a_status_read_asks_for_the_pass_it_reports(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`status` must not answer from the last cadence tick: it asks for a read.
+
+    With the background cadence parked well past this test's lifetime, the only
+    pass that can complete between the dial and the read is the one the read asks
+    for (``RelayServer._fresh_membership_read``); a `status` that merely read
+    ``_membership_reports`` would keep reporting the pre-dial pass, whose table
+    never saw this link.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+
+    def _row(payload: dict[str, Any]) -> dict[str, Any]:
+        return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
+
+    # Before the read asks: the last completed pass predates the link, so b is not
+    # in `answered` — there is no fresh table for the read to lean on yet.
+    before = _row(a.server.status())["membership"]["table"]  # noqa: SLF001
+    assert before["answered"] == [], before
+    assert before["complete"] is False
+
+    # The read asks, and the pass it asked for lands inside the bound.
+    after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
+    assert after["answered"] == [b.device_id], after
+    assert after["complete"] is True
+    assert isinstance(after["oldest_answer_age_s"], float), after
+    assert "verified with all 1 peer(s)" in after["sentence"]
+
+
+def test_a_status_read_does_not_wait_out_a_hung_pass(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read's wait is BOUNDED: a pass stuck in a pull must not hold the command.
+
+    The fallback is the last completed pass — reported with its own age, never
+    dressed as fresh — and the call returns on its own clock
+    (``MEMBERSHIP_READ_WAIT_S``) instead of waiting out the peer's pull. The
+    injected hang is long enough that an unbounded implementation cannot pass the
+    elapsed assertion, and a release in ``finally`` leaves nothing waiting.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+
+    # A completed pass first: the fallback must BE this one, so make it answer with
+    # b's table (a real pull — the link is up).
+    first = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
+    assert first.answered == [b.device_id], first
+
+    # Make the NEXT pull hang, and re-open the link's due window so the pass the
+    # read triggers actually enters the hung pull.
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
+    a_link.member_pulled_at = 0.0
+    release = threading.Event()
+
+    def _hang(link: Any) -> str:
+        release.wait(10.0)
+        return "no_answer"
+
+    monkeypatch.setattr(a.server, "_pull_members", _hang)
+    started = time.monotonic()
+    try:
+        payload = a.server.status(refresh=True)  # noqa: SLF001
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()  # let the loop's pass finish; nothing may be left waiting
+
+    table = next(row for row in payload["networks"] if row["network_id"] == record.network_id)[
+        "membership"
+    ]["table"]
+    # The fallback is the last COMPLETED pass, with its own age on the line.
+    assert table["answered"] == [b.device_id], table
+    assert table["complete"] is True
+    assert ("just now" in table["sentence"]) or ("s ago" in table["sentence"]), table["sentence"]
+    assert elapsed >= 1.0, elapsed
+    assert elapsed < 5.0, elapsed
+
+
+def test_a_row_no_read_has_fed_says_so_on_every_surface(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A count nobody read says THAT, and never that a peer failed to answer.
+
+    The placeholder rows (``RelayServer.network_summary`` without a report, and
+    ``cli._summarise`` when the relay itself did not answer) fed the marker an
+    empty `not_answered`, which the old marker rendered as "no peer answered" — a
+    claim about an ask that never happened, the same defect as the un-dated
+    failure in the other direction. The empty list is now read for what it is.
+    """
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+
+    row = a.server.network_summary(store.load(record.network_id, a.root))
+    table = row["membership"]["table"]
+    assert "no table read has completed yet" in table["sentence"], table
+    assert "no peer answered" not in table["sentence"], table
+    marker = relay.membership_marker(row)
+    assert marker == "  [members NOT verified: no table read has completed yet]", marker
+
+    # The CLI's own fallback (the relay did not answer `net_ls`/`net_show`) says
+    # the same about its half: the read never completed, because the relay was
+    # silent — and no peer was asked.
+    summary = net_cli._summarise(store.load(record.network_id, a.root))  # noqa: SLF001
+    sentence = summary["membership"]["table"]["sentence"]
+    assert "no table read has completed yet" in sentence, sentence
+    assert "relay did not answer" in sentence, sentence
+
+
+def test_the_status_verb_asks_over_the_control_socket_for_a_fresh_pass(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole hop: `relay.status(refresh=True)` → health → control frame → pass.
+
+    The relay-level cells above drive ``RelayServer.status`` directly; this one
+    proves the FIELD crosses the socket (the `net_status` handler reads `refresh`
+    off the frame) and that the module-level read the CLI's `status` verb calls
+    waits long enough for the answer — by reading a real relay through its real
+    control socket.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+
+    # The ambient root is what `health()` scans for the relay's record; a's own
+    # store holds one (published at start, re-stamped by its heartbeat).
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(a.root))
+
+    def _row(payload: dict[str, Any]) -> dict[str, Any]:
+        return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
+
+    stale = _row(relay.status())["membership"]["table"]
+    assert stale["answered"] == [], stale
+    fresh = _row(relay.status(refresh=True))["membership"]["table"]
+    assert fresh["answered"] == [b.device_id], fresh
+    assert fresh["complete"] is True

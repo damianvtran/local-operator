@@ -529,6 +529,32 @@ def test_status_reports_the_local_networks_with_no_relay_running(
     assert payload["networks"][0]["links"] == 0
 
 
+def test_the_status_command_asks_the_relay_for_a_fresh_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`lop network status` is a READ THAT ASKS (the "contradiction" class).
+
+    The member block this command prints must come from a pass the command asked
+    for, not from the cadence's last tick — the shape that let `status` say "no
+    peer answered" beside `peers`' fresh probe. The relay side's semantics are
+    tested where the relay is (``test_membership_convergence``); this cell pins
+    the seam: the verb passes ``refresh=True`` through to ``relay.status``. The
+    payload itself is the existing audit-block fixture, so nothing here
+    re-derives the relay's answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    seen: list[dict[str, Any]] = []
+
+    def _status(*args: Any, **fields: Any) -> dict[str, Any]:
+        seen.append(dict(fields))
+        return _audit_status(root, audit_mod.AuditLog(root))
+
+    monkeypatch.setattr(relay, "status", _status)
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    capsys.readouterr()
+    assert seen and seen[0].get("refresh") is True, seen
+
+
 def test_doctor_reports_identity_missing_rather_than_claiming_reachability(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
