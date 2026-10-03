@@ -1686,6 +1686,13 @@ class SessionHandle(Protocol):
     #   which is what makes the op family ADDITIVE — no ``PROTOCOL_VERSION``
     #   bump, an old registrant answers ``unknown op``, and a handle without it
     #   is refused in words rather than with an AttributeError.
+    # ask_revise(ask_id, answers, by="") -> str: SUPERSEDE that answer while it
+    #   is still undelivered (design §10, #1936). Deliberately a separate OP
+    #   rather than a flag on ``ask_respond``: the intent must be explicit on the
+    #   wire so no layer can mistake a duplicate delivery for a change of mind.
+    #   Same body, same atomicity, same optional/getattr shape; it answers
+    #   "revised" when it superseded and "answered" when it degraded to a first
+    #   answer.
     # ask_decline(ask_id, by="") -> str: the explicit "no answer, decide
     #   yourself" (today's Esc). Optional, same shape.
     # ask_dismiss(ask_id, by="") -> str: view-only removal of a TIMED-OUT ask;
@@ -6992,7 +6999,7 @@ class RuntimeServer:
                 raise ValueError("this owner cannot recall queued steering")
             typed_recall = cast(Callable[[str], Awaitable[str]], recall)
             return await typed_recall(str(frame.get("command_id", "")))
-        if op in ("ask_respond", "ask_decline", "ask_dismiss"):
+        if op in ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss"):
             # THE QUEUED-ASK OP FAMILY. Probed with getattr like every other
             # optional capability, so a reduced handle (an older bridge, a test
             # double) answers the unknown-op error rather than an AttributeError
@@ -7004,10 +7011,10 @@ class RuntimeServer:
                     "this session's runtime predates queued asks; update the runtime "
                     "to answer them"
                 )
-            if op == "ask_respond":
+            if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
-                    raise ValueError("ask_respond needs an answers map")
+                    raise ValueError(f"{op} needs an answers map")
                 answers = {
                     str(key): [str(item) for item in (value or [])] for key, value in raw.items()
                 }

@@ -49,6 +49,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.asks import policy, store
 from local_operator.harness.types import StreamEndEvent
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
@@ -465,6 +466,101 @@ async def test_the_mutating_ops_run_on_the_sessions_loop(
     finally:
         runtime.close()
         await session.dispose()
+
+
+async def _no_ask(questions: Any) -> Any:
+    """The host's ask hook, and nothing else: its PRESENCE is what makes ``ask``
+    (and ``Session.ask_queue``) exist, and a queued ask never calls it."""
+    return None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_ops_run_on_the_sessions_loop(
+    isolated_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ASK FAMILY IS HOPPED TOO, and this one is measured rather than declared.
+
+    Agent review round 1, BLOCKER 1: ``ask_revise`` was the single op in the
+    queued-ask family with no ``@_on_session_loop``, so on THIS plane its fold
+    read and its log append would run on the registrant's thread while
+    ``reconcile`` ran on the session's. ``AskQueue.revise`` accepts on exactly the
+    ground that those two run in one place, so the omission falsified the
+    ordering invariant §10 states as "never accepted-and-then-dropped".
+
+    The instrument is the SESSION's own method, for the reason the mutating-ops
+    test above gives — a handle-side wrapper runs wherever it was awaited, which
+    is the frame whose loop is not in question. With the decorator missing,
+    ``asyncio.get_running_loop()`` inside ``revise_ask`` raises on the registrant's
+    thread, so this cell fails loudly instead of merely asserting a decorator
+    exists.
+
+    It carries a second reading for free: the answer goes over the wire FIRST
+    (``ask_respond``, which awaits its own reconcile), so the revision that
+    follows is refused — the delivery bound is on the row, and the answering op
+    has already put it there.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    ran_on: list[tuple[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    session = make_session(tmp_path, _recording_stream([]))
+    session.set_ask_handler(_no_ask)
+    queue = session.ask_queue()
+    assert queue is not None, "the queued arm must be live for this cell"
+    enqueued = queue.enqueue(
+        [
+            {
+                "id": "q0",
+                "question": "Ship it?",
+                "options": [{"label": "yes"}, {"label": "no"}],
+                "multi": False,
+                "secret": False,
+                "persist": False,
+                "recommended": None,
+            }
+        ],
+        None,
+    )
+    assert enqueued["ok"] is True, enqueued
+    ask_id = str(enqueued["details"]["ask_id"])
+
+    real_revise = session.revise_ask
+
+    def revise_ask(*args: Any, **kwargs: Any) -> Any:
+        ran_on.append(("session.revise_ask", asyncio.get_running_loop()))
+        return real_revise(*args, **kwargs)
+
+    session.revise_ask = revise_ask  # type: ignore[method-assign]
+
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    try:
+        assert await runtime.wait_until_published()
+        # On a WORKER thread, like the mutating-ops test: these ops are hopped onto
+        # the session's loop, which is THIS loop.
+        answered = await asyncio.to_thread(
+            _request,
+            runtime.record,
+            {"op": "ask_respond", "req": 1, "ask_id": ask_id, "answers": {"q0": ["yes"]}},
+        )
+        assert answered.get("detail") == "answered", answered
+        revised = await asyncio.to_thread(
+            _request,
+            runtime.record,
+            {"op": "ask_revise", "req": 2, "ask_id": ask_id, "answers": {"q0": ["no"]}},
+        )
+        assert revised.get("op") == "error", revised
+        assert "already delivered" in str(revised.get("message", "")), revised
+        await _let_the_server_settle()
+    finally:
+        runtime.close()
+        await session.dispose()
+
+    assert [name for name, _ in ran_on] == ["session.revise_ask"], ran_on
+    assert ran_on[0][1] is loop, f"session.revise_ask ran on {ran_on[0][1]!r}, not the session's"
+    # The refusal was the whole effect: no revision event, no second row.
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED, store.EVENT_ANSWERED], kinds
 
 
 class _GuestWire:

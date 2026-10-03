@@ -567,6 +567,12 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # happened while these three had no row and fell to the refuse-closed
     # default (review round 1, BLOCKER 1).
     "ask_respond": "prompt",
+    # ``ask_revise`` rides the SAME capability as its three siblings: a surface
+    # that may answer an ask one way must not be refused the amend window for it.
+    # That is the argument that put the other three rows here, and it applies
+    # unchanged to the fourth — the alternative is a relayed viewer whose answer
+    # can be given but never revised.
+    "ask_revise": "prompt",
     "ask_decline": "prompt",
     "ask_dismiss": "prompt",
     "set_model": "prompt",

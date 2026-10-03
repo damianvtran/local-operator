@@ -334,17 +334,19 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("request_id must be a non-empty string")
         if not isinstance(frame.get("value"), str):
             raise ValueError("value must be a string")
-    elif op in ("ask_respond", "ask_decline", "ask_dismiss"):
+    elif op in ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss"):
         # THE QUEUED-ASK FAMILY (design docs/design/ask-nonblocking.md §2.4).
         # Validated here so a malformed body is refused at the wire rather than
         # half-applied at the dispatch: `ask_respond` is ATOMIC per ask (one
         # answer for all its questions), which is what removes the per-question
         # race the blocking path had, so a partial map must not get through.
+        # ``ask_revise`` has the identical body — it is the intent, not the
+        # shape, that differs — so it is validated by the same branch.
         if not isinstance(frame.get("ask_id"), str) or not frame["ask_id"]:
             raise ValueError("ask_id must be a non-empty string")
         if "by" in frame and not isinstance(frame.get("by"), str):
             raise ValueError("by must be a string")
-        if op == "ask_respond":
+        if op in ("ask_respond", "ask_revise"):
             answers = frame.get("answers")
             if not isinstance(answers, dict):
                 raise ValueError("answers must be a map of question id to a list of strings")
@@ -480,6 +482,12 @@ ControlOp = Literal[
     # (whole-ask answers), ``ask_decline`` is the explicit no/decide-yourself,
     # and ``ask_dismiss`` is a view-only removal that injects nothing.
     "ask_respond",  # {ask_id, answers: {qid: [str]}, by?}
+    # ``ask_revise`` is the ONE sanctioned exception to the one-way answer rule
+    # (design §10, #1936): the same atomic body, said as a CHANGE OF MIND rather
+    # than a repeat tap. A separate op rather than a flag, because the intent has
+    # to be explicit — no layer may infer a revision by comparing values — and a
+    # separate op is also what makes it fail closed on an old runtime.
+    "ask_revise",  # {ask_id, answers: {qid: [str]}, by?}
     "ask_decline",  # {ask_id, by?}
     "ask_dismiss",  # {ask_id, by?}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection

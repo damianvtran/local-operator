@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -743,6 +743,258 @@ def test_a_stop_outside_the_asks_own_window_is_not_annotated(tmp_path: Path):
     queue._now = lambda: BASE + 200_000
     _run(queue.reconcile(load_time=True))
     assert session.batches[0][0].details["lapsed_while_stopped"] is False
+
+
+# ---------------------------------------------------------------------------
+# §10, #1936 — the in-flight ANSWER REVISION, bounded by delivery
+# ---------------------------------------------------------------------------
+
+#: The revision path's own sentence. NOT ``render.refusal_copy``'s table: the
+#: state table must keep answering "already answered by <surface>" for a plain
+#: repeat, so the delivered line belongs to the op (design §10).
+DELIVERED_REFUSAL = "already delivered — send a new message"
+
+
+def test_repro_the_two_question_revision_window_closes_at_delivery(tmp_path: Path):
+    """THE #1936 REPRODUCTION, end to end on the queue.
+
+    Two questions in one ask: answer it, CHANGE the answer while it is still
+    undelivered (accepted, supersedes), let the delivery land, then try to change
+    it again (refused). Before this op the first of those was refused — the
+    reporter's "I entered an incorrect answer and I need to interrupt the session
+    to ask it again".
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+
+    # 1. the first answer, wrong on the first question.
+    assert queue.respond(ask_id, {"q0": ["no"], "q1": ["maybe"]}, by="terminal")["ok"] is True
+
+    # 2. still undelivered: the explicit revision is ACCEPTED and supersedes.
+    outcome = queue.revise(ask_id, {"q0": ["yes"], "q1": ["maybe"]}, by="desktop")
+    assert outcome["ok"] is True
+    assert outcome["revised"] is True
+    events = store.read_events(queue.session_dir)
+    assert [event["kind"] for event in events] == [
+        store.EVENT_QUEUED,
+        store.EVENT_ANSWERED,
+        store.EVENT_REVISED,
+    ]
+    revised = events[-1]
+    assert revised["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+    assert revised["by"] == {"surface": "desktop"}
+    assert revised["supersedes"] == BASE
+
+    # 3. delivery: ONE response row, and it carries the REVISED map.
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert session.batches[-1][0].details["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["status"] == store.STATUS_ANSWERED
+    # The FIRST answer keeps the stamp and the attribution; only the answers move.
+    assert record["answered_at"] == BASE
+    assert record["answered_by"] == {"surface": "terminal"}
+    assert record["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+
+    # 4. delivered: the window has closed, in the revision path's own words.
+    refused = queue.revise(ask_id, {"q0": ["maybe"], "q1": ["maybe"]})
+    assert refused["ok"] is False
+    assert refused["error"] == DELIVERED_REFUSAL
+    # The row still says exactly what the model was told, and no second revision
+    # reached the log.
+    assert [event["kind"] for event in store.read_events(queue.session_dir)][-1] == (
+        store.EVENT_REVISED
+    )
+    after = queue.find(ask_id)
+    assert after is not None and after["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+
+
+def test_the_window_keys_on_the_response_row_not_the_sticky_delivered_hint(
+    tmp_path: Path,
+):
+    """THE DISTINCTION THE PR BODY ARGUES: ``delivered`` is STICKY.
+
+    ``store.delivered_hint`` counts the ``ask-timeout-`` row, because a deadline
+    notice is a delivery for the model too. A LATE answer is exactly where the two
+    disagree — the notice went out, the answer has not — and a revision there is
+    still free to make. Keying the window on the hint would refuse the one
+    revision that costs nothing and is exactly the mis-tap #1936 is about.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 120_000
+    assert _run(queue.reconcile()) == [store.timeout_row_id(ask_id)]
+
+    queue._now = lambda: BASE + 130_000
+    assert queue.respond(ask_id, {"q0": ["late"]}, by="terminal")["ok"] is True
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["status"] == store.STATUS_LATE
+    assert record["delivered"] is True, "the hint counts the timeout row"
+    assert store.response_row_id(ask_id) not in session.transcript.ids
+
+    outcome = queue.revise(ask_id, {"q0": ["late but corrected"]})
+    assert outcome["ok"] is True and outcome["revised"] is True
+    # The response row is what delivers a late answer, so the corrected map is
+    # what lands — and only ONE row does.
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert session.batches[-1][0].details["answers"] == {"q0": ["late but corrected"]}
+
+
+def test_a_revision_from_another_surface_supersedes_while_undelivered(tmp_path: Path):
+    """A revision is NOT a race, so the single-winner surface rule is not a gate.
+
+    Design §10: while the ask is undelivered a deliberate revision from ANY
+    surface is accepted, and no layer may restore a surface gate as a safety
+    measure. The winner rule still governs two plain ``respond``s (pinned above).
+    """
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]}, by="phone")["ok"] is True
+    outcome = queue.revise(ask_id, {"q0": ["yes"]}, by="desktop")
+    assert outcome["ok"] is True and outcome["revised"] is True
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["answers"] == {"q0": ["yes"]}
+    assert record["answered_by"] == {"surface": "phone"}, "the FIRST surface keeps it"
+
+
+def test_successive_revisions_all_land_and_the_latest_is_effective(tmp_path: Path):
+    """Successive revisions are legal while the window is open, and the log keeps
+    the CHAIN: each event names the write it supersedes."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["one"]})["ok"] is True
+    queue._now = lambda: BASE + 1
+    assert queue.revise(ask_id, {"q0": ["two"]})["ok"] is True
+    queue._now = lambda: BASE + 2
+    assert queue.revise(ask_id, {"q0": ["three"]})["ok"] is True
+
+    revised = [
+        event
+        for event in store.read_events(queue.session_dir)
+        if event["kind"] == store.EVENT_REVISED
+    ]
+    assert [event["supersedes"] for event in revised] == [BASE, BASE + 1]
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"] == {"q0": ["three"]}
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert session.batches[-1][0].details["answers"] == {"q0": ["three"]}
+
+
+def test_a_revision_before_any_answer_degrades_to_the_first_answer(tmp_path: Path):
+    """An ``open``/``timed_out`` ask has no recorded answer to supersede, so the
+    intent degrades: one ``answered`` event, no ``revised`` (design §10)."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    outcome = queue.revise(ask_id, {"q0": ["yes"]}, by="desktop")
+    assert outcome["ok"] is True
+    assert outcome["revised"] is False
+    assert [event["kind"] for event in store.read_events(queue.session_dir)] == [
+        store.EVENT_QUEUED,
+        store.EVENT_ANSWERED,
+    ]
+
+
+def test_a_revision_of_a_settled_refusal_keeps_the_state_tables_sentence(tmp_path: Path):
+    """``declined``/``dismissed``/``expired`` are NOT the delivered case: they keep
+    the state table's own sentence, byte-for-byte what every other path says."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.decline(ask_id, by="terminal")["ok"] is True
+    refused = queue.revise(ask_id, {"q0": ["yes"]})
+    assert refused["ok"] is False
+    assert refused["error"] == "you already declined this."
+
+
+def test_a_revision_past_the_late_window_says_the_ask_expired(tmp_path: Path):
+    now = BASE + store.LATE_WINDOW_S * 1000 + 200_000
+    queue = _queue(tmp_path, FakeSession(), now=now)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: now
+    assert queue.respond(ask_id, {"q0": ["late"]})["ok"] is False  # the existing refusal
+    refused = queue.revise(ask_id, {"q0": ["late"]})
+    assert refused["ok"] is False
+    assert "expired" in refused["error"]
+
+
+def test_a_revision_keeps_the_whole_ask_map_contract(tmp_path: Path):
+    """The same complete-map rule as ``respond`` — one shared implementation, so a
+    surface that forgot a key is refused here too rather than losing the question."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["a"], "q1": ["b"]})["ok"] is True
+    refused = queue.revise(ask_id, {"q0": ["a"]})
+    assert refused["ok"] is False
+    assert "q1" in refused["error"]
+    assert "empty list" in refused["error"]
+
+
+def test_a_revision_cannot_carry_a_secret_value_into_the_log(tmp_path: Path):
+    """MINOR 6 applies to the revision path too: the guard is in the shared map
+    contract, so a raw value in a secret cell is replaced whole, not filtered."""
+    sentinel = "sk-live-do-not-persist"
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"key-0": ["KEY-0"]}, by="terminal")["ok"] is True
+    assert queue.revise(ask_id, {"key-0": [sentinel]}, by="cli")["ok"] is True
+    log = store.asks_log_path(store.session_dir(tmp_path, "s1")).read_text()
+    assert sentinel not in log
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"]["key-0"] == ["<not provided>"]
+
+
+def test_a_plain_repeat_respond_keeps_its_exact_refusal(tmp_path: Path):
+    """The one-way rule SURVIVES the amendment: a second ``respond`` — even with a
+    different map — is still refused in the sentence it always used. This is the
+    pin design §10 promises: a repeat tap is a retry, not a change of mind."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]}, by="terminal")["ok"] is True
+    repeat = queue.respond(ask_id, {"q0": ["yes"]}, by="phone")
+    assert repeat["ok"] is False
+    assert repeat["error"] == "already answered by terminal."
+    assert [event["kind"] for event in store.read_events(queue.session_dir)] == [
+        store.EVENT_QUEUED,
+        store.EVENT_ANSWERED,
+    ]
+
+
+def test_a_refused_revision_cannot_buy_a_second_row_or_a_second_turn(tmp_path: Path):
+    """A revision can never add a second row or a second turn (design §10). Once
+    delivered, the refusal is the whole effect and reconcile stays silent."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]})["ok"] is True
+    delivered = _run(queue.reconcile())
+    assert delivered == [store.response_row_id(ask_id)]
+    assert queue.revise(ask_id, {"q0": ["yes"]})["ok"] is False
+    assert _run(queue.reconcile()) == []
+    assert len([m for batch in session.batches for m in batch]) == 1
+
+
+def test_the_session_revision_op_refuses_in_words_without_a_queue() -> None:
+    """THE KILL SWITCH (design §10): with ``LOP_ASK_NONBLOCKING=0`` a real client
+    never revises — the old picker submits once — and a stray op must answer in
+    words rather than with a traceback or a silent success.
+
+    Called unbound on a stub that has no queue, which is exactly the seam
+    ``Session.respond_ask`` guards and the only state the guard reads.
+    """
+    from local_operator.session.session import Session
+
+    class _NoQueue:
+        def ask_queue(self) -> None:
+            return None
+
+    outcome = Session.revise_ask(cast(Any, _NoQueue()), "a-1", {"q0": ["yes"]})
+    assert outcome["ok"] is False
+    assert "predates queued asks" in outcome["error"]
 
 
 # ---------------------------------------------------------------------------

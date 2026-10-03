@@ -8873,6 +8873,10 @@ class Session:
         durable, replayed to the provider and shown on every card. The value
         therefore never reaches ``asks.jsonl``, the index, the transcript, an
         event or a notification, which is what the sentinel-grep test asserts.
+
+        The one sanctioned way to CHANGE a recorded answer is :meth:`revise_ask`
+        (design §10, #1936) — a plain repeat of this call keeps its refusal,
+        because a repeat tap is a retry, not a change of mind.
         """
         queue = self.ask_queue()
         if queue is None:
@@ -8899,6 +8903,67 @@ class Session:
                 )
             )
         return queue.respond(ask_id, merged, by=by)
+
+    def revise_ask(
+        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+    ) -> dict[str, Any]:
+        """Revise a queued ask's recorded answer while it is still undelivered.
+
+        The sanctioned exception to the one-way rule (design §10, #1936), and the
+        only path allowed to change an answer the log already holds — a plain
+        second :meth:`respond_ask` still refuses, in the same sentence as before.
+
+        THE ORDER IS :meth:`respond_ask`'s, and it is a contract rather than a
+        detail: the queue decides FIRST (``AskQueue.revision_refusal``), and only
+        a revision the queue will take reaches the SECRET hop. Without that, a
+        revision refused as delivered — or declined, or expired — would still
+        store the pasted value in the session's credential store and announce it
+        to later turns: a durable, user-visible effect from a path whose whole
+        contract is that the refusal IS the effect (agent review round 1, MAJOR
+        2). The hop itself is unchanged: the value reaches the memory-only store
+        before anything is appended, and the log carries the KEY NAME only.
+
+        NO state-table refusal is consulted here, deliberately: for an answered
+        ask the state table says "already answered by <surface>", and that is
+        exactly the sentence a revision must NOT use — the revision path has its
+        own line for the delivered case. The queue decides, so the copy cannot
+        drift between this hop and the wire (design §10, "one sentence is
+        op-qualified").
+
+        Under the kill switch this refuses in words exactly like
+        :meth:`respond_ask`: with no queue there is nothing to revise, and the
+        caller hears that rather than a traceback or a silent success.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
+        # without writing; see the docstring for what doing it in the other order
+        # costs. Nothing can interleave between the two — this method is sync and
+        # runs on the session's loop, which is also the only writer of the row the
+        # probe tests — so the probe is not a weaker answer than the write's.
+        refusal = queue.revision_refusal(ask_id)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
+        if any(q.get("secret") for q in (record.get("questions") or ())):
+            # The same hop and the same order as ``respond_ask``: the value is
+            # stored, the row keeps the key name, and a refused store is reported
+            # as NOT PROVIDED rather than as a leaked value.
+            from local_operator.asks.render import apply_secret_answers
+
+            merged.update(
+                apply_secret_answers(
+                    record.get("questions") or (),
+                    answers,
+                    variables=self._variables,
+                    journal_credential=self.journal_credential_change,
+                )
+            )
+        return queue.revise(ask_id, merged, by=by)
 
     def answer_ask_question(
         self,

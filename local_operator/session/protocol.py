@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 139 public members and a POSITIVE
+    than stylistic. This protocol carries 140 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -689,7 +689,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     (``respond_ask``/``decline_ask``/``dismiss_ask``: the dock looks the owner's
     spelling up on whichever session holds the ask, so a viewer without them made
     the surface silently do nothing; three members, because a queued ask has one
-    answer and two refusals), so
+    answer and two refusals), 140 once the queued-ask revision rung needed
+    ``revise_ask`` — :meth:`respond_ask`'s sanctioned exception (design §10, the
+    in-flight answer revision) rides the same atomic whole-ask path and the same
+    cold-arm bind, so it is one more member on that rung rather than a new one), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -825,6 +828,27 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
     async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
+
+    async def revise_ask(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """Revise a recorded answer before delivery — the OWNER's name (design §10).
+
+        :meth:`respond_ask`'s sanctioned exception rather than a second spelling
+        of it: the queue supersedes the answer while the response row is absent
+        and refuses, in its own sentence, once it exists — so a surface offers the
+        call only on an undoable move, and a refusal is still a verdict rather than
+        a crash. Declared beside its siblings for the reason that docstring gives:
+        the dock looks the OWNER's names up on whichever session holds the ask
+        (``tui/app.py::_decline_ask`` and its two siblings), and a viewer that is
+        cold binds an owner to reach the log. The wire op is ``ask_revise``; the
+        facade forwards, so a surface never has to know which kind it holds.
+        """
+        ...
 
     async def verify_live(self, timeout: float) -> bool:
         """Ask the owner to answer, and stamp the verification if it does.
@@ -1283,16 +1307,21 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         answers: Mapping[str, Sequence[str]] | None = None,
         *,
         decline: bool = False,
+        revise: bool = False,
     ) -> str:
-        """Answer or decline a QUEUED ask; returns the owner's receipt.
+        """Answer, decline or REVISE a QUEUED ask; returns the owner's receipt.
 
         Viewer-only by construction and not a decoration: a queued ask outlives
         the runtime that queued it, so a viewer answering one may have to reach
         an owner that is not running -- ``AttachedSession`` is the object that
         owns the dial, and an owner ``Session`` answers its own queue in-process
-        with no wire to send on (``Session.respond_ask``). It addresses an
-        ``ask_id`` rather than an epoch for the same reason: the epoch the ask
-        was queued under may belong to a retired owner.
+        with no wire to send on (``Session.respond_ask``/``Session.revise_ask``).
+        It addresses an ``ask_id`` rather than an epoch for the same reason: the
+        epoch the ask was queued under may belong to a retired owner.
+
+        ``revise`` selects a DIFFERENT op on the wire (``ask_revise``) rather than
+        a flag the far side interprets: design §10 requires the intent to be
+        explicit, because value equality is never the marker.
 
         Declared here because ``server/routes/desktop_sessions.py`` reaches it
         through a duck-typed ``bridge.remote`` binding, where a rename would be

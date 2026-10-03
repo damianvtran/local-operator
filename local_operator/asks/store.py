@@ -72,6 +72,14 @@ EVENT_QUEUED = "queued"
 EVENT_ANSWERED = "answered"
 EVENT_DECLINED = "declined"
 EVENT_DISMISSED = "dismissed"
+#: THE REVISION EVENT (design §10, #1936). It exists ONLY to SUPERSEDE an
+#: already-recorded, not-yet-delivered answer: :func:`fold` keeps status,
+#: ``answered_at`` and ``answered_by`` from the FIRST ``answered`` row and takes
+#: the effective ``answers`` from the LATEST ``revised`` one. A revision that
+#: arrives before any answer is recorded degrades to a plain ``answered`` and
+#: never writes this kind (see ``AskQueue.revise``), so every ``revised`` row has
+#: an ``answered`` row to supersede — the fold never honours a revision alone.
+EVENT_REVISED = "revised"
 
 #: Every status a folded ask can hold (design §2.2, §4).
 STATUS_OPEN = "open"
@@ -370,6 +378,21 @@ def _first(events: Sequence[Mapping[str, Any]], ask_id: str, kind: str) -> dict[
     return None
 
 
+def _last(events: Sequence[Mapping[str, Any]], ask_id: str, kind: str) -> dict[str, Any] | None:
+    """The LAST event of ``kind`` for ``ask_id`` (log order wins, as it does for
+    every other rule here — see the ordering invariant stated at ``fold``).
+
+    Successive revisions are all legal while the delivery window is open, so the
+    effective answer is the newest ``revised`` row rather than any of the ones it
+    supersedes; a later write cannot be beaten by an earlier reader.
+    """
+    found: dict[str, Any] | None = None
+    for event in events:
+        if event.get("kind") == kind and str(event.get("ask_id")) == ask_id:
+            found = dict(event)
+    return found
+
+
 def fold(
     events: Sequence[Mapping[str, Any]],
     now: int,
@@ -394,6 +417,7 @@ def fold(
         answered = _first(events, ask_id, EVENT_ANSWERED)
         declined = _first(events, ask_id, EVENT_DECLINED)
         dismissed = _first(events, ask_id, EVENT_DISMISSED)
+        revised = _last(events, ask_id, EVENT_REVISED)
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
         answered_at = int(answered.get("at") or 0) if answered else 0
@@ -442,6 +466,19 @@ def fold(
             if isinstance(by, Mapping):
                 record["answered_by"] = dict(by)
             record["answered_at"] = answered_at
+            if revised is not None:
+                # The status, the stamp and the attribution stay the FIRST
+                # answer's (design §10: a revision does not rewrite who answered
+                # or when); only the ANSWERS move, and only to the newest
+                # revision. ``revised_at`` is published beside them so the
+                # revision path can name the write it supersedes without a
+                # second read of the log.
+                record["revised_at"] = int(revised.get("at") or 0)
+                replacement = revised.get("answers")
+                if isinstance(replacement, Mapping):
+                    record["answers"] = {
+                        str(k): [str(v) for v in (vals or ())] for k, vals in replacement.items()
+                    }
         records.append(record)
     return records
 
