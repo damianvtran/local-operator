@@ -927,7 +927,12 @@ def _empty_index_requested() -> bool:
     raw string made `LOP_ASK_FIXTURE_EMPTY_INDEX=0` — the way anyone would turn a
     flag off — serve the empty index instead, which is the opposite of the
     request and silently photographs the wrong state. Only the two spellings that
-    mean "on" count, the same set `asks.policy.NONBLOCKING_ASK` accepts.
+    mean "on" count here, and the polarity is DELIBERATELY not the one
+    `asks.policy.NONBLOCKING_ASK` uses: that constant is a KILL SWITCH (on unless
+    the value is one of `0`/`false`/`no`/`off`, because the queue is the shipped
+    default), while this fixture flag is off unless asked for. Copying either
+    polarity onto the other is how a rig photographs the opposite of what it was
+    told to.
     """
     return os.environ.get("LOP_ASK_FIXTURE_EMPTY_INDEX", "").strip().lower() in {"1", "true"}
 

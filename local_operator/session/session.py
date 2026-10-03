@@ -8808,13 +8808,15 @@ class Session:
         return str(value)
 
     def ask_queue(self) -> Any:
-        """The session's ask queue, or ``None`` while the feature is DARK.
+        """The session's ask queue, or ``None`` while the BLOCKING arm is live.
 
         Two conditions, and both are the ones that already decide whether ``ask``
-        exists at all: the flag (``asks.policy.NONBLOCKING_ASK``) and the host
-        hook. With either missing this returns ``None`` and nothing in this file
+        exists at all: the flag (``asks.policy.NONBLOCKING_ASK`` — on unless the
+        operator set the kill switch ``LOP_ASK_NONBLOCKING=0``) and the host hook.
+        With either missing this returns ``None`` and nothing in this file
         constructs a log, a timer or a transcript row — which is what makes the
-        PR's flag-off invariant a property of the code rather than a promise.
+        kill-switch arm's "every old path is untouched" a property of the code
+        rather than a promise.
         """
         from local_operator.asks import policy
 
