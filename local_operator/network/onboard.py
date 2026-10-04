@@ -22,7 +22,7 @@ THE STEPS (named receipts, §3.3 steps 3-10; steps 1-2 are the request path):
 
     invite    mint the one invite + pre-answer the relay's parked confirm (§2.6)
     pre_read  the credentialed pre-read; halt-on-contradiction
-    install   ``uv tool install local-operator==<tag>`` | ``lop-update <tag>``
+    install   ``uv tool install [--force] --refresh local-operator==<tag>`` | ``lop-update <tag>``
     join      identity + ``lop network join @<token> --automated``
     anchor    ``lop operator anchor export`` → node → ``install --from`` (F4b)
     grants    ``lop network member grant <net> <mac> approve unattended``
@@ -904,6 +904,48 @@ def _compiled_tag() -> str:
         return ""
 
 
+#: The resolver-class install failure, however uv wraps it: "there is no version
+#: of local-operator==X … unsatisfiable", "No compatible version found". This
+#: text is NOT knowledge of absence while the index response is cached — see
+#: ``_install_failure_detail``.
+_INSTALL_RESOLVER_MARKERS: tuple[str, ...] = (
+    "unsatisfiable",
+    "no version of",
+    "no compatible version",
+)
+
+
+def _install_failure_detail(tag: str, result: CommandResult) -> str:
+    """The install step's failure sentence, in the family's cause+remedy shape.
+
+    WHY (drill finding F3, 2026-10-04): two drill runs ended at ``install`` with
+    uv's raw text — "there is no version of local-operator==0.67.4 and you
+    require local-operator==0.67.4, we can conclude that your requirements are
+    unsatisfiable" — six minutes and again ~1 h after the release was published,
+    because the node's uv served a CACHED simple-index response; the same node's
+    curl showed the version present, and ``--refresh`` cured it by hand. Raw,
+    the text told the reader something false with no remedy. So the
+    resolver-class text is repaved: the cached index is named as the likely
+    cause, the remedy is the retry — whose resolve now carries ``--refresh`` —
+    and the machine's own words stay in the parenthetical for the machine
+    register (§2.9: remedies name product actions, never terminal commands).
+    Any other failure keeps the previous surface.
+    """
+    output = (result.stderr or result.stdout or "").strip()
+    flat = " ".join(output.split())
+    if any(marker in flat.lower() for marker in _INSTALL_RESOLVER_MARKERS):
+        excerpt = ("…" + flat[-300:]) if len(flat) > 300 else flat
+        return (
+            "the approved build could not be installed: the machine's uv could "
+            f"not see local-operator=={tag}, and its cached package index is the "
+            "likely cause — a release published minutes earlier can stay "
+            f"invisible to the cache ({excerpt}). Retry the install: the retry "
+            "re-resolves against a refreshed index"
+        )
+    tail = output.splitlines()
+    return "the approved build could not be installed: " + (tail[-1][:200] if tail else "no output")
+
+
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
@@ -1287,7 +1329,10 @@ class OnboardRun:
                     "the machine has no build and no `uv` to install one with; nothing "
                     "was installed",
                 )
-            command = f"uv tool install local-operator=={shlex.quote(tag)}"
+            # `--refresh` revalidates uv's cached simple-index response: the
+            # drill (F3, 2026-10-04) measured a release published minutes
+            # earlier resolving as "no version … unsatisfiable" off that cache.
+            command = f"uv tool install --refresh local-operator=={shlex.quote(tag)}"
             method = "uv-tool-install"
         elif facts.get("lop_update") == "yes":
             command = f"lop-update {shlex.quote(tag)}"
@@ -1296,8 +1341,9 @@ class OnboardRun:
             # §3.4 names `lop-update` for an existing build; a node with a build
             # but no updater script still has uv, and a pinned reinstall is the
             # remaining documented spelling. The running relay picks the new
-            # build up at step 9's restart.
-            command = f"uv tool install --force local-operator=={shlex.quote(tag)}"
+            # build up at step 9's restart. `--refresh` as at the fresh-install
+            # branch: a cached index can hide the release this run is for.
+            command = f"uv tool install --force --refresh local-operator=={shlex.quote(tag)}"
             method = "uv-tool-reinstall"
         else:
             return _StepOutcome(
@@ -1307,11 +1353,9 @@ class OnboardRun:
             )
         result = self._remote_lop(command, timeout=self._step_timeout("install"))
         if result.rc != 0:
-            tail = (result.stderr or result.stdout or "").strip().splitlines()
             return _StepOutcome(
                 False,
-                "the approved build could not be installed: "
-                + (tail[-1][:200] if tail else "no output"),
+                _install_failure_detail(tag, result),
                 {"tag": tag, "method": method},
             )
         check = self._remote_lop("lop --version", timeout=min(60.0, self._step_timeout("install")))
