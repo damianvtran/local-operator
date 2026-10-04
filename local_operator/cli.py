@@ -14217,12 +14217,30 @@ def main() -> int:
                     if len(quoted) > 2
                     else " and ".join(quoted)
                 )
+                # Exactly two positionals is the common shape — a title mistaken
+                # for the prompt — and can be repaired with a concrete command.
+                # Three or more cannot: a `--name <title> <prompt>` example would
+                # silently DROP the tail, handing the caller a valid command that
+                # runs a different brief than the one they composed. Those get the
+                # rule instead of a misleading example.
+                if len(quoted) == 2:
+                    hint = (
+                        "The first positional is the prompt, not a title. To name the run, "
+                        "pass the title via --name:\n"
+                        # shlex.quote, not repr: the suggestion is composed to be pasted
+                        # into a shell, and repr's escaping is Python's, not the shell's
+                        # (a title like `O'Brien's audit` renders differently under each).
+                        f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+                    )
+                else:
+                    hint = (
+                        "The first positional is the prompt, not a title: pass the title via "
+                        "--name, and quote the prompt as the ONE positional — the extra "
+                        "positionals are not consumed.\n"
+                    )
                 parser.error(
                     f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-                    f"{received}.\n"
-                    "The first positional is the prompt, not a title. To name the run, "
-                    "pass the title via --name:\n"
-                    f"  lop exec --name {args.command!r} {extras[0]!r}\n"
+                    f"{received}.\n{hint}"
                     "(--workstream is a flag — it publishes the run and takes no value.)"
                 )
             # Single-execution mode: headless one-shot (README contract —

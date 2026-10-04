@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import shlex
 import socket
 import subprocess
 import sys
@@ -1756,9 +1757,25 @@ def test_exec_second_positional_parses_so_the_refusal_can_name_the_flag(
     assert args.extra == ["do the work"]
     assert args.workstream is True, "the flag itself still parses as store_true"
 
-    # Hidden from the help surface: an escape hatch nobody can discover in
-    # `--help` is one nobody reaches for on purpose — it exists to be refused.
-    assert "extra" not in build_cli_parser().format_help()
+
+def test_exec_catch_all_stays_out_of_the_exec_help(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The catch-all must not be discoverable on the exec help surface.
+
+    Assert on the EXEC subparser's own help, never on the root parser's:
+    ``build_cli_parser().format_help()`` renders only the root's options and
+    the subcommand list, so subparser arguments never reach it — an assertion
+    against it passes even with the suppression removed (``--workstream``, a
+    non-suppressed exec flag, is equally absent from it). The control flag
+    below is what keeps a broken capture from passing vacuously.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        build_cli_parser().parse_args(["exec", "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--name" in out, "control: the exec subparser help really rendered"
+    assert "extra" not in out
 
 
 @pytest.mark.parametrize(
@@ -1823,6 +1840,34 @@ def test_main_refuses_three_exec_positionals_and_counts_them_all(
     assert "got 3 positionals" in err
     assert "'Some Title', 'do the work' and 'and more'" in err
     assert "--name" in err
+    # M2: a two-argument example would silently DROP the third positional and
+    # hand the caller a VALID command that runs a different brief. Assert the
+    # absence of the suggestion itself, not merely the presence of the count.
+    assert "lop exec --name" not in err
+    assert "the extra positionals are not consumed" in err
+
+
+def test_the_suggested_command_survives_a_shell_round_trip(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """The suggestion is composed to be PASTED, so its quoting must be the
+    shell's (``shlex.quote``), not ``repr``'s — for a title containing an
+    apostrophe ``repr`` emits a backslash-escaped literal that is not
+    pastable. Round-trip the printed line through ``shlex.split`` and require
+    the caller's exact tokens back."""
+    title = "O'Brien's audit"
+    monkeypatch.setattr(sys, "argv", ["program", "exec", "--workstream", title, "do the work"])
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    suggestion = next(
+        line.strip() for line in err.splitlines() if line.strip().startswith("lop exec --name")
+    )
+    assert shlex.split(suggestion) == ["lop", "exec", "--name", title, "do the work"]
 
 
 def test_a_subcommand_does_not_clobber_a_root_run_shaping_flag(
