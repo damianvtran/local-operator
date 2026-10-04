@@ -1516,6 +1516,47 @@ def test_an_already_active_member_skips_the_join_without_a_push_or_dial(
     assert not [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
 
 
+def test_a_same_named_other_network_row_cannot_satisfy(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Names are not unique by design — the id is the identity (reviewer r1, MINOR-1).
+
+    Reproduced at head ``daf9a4819``: with a same-named row for a DIFFERENT network
+    id listed BEFORE the invite's own row, the ``network_id OR name`` matcher read
+    the other network's ``active`` row and reported satisfied while the invite's
+    own row says ``removed`` — the outcome was row-order dependent. The id-only
+    match must fall through to the join here.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(), None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    other = _status_row(network_id="n_9", membership_state="active")
+    target_row = _status_row(membership_state="removed")
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(other, target_row))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert "already an active member" not in join["detail"]
+    assert "joined damian-mesh as d_node" in join["detail"]
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
 def test_a_node_missing_from_the_inviters_table_still_joins(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

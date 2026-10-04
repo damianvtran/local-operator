@@ -1597,11 +1597,12 @@ class OnboardRun:
         and the attempt stopped inside the sealed-record phase, so the cell was
         exercising the join MECHANISM rather than the requirement the step exists
         to answer: "is this node admitted?". The requirement is answerable without
-        the wire: the node's own ``status`` row (``membership_state`` active, at
-        the invite's epoch), the inviter's member table (the row present, active,
-        not burned), and the device id the ``identity show`` read above returned.
-        When the reads agree the step is SATISFIED and returns before the token
-        push — no push, no dial.
+        the wire: the node's own ``status`` row for the invite's network ID
+        (``membership_state`` active, at the invite's epoch — matched by
+        ``network_id``; names are not unique by design), the inviter's member
+        table (the row present, active, not burned), and the device id the
+        ``identity show`` read above returned. When the reads agree the step is
+        SATISFIED and returns before the token push — no push, no dial.
 
         THE GATE IS BOTH-SIDED, and anything short of both sides falls through to
         the join EXACTLY as before: a status row that is missing, inactive, at
@@ -1653,9 +1654,15 @@ class OnboardRun:
         for candidate in (status or {}).get("networks") or []:
             if not isinstance(candidate, dict):
                 continue
-            if (target[0] and str(candidate.get("network_id") or "") == target[0]) or (
-                target[1] and str(candidate.get("name") or "") == target[1]
-            ):
+            # THE ID IS THE IDENTITY, the name is not: network names are not
+            # unique by design (``store.match_networks`` refuses ambiguity rather
+            # than picking), so a name match could read a SAME-NAMED OTHER
+            # network's row — satisfied while the invite's own row says
+            # ``removed``, row-order dependent (reviewer round 1, MINOR-1,
+            # reproduced). Every producer row carries a ``network_id``; one
+            # without cannot be vouched for, so not matching it falls through to
+            # the join, the safe direction.
+            if str(candidate.get("network_id") or "") == target[0]:
                 row = candidate
                 break
         if row is None or str(row.get("membership_state") or "") != "active":
@@ -1676,6 +1683,12 @@ class OnboardRun:
             {
                 "invite_id": self.invite_id,
                 "device_id": node_device_id,
+                # A DIFFERENT SCHEMA from the relay row block that shares this key
+                # name (``{state, sentence, remedies, ...}``, rendered by
+                # ``relay.membership_lines``): this one is the runner's own
+                # ``{state, epoch, device_id, source}``, machine-only. Same key,
+                # different shape — do not feed one to the other's renderer
+                # (design round 1, D4).
                 "membership": {
                     "state": "active",
                     "epoch": epoch,

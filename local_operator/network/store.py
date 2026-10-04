@@ -808,7 +808,7 @@ def require_secrets(network_id: str, root: Path | None = None) -> SecretState:
             "no_network_secret",
             "this device has no secret for that network: it was forgotten with "
             "`lop network rm`, deleted by `lop network disconnect`, or never written. "
-            "Rejoin with `lop network join` and a fresh invite from a member.",
+            "Re-join with `lop network join` and a fresh invite from a member.",
         )
     return load_secrets(network_id, root)
 
