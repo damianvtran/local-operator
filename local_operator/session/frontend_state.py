@@ -3734,13 +3734,22 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #:   the options. Truncating them leaves the reader deciding from a fragment, and
 #:   the ellipsis is the only signal that anything is missing.
 #:
-#: So the rule here, and the constraint a later editor must keep: a wire bound
-#: may bound the NUMBER of things carried, never the LENGTH of a field the user
-#: must read or act on. A truncated LIST is recoverable — ``dropped`` marks it
-#: (``asks_truncated`` on the wire), the true count still rides (``asks_open``),
-#: and the aggregate routes (``GET /v1/desktop/asks``, ``GET /api/asks``) carry
-#: the rest; a truncated ANSWER is not recoverable at all. Text rides whole or
-#: its row does not ride.
+#: So the rule here, and the constraint a later editor must keep: on the
+#: ANSWERING surface a bound may bound the NUMBER of things carried, never the
+#: LENGTH of a field the user must read or act on. A truncated LIST is
+#: recoverable — ``dropped`` marks it (``asks_truncated`` on the wire), the true
+#: count still rides (``asks_open``), and the aggregate routes
+#: (``GET /v1/desktop/asks``, ``GET /api/asks``) carry the rest; a truncated
+#: ANSWER is not recoverable at all, and a truncated question is a decision made
+#: on a fragment. What is forbidden is cutting a field THIS surface shows and
+#: the answer then carries.
+#:
+#: LENGTH CLIPPING IS STILL RIGHT WHERE A FRAGMENT CANNOT BE AN ANSWER, and the
+#: rule above deliberately does not reach those: ``asks.render._clip`` cuts
+#: question text to 200 characters in the TIMEOUT NOTICE, a summarised
+#: notification the user acts on through the ask list rather than through the
+#: notice, and the TUI picker keeps its labels whole instead of cutting them
+#: (``ask_picker._labels_must_all_fit``). Neither is this surface.
 #:
 #: The counts below are that bound, and a review finding is why they exist
 #: rather than symmetry: with only a byte budget the FIRST row was exempt from
@@ -3749,14 +3758,15 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: screenful and ``dropped`` says when it could not.
 ASK_WIRE_QUESTIONS_MAX = 12
 ASK_WIRE_OPTIONS_MAX = 10
-#: The ask field's text budget. Spent in the fold's own order (open first) so the
-#: rows that survive are the ones a user must answer; a row that would push the
-#: field past it is left out WHOLE (``dropped``), never clipped. The FIRST row is
-#: exempt from the drop — the surface must have the head ask to answer, and a row
-#: too big for the budget is the frame's problem, not a reason to hand the reader
-#: a fragment. A frame that genuinely cannot carry the list at all is handled by
-#: ``_yield_asks_when_the_frame_has_no_room``, which drops the whole field and
-#: says so rather than shipping something corrupt.
+#: The ask field's text budget, and the allowance for the TAIL only. Spent in the
+#: fold's own order (open first) so the rows that survive are the ones a user
+#: must answer; a row that would push the field past it is left out WHOLE
+#: (``dropped``), never clipped. The FIRST row is exempt from the budget as well
+#: as from the drop — the surface must have the head ask to answer, and its
+#: bytes must not spend the allowance the tail answers with (see
+#: :func:`bound_ask_rows`). A frame that genuinely cannot carry the list at all
+#: is handled by ``_yield_asks_when_the_frame_has_no_room``, which drops the
+#: whole field and says so rather than shipping something corrupt.
 ASK_WIRE_TEXT_BUDGET_CHARS = 6_000
 
 
@@ -3771,18 +3781,21 @@ def bound_ask_rows(
     for jobs ("a bound placed only at the snapshot boundary holds for the first
     frame and leaks on every one after it").
 
-    TEXT IS NEVER CUT (see the constants above for the measured corruption that
+    TEXT IS NOT CUT (see the constants above for the measured corruption that
     clipping caused): the bounds drop whole QUESTIONS past
     ``ASK_WIRE_QUESTIONS_MAX``, whole OPTIONS past ``ASK_WIRE_OPTIONS_MAX`` and
     whole ROWS past the budget, so every string a surface shows — and the label
-    an answer records — is the string the model wrote.
+    an answer records — is the string the model wrote. A bound removes a whole
+    unit or nothing; it never trims a field the reader or the answer needs.
 
     The FIRST row always survives, bounded only in its question and option
-    COUNTS: a surface must have the head ask to answer, and the reviewer's
-    reproduction (one row carrying a hundred long questions) showed that
-    "exempt" and "bounded" cannot both be true of it. ``dropped`` says whether
-    anything was left out, so a client can be told the list is a prefix instead
-    of inferring it from a count.
+    COUNTS, and it does NOT spend the tail's allowance: it is the ask the user
+    must answer, so charging its bytes into the budget would leave the field
+    already over and drop every later row — an over-budget head ask silently
+    taking the tail asks off the wire is the opposite of what the exemption is
+    for (review round 1, MAJOR-1). ``dropped`` says whether anything was left
+    out, so a client can be told the list is a prefix instead of inferring it
+    from a count.
     """
     if not isinstance(rows, list):
         return [], False
@@ -3818,7 +3831,13 @@ def bound_ask_rows(
             dropped = True
             break
         kept.append({**row, "questions": questions})
-        spent += charge
+        if len(kept) > 1:
+            # The HEAD row is exempt from the budget, so it must not SPEND it
+            # (review round 1, MAJOR-1): charging its bytes into ``spent`` left
+            # the field already past budget and dropped every row after it, so
+            # one over-budget head ask took three answerable tail asks off the
+            # wire. Only rows the budget actually governs are charged.
+            spent += charge
     return kept, dropped
 
 

@@ -964,6 +964,26 @@ def test_the_first_row_rides_whole_when_it_exceeds_the_budget() -> None:
         assert not question["question"].endswith("…")
 
 
+def test_an_over_budget_head_row_does_not_starve_the_tail() -> None:
+    """The head-row exemption must not spend the tail's allowance.
+
+    ``bound_ask_rows`` exempts the first row so the ask the user must answer
+    always rides. Charging its bytes into ``spent`` anyway left the field
+    already past budget, so EVERY later row was dropped — a 16.5 KB head ask
+    silently took three small outstanding asks off the wire, which is the
+    opposite of what the exemption is for (review round 1, MAJOR-1).
+    """
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    head = _ask_row(0, questions=3, text="c" * 5_500)  # charge 16,515 > the budget
+    tail = [_ask_row(index) for index in (1, 2, 3)]  # charge 13 each
+    kept, dropped = bound_ask_rows([head, *tail], budget=6_000)
+    assert [row["ask_id"] for row in kept] == ["a-0000", "a-0001", "a-0002", "a-0003"]
+    assert dropped is False
+    # The head row still rides whole.
+    assert kept[0]["questions"][0]["question"] == f"{'c' * 5_500} 0"
+
+
 def test_a_long_option_label_reaches_the_ledger_whole(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
