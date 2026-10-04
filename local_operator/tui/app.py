@@ -33354,12 +33354,18 @@ class OperatorApp(App[None]):
         # a page that only advanced on relayed events sat frozen through every
         # long tool call the child made. `show()` is a no-op when nothing moved.
         self._refresh_subagent_view()
-        # BOTH overlay cards ride the same tick. Neither is in the layout, so a
-        # dock-band height change does not resize them and Textual emits no
-        # resize event for either. Re-measure after the band has repainted;
+        # The overlay cards ride the same tick. None of them is in the layout,
+        # so a dock-band height change does not resize them and Textual emits
+        # no resize event for any. Re-measure after the band has repainted;
         # otherwise a todo/subagent appearing under an open tall card lifts the
         # input into it. `sync_layout` is a no-op when the measurement has not
         # moved.
+        #
+        # The keys legend was missing from this tuple until review round 1
+        # (F1/U1): its own `on_resize` could never fire (a `width: auto` host
+        # gets no resize event — the premise two lines up), so an open legend
+        # never re-measured on a terminal resize or a dock-band change and
+        # could overflow the screen or sit over the docked composer.
         self.call_after_refresh(self._sync_overlay_layout)
         # A live prompt rides it too, as a BACKSTOP rather than as its primary
         # trigger -- see :meth:`_repaint_live_prompt_if_stale`.
@@ -33402,7 +33408,7 @@ class OperatorApp(App[None]):
         dock has been told to re-arrange but has not finished, so the guard
         compares two stale numbers, agrees with itself, and returns.
         """
-        for panel in (self._usage_panel(), self._aside_panel()):
+        for panel in (self._usage_panel(), self._aside_panel(), self._keys_legend()):
             if panel is not None:
                 panel.sync_layout(force=force)
 
