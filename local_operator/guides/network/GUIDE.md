@@ -669,10 +669,11 @@ Diagnose in this order, and stop at the first answer that explains it:
      `grants`, `relay`, `verify`. `join` is satisfied when the node is already
      an active member: no dial is made, and the step's detail reads "<node> is
      already an active member of <network> (epoch N); admission is satisfied and
-     no re-join was attempted — the invite goes unused and expires". Read it in
-     `lop network approvals run <id> --json` (`steps[join]`) — the human run
-     block shows only the card's state, so satisfied and freshly joined read the
-     same there. A pre-read that CONTRADICTS the card halts the
+     no re-join was attempted — the invite goes unused and expires." Read it in
+     `lop network approvals run <id> --json`: it is the join receipt's `detail`
+     (`steps[] | select(.step == "join") | .detail`) — the human run block shows
+     only the card's state, so satisfied and freshly joined read the same there.
+     A pre-read that CONTRADICTS the card halts the
      run and files a fresh request carrying the corrected facts — take that one
      to approval; never proceed on the wrong facts.
      Filing needs an operator key on THIS machine to name on the card, so on a
