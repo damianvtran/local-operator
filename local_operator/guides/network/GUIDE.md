@@ -666,7 +666,9 @@ Diagnose in this order, and stop at the first answer that explains it:
      installs/updates the build on it, lands the operator's public anchor
      root-owned, joins the member, writes the grants and supervises the relay.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
-     `grants`, `relay`, `verify`. A pre-read that CONTRADICTS the card halts the
+     `grants`, `relay`, `verify`. `join` is satisfied when the node is already
+     an active member (`join: ok (already active)` — no re-join is attempted and
+     the invite goes unused). A pre-read that CONTRADICTS the card halts the
      run and files a fresh request carrying the corrected facts — take that one
      to approval; never proceed on the wrong facts.
      Filing needs an operator key on THIS machine to name on the card, so on a

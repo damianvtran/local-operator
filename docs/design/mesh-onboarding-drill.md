@@ -53,6 +53,9 @@ from memory; the note and the PRs are the references.
    - `install`: `lop-update <tag>` (build present) or `uv tool install local-operator==<tag>`.
    - `join`: `join @<token> --automated`; the operator's approve is the admit (pre-answered
      confirm); a mismatch refuses and spends the attempt (audit `sas_mismatch`).
+     Satisfied when already active: a node already an active member passes this step
+     without a re-join (`join: ok (already active)`) — test the join mechanism against
+     a genuinely non-member target.
    - `anchor`: F4b trio re-derived locally; `install --from` lands the EXACT approved bytes.
    - `grants`: node-side `member grant <net> <mac-id> approve unattended` per the card's ticks.
    - `relay`: install/start the systemd `--user` unit + linger; linger missing = caveat,
