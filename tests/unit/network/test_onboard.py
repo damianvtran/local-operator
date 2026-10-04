@@ -1556,11 +1556,12 @@ def test_the_install_refusal_names_the_cached_index_as_the_likely_cause(
 ) -> None:
     """Drill finding F3, the copy half: the drill read raw uv text as the WHOLE
     failure — "no version … unsatisfiable" — with no cause and no remedy. The
-    resolver-class sentence now names the cached index as the likely cause and
-    the retry whose refreshed resolve clears it — the retry runs exactly the
-    command the drill cured by hand, without naming a terminal command (§2.9) —
-    and the machine's own words stay in the parenthetical, never the only thing
-    a reader sees.
+    resolver-class sentence now leads with the action, names the cached index as
+    the likely cause, hedges for genuine absence (so the reader can tell "retry
+    may cure" from "the version may not exist yet"), keeps one name for the
+    artefact, and leaves uv's words flattened and glyph-stripped at the end —
+    the retry runs exactly the command the drill cured by hand, without naming
+    a terminal command (§2.9).
 
     The branch split is part of the pin: a non-resolver failure keeps its
     original surface.
@@ -1590,15 +1591,24 @@ def test_the_install_refusal_names_the_cached_index_as_the_likely_cause(
     failing = first["steps"][-1]
     assert failing["step"] == "install" and failing["ok"] is False
     detail = failing["detail"]
-    # The cause is named, and it is the CACHE — not uv's false "no version".
-    assert "the machine's uv could not see local-operator==0.67.4" in detail
-    assert "cached package index is the likely cause" in detail
-    # The remedy is the retry; its refreshed resolve is the drill's own cure.
-    assert "Retry the install: the retry re-resolves against a refreshed index" in detail
-    # The machine's own words ride — flattened, never wrapped fragments.
-    assert "no version of local-operator==0.67.4" in detail
+    # D2: the action leads; a clipping surface keeps cause+remedy, not uv's words.
+    assert detail.startswith("the approved build could not be installed. Retry the install")
+    # D1: the cache is named as the likely cause and the escape keeps a genuine
+    # absence from turning the retry into a loop.
+    assert "a cached index is the likely cause" in detail
+    assert "it is not on the index" in detail
+    assert "ask Local Operator to file a fresh request with the corrected tag" in detail
+    # D4: the window matches the drill's own clock (6 minutes, then ~1 h).
+    assert "shortly before the run" in detail
+    assert "minutes earlier" not in detail
+    # D3: one name for the artefact ("the approved build <tag>") in the prose.
+    assert "The machine's uv could not see the approved build 0.67.4" in detail
+    # N1/N2: uv's words ride flattened and glyph-stripped, never with a doubled stop.
+    assert "Because there is no version of local-operator==0.67.4" in detail
     assert "unsatisfiable" in detail
-    assert "\n" not in detail
+    assert "\n" not in detail and "×" not in detail and "╰─▶" not in detail
+    assert ".)." not in detail
+    assert detail.endswith(".)")
     assert failing["data"]["method"] == "uv-tool-reinstall"
 
     generic = FakeTransport(
@@ -1617,6 +1627,52 @@ def test_the_install_refusal_names_the_cached_index_as_the_likely_cause(
     assert second["steps"][-1]["detail"] == (
         "the approved build could not be installed: network down"
     )
+
+
+def test_a_long_resolver_message_keeps_the_head_and_drops_terminal_glyphs(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Design round 1 (N2/N3), pinned at the excerpt's own boundary: uv's
+    box-drawing furniture ("×", "╰─▶") is terminal-only and can render as tofu
+    in a UI sheet, and when the flattened words run long the excerpt keeps the
+    HEAD — "No solution found when resolving dependencies" is the part that
+    names the resolver — not the last 300 characters."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(build="0.67.4")
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    long_uv = (
+        "  × No solution found when resolving dependencies:\n"
+        "  ╰─▶ Because there is no version of local-operator==0.67.4 and you require\n"
+        "      local-operator==0.67.4, we can conclude that your requirements are\n"
+        + ("      adding solver context " * 20)
+        + "      unsatisfiable.\n"
+    )
+    transport = FakeTransport(
+        outputs=[
+            ("uname", {"stdout": STALE_NODE_PRE_READ}),
+            ("tool install", {"rc": 1, "stderr": long_uv}),
+        ]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    detail = payload["steps"][-1]["detail"]
+    assert "No solution found when resolving dependencies" in detail  # head kept
+    assert "…" in detail  # the cut is marked
+    assert "unsatisfiable" not in detail  # the tail really was dropped
+    assert "×" not in detail and "╰─▶" not in detail
+    assert detail.endswith(".)")
+    assert ".)." not in detail
 
 
 def test_a_tampered_record_cannot_mint_an_invite_or_pre_answer_a_join(

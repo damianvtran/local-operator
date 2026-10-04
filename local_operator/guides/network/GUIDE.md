@@ -665,16 +665,15 @@ Diagnose in this order, and stop at the first answer that explains it:
      `deny <id>` is ordinary), then run `lop network approvals run <id> --json`:
      installs/updates the build on it, lands the operator's public anchor
      root-owned, joins the member, writes the grants and supervises the relay.
+     The card's install target is the version the **agent's own `lop`** is
+     running, unless the card names a build — so a node is only ever brought as
+     current as the agent driving the run. To move a node onto a new release,
+     the agent's `lop` must be on that release first — `lop-update` moves it
+     there.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
      `grants`, `relay`, `verify`. A pre-read that CONTRADICTS the card halts the
      run and files a fresh request carrying the corrected facts — take that one
      to approval; never proceed on the wrong facts.
-
-     The card's install target is the **driving runtime's compiled tag**
-     unless the card names a `build`/`tag` — so a node is only ever brought as
-     current as the agent driving the run. To move a node onto a new release,
-     the agent's `lop` must be on that release first.
-
      Filing needs an operator key on THIS machine to name on the card, so on a
      fresh machine the local bullet above comes first.
    Denying a parked session works from any attached viewer. Allowing one is

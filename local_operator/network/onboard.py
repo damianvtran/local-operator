@@ -905,9 +905,9 @@ def _compiled_tag() -> str:
 
 
 #: The resolver-class install failure, however uv wraps it: "there is no version
-#: of local-operator==X … unsatisfiable", "No compatible version found". This
-#: text is NOT knowledge of absence while the index response is cached — see
-#: ``_install_failure_detail``.
+#: of local-operator==X … unsatisfiable", "No compatible version found". This is
+#: what uv emits whether the index response is stale OR the version is genuinely
+#: absent — knowledge of neither — see ``_install_failure_detail``.
 _INSTALL_RESOLVER_MARKERS: tuple[str, ...] = (
     "unsatisfiable",
     "no version of",
@@ -924,23 +924,35 @@ def _install_failure_detail(tag: str, result: CommandResult) -> str:
     unsatisfiable" — six minutes and again ~1 h after the release was published,
     because the node's uv served a CACHED simple-index response; the same node's
     curl showed the version present, and ``--refresh`` cured it by hand. Raw,
-    the text told the reader something false with no remedy. So the
-    resolver-class text is repaved: the cached index is named as the likely
-    cause, the remedy is the retry — whose resolve now carries ``--refresh`` —
-    and the machine's own words stay in the parenthetical for the machine
-    register (§2.9: remedies name product actions, never terminal commands).
+    the text told the reader something false with no remedy.
+
+    Shape (design round 1, D1-D5 + N1-N3): the ACTION leads — a clipping surface
+    keeps cause and remedy, not the machine fragment; the cache is named as the
+    likely cause and the escape names genuine absence, because the same uv text
+    covers a version that is not on the index and a retry must not be a loop;
+    one name for the artefact ("the approved build <tag>"); the window matches
+    the drill's own clock ("shortly before the run"); uv's words ride last,
+    flattened and glyph-stripped (terminal box-drawing renders as tofu in a UI
+    sheet), head-kept when long (the head names the resolver) and never with a
+    doubled stop (§2.9: remedies name product actions, never terminal commands).
     Any other failure keeps the previous surface.
     """
     output = (result.stderr or result.stdout or "").strip()
     flat = " ".join(output.split())
     if any(marker in flat.lower() for marker in _INSTALL_RESOLVER_MARKERS):
-        excerpt = ("…" + flat[-300:]) if len(flat) > 300 else flat
+        excerpt = flat.replace("×", "").replace("╰─▶", "")
+        excerpt = " ".join(excerpt.split()).rstrip(". ")
+        if len(excerpt) > 300:
+            excerpt = excerpt[:300].rstrip() + "…"
         return (
-            "the approved build could not be installed: the machine's uv could "
-            f"not see local-operator=={tag}, and its cached package index is the "
-            "likely cause — a release published minutes earlier can stay "
-            f"invisible to the cache ({excerpt}). Retry the install: the retry "
-            "re-resolves against a refreshed index"
+            "the approved build could not be installed. Retry the install: it "
+            "re-resolves against a refreshed index, so a release published "
+            "shortly before the run can no longer stay hidden by a cached "
+            "answer — a cached index is the likely cause. If the approved build "
+            "is still missing after the retry, it is not on the index — ask "
+            "Local Operator to file a fresh request with the corrected tag. "
+            f"(The machine's uv could not see the approved build {tag} — "
+            f"{excerpt}.)"
         )
     tail = output.splitlines()
     return "the approved build could not be installed: " + (tail[-1][:200] if tail else "no output")
@@ -1330,8 +1342,9 @@ class OnboardRun:
                     "was installed",
                 )
             # `--refresh` revalidates uv's cached simple-index response: the
-            # drill (F3, 2026-10-04) measured a release published minutes
-            # earlier resolving as "no version … unsatisfiable" off that cache.
+            # drill (F3, 2026-10-04) measured a release published shortly
+            # before the run resolving as "no version … unsatisfiable" off
+            # that cache.
             command = f"uv tool install --refresh local-operator=={shlex.quote(tag)}"
             method = "uv-tool-install"
         elif facts.get("lop_update") == "yes":
