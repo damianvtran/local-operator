@@ -669,6 +669,12 @@ Diagnose in this order, and stop at the first answer that explains it:
      `grants`, `relay`, `verify`. A pre-read that CONTRADICTS the card halts the
      run and files a fresh request carrying the corrected facts — take that one
      to approval; never proceed on the wrong facts.
+
+     The card's install target is the **driving runtime's compiled tag**
+     unless the card names a `build`/`tag` — so a node is only ever brought as
+     current as the agent driving the run. To move a node onto a new release,
+     the agent's `lop` must be on that release first.
+
      Filing needs an operator key on THIS machine to name on the card, so on a
      fresh machine the local bullet above comes first.
    Denying a parked session works from any attached viewer. Allowing one is
