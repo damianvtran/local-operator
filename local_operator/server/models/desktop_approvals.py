@@ -1,8 +1,9 @@
 """Wire shapes for the desktop's approval surfaces (``features.approvals``).
 
 The frozen shapes are the design note's §3.5 / the desktop contract's: the list
-answer is ``{approvals: [{approval_id, state, what, requested_by, expires_at,
-device}]}``, and a decision answers ``{approval_id, state, signature:{key_id}}``.
+answer is ``{approvals: [{approval_id, state, what, requested_by, withdrawn_by,
+expires_at, device}]}``, and a decision answers ``{approval_id, state,
+signature:{key_id}}``.
 The dict-typed halves are deliberate rather than lazy: ``what`` and the
 where-block are the record's OWN vocabulary (the design grows scopes there
 without a wire change), and pinning them field-by-field here would make the
@@ -27,6 +28,9 @@ class ApprovalRow(BaseModel):
     state: str
     what: dict[str, Any]
     requested_by: dict[str, Any]
+    #: The requester's own settle, once one happened (design review round 1, D2
+    #: — decision: fix the shared row, so a panel can name the withdrawer).
+    withdrawn_by: dict[str, Any] | None = None
     expires_at: float | None = None
     #: The where-block, under the key its KIND spells: ``device`` for
     #: ``device_onboard``, ``machine`` for ``local_authority``. Exactly one is
