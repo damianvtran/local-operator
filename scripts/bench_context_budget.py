@@ -1151,20 +1151,28 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (a bare ``manager`` silently landing on a namesake TITLE) could not be
 #: prevented by wording alone — but a model that is never told still types it.
 #:
-#: Measured with THIS script on the same tree pair, CLEAN arm (isolated HOME and
-#: config dir, which is what CI renders — the config dependence the ``tool://``
-#: entry above explains does not apply):
+#: Measured with THIS script, CLEAN arm (an isolated HOME and config dir, which
+#: is what CI renders — the config dependence the ``tool://`` entry above
+#: explains does not apply). The BASE reads 99,557 at BOTH this branch's
+#: merge-base (``cd3d03e9f``) and at ``origin/main`` (``e01d66d0d``) — the five
+#: main commits since are schema-neutral — so the delta below is entirely this
+#: branch's:
 #:
-#:   origin/main (e01d66d0d)   99,557 chars = ~35,812  (62 left, the band main carries)
-#:   head (this branch)        99,733 chars = ~35,875
-#:   delta                        176 chars =   ~63
+#:   cd3d03e9f == origin/main   99,557 chars = ~35,812  (62 left)
+#:   head (this branch)         99,733 chars = ~35,875
+#:   delta                         176 chars =   ~63
 #:
-#: and the delta is the two edited fields: +112 chars on ``send``'s ``target``
-#: and +59 on ``sessions``' ``target`` = 171 chars, the remaining ~5 being
-#: this script's char-to-token rounding across the whole surface. The ceiling is
-#: therefore the measured head + 62, the same band main carried before this
-#: change, rather than the hand-summed budget + delta. The tighten band (1,200)
-#: is nowhere near tripped.
+#: and it decomposes EXACTLY into the two edited fields:
+#:
+#:   +112 chars   ``SendParams.target``      (that schema's JSON 2,004 -> 2,116)
+#:   + 59 chars   ``SessionsParams.target``  (3,725 -> 3,784)
+#:   +  5 chars   the ONE extra em dash the new ``send`` copy adds — this block
+#:                counts the provider array, where ``json.dumps`` escapes a
+#:                non-ASCII char as ``\u2014`` (6 chars for 1)
+#:   = 176 chars  =  ~63 billed
+#:
+#: The ceiling is the measured head + 62, the same band main carried before this
+#: change. The tighten band (1,200) is nowhere near tripped.
 BUDGET_BILLED_TOKENS = 35_937
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
