@@ -158,41 +158,75 @@ class OperatorAnchor:
         reports a lower level while a misread one reports a boundary that is not
         there.
         """
+        anchor, _ = cls._parse(body)
+        return anchor
+
+    @classmethod
+    def _parse(cls, body: Any) -> tuple["OperatorAnchor | None", str]:
+        """ONE parse, and the refusal's own sentence when there is one to give.
+
+        ``from_json`` is the public spelling; this pair-valued form exists
+        because ONE refusal is actionable and the reader should be told it (F5
+        slice B). When everything about the body holds except
+        ``key_id != key_id_for(spki)`` — the shape a hand edit or a foreign
+        writer produces — both values are named, because the generic sentence
+        ("does not describe an ES256 operator key") sent a reader whose
+        statement looks coherent hunting for the problem in the wrong place.
+        Every other refusal returns ``""``; those bodies are not operator
+        statements at all, and the caller's generic sentence is the whole story.
+        The checks, their order and their strictness are exactly ``from_json``'s;
+        only the explanation is richer.
+        """
         if not isinstance(body, dict) or body.get("v") != ANCHOR_VERSION:
-            return None
+            return None, ""
         if body.get("alg") != "ES256":
-            return None
+            return None, ""
         raw = body.get("spki")
         if not isinstance(raw, str):
-            return None
+            return None, ""
         try:
             spki = bytes.fromhex(raw)
         except ValueError:
-            return None
+            return None, ""
         if len(spki) != 65 or spki[0] != 0x04:
-            return None
+            return None, ""
         key_id = body.get("key_id")
-        if not isinstance(key_id, str) or key_id != key_id_for(spki):
+        if not isinstance(key_id, str):
+            return None, ""
+        if key_id != key_id_for(spki):
             # The id is DERIVED, so a mismatch means the file was hand-edited or
             # assembled by something that does not know the rule. Refusing is
             # what stops a frame's ``operator_key_id`` from being matched against
-            # a value unrelated to the key that will actually verify.
-            return None
+            # a value unrelated to the key that will actually verify. The reason
+            # names both values — and only the product action that replaces the
+            # statement from this machine's own key (§2.9: no terminal
+            # commands in refusal copy).
+            return None, (
+                f"the statement declares key id {key_id} but its key's id is "
+                f"{key_id_for(spki)} — it was hand-edited, or written by a different "
+                "key; ask Local Operator to set up operator authority again for this "
+                "machine"
+            )
         devices = body.get("devices")
         if devices is None:
             devices = []
         if not isinstance(devices, list) or not all(isinstance(d, dict) for d in devices):
-            return None
+            return None, ""
         backend = body.get("backend")
         presence = body.get("presence")
-        return cls(
-            key_id=key_id,
-            spki=spki,
-            backend=str(backend) if isinstance(backend, str) else FILE_ONLY,
-            presence=bool(presence),
-            label=str(body.get("label") or ""),
-            created_at=int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0,
-            devices=tuple(devices),
+        return (
+            cls(
+                key_id=key_id,
+                spki=spki,
+                backend=str(backend) if isinstance(backend, str) else FILE_ONLY,
+                presence=bool(presence),
+                label=str(body.get("label") or ""),
+                created_at=(
+                    int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0
+                ),
+                devices=tuple(devices),
+            ),
+            "",
         )
 
 
@@ -326,13 +360,17 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             reason="the anchor is not readable JSON",
             exists=True,
         )
-    anchor = OperatorAnchor.from_json(body)
+    anchor, refusal = OperatorAnchor._parse(body)
     if anchor is None:
         return AnchorLoad(
             anchor=None,
             path=path,
             root_owned=info.st_uid == 0,
-            reason="the anchor does not describe an ES256 operator key",
+            # ``refusal`` carries the ONE specific sentence ``_parse`` gives (the
+            # declared-vs-derived key id — F5 slice B); every other refusal keeps
+            # the corpus's generic sentence, because none of them names a
+            # different next move.
+            reason=refusal or "the anchor does not describe an ES256 operator key",
             exists=True,
         )
     return AnchorLoad(

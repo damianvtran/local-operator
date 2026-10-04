@@ -478,6 +478,20 @@ def _anchor(args: argparse.Namespace) -> int:
     if anchor is None:
         anchor = loaded.anchor
     if anchor is None:
+        if loaded.exists:
+            # F5 slice B: a statement that EXISTS and failed validation is a
+            # different state from "no key yet" — this message used to send a
+            # reader with a hand-edited or root-unowned statement hunting for a
+            # key that is right there on disk. The state and the loader's reason
+            # name what to fix; the product action replaces the statement from
+            # this machine's own key (§2.9: no terminal commands in copy).
+            print(
+                f"the operator statement at {loaded.path} exists but is not usable "
+                f"({loaded.reason}), so there is nothing to hand to another machine — "
+                "ask Local Operator to set up operator authority again for this machine",
+                file=sys.stderr,
+            )
+            return 1
         print(
             "this machine has no operator key yet, so there is nothing to hand to "
             "another machine — ask Local Operator to set it up for you (one approval "
