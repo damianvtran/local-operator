@@ -1571,7 +1571,7 @@ def _generation_status(
     cells; the unit-file reader has its own cells below). The STALENESS FLAG is
     NOT a seam: the reading's tri-state comes from the real comparison over the
     injected probes, which is what lets a cell pin that an unproven comparison
-    renders ``not reported`` rather than a default.
+    is never rendered as a default.
 
     ``unit``: ``"shim"`` (the unit names the stable shim — the generation
     layout, where the pointer resolves), ``None`` (no unit and no shim), or an
@@ -1679,7 +1679,7 @@ def test_an_older_relays_build_is_flagged_with_the_restart_remedy(
     new = "20260924T103058Z-509c7450dbf6"
     payload = _generation_status(root, monkeypatch, running=old, installed=new)
     out = _render_status(monkeypatch, payload, capsys)
-    expected = "build:      0.61.12 — behind 0.67.4; run `lop network restart`"
+    expected = "build:      0.61.12 — behind install 0.67.4; `lop network restart`"
     assert expected in out, out
     line = next(line for line in out.splitlines() if line.startswith("build:"))
     assert len(line) <= 80, line
@@ -1715,7 +1715,7 @@ def test_a_reinstalled_same_build_names_the_install_not_itself(
         installed_build="0.67.6",
     )
     out = _render_status(monkeypatch, payload, capsys)
-    assert "build:      0.67.6 — behind the install; run `lop network restart`" in out, out
+    assert "build:      0.67.6 — behind the install; `lop network restart`" in out, out
     assert "behind 0.67.6" not in out, out
 
 
@@ -1760,18 +1760,19 @@ def test_a_machine_without_generations_gets_no_generation_row(
     assert "relay:      running, pid 4711" in out, out
 
 
-def test_an_unproven_comparison_says_not_reported_never_the_bare_version(
+def test_an_unproven_comparison_names_the_build_and_declines_a_verdict(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F10 slice A, the person-facing row: unproven is not a verdict.
+    """F10 slice A, the person-facing row: unproven is not past silence either.
 
     ``relay_generation_stale`` is tri-state now; the row that kept reading it as
     a boolean ("if not stale: print the version") would render the default as
     health for a question that was never answered. Here the running build IS
     readable — a generation-installed process whose supervision is gone (no
     unit, no shim) — but nothing exists to compare it against, so the flag is
-    ``None`` and the row says ``not reported``: neither the bare version nor a
-    ``behind`` clause, because the bare version is the default wearing a verdict.
+    ``None`` and the row NAMES what it read with the limit stated (design round
+    1, D1): neither the bare version (the default wearing a verdict) nor F6's
+    ``not reported``, which belongs to a build that could not be read at all.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     gen = "20260921T125352Z-0.61.12"
@@ -1781,8 +1782,8 @@ def test_an_unproven_comparison_says_not_reported_never_the_bare_version(
     assert payload["relay_generation_stale"] is None, payload
     assert payload["relay_build"] == "0.61.12", payload
     out = _render_status(monkeypatch, payload, capsys)
-    assert "build:      not reported" in out, out
-    assert "0.61.12" not in out, out
+    assert "build:      0.61.12 — cannot confirm it is current" in out, out
+    assert "not reported" not in out, out
     assert "behind" not in out, out
 
 
@@ -1801,8 +1802,9 @@ def test_a_flow_installed_node_names_the_real_builds_and_never_claims_health(
 
     And the comparison is UNPROVEN off the generation axis (the argv names no
     generation; a mutable tree cannot prove what a started process loaded), so
-    the flag is ``None`` and the row says ``not reported`` — never the healthy
-    default, and never the pointer's stale version.
+    the flag is ``None`` and the row names the real build with its limit
+    (``0.67.8 — cannot confirm it is current``, design round 1 D1) — never the
+    healthy default, and never the pointer's stale version.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     tool = root / "uvtools" / "local-operator"
@@ -1827,7 +1829,7 @@ def test_a_flow_installed_node_names_the_real_builds_and_never_claims_health(
     assert payload["relay_generation_stale"] is None, payload
 
     out = _render_status(monkeypatch, payload, capsys)
-    assert "build:      not reported" in out, out
+    assert "build:      0.67.8 — cannot confirm it is current" in out, out
     assert "0.67.2" not in out, out
     assert "behind" not in out, out
 
@@ -1860,7 +1862,7 @@ def test_a_just_restarted_relay_reads_current_on_the_next_status(
         installed_build="0.67.6",
     )
     out = _render_status(monkeypatch, stale_payload, capsys)
-    assert "build:      0.61.12 — behind 0.67.4; run `lop network restart`" in out, out
+    assert "build:      0.61.12 — behind install 0.67.4; `lop network restart`" in out, out
 
     out = _render_status(monkeypatch, fresh_payload, capsys)
     assert "build:      0.67.6" in out, out
@@ -1893,7 +1895,7 @@ def test_the_doctor_fallback_names_the_running_build_where_it_can(
     line, up = net_cli._relay_state()  # noqa: SLF001
     assert up is True
     assert line == (
-        "running, pid 4711, build 0.61.12 — behind 0.67.4; run `lop network restart`"
+        "running, pid 4711, build 0.61.12 — behind install 0.67.4; `lop network restart`"
     ), line
     assert len(line) <= 80, line
 
@@ -1930,7 +1932,7 @@ def test_a_wedged_relays_build_is_its_own_sentence_after_the_detail(
     assert line == (
         "running (pid 4711), and its control socket did not answer this probe, and its "
         "heartbeat has gone stale as well, so its owner is not reporting either. "
-        "Build 0.61.12 — behind 0.67.4; run `lop network restart`."
+        "Build 0.61.12 — behind install 0.67.4; `lop network restart`."
     ), line
     # The clause this round owns is the second sentence: one row at 80, remedy
     # inside its own sentence (D6). The detail sentence predates this round

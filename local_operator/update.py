@@ -1599,6 +1599,16 @@ def generation_of_process(pid: int) -> Path | None:
     return generation_in_argv(argv)
 
 
+#: How many whitespace-delimited fragments of a ``ps`` argv line may belong to
+#: the image path before the probe gives up. ``ps`` joins argv with single
+#: spaces, so an image under a directory that contains one — the shape this
+#: codebase's systemd quoting exists for — is only recoverable as a PREFIX of
+#: the line (``/home/a b/…/python3 -m …``); the image is never more than a
+#: handful of fragments, and the probe stops at the first option-looking
+#: fragment or the first tree that answers, so this bound is only a backstop.
+_IMAGE_ARGV_FRAGMENTS = 8
+
+
 def version_of_process(pid: int) -> str:
     """The version inside the tree a live process's own image sits in, or ``""``.
 
@@ -1613,6 +1623,15 @@ def version_of_process(pid: int) -> str:
     its build while its "installed" side read a pointer the install never moved —
     the defect this exists to close.)
 
+    THE IMAGE IS PROBED AS ASCENDING PREFIXES, LONGEST FIRST (review round 1,
+    R1-1): splitting at the first space truncates any image under a spaced
+    directory into a path whose ancestors carry no distribution, so a reading
+    that existed came back as silence. ``ps`` cannot re-escape those spaces for
+    us, so the prefixes that could BE the image are walked longest-first — the
+    nearest distribution wins exactly as it does for a single path — and a space
+    in the image's own final component keeps resolving through the ancestor walk
+    of :func:`version_of_image`.
+
     ``""`` for every way the answer can fail to exist: a pid that is gone or was
     never there, no ``ps``, a timeout, an argv that names no readable tree (see
     :func:`version_of_image`). Callers render the empty answer as "not reported" —
@@ -1623,10 +1642,21 @@ def version_of_process(pid: int) -> str:
     argv = _process_argv(pid)
     if argv is None:
         return ""
-    fields = argv.split(None, 1)
-    if not fields:
+    fragments = argv.split()
+    if not fragments:
         return ""
-    return version_of_image(Path(fields[0]))
+    # The image ends before the first option-looking fragment — everything past
+    # it describes the run, not the tree the image sits in.
+    last = len(fragments)
+    for end in range(2, len(fragments) + 1):
+        if fragments[end - 1].startswith("-"):
+            last = end - 1
+            break
+    for end in range(min(last, _IMAGE_ARGV_FRAGMENTS), 0, -1):
+        found = version_of_image(Path(" ".join(fragments[:end])))
+        if found:
+            return found
+    return ""
 
 
 def stale_generation_of_process(pid: int) -> Path | None:

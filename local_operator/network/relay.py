@@ -12167,7 +12167,9 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
       generation in the argv, no readable pointer, a pointer mid-rename, an
       install whose mutable tree cannot prove what the process loaded). Never a
       boolean from an unreadable probe: the surfaces render ``None`` as "not
-      reported".
+      reported" for an unreadable running build, and name a read one
+      (``… — cannot confirm it is current``) when only the comparison is
+      unproven — never the bare version, never the remedy.
 
     Never raises, and never spends a probe on a machine with nothing to ask
     about: a machine with no generation layout, no unit and no shim gets
@@ -12213,26 +12215,31 @@ def generation_words(facts: Mapping[str, Any]) -> str:
 
     THE REGISTER IS THE FAMILY'S (design round 1, D3/D4): the word "build", a
     version for the value (the generation id reads as noise outside this module
-    and rides ``--json`` as provenance), and the ``behind X`` + ``run Y`` shape
+    and rides ``--json`` as provenance), and the ``behind X`` + remedy shape
     :func:`local_operator.network.readiness.build_suffix` already prints. The id
     is also the fallback for the one corner a version cannot be read out of — a
     pruned tree whose process still runs, which is the drill's own incident —
     because dropping it there would leave the row saying nothing.
 
-    THREE ANSWERS, AND THE THIRD MUST NOT BE FOLDED (F10 slice A). ``""``:
-    nothing on either side can be named (no generation layout, no unit, no shim —
-    the question cannot exist, and a pip/pipx machine keeps its block byte-for-
-    byte). ``"not reported"``: the question exists but was not answered — the
-    running build could not be read, or the staleness comparison is unproven
-    (``None``: a plain-image install whose mutable tree proves nothing about what
-    the process loaded, no readable pointer, a pointer mid-rename). The bare
+    FOUR ANSWERS (F10 slice A; the third is design round 1's D1 correction).
+    ``""``: nothing on either side can be named (no generation layout, no unit,
+    no shim — the question cannot exist, and a pip/pipx machine keeps its block
+    byte-for-byte). ``"not reported"``: the running build could not be read at
+    all — F6's meaning of the words, preserved. ``"{build} — cannot confirm it
+    is current"``: the build WAS read and the comparison could not be proven.
+    That read-but-unproven case is the steady state of a flow-install node, and
+    withholding a value the surface holds made the row information-free exactly
+    where the drill ran (D1): name what was read, decline the verdict. The bare
     version only when the shipped comparison proves the process current, and the
-    flagged form only when it proves the move: an unproven comparison renders as
-    neither, because silence would read as healthy and the default is not a
-    verdict.
+    flagged form only when it proves the move.
 
-    WIDTHS: every rendered form is ≤80 columns with the sentence-shaped
-    ``running, pid N, `` prefix included, so the remedy never wraps.
+    WIDTHS (design round 1, D3): every rendered form is ≤80 columns with the
+    sentence-shaped ``running, pid N, `` prefix included to a SIX-digit pid —
+    the widest, the version pair, measures 80 there (81 at seven). Both flagged
+    forms name their referent — ``behind the install`` / ``behind install X``
+    (D2): the number after *behind* is this device's own install, and the tail
+    drops the ``run`` the original carried so the referent fits inside the
+    budget.
     """
     name = facts.get("relay_generation")
     installed = facts.get("installed_generation")
@@ -12241,12 +12248,14 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     if not running and not own:
         return ""
     stale = facts.get("relay_generation_stale")
-    if not running or not isinstance(stale, bool):
+    if not running:
         return "not reported"
+    if not isinstance(stale, bool):
+        return f"{running} — cannot confirm it is current"
     if not stale:
         return str(running)
-    where = f"behind {own}" if (own and own != running) else "behind the install"
-    return f"{running} — {where}; run `lop network restart`"
+    where = f"behind install {own}" if (own and own != running) else "behind the install"
+    return f"{running} — {where}; `lop network restart`"
 
 
 def generation_clause(facts: Mapping[str, Any]) -> str:

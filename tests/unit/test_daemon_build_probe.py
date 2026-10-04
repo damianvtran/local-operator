@@ -544,9 +544,12 @@ def test_a_real_process_reports_the_version_of_the_tree_it_runs_from(
     its own exec, then is read through the shipped reader), with ``argv[0]``
     naming a plain venv image instead of a generation — the mesh drill's
     flow-installed node. The generation reader answers ``None`` for it, and the
-    version reader answers the distribution beside the image.
+    version reader answers the distribution beside the image. The tree sits
+    under a directory WITH A SPACE (review round 1, R1-1): the shape the old
+    first-space split read as unreadable, so this cell drives the
+    longest-prefix probe through the real ``ps`` line.
     """
-    tool = tmp_path / "uvtools" / "local-operator"
+    tool = tmp_path / "uv tools" / "local-operator"
     _dist(tool, "0.67.8")
     argv0 = str(tool / "bin" / "python3")
 
@@ -590,7 +593,8 @@ def test_version_of_process_answers_nothing_for_an_unreadable_probe(
     process's group", the same guard ``generation_of_process`` documents); a pid
     nothing runs under and a probe that answers nothing are the other two, and a
     relative first field (a bare ``lop``, a launcher's name) cannot be placed to
-    a tree at all.
+    a tree at all. A spaced tree with no distribution is silence too — the
+    prefix probe narrows the miss, it does not invent a reading (R1-1).
     """
     assert update_mod.version_of_process(0) == ""
     assert update_mod.version_of_process(-1) == ""
@@ -599,6 +603,47 @@ def test_version_of_process_answers_nothing_for_an_unreadable_probe(
     assert update_mod.version_of_process(1234) == ""
     monkeypatch.setattr(update_mod, "_process_argv", lambda pid: "lop serve")
     assert update_mod.version_of_process(1234) == ""
+
+
+def test_a_spaced_image_path_is_probed_as_ascending_prefixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, R1-1: a directory with a space must not read as unreadable.
+
+    ``ps`` joins argv with single spaces, so truncating at the first space left
+    a prefix whose ancestors carry no distribution — a reading that existed came
+    back as silence. The probe walks the whitespace-delimited prefixes
+    longest-first, so the nearest distribution still wins, a space in the
+    image's own final component keeps resolving through the ancestor walk, and
+    a tree named only by an ARGUMENT is never read as the image's.
+    """
+    tool = tmp_path / "my tools" / "uvtools" / "local-operator"
+    _dist(tool, "0.67.8")
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: f"{tool}/bin/python3 -m local_operator.network.relay --port 5",
+    )
+    assert update_mod.version_of_process(1234) == "0.67.8"
+
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: f"{tool}/bin/Local Operator -m local_operator.network.relay",
+    )
+    assert update_mod.version_of_process(1234) == "0.67.8"
+
+    # The image, not the argument, is what the process loaded: an interpreter
+    # of ours with nothing to announce stays silent even beside a treeful
+    # argument path (the option guard and the prefix walk both leave it alone).
+    elsewhere = tmp_path / "elsewhere" / "local-operator"
+    _dist(elsewhere, "0.67.9")
+    monkeypatch.setattr(
+        update_mod, "_process_argv", lambda pid: f"/usr/bin/python3 {elsewhere}/bin/tool"
+    )
+    assert update_mod.version_of_process(1234) == ""
+    monkeypatch.setattr(update_mod, "_process_argv", lambda pid: f"{tool}/bin/python3 -m x")
+    assert update_mod.version_of_process(1234) == "0.67.8", "the image's own tree still wins"
 
 
 def test_the_tri_state_keeps_cannot_compare_distinct_from_current(

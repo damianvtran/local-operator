@@ -1458,7 +1458,8 @@ def test_compose_names_the_running_build_where_one_can_be_read(
     payload = readiness.compose(server)
 
     assert payload["relay"] == (
-        f"running, pid {os.getpid()}, build 0.61.12 — behind 0.67.4; " "run `lop network restart`"
+        f"running, pid {os.getpid()}, build 0.61.12 — behind install 0.67.4; "
+        "`lop network restart`"
     ), payload["relay"]
 
 
