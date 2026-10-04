@@ -209,6 +209,10 @@ def test_git_row_says_what_commits_will_do() -> None:
     assert ok_row["ok"] is True
     assert "commits as Damian Tran <damian@gominerva.com>" in ok_row["detail"]
     assert "push credentials are a separate question" in ok_row["detail"]
+    # The github clause, per the desk call (2026-10-03): the ACTUAL state in the
+    # reader's terms — GitHub push waits on a configured App, one step — never
+    # "implemented" and never "blocked".
+    assert "GitHub push through the mesh waits on a configured GitHub App" in ok_row["detail"]
 
     bad_row = readiness.git_row(
         _member(), _facts(git={"user_name": "", "user_email": "someone@e.test"}), peer_label="box"
