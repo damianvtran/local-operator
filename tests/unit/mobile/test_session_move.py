@@ -20,7 +20,11 @@ pin:
   successor adopts the dying runtime and answers with a pid that is about to
   exit;
 * the refusals are the three stable codes the native app branches on, with the
-  copy it renders verbatim -- never the runtime's own ``kept: …`` prose.
+  copy it renders verbatim -- never the runtime's own ``kept: …`` prose;
+* the move's two SAFETY MECHANISMS are tested DIRECTLY, not only through the
+  route: the viewer's ``connected`` guard and the bounded, pid-matched
+  unpublish wait. The route cells fake both, so without these a ``return
+  True`` in either would leave the whole file green.
 
 Nothing here touches the operator's machine: the transport is a fake viewer, so
 no runtime is dialled and no child is spawned (``spawn_session`` is recorded,
@@ -31,11 +35,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
+from local_operator.mobile import attach_client
 from local_operator.mobile import daemon as daemon_mod
 from local_operator.mobile.daemon import (
     MobileDaemon,
@@ -436,3 +442,104 @@ def test_directory_refusal_code_mapping_is_closed() -> None:
     )
     assert _directory_refusal_code("kept: something nobody has seen before") == "move_unavailable"
     assert _directory_refusal_code("retired") == "move_unavailable"
+
+
+# --------------------------------------------------------------------------
+# The two safety mechanisms, exercised DIRECTLY (review round 1, minor 2)
+# --------------------------------------------------------------------------
+
+
+def test_phone_viewer_hands_back_only_a_connected_client() -> None:
+    """``phone_viewer`` is the move's transport, and a client mid-reconnect must
+    NOT be handed to the route: the runtime would never see the ask, and the
+    move would surface as a transport failure instead of the owner's answer."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    viewer = FakeViewer()
+    viewer.connected = False
+    daemon._phone_attaches[SESSION] = viewer
+
+    assert daemon.phone_viewer(SESSION) is None
+    viewer.connected = True
+    assert daemon.phone_viewer(SESSION) is viewer
+    assert daemon.phone_viewer("nosuchsession") is None
+
+
+class _FakeDiscoveryRecord:
+    """Only the one field the guard reads."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+
+@pytest.mark.asyncio
+async def test_wait_for_owner_to_unpublish_is_polling_pid_matched_and_bounded(
+    monkeypatch,
+) -> None:
+    """THE ADOPTION GUARD's own semantics: return as soon as the record is gone
+    or is a DIFFERENT generation, keep polling while the SAME pid is published,
+    and give up at the bound rather than blocking a request forever."""
+    calls = {"n": 0}
+
+    def same_pid(*_args) -> tuple[object, str]:
+        return _FakeDiscoveryRecord(PID), "live"
+
+    def first_then_gone(*_args) -> tuple[object, str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeDiscoveryRecord(PID), "live"
+        return None, "gone"
+
+    monkeypatch.setattr(attach_client, "find_runtime_record", first_then_gone)
+    assert await daemon_mod._wait_for_owner_to_unpublish(SESSION, PID, 2.0) is True
+    # It POLLED: a one-shot read would have returned False on the first answer.
+    assert calls["n"] >= 2
+
+    # A DIFFERENT generation is not the owner we retired -- that is the
+    # successor, and waiting for it would be waiting for our own spawn.
+    monkeypatch.setattr(
+        attach_client, "find_runtime_record", lambda *_: (_FakeDiscoveryRecord(9), "live")
+    )
+    assert await daemon_mod._wait_for_owner_to_unpublish(SESSION, PID, 0.2) is True
+
+    # Absent at once: no waiting at all.
+    monkeypatch.setattr(attach_client, "find_runtime_record", lambda *_: (None, "gone"))
+    assert await daemon_mod._wait_for_owner_to_unpublish(SESSION, PID, 0.2) is True
+
+    # The SAME pid still published with a tiny bound: False, and bounded.
+    monkeypatch.setattr(attach_client, "find_runtime_record", same_pid)
+    started = time.monotonic()
+    assert await daemon_mod._wait_for_owner_to_unpublish(SESSION, PID, 0.15) is False
+    assert time.monotonic() - started < 2.0
+
+
+def test_move_refuses_with_a_sentence_that_names_the_actual_problem(tmp_path, monkeypatch) -> None:
+    """UX round 1, U2: "nothing is there" and "that is not somewhere a session
+    may work" are different problems with different recoveries, so they cannot
+    share one sentence -- and the RULE has to be stated, because this sentence
+    is the reader's whole recovery path."""
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    # The real scratch root is under pytest's own tmp_path, so an unpatched
+    # ``_tmp_dir`` would ADMIT ``outside`` (the trap the gate tests record).
+    monkeypatch.setattr(daemon_mod, "_tmp_dir", lambda: str(tmp_path / "scratch"))
+    client, daemon = _client_and_daemon()
+    viewer, spawns = _prepare_move(monkeypatch, daemon)
+
+    missing = str(home / "nope-dir-9z")
+    reply = client.post(f"/api/sessions/{SESSION}/directory", json={"cwd": missing})
+    assert reply.status_code == 400
+    assert reply.json() == {"error": f"there's no directory at {missing}"}
+
+    reply = client.post(f"/api/sessions/{SESSION}/directory", json={"cwd": str(outside)})
+    assert reply.status_code == 400
+    body = reply.json()
+    assert str(outside) in body["error"]
+    assert "home folder" in body["error"]
+    assert "code" not in body
+
+    # Neither refusal reached the owner or the spawn path.
+    assert viewer.asked == 0
+    assert spawns == []

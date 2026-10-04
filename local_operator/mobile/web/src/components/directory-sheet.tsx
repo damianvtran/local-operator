@@ -26,6 +26,7 @@ import { changeDirectory, getDirectories } from "../api";
 import { cn } from "../lib/cn";
 import { shortenHome } from "../lib/format";
 import type { Directories } from "../types";
+import { Chip } from "./ui/chip";
 import { Sheet } from "./ui/sheet";
 
 /** One choosable directory in the sheet: its path and the word that names it. */
@@ -41,6 +42,27 @@ interface DirectoryRow {
  */
 function displayPath(path: string, home: string): string {
 	return path ? shortenHome(path, home) : "";
+}
+
+/**
+ * The typed path, expanded the way the daemon will resolve it.
+ *
+ * ``~`` and a trailing slash are the spellings a reader types that are NOT the
+ * path the session ends up in, and the chip's label must not depend on HOW the
+ * directory was chosen (UX round 1, U6: after a free-text move the chip read
+ * ``~/work`` while the session's own cwd was the resolved absolute path, so the
+ * same control had two names for one state).
+ *
+ * Only the DISPLAY value is expanded -- the request still carries what was
+ * typed, because a refusal has to echo the spelling the reader has to fix. A
+ * relative path cannot be expanded here at all (the daemon resolves it against
+ * its own working directory); it is handed on as typed and the composer's
+ * bridge yields on the projection rather than on a match.
+ */
+function expandTyped(path: string, home: string): string {
+	let out = path.trim();
+	if (home && (out === "~" || out.startsWith("~/"))) out = home + out.slice(1);
+	return out.length > 1 ? out.replace(/\/+$/, "") : out;
 }
 
 /** The working-directory sheet: pick a directory, or type one. */
@@ -121,7 +143,7 @@ export function DirectorySheet({
 		setError("");
 		try {
 			await changeDirectory(sessionId, target);
-			onMoved(target);
+			onMoved(expandTyped(target, dirs?.home ?? home));
 			onClose();
 		} catch (e) {
 			/* THE SHEET STAYS OPEN ON A REFUSAL, showing the daemon's own sentence
@@ -144,12 +166,27 @@ export function DirectorySheet({
 						onClick={() => void commit(path)}
 						disabled={busy || tag === "current"}
 						aria-current={tag === "current" ? "true" : undefined}
+						/* NO ``disabled:opacity-60`` (design round 1, D2). This
+						   stylesheet's own rule is ``:where(:disabled,
+						   [aria-disabled="true"]) { opacity: 1 }`` -- "disabled
+						   changes colour, never opacity" -- and a Tailwind
+						   ``disabled:`` utility outranks a zero-specificity
+						   ``:where``, so this row was the one control that opted
+						   back in. At 0.6 the 12 px "current" tag measured 2.34:1
+						   (light) / 2.52:1 (dark), and that tag CARRIES INFORMATION
+						   -- which directory is current -- rather than only marking
+						   an unavailable action. The accent border, the wash and
+						   the word do the work at full opacity (4.86:1 / 4.57:1). */
 						className={cn(
-							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-left active:bg-elevated disabled:opacity-60",
+							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-left active:bg-elevated",
 							tag === "current" ? "border-accent bg-accent-wash" : "border-control bg-surface",
 						)}
 					>
-						<span className="min-w-0 flex-1 truncate font-mono text-mono-sm text-ink">
+						{/* ``break-all``, not ``truncate`` (design round 1, D6): a long
+						    path's last segment is the part that NAMES the directory,
+						    and an end-ellipsis hid exactly that. The rows may wrap;
+						    the chip above them stays a single truncated line. */}
+						<span className="min-w-0 flex-1 break-all font-mono text-mono-sm text-ink">
 							{displayPath(path, dirs?.home ?? home)}
 						</span>
 						{/* TEXT, never a glyph: a tick renders as tofu on phones whose
@@ -172,7 +209,14 @@ export function DirectorySheet({
 						spellCheck={false}
 						autoCapitalize="off"
 						autoCorrect="off"
-						className="min-h-11 min-w-0 flex-1 rounded-sm border border-hairline bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim focus:border-control"
+						/* ``border-control`` at rest, the token the rows directly above
+						   already use (design round 1, D5): ``border-hairline`` measured
+						   1.41:1 light / 1.19:1 dark against the panel, so the field read
+						   as free-floating placeholder text rather than as a field. No
+						   ``focus:`` variant, matching the list's own search input --
+						   this sheet's field is the only place in the app that had one,
+						   and it would now be a no-op. */
+						className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim"
 					/>
 					<button
 						type="button"
@@ -236,21 +280,30 @@ export function WorkingDirectoryChip({
 	const label = cwd ? displayPath(cwd, home) : "…";
 
 	return (
-		<div className="flex items-center">
-			<button
-				type="button"
+		<div className="flex min-w-0 items-center">
+			{/* THE APP'S OWN CHIP, not a second chip-shaped control (design round 1,
+			    D3/D4): ``ui/chip.tsx`` already carries the resting ground, the
+			    control border and the 44 px floor the model and effort chips in
+			    the session header use, and this control is the only route into the
+			    change-directory flow -- so it must not be the one 32 px target on
+			    the surface. Its muted label look is kept.
+			    ``min-w-0``/``max-w-full`` let the label truncate inside the
+			    composer's row instead of pushing the row wider than its column
+			    (design round 1, D1). */}
+			<Chip
 				onClick={() => setOpen(true)}
 				aria-label={`working directory: ${cwd || "unknown"}`}
-				className="flex min-h-8 max-w-full items-center gap-1.5 rounded-sm px-1.5 text-mono-sm text-ink-muted active:bg-elevated"
+				className="min-w-0 max-w-full"
 			>
 				{/* A folder glyph drawn inline: this package carries no icon
-				    dependency (the same reason the list's marks are text), and a
-				    16px svg costs no font lookup. */}
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+				    dependency (the same reason the list's marks are text). 14 px
+				    rather than 12 (design round 1, N2): a 24-viewBox path with a
+				    2 px stroke is barely legible at 12 px. */}
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
 					<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
 				</svg>
 				<span className="min-w-0 truncate">{label}</span>
-			</button>
+			</Chip>
 			<DirectorySheet
 				open={open}
 				onClose={() => setOpen(false)}

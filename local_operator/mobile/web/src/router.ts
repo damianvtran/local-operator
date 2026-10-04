@@ -64,10 +64,39 @@ export function navigateUp(fallback: string): void {
 	navigate(fallback, { replace: true, hasInAppPredecessor: false });
 }
 
+/**
+ * Rewrite a hash that RESOLVED to the list but does not SPELL the list.
+ *
+ * ``#/new`` used to be a route and is one no longer, so ``parseHash`` sends it —
+ * and every other unrecognised path — to the list. Rendering the list while the
+ * address bar still reads ``#/new`` leaves a bookmark or a shared link naming a
+ * screen that does not exist, and the history entry misreporting where the
+ * reader is (UX round 1, U5). The list IS the right answer for those paths, so
+ * the URL is corrected to say so.
+ *
+ * A REPLACEMENT, never a push: canonicalising is not a navigation, and a reader
+ * pressing Back must not land on the stale spelling again. ``parseHash`` stays
+ * PURE — this belongs to the route effect, which is the only place that knows
+ * the current URL is also the current state.
+ */
+function canonicaliseListHash(): void {
+	if (parseHash(location.hash).name !== "list") return;
+	if (location.hash === "" || location.hash === "#/") return;
+	history.replaceState({ ...history.state, [ROUTE_STATE_KEY]: false }, "", "#/");
+}
+
 export function useRoute(): Route {
 	const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
 	useEffect(() => {
-		const onChange = () => setRoute(parseHash(location.hash));
+		/* The MOUNT pass canonicalises too: a deep link straight to `#/new` is
+		   the case a reader is most likely to arrive by. No `setRoute` here — the
+		   hash this call rewrites parses to the same route already in state, and
+		   the rewrite fires no event of its own. */
+		canonicaliseListHash();
+		const onChange = () => {
+			canonicaliseListHash();
+			setRoute(parseHash(location.hash));
+		};
 		window.addEventListener("hashchange", onChange);
 		window.addEventListener("popstate", onChange);
 		return () => {

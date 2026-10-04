@@ -5210,7 +5210,12 @@ def build_app(daemon: MobileDaemon):
         # publishes as ``default`` — the directory the phone lands in is
         # therefore always one the picker would also have offered.
         requested = str(body.get("cwd") or "").strip()
-        cwd_raw = requested or _default_start_cwd()
+        # RESOLVED OFF THE LOOP, exactly as the sibling reader below does it:
+        # ``_default_start_cwd`` builds an AgentRegistry and reads every agent's
+        # metadata from disk, and this coroutine shares its loop with every
+        # connected phone's SSE stream. The short-circuit stays, so an explicit
+        # cwd -- the common case -- never pays for the read at all.
+        cwd_raw = requested or await asyncio.to_thread(_default_start_cwd)
         # Resolve to a real directory the picker is allowed to open: anywhere
         # under the owner's home, OR the system temp dir. The spawn runs with
         # the daemon's own environment (it is the owner's account either way),
@@ -5387,14 +5392,26 @@ def build_app(daemon: MobileDaemon):
         # the same way, so a directory this route accepts is always one a
         # successor can actually be spawned in. The STATUS AND SHAPE mirror the
         # start route (a bare ``error``, no code): a bad path is a typo, not one
-        # of the three lifecycle refusals the phone branches on. The sentence
-        # is deliberately distinct from the start route's so a reader can tell
-        # which control refused, and it echoes the path the user typed rather
-        # than the resolved one, because the typo is what they have to fix.
+        # of the three lifecycle refusals the phone branches on.
+        #
+        # TWO SENTENCES, NOT ONE, because these are two problems with two
+        # different recoveries (UX round 1, U2): "there is nothing at that path"
+        # is a typo the reader fixes, while "that is outside the directories a
+        # session may work in" is a RULE they can only obey if it is stated --
+        # the shipped single sentence covered both causes and named neither, so
+        # the reader's only route back was to guess. Both echo the path AS
+        # TYPED, because the typed spelling is what they have to change.
         cwd_path = Path(cwd_raw).expanduser().resolve()
-        if not cwd_path.is_dir() or not _spawn_dir_allowed(cwd_path):
+        if not cwd_path.is_dir():
+            return JSONResponse({"error": f"there's no directory at {cwd_raw}"}, status_code=400)
+        if not _spawn_dir_allowed(cwd_path):
             return JSONResponse(
-                {"error": f"that working directory can't be used: {cwd_raw}"},
+                {
+                    "error": (
+                        "a session can only work inside your home folder or the tmp root: "
+                        f"{cwd_raw}"
+                    )
+                },
                 status_code=400,
             )
         cwd = str(cwd_path)
@@ -6296,11 +6313,13 @@ def _recent_directories(limit: int = 8) -> list[str]:
     list through the SAME predicate the start route applies is what makes every
     row a directory a session can actually start in.
 
-    ``_recent_directories`` has exactly ONE consumer (``GET /api/directories``,
-    verified by grep in this module): a future consumer that genuinely needs
-    the unfiltered ranking should filter at that consumer rather than relaxing
-    this, because the dead-tap property is a property of the SUGGESTION list,
-    not of the registry.
+    THE FILTER BELONGS HERE because both readers want it: this list is served
+    as the picker's rows (``GET /api/directories``) and read by
+    ``_default_start_cwd`` for the directory a no-cwd start lands in -- and both
+    of those answers have to be spawnable, or the phone offers a default it
+    cannot honour. A future consumer that genuinely needs the unfiltered
+    ranking should filter at that consumer rather than relaxing this, because
+    the dead-tap property is a property of the SUGGESTION, not of the registry.
     """
     try:
         from local_operator.agents import AgentRegistry

@@ -120,6 +120,23 @@ describe("the working-directory chip", () => {
 		expect(onMoved).toHaveBeenCalledWith("/Users/tester/scratch");
 	});
 
+	it("hands back the resolved path, so the chip's label never depends on how it was chosen (U6)", async () => {
+		const onMoved = await renderChip();
+		await openSheet();
+		const input = await screen.findByPlaceholderText("or type another path…");
+		// A typed `~` path is expanded SERVER-side, so the client's optimistic
+		// label has to be the resolved spelling too — otherwise the same control
+		// reports two different names for one state ("~/work" vs the absolute
+		// path a row move produces).
+		fireEvent.change(input, { target: { value: "~/work" } });
+		fireEvent.click(screen.getByRole("button", { name: "change" }));
+
+		await waitFor(() => expect(changeDirectory).toHaveBeenCalledWith(SESSION, "~/work"));
+		// The REQUEST keeps the typed spelling (a refusal has to echo what the
+		// reader has to fix); only the display value is expanded.
+		expect(onMoved).toHaveBeenCalledWith("/Users/tester/work");
+	});
+
 	it("shows the daemon's refusal sentence and keeps the sheet open", async () => {
 		const sentence = "This session already has messages, so its working directory can't change.";
 		changeDirectory.mockRejectedValue(new Error(sentence));

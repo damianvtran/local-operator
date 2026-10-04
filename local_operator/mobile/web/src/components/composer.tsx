@@ -85,6 +85,18 @@ async function fileToImage(file: File): Promise<AttachedImage | null> {
 }
 
 
+/** Whether two paths name the same directory, allowing for a trailing slash.
+
+    ONE spelling difference is worth absorbing here and no more: the daemon
+    resolves its own input, so a trailing slash is the difference between what
+    a reader types and what the projection publishes. Everything else (``~``,
+    relative paths) is resolved above the client, which is why the bridge also
+    yields on a changed projection rather than relying on this alone. */
+function sameDirectory(a: string, b: string): boolean {
+	const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+	return norm(a) === norm(b);
+}
+
 /** Detect "/cmd args" at the very start of the draft — the slash trigger. */
 function slashQuery(text: string): string | null {
 	if (!text.startsWith("/")) return null;
@@ -448,11 +460,33 @@ export function Composer({
 	   answers only once the successor runtime is ready, and the successor's
 	   first projection lands a scan tick later; without this the chip would keep
 	   naming the OLD directory for that second, which reads as "the change did
-	   not take". It yields the moment the projection agrees, so what the chip
-	   shows is always either the session's real cwd or a directory the daemon
-	   has just confirmed. */
+	   not take".
+
+	   IT YIELDS ON THE SUCCESSOR'S OWN ANSWER, not on string equality (review
+	   round 1, nit 4). Equality only holds when the spelling the client sent is
+	   the spelling the daemon resolves to, which is NOT guaranteed -- a typed
+	   ``~`` path or a relative one is resolved server-side, so the strings
+	   differ and an equality test would hold the optimistic value for the life
+	   of the page, leaving the chip disagreeing with the session it describes.
+	   The value the projection carried BEFORE the move is the discriminator: a
+	   projection that now names the directory we asked for (any spelling), or
+	   any directory other than that pre-move one, is the successor answering.
+	   What the chip shows is therefore always either the session's real cwd or a
+	   directory the daemon has just confirmed. */
 	const [movedCwd, setMovedCwd] = useState("");
-	const shownCwd = movedCwd && movedCwd !== projection.cwd ? movedCwd : projection.cwd;
+	const cwdBeforeMove = useRef("");
+	const projectedCwd = projection.cwd;
+	const shownCwd = movedCwd || projectedCwd;
+	const requestMove = (target: string) => {
+		cwdBeforeMove.current = projectedCwd;
+		setMovedCwd(target);
+	};
+	useEffect(() => {
+		if (!movedCwd || !projectedCwd) return;
+		if (sameDirectory(projectedCwd, movedCwd) || projectedCwd !== cwdBeforeMove.current) {
+			setMovedCwd("");
+		}
+	}, [movedCwd, projectedCwd]);
 
 	useEffect(() => {
 		if (!autoFocus) return;
@@ -1213,11 +1247,11 @@ export function Composer({
 			    (rather than beside the send controls) so it never competes with them
 			    for width on a narrow phone, and so the row it opens is where a reader
 			    already looks when asking "where is this session working?". */}
-			<div className="flex items-center px-0.5">
+			<div className="flex min-w-0 flex-1 items-center px-0.5">
 				<WorkingDirectoryChip
 					sessionId={pid}
 					cwd={shownCwd}
-					onMoved={setMovedCwd}
+					onMoved={requestMove}
 				/>
 			</div>
 
