@@ -3032,34 +3032,41 @@ confirmation strengthened a number that was never right.
 The same basis error decides a release gate, because the consumer's index is
 not the one that is easiest to query. A tag, a GitHub Release and the pull
 request inside them can all exist while the package index the installer
-actually reads has not caught up — measured here as the release published at
-15:56 with `pip`'s JSON API answering for the new version while the PyPI
-**simple index** served nothing until 17:00:28. A run in that window fails an
-install step it had passed twice before, and it reads as flakiness rather
-than as a publication lag. **Name the basis the consumer reads, not the one
-that answers first.**
+actually reads has not caught up — measured here, every time UTC: the Release
+published **15:56:42Z**, its files uploaded **15:58:52Z–15:58:58Z**, PyPI's own
+JSON API carrying them from then, and the **simple index** — the surface `pip`
+and `uv` actually read — still not answering for the new version at
+**15:59:28Z** and answering by **16:00:28Z**. Nothing was run in that gap, and
+that is the point: the gate was a poll of the index the installer reads, so the
+retry waited ~2 minutes rather than failing an `install` step it had already
+passed twice and reading as flakiness. **Name the basis the consumer reads, not
+the one that answers first** — and **put both times on one clock**, since a
+local-clock reading beside a UTC one implies a gap that never existed.
 
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
 landmine — the next reader treats it as unresolved-but-real and "corrects" a
 correct value into a wrong one.
 
-**Never assert a verdict from a value you do not have.** A device's relay
-honesty field reported `relay_generation_stale: false` on a machine where
-`relay_build` and `relay_generation` were both `None` — a boolean answering
-about a value it had not read. The same read reported `installed_build: 0.67.2`
-for a command-line tool running `0.67.8`, because the field inspects the
-generation layout while the installer that put the newer build there used a
-different one: the number was well-formed, plausible, and about a directory the
-running build does not live in. Both arrived in the fix for the previous
-instance of this class, which is the base rate rather than an irony — every one
-of these was written by someone who had just been bitten by the last one, so
-the guard has to be mechanical rather than attentional. **Name the thing, or
-say "not reported"; never let unknown default to a boolean in either
-direction** — a stale flag defaulting to a safe `true` fails identically,
-because the fault is asserting a verdict at all, not the way it points. And
-when the value is a path, say **which** path: two install layouts can both be
-real, and only one of them is the one running.
+**Never assert a verdict from a value you do not have.** One read of a mesh
+peer, with the fields the relay-honour work added, produced two of these at
+once. `installed_build: 0.67.2` for a command-line tool running `0.67.8`: the
+field follows the generation pointer (`~/.local/share/lop/generations/…`) while
+the install step that had just placed the newer build wrote the other tree
+(`~/.local/share/uv/tools/…`) and never moves that pointer — a well-formed,
+plausible number about a directory the running build does not live in. And
+`relay_generation_stale: false` beside `relay_build: null` and
+`relay_generation: null`. The second is a **considered direction choice rather
+than an oversight** — `false` is the fail-safe answer for a machine consumer
+that must have a boolean, and the human-facing row already says "not
+reported" — which is exactly the distinction to keep: **a machine field may
+default safely, but a surface a person reads must name the thing or say "not
+reported"; never render the default as a verdict.** Both arrived in the fix for
+the previous instance of this class, which is the base rate rather than an
+irony — each instrument was written by someone who had just been bitten by the
+last one, so the guard has to be mechanical rather than attentional. And when
+the value is a path, say **which** path: both install trees are real, and only
+one of them is the one running.
 
 ### When a test is already flaking
 
