@@ -1273,6 +1273,59 @@ def test_the_agent_digest_carries_the_audit_state_at_its_own_column() -> None:
     assert not [line for line in net_tool._render("status", stale) if line.startswith("audit:")]
 
 
+def test_the_agent_digest_carries_the_running_build_at_its_own_column() -> None:
+    """D2 (design round 1): the digest renders the build row the payload carries.
+
+    The CLI block gained the row; the digest — the surface "why is my session
+    stuck" actually arrives on — rendered every other row of the same payload
+    and silently dropped this one, so a stale relay could not be diagnosed from
+    the model's own view. Same words as the CLI (``relay.generation_words``), at
+    this register's own column (cell 11), and the flag + remedy ride the stale
+    form. No row where the CLI has none: not running, or no generation layout.
+    """
+    payload = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay": {"pid": 4711},
+        "relay_generation": "20260921T125352Z-0.61.12",
+        "installed_generation": "20260924T103058Z-509c7450dbf6",
+        "relay_generation_stale": False,
+        "relay_build": "0.61.12",
+        "installed_build": "0.67.4",
+        "log": "/tmp/network.log",
+        "networks": [],
+    }
+    lines = net_tool._render("status", payload)  # noqa: SLF001 — the renderer under test
+    build_line = next(line for line in lines if line.startswith("build:"))
+    assert build_line == "build:     0.61.12", lines
+    assert build_line.index("0.61.12") == 11, build_line
+
+    stale = dict(payload, relay_generation_stale=True)
+    target = "build:     0.61.12 — behind 0.67.4; run `lop network restart`"
+    assert any(line == target for line in net_tool._render("status", stale)), stale
+
+    # The two absences the CLI block has: no layout (nothing to say) and not
+    # running (nothing whose build it would be).
+    plain = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in (
+            "relay_generation",
+            "installed_generation",
+            "relay_generation_stale",
+            "relay_build",
+            "installed_build",
+        )
+    }
+    assert not [line for line in net_tool._render("status", plain) if line.startswith("build:")]
+    stopped = dict(payload, relay_running=False)
+    assert not [line for line in net_tool._render("status", stopped) if line.startswith("build:")]
+
+
 def test_the_agent_digest_does_not_call_a_wedged_relay_not_running() -> None:
     """A relay that is up and silent is NOT "not running", on the model's surface too.
 

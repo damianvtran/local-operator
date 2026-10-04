@@ -60,6 +60,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
+    # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
+    # vocabulary ``_cleanup_row`` above declares (``superseded, unreferenced`` /
+    # ``the pointer's target`` / the removal-failed sentence), authored in
+    # ``update.py`` for a reader and printed as the per-row parenthetical: one row
+    # per decision from the snapshot path's ``prune_lines``, one line per removal
+    # from the upgrade path's ``prune_notice_lines``. ``update.py`` entered this
+    # scan when the relay roll's import (F6, #1972) spelled ``local_operator.network``;
+    # both reads and their sentences predate that and nothing here is a wire value.
+    ("local_operator/update.py", "prune_lines", "reason"): (
+        1,
+        "the prune vocabulary's own prose (one row per decision)",
+    ),
+    ("local_operator/update.py", "prune_notice_lines", "reason"): (
+        1,
+        "the prune vocabulary's own prose (the upgrade path's one line per removal)",
+    ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),

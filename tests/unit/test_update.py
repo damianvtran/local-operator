@@ -1595,7 +1595,7 @@ class TestServiceDaemonRefresh:
         had WRITTEN at the moment each repair ran, which is what the parent sees when
         it kills the pipe.
 
-        THE STEPS RUN CONCURRENTLY, and that is proven STRUCTURALLY: all three
+        THE STEPS RUN CONCURRENTLY, and that is proven STRUCTURALLY: all four
         repairs must be inside their bodies at once (a barrier), so a serial
         implementation breaks the barrier into the timeout and fails — no
         wall-clock makes this pass by luck. The same run pins the machine line of
@@ -1608,12 +1608,13 @@ class TestServiceDaemonRefresh:
 
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
+        from local_operator.network import relay as relay_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
         written: dict[str, str] = {}
         buffer = io.StringIO()
-        barrier = threading.Barrier(3)
+        barrier = threading.Barrier(4)
         breached: list[bool] = []
 
         def repair_for(name: str):
@@ -1633,6 +1634,7 @@ class TestServiceDaemonRefresh:
             (browser_install, "browser bridge"),
             (tunnel_install, "tunnel"),
             (wakes_install, "wakes supervisor"),
+            (relay_install, "network relay"),
         ):
             monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
 
@@ -1641,7 +1643,7 @@ class TestServiceDaemonRefresh:
 
         steps = update_mod._refresh_steps()
         names = tuple(name for name, _recovery, _repair in steps)
-        assert names == ("browser bridge", "tunnel", "wakes supervisor")
+        assert names == ("browser bridge", "tunnel", "wakes supervisor", "network relay")
         assert sorted(written) == sorted(names), "every daemon was repaired"
         assert len(breached) == len(names), "every repair reached the barrier"
         assert all(breached), "the repairs did not run concurrently"
@@ -1849,6 +1851,7 @@ class TestServiceDaemonRefresh:
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
+        from local_operator.network import relay as relay_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
@@ -1874,7 +1877,13 @@ class TestServiceDaemonRefresh:
             patch.object(launchd, "load", side_effect=loaded),
             ExitStack() as stack,
         ):
-            for module in (mobile_install, browser_install, tunnel_install, wakes_install):
+            for module in (
+                mobile_install,
+                browser_install,
+                tunnel_install,
+                wakes_install,
+                relay_install,
+            ):
                 stack.enter_context(
                     patch.object(
                         module,
@@ -1912,6 +1921,7 @@ class TestServiceDaemonRefresh:
         """
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
+        from local_operator.network import relay as relay_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
@@ -1919,6 +1929,7 @@ class TestServiceDaemonRefresh:
             (browser_install, launchd.PlistRefresh("browser bridge", "current")),
             (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
             (wakes_install, launchd.PlistRefresh("wakes supervisor", "repaired")),
+            (relay_install, launchd.PlistRefresh("network relay", "current")),
         )
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
@@ -1939,6 +1950,7 @@ class TestServiceDaemonRefresh:
             update_mod._daemon_report_line("browser bridge", "already"),
             update_mod._daemon_report_line("tunnel", "failed"),
             update_mod._daemon_report_line("wakes supervisor", "refreshed"),
+            update_mod._daemon_report_line("network relay", "already"),
         }
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
 
