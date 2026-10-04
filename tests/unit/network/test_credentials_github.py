@@ -1658,12 +1658,17 @@ def test_after_the_window_the_next_command_gets_a_new_token_or_fails_clean(
     served_env, served_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
     assert served_token == first and served_env["GH_TOKEN"] == first
 
-    # The window ends: the entry is inside the re-ask margin, so the cache must
-    # NOT serve it. With no relay record on this root the ask fails clean.
-    client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(first, now_ms - 1))
-    assert client.grants.get(github_mod.GITHUB_KEY, "sess-next") is None, "the margin leaked"
+    # INSIDE the margin, not past the window: 60 s of window left, less than
+    # REASK_MARGIN_MS (120 s), so the cache must NOT serve it. THIS value — not
+    # an already-expired one — is what discriminates the margin itself (M2):
+    # with REASK_MARGIN_MS at 0 the grant would still be served and this cell
+    # would fail. With no relay record on this root the ask then fails clean.
+    client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(first, now_ms + 60_000))
+    assert (
+        client.grants.get(github_mod.GITHUB_KEY, "sess-next") is None
+    ), "a grant inside the re-ask margin was served"
     clean_env, clean_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
-    assert (clean_env, clean_token) == ({}, ""), "a window ended and the old token was served"
+    assert (clean_env, clean_token) == ({}, ""), "a grant inside the margin was served"
 
     # (c) A fresh fetch after the window carries the NEW token, never the old.
     client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(second, now_ms + 600_000))

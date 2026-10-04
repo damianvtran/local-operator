@@ -188,7 +188,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # revoke batch the owner's lender performed — the scheduled window-end DELETE,
         # the operator's immediate revoke, and the retry after a failed call.
         "credential.revoke",
-        # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). Six lifecycle
+        # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). The lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or
         # bootstrap the operator's own anchor locally — the same events, `kind`
@@ -206,6 +206,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # shows the gap between an approval that ran and the run that replaced
         # it (drill finding, 2026-10-04).
         "onboard_superseded",
+        # The REQUESTER's own settle for an un-actioned request (drill finding,
+        # same day): no operator gesture rides it, and an incident reader must be
+        # able to tell it apart from a deny (the operator said no) and from an
+        # expiry (the window lapsed on its own).
+        "onboard_withdrawn",
     }
 )
 
@@ -388,6 +393,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "onboard_connected": frozenset({"kind", "run_id"}),
     "onboard_failed": frozenset({"kind", "step", "run_id"}),
     "onboard_superseded": frozenset({"kind", "run_id"}),
+    # The requester's own settle: `surface`/`session_id` name the filer that
+    # withdrew (the store only ever accepts the filer), so the row is
+    # self-explaining without reading the record.
+    "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second

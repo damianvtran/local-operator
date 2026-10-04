@@ -325,6 +325,9 @@ def test_a_hand_started_relay_that_will_not_stop_refuses_with_its_pid(
     # into its own gloss.
     assert result["error"].count("started by hand") == 1, result["error"]
     assert "did not stop" in result["error"]
+    # D-N1: the imperative names its own holder by pid, not an ambiguous
+    # "that process" that a context sentence could reassign.
+    assert "Stop that relay (pid 333612) and retry" in result["error"], result["error"]
 
 
 def test_a_foreign_listener_blocks_the_action_with_pid_and_cmdline_named(
@@ -632,6 +635,35 @@ def test_a_refusal_after_an_earlier_adoption_reports_the_stop(
     assert "pid 111" in result["error"]
     assert "pid 222" in result["error"]
     assert result.get("stopped") == [111], result
+
+
+def test_a_gone_holder_is_not_folded_into_was_stopped_first(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-R3-1: an earlier holder that was ALREADY GONE (nothing signalled) must
+    not read as "was stopped first by this command" in a later refusal's
+    context — NIT-2's distinction, on the refusal's own sentence. D-N1 rides the
+    same cell: the stubborn imperative names ITS holder by pid, so "that relay"
+    cannot attach to the gone pid the context just named."""
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _no_systemctl(monkeypatch)
+    _pin_supervision(
+        monkeypatch,
+        managed=None,
+        holder_pids=(111, 222),
+        record=None,
+        stop_outcome=["gone", "stubborn"],
+    )
+
+    result = relay.service_action("restart")
+
+    assert result["ok"] is False, result
+    assert result["reason"] == "port_held"
+    error = result["error"]
+    assert "The hand-started relay (pid 111) was already gone." in error, error
+    assert "was stopped first by this command" not in error, error
+    assert "Nothing was changed" not in error, error
+    assert "Stop that relay (pid 222) and retry" in error, error
 
 
 def test_a_gone_holder_is_labelled_gone_not_stopped(

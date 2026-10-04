@@ -109,6 +109,7 @@ async def test_the_badge_reads_the_frozen_shape(api: Any) -> None:
         "state",
         "what",
         "requested_by",
+        "withdrawn_by",
         "expires_at",
         "device",
         "machine",
@@ -116,6 +117,22 @@ async def test_the_badge_reads_the_frozen_shape(api: Any) -> None:
     assert row["state"] == "requested"
     assert row["device"]["host"] == "99.79.190.164"
     assert row["machine"] is None
+    assert row["withdrawn_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_row_names_its_settler(api: Any) -> None:
+    """Design review round 1, D2 (decision: fix the shared row): a withdrawn
+    record's row carries ``withdrawn_by``, so a panel over this read can name
+    the requester that settled it, never the bare word alone."""
+    client, _app = api
+    record = _file_device_record(Path(_app_root()))
+    A.withdraw(record["approval_id"], requested_by=dict(record["requested_by"]))
+    response = await client.get("/v1/desktop/approvals")
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["approvals"][0]
+    assert row["state"] == "withdrawn"
+    assert row["withdrawn_by"] == record["requested_by"]
 
 
 # ---------------------------------------------------------------------------

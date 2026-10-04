@@ -11499,16 +11499,32 @@ def _adoption_refusal(
     and the kind is named at most once, by the sentence itself. And a refusal
     that follows an EARLIER adoption on the same pass says that relay was
     stopped (round-2 MINOR-1): "nothing was changed" is only true when nothing
-    was. (:func:`_with_replaced_note`'s tail — "the service command that
-    followed did not complete" — is false on this path: the arm never ran.)
+    was — and a holder found ALREADY GONE is labelled as such rather than
+    folded into "was stopped first" (round-3 Q-R3-1: NIT-2's distinction in the
+    success steps and ``_stopped_note``, applied on this third site).
+    (:func:`_with_replaced_note`'s tail — "the service command that followed
+    did not complete" — is false on this path: the arm never ran.)
     """
     ids = _holder_ids(holder)
     if replaced:
-        context = (
-            "The hand-started relay (pid "
-            + ", ".join(str(h.get("pid")) for h in replaced)
-            + ") was stopped first by this command."
-        )
+        # NIT-2 (round 2) split stopped from gone in the success steps and
+        # ``_stopped_note``; Q-R3-1 is the same split HERE, where the context
+        # used to fold a gone holder into "was stopped first by this command"
+        # even though nothing was signalled to it.
+        stopped = [str(h.get("pid")) for h in replaced if h.get("outcome") != "gone"]
+        gone = [str(h.get("pid")) for h in replaced if h.get("outcome") == "gone"]
+        fragments = []
+        if stopped:
+            fragments.append(
+                "The hand-started relay (pid "
+                + ", ".join(stopped)
+                + ") was stopped first by this command."
+            )
+        if gone:
+            fragments.append(
+                "The hand-started relay (pid " + ", ".join(gone) + ") was already gone."
+            )
+        context = " ".join(fragments)
     else:
         context = "Nothing was changed."
     if outcome == "unverified":
@@ -11525,10 +11541,14 @@ def _adoption_refusal(
             f"{context} Stop it at the level that owns it, or leave it and retry."
         )
     else:  # stubborn
+        # D-N1 (round 3): with an adoption earlier on the pass, "that process"
+        # was ambiguous — its nearest antecedent could read as the relay the
+        # context sentence just said was stopped/gone, not the stubborn holder
+        # the sentence before it named. The imperative names its own holder.
         error = (
             f"`lop network {action}` could not take :{port}: {ids} — a relay this device "
-            f"started by hand — was signalled and did not stop. {context} Stop that "
-            "process and retry, or run the relay in the foreground instead."
+            f"started by hand — was signalled and did not stop. {context} Stop that relay "
+            f"(pid {holder.get('pid')}) and retry, or run the relay in the foreground instead."
         )
     result: dict[str, Any] = {
         "ok": False,
