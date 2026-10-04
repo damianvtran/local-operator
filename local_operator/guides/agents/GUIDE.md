@@ -78,7 +78,9 @@ A run opened without `--workstream` — or spawned with
 `visibility="ephemeral"` — is stamped `origin.json` = `agent-shell`: it will
 not appear in the operator's `/resume` picker, desktop sidebar or phone list as
 a chat they started. It is not hidden — `lop sessions` lists the live run,
-`exec` prints its id, and YOUR route back to it is `lop exec --resume <id>`.
+`exec` prints its id, and YOUR route back to it is the `sessions` tool:
+`op='peek'` while it runs, `op='resume'` once it has stopped (where the tool is
+absent, the CLI fallback is `lop exec --resume <id>`).
 The bare `lop --resume <id>` form belongs to the operator: it is the
 interactive path, which stays refused for every agent shell (see above). A
 `spawn` (or an explicit `--workstream` on the CLI) stamps `agent-workstream`
