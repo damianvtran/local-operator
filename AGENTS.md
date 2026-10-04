@@ -3044,10 +3044,13 @@ drill had already walked green twice and reading as flakiness. **Name the basis
 the consumer reads, not the one that answers first** — and **put both times on
 one clock**, since a local-clock reading beside a UTC one implies a gap that
 never existed. And do not treat the first hit as settled: the index is **not
-atomic at the instant it flips**, measured as a check that saw a new version
-there followed within the same second by an update failing as
-`unsatisfiable` — the identical command succeeding minutes later. **A hit
-proves the index has begun to move, not that it has stopped.**
+atomic at the instant it flips** — measured as a check that saw a new version
+there followed at the next log line (≤2 s, second-granularity) by an update
+failing as `unsatisfiable`, the identical command succeeding about two minutes
+later, and a run on that build then passing. **A hit proves the index has begun
+to move, not that it has stopped**; so **expect the first install after a hit to
+need a retry — an `unsatisfiable` there is a publication still in progress, not
+a broken release.**
 
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
