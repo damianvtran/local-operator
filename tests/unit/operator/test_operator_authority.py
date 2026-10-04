@@ -38,6 +38,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -196,6 +197,63 @@ def test_a_symlinked_anchor_path_is_refused(
     # "nothing installed", and the level is what the operator's own `status` prints.
     assert loaded.exists is True, "a present-but-redirected anchor is not a missing one"
     assert operator_authority_level() == LEVEL_ANCHOR_UNPINNED
+
+
+def test_an_incoherent_statement_names_both_key_ids_and_the_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F5 slice B: a statement whose declared key id is not its key's id is
+    still REFUSED (unchanged) and now says which two values disagree.
+
+    ``from_json`` refuses such a body by returning ``None``, so every reader
+    got the generic "does not describe an ES256 operator key" — true, but it
+    sent a reader whose statement looks coherent hunting in the wrong place.
+    The reason now names the declared id, the derived id, and the product
+    action that replaces the statement from this machine's own key. Only this
+    refusal gets a specific sentence; a different malformation keeps the
+    generic one (asserted below), because none of them names a different next
+    move.
+    """
+    root = _anchor_root(monkeypatch, tmp_path / "anchors")
+    root.mkdir()
+    handle = FileKeyBackend(tmp_path / "k.pem").create()
+    anchor = anchor_for_handle(handle)
+    body = json.loads(trust.anchor_bytes(anchor))
+    body["key_id"] = "f" * 32
+    statement = root / f"{os.getuid()}.json"
+    statement.write_text(json.dumps(body))
+
+    # The root-owned shape the loader demands: a tmp file is owned by this uid,
+    # so the fstat its ownership gate reads is synthesized. Everything else —
+    # the symlink walk, the open, the JSON, the parse — is the real code path.
+    real_open = trust._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        assert opened is not None
+        descriptor, _ = opened
+        return descriptor, SimpleNamespace(st_uid=0, st_mode=0o100644)
+
+    monkeypatch.setattr(trust, "_open_no_follow", as_root)
+
+    loaded = trust.load_anchor()
+    assert loaded.usable is False
+    assert f"declares key id {'f' * 32} but its key's id is {anchor.key_id}" in loaded.reason
+    assert "set up operator authority" in loaded.reason
+
+    # The reason surfaces through `lop operator trust`, the reader the state
+    # reaches (handlers prints it whenever the anchor is not usable).
+    from local_operator.operator import handlers as operator_handlers
+
+    assert operator_handlers.dispatch(argparse.Namespace(operator_command="trust")) == 1
+    assert "declares key id" in capsys.readouterr().err
+
+    # A different malformation keeps the corpus's generic sentence.
+    body["key_id"] = anchor.key_id
+    body["alg"] = "RS256"
+    statement.write_text(json.dumps(body))
+    loaded = trust.load_anchor()
+    assert loaded.reason == "the anchor does not describe an ES256 operator key"
 
 
 def test_the_anchor_path_cannot_be_redirected(

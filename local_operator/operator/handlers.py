@@ -478,6 +478,31 @@ def _anchor(args: argparse.Namespace) -> int:
     if anchor is None:
         anchor = loaded.anchor
     if anchor is None:
+        staged_file = staging_path(root)
+        if staged_file.exists() or loaded.exists:
+            # WHICH statement is present-but-unusable, and ONE remedy (F5 review,
+            # D1/D2/R-M1): the staged file counts too — export prefers to hand
+            # over the artifact ``init``/``setup`` produced, so "no key yet" must
+            # not be printed while one is sitting on disk — and the key-id
+            # refusal's reason is designed standalone and already ends in the
+            # product action, so export must not stack its own on top of it (that
+            # composition ran 464 characters with the action twice). The artifact
+            # and the cost clause match the no-key branch (§2.9: no terminal
+            # commands in copy).
+            path = staged_file if staged_file.exists() else loaded.path
+            reason = "" if staged_file.exists() else loaded.reason
+            remedy = (
+                " — ask Local Operator to set up operator authority again for this "
+                "machine (one approval and one admin password prompt)"
+            )
+            suffix = "" if "set up operator authority" in reason else remedy
+            print(
+                f"the operator key at {path} exists but is not usable"
+                + (f" ({reason})" if reason else "")
+                + f", so there is nothing to hand to another machine{suffix}",
+                file=sys.stderr,
+            )
+            return 1
         print(
             "this machine has no operator key yet, so there is nothing to hand to "
             "another machine — ask Local Operator to set it up for you (one approval "
