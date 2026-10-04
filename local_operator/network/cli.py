@@ -46,6 +46,7 @@ import json
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -225,6 +226,23 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help=(
             "No human at this device: send this device's own derived code for the "
             "inviter to compare (a person on the inviting device must still confirm)"
+        ),
+    )
+    # THE ONE-ATTEMPT DIAGNOSTIC (F4, drill 2026-10-04). ``--explain`` runs the
+    # OFFLINE preflight — token, expiry, endpoints, and (when this device holds
+    # the network) the token's tag against its own secret and its own membership
+    # row — then performs THE SAME SINGLE ATTEMPT the plain join would, because
+    # the local failure class (a sealed record that failed authentication, a
+    # peer that closed, a timeout) is only observable on the wire. It reports the
+    # local ``join`` block (stage + class + kind + counters) and the persisted
+    # last-attempt record. DOCUMENTED AS ONE ATTEMPT: it dials, it can admit, and
+    # it spends the invite exactly like a join does.
+    join.add_argument(
+        "--explain",
+        action="store_true",
+        help=(
+            "Preflight the token locally, then run ONE attempt and report the local "
+            "failure class and stage (one attempt: it can admit and spends the invite)"
         ),
     )
     join.add_argument(
@@ -768,7 +786,15 @@ def main(args: argparse.Namespace) -> int:
             # exist to make possible. Stdout carries the payload, stderr keeps the
             # coloured sentence for a human watching the terminal.
             if _json_mode(args):
-                print(json.dumps({"ok": False, "code": exc.code, "message": exc.sentence}))
+                body: dict[str, Any] = {"ok": False, "code": exc.code, "message": exc.sentence}
+                # THE LOCAL JOIN BLOCK RIDES THE REFUSAL BODY (F4): attached by
+                # ``_cmd_join`` via ``_attach_join_block`` — an attribute, because
+                # the exception classes are the mesh's shared vocabulary and this
+                # is CLI-local payload dressing. Present only when an attempt ran.
+                block = getattr(exc, "join_block", None)
+                if isinstance(block, dict):
+                    body["join"] = block
+                print(json.dumps(body))
             print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
             # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
             # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
@@ -2386,8 +2412,16 @@ def _cmd_join(args: argparse.Namespace) -> int:
     moves to the inviter is only the transcription; the compare never moves, and
     the operator's confirm is the run's one human act.
     """
+    explain = bool(getattr(args, "explain", False))
     confirm = str(getattr(args, "confirm", "") or "").strip()
     if confirm:
+        if explain:
+            print(
+                "--explain runs its own attempt; --confirm answers a parked ceremony — "
+                "use one or the other",
+                file=sys.stderr,
+            )
+            return 2
         return _answer_parked_join(args, confirm)
     if bool(getattr(args, "automated", False)):
         # Each pair below cannot mean one thing at once: automated supplies this
@@ -2449,15 +2483,41 @@ def _cmd_join(args: argparse.Namespace) -> int:
         sas_matches,
     )
     from local_operator.network.identity import load_or_mint
-    from local_operator.network.types import MeshRefusal
+    from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
-    token = _read_token(args.token)
-    envelope = invite_mod.decode(token)
+    preflight: list[dict[str, str]] = []
+    try:
+        token = _read_token(args.token)
+        envelope = invite_mod.decode(token)
+    except MeshRefusal as exc:
+        if not explain:
+            raise
+        # The FIRST preflight answer, reported rather than raised: the caller asked
+        # for the local class, and "the token does not decode" IS one.
+        preflight.append(_preflight("token", "failed", exc.sentence))
+        return _explain_refusal(args, exc, preflight, store, from_attempt=False)
+    if explain:
+        preflight.append(
+            _preflight(
+                "token",
+                "ok",
+                f"decoded invite {envelope.invite_id} for "
+                f"{envelope.network_name or envelope.network_id}",
+            )
+        )
     hosts = invite_mod.host_candidates(envelope, args.host or None)
     if not hosts:
-        raise MeshRefusal(
+        exc = MeshRefusal(
             "no_host",
             "that invite names no endpoint; pass --host host:port",
+        )
+        if not explain:
+            raise exc
+        preflight.append(_preflight("hosts", "failed", exc.sentence))
+        return _explain_refusal(args, exc, preflight, store, from_attempt=False)
+    if explain:
+        preflight.append(
+            _preflight("hosts", "ok", f"{len(hosts)} endpoint(s): " + ", ".join(hosts))
         )
     identity = load_or_mint(name=args.name)
     settings = relay_mod.NetworkSettings.from_config()
@@ -2471,13 +2531,28 @@ def _cmd_join(args: argparse.Namespace) -> int:
     now = time.time()
     expires_at = envelope.issued_at + envelope.ttl_s
     if expires_at <= now:
-        raise MeshRefusal(
+        exc = MeshRefusal(
             "invite_expired",
             f"that invite expired {int(now - expires_at)}s ago. Invites are short-lived on "
             "purpose, so a token left where someone else could read it stops working; "
             "mint a fresh one on the other device with `lop network invite` and bring the "
             "new file across.",
         )
+        if not explain:
+            raise exc
+        preflight.append(_preflight("expiry", "failed", exc.sentence))
+        return _explain_refusal(args, exc, preflight, store, from_attempt=False)
+    if explain:
+        preflight.append(_preflight("expiry", "ok", f"{int(expires_at - now)}s left on it"))
+        # The member-side offline reads and one stop: a tag that does not verify
+        # against this device's own secret is a deterministic local fact, so no
+        # dial is run to rediscover it.
+        preflight.extend(_explain_member_checks(token, envelope, invite_mod))
+        stopped = next((entry for entry in preflight if entry["state"] == "failed"), None)
+        if stopped is not None:
+            code = str(stopped.get("code") or "invite_unusable")
+            exc = MeshRefusal(code, str(stopped.get("reading") or ""))
+            return _explain_refusal(args, exc, preflight, store, from_attempt=False)
 
     if bool(getattr(args, "park", False)):
         # ONE PARKED CEREMONY PER INVITE, refused BEFORE the dial rather than overwritten
@@ -2498,24 +2573,41 @@ def _cmd_join(args: argparse.Namespace) -> int:
 
     last_reason = ""
     for host in hosts:
-        link_result = _join_one(
-            host=host,
-            token=token,
-            envelope=envelope,
-            identity=identity,
-            settings=settings,
-            args=args,
-            declared_hosts=tuple(args.advertise_hosts or []),
-            wire=wire,
-            Handshake=Handshake,
-            Credential=Credential,
-            pair_abort_frame=pair_abort_frame,
-            pair_timeout_seconds=pair_timeout_seconds,
-            sas_matches=sas_matches,
-            invite_mod=invite_mod,
-            store=store,
-            relay_mod=relay_mod,
-        )
+        try:
+            link_result = _join_one(
+                host=host,
+                token=token,
+                envelope=envelope,
+                identity=identity,
+                settings=settings,
+                args=args,
+                declared_hosts=tuple(args.advertise_hosts or []),
+                wire=wire,
+                Handshake=Handshake,
+                Credential=Credential,
+                pair_abort_frame=pair_abort_frame,
+                pair_timeout_seconds=pair_timeout_seconds,
+                sas_matches=sas_matches,
+                invite_mod=invite_mod,
+                store=store,
+                relay_mod=relay_mod,
+            )
+        except MeshRefusal as exc:
+            # The attempt's own refusal (a pair refusal, a protocol error, a parked
+            # ceremony nobody answered). The block rides the exception so ANY caller's
+            # --json body carries it (``main()`` merges it); an explain run reports it
+            # here instead of raising it onward, and a parked-unanswered keeps exit 3.
+            _attach_join_block(exc, _attempt_block_from_record(_attempt_record(store)))
+            if not explain:
+                raise
+            return _explain_refusal(
+                args,
+                exc,
+                preflight,
+                store,
+                from_attempt=True,
+                rc=3 if isinstance(exc, JoinParkUnanswered) else None,
+            )
         if isinstance(link_result, str):
             # A per-host sentence, kept so the NEXT host is still tried and so the
             # final refusal can say what actually happened at each one.
@@ -2523,8 +2615,20 @@ def _cmd_join(args: argparse.Namespace) -> int:
             continue
         if link_result is None:
             continue
+        if explain:
+            return _explain_report(
+                args,
+                ok=True,
+                code="",
+                message="",
+                preflight=preflight,
+                store=store,
+                block={},
+                payload=link_result[1],
+                lines=link_result[0],
+            )
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
-    raise MeshRefusal(
+    failure = MeshRefusal(
         "join_failed",
         "could not join: "
         f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
@@ -2533,6 +2637,10 @@ def _cmd_join(args: argparse.Namespace) -> int:
         "every refusal tells an attacker which tokens are real. If you are not certain "
         "the token is still open, mint a fresh one with `lop network invite`.",
     )
+    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
+    if explain:
+        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
+    raise failure
 
 
 def _read_token(argument: str) -> str:
@@ -2579,6 +2687,402 @@ def _read_token(argument: str) -> str:
     return files[-1].read_text(encoding="utf-8").strip()
 
 
+#: The keys of the join failure payload's ``join`` block, in ONE place: the block
+#: is built by ``_JoinAttempt.block()`` and cropped back off the persisted record
+#: by ``_attempt_block_from_record``, so the two spellings cannot drift.
+_JOIN_BLOCK_KEYS = (
+    "stage",
+    "class",
+    "kind",
+    "host",
+    "link_id",
+    "transcript_hash",
+    "records_sent",
+    "records_received",
+    "local_only",
+)
+
+
+@dataclass
+class _JoinAttempt:
+    """One dial attempt and WHERE it was when it stopped — the joiner's own record.
+
+    THE WHOLE OBJECT IS LOCAL-ONLY (F4, drill 2026-10-04): the failure class, the
+    stage and the link's counters are exactly the facts the wire deliberately
+    withholds (a peer that explained its failures would be an oracle), so nothing
+    here may be rendered into a frame or any sentence that crosses to the other
+    side. It exists so ONE device's agent can answer "which end, at which stage,
+    which class" from its own files after a join stops — the question run 10 could
+    not answer on either end.
+    """
+
+    host: str
+    #: ``dial`` -> ``hello`` -> ``challenge`` -> ``auth`` -> ``welcome`` ->
+    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read``; the
+    #: statement boundary last ENTERED, so a failure names the step that was in
+    #: progress rather than the last step that finished.
+    stage: str = "dial"
+    #: The local failure class (``invite``/``dial``/``handshake``/``refused``/
+    #: ``link_crypto``/``peer_closed``/``timeout``/``io``) and its finer token
+    #: (the codec's ``auth``/``limit``/``parse``/``sequence``, a refusal code, an
+    #: exception class name).
+    failure_class: str = ""
+    kind: str = ""
+    #: The read deadline in force at ``stage`` when it reads at all — the number
+    #: the ``timeout`` copy renders.
+    budget_s: float | None = None
+    #: The handshake result and codec once established: their link id, transcript
+    #: hash and record counters are what the block reports.
+    result: Any = None
+    codec: Any = None
+
+    def note(self, failure_class: str, kind: str) -> None:
+        """Name the local class this attempt stopped with."""
+        self.failure_class = failure_class
+        self.kind = kind
+
+    def block(self) -> dict[str, Any]:
+        """The payload block for this attempt — never sent to any peer."""
+        block: dict[str, Any] = {
+            "stage": self.stage,
+            "class": self.failure_class,
+            "kind": self.kind,
+            "host": self.host,
+            "records_sent": int(getattr(self.codec, "sent", 0) or 0),
+            "records_received": int(getattr(self.codec, "received", 0) or 0),
+            # MARKS THE BLOCK as this device's OWN observation: the link id never
+            # crosses the wire at all and the transcript hash is a LOCAL
+            # fingerprint, and every field here is invisible to the other end by
+            # design — a reader must never treat any of it as something a peer
+            # said.
+            "local_only": True,
+        }
+        if self.result is not None:
+            block["link_id"] = str(self.result.link_id)
+            block["transcript_hash"] = str(self.result.transcript_hash)
+        return block
+
+
+def _join_class_of(exc: BaseException) -> tuple[str, str]:
+    """The local ``(class, kind)`` of a connection that died mid-attempt.
+
+    SPECIFIC FIRST: ``TimeoutError`` and ``ConnectionError`` are both ``OSError``
+    subclasses, so the order IS the classification. A ``LinkCryptoError`` carries
+    ``wire.LINK_CRYPTO_KINDS``; the socket classes carry themselves as their kind,
+    so the payload discriminates exactly
+    ``auth``/``limit``/``parse``/``sequence``/``peer_closed``/``timeout``/``io``.
+    """
+    from local_operator.network import wire
+
+    if isinstance(exc, wire.LinkCryptoError):
+        return "link_crypto", exc.kind
+    if isinstance(exc, TimeoutError):
+        return "timeout", "timeout"
+    if isinstance(exc, ConnectionError):
+        return "peer_closed", "peer_closed"
+    return "io", exc.__class__.__name__
+
+
+def _record_join_attempt(attempt: _JoinAttempt, envelope: Any, store: Any, *, ok: bool) -> None:
+    """Persist the attempt so ``--explain``/status can report it without a new dial.
+
+    BEST EFFORT, on purpose: this record is a diagnostic, and a store that cannot
+    write (a full disk, a read-only root) must never turn a completed join into a
+    failed one — or mask the real failure sentence with a disk error.
+    """
+    payload = {
+        "ts": time.time(),
+        "ok": ok,
+        "invite_id": str(getattr(envelope, "invite_id", "") or ""),
+        "network_id": str(getattr(envelope, "network_id", "") or ""),
+        "network_name": str(getattr(envelope, "network_name", "") or ""),
+        "budget_s": attempt.budget_s,
+        **attempt.block(),
+    }
+    try:
+        store.save_join_attempt(payload)
+    except OSError:
+        pass
+
+
+def _attempt_record(store: Any) -> dict[str, Any] | None:
+    """The persisted last-attempt record, read defensively (never raises)."""
+    try:
+        record = store.join_attempt()
+    except OSError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _attempt_block_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The ``join`` payload block cropped from a persisted record, or ``None``."""
+    if not record:
+        return None
+    block = {key: record[key] for key in _JOIN_BLOCK_KEYS if key in record}
+    return block or None
+
+
+def _attach_join_block(exc: BaseException, block: dict[str, Any] | None) -> None:
+    """Carry the local attempt block onto a refusal's ``--json`` body.
+
+    ``main()`` merges ``join_block`` into the refusal document when present, so the
+    refusal keeps its own class and its own exit code (``JoinParkUnanswered`` must
+    stay itself) while still shipping the F4 block. An ATTRIBUTE rather than a
+    field on the exception classes: those are the mesh's shared vocabulary
+    (``types.py``) and this is CLI-local payload dressing.
+    """
+    if block:
+        setattr(exc, "join_block", block)
+
+
+def _preflight(check: str, state: str, reading: str, *, code: str = "") -> dict[str, str]:
+    """One line of ``join --explain``'s offline preflight.
+
+    ``state`` is ``ok`` (checked and fine), ``failed`` (a hard local fact that
+    stops the dial), ``skipped`` (this device cannot answer it offline) or
+    ``noted`` (a fact reported, neither pass nor fail). ``code`` is set only on a
+    ``failed`` entry, where it becomes the refusal's machine code.
+    """
+    entry = {"check": check, "state": state, "reading": reading}
+    if code:
+        entry["code"] = code
+    return entry
+
+
+def _preflight_block(code: str) -> dict[str, Any]:
+    """The block-shaped row for a failure that never dialled: class ``invite``."""
+    return {"stage": "preflight", "class": "invite", "kind": code, "local_only": True}
+
+
+def _explain_member_checks(token: str, envelope: Any, invite_mod: Any) -> list[dict[str, str]]:
+    """The member-side offline reads: the token's tag, and this device's standing.
+
+    A device that ALREADY holds the invite's network can answer two questions the
+    wire would otherwise answer the hard way: whether the token was minted from the
+    secret it holds (``invite.check_tag`` — a mismatch is a deterministic local
+    fact, refused BEFORE a dial), and whether it is already recorded as an active
+    member. The membership finding is REPORTED, never turned into a skip: skipping
+    is the onboarding step's decision (its own slice), and what this attempt
+    exists to classify is the join MECHANISM a re-run would exercise.
+    """
+    from local_operator.network import store, wire
+    from local_operator.network.types import MeshRefusal
+
+    entries: list[dict[str, str]] = []
+    try:
+        record = store.load(envelope.network_id)
+    except FileNotFoundError:
+        record = None
+    if record is None:
+        entries.append(
+            _preflight(
+                "secret_tag",
+                "skipped",
+                "this device does not hold that network's secret, so the token's tag "
+                "cannot be checked here",
+            )
+        )
+        return entries
+    try:
+        secrets = store.require_secrets(envelope.network_id)
+    except (MeshRefusal, FileNotFoundError) as exc:
+        entries.append(
+            _preflight(
+                "secret_tag",
+                "skipped",
+                str(getattr(exc, "sentence", ""))
+                or "this device's secret for that network is unreadable",
+            )
+        )
+        return entries
+    try:
+        invite_mod.check_tag(
+            token,
+            envelope,
+            wire.invite_key(secrets.secret, envelope.network_id, envelope.invite_id),
+        )
+    except MeshRefusal as exc:
+        entries.append(_preflight("secret_tag", "failed", exc.sentence, code=exc.code))
+        return entries
+    entries.append(
+        _preflight("secret_tag", "ok", "the token's tag verifies against this device's own secret")
+    )
+    me = record.member(record.self_device_id)
+    if me is not None and me.active:
+        reading = (
+            f"this device is already an active member at epoch {record.epoch}; this "
+            "explain run performs the same ONE attempt a re-run of the join "
+            "mechanism would"
+        )
+    elif me is not None:
+        reading = (
+            f"this device holds the network but its own membership row is "
+            f"{me.lifecycle!r} (epoch {record.epoch})"
+        )
+    else:
+        reading = "this device holds the network but has no membership row of its own"
+    entries.append(_preflight("membership", "noted", reading))
+    return entries
+
+
+def _join_class_sentence(block: dict[str, Any], budget_s: float | None) -> str:
+    """The note's copy per LOCAL class — and it never claims a peer-side reason.
+
+    The sentences for the silent classes say exactly what this device observed and
+    NOTHING about the peer's reason ("not visible from here by design") — the same
+    non-claim discipline as the relay's ``_note_refused_handshake``. The classes
+    whose existing sentences already say everything (``invite``, ``dial``,
+    ``handshake``, ``refused``) return "" so the message is not duplicated.
+    """
+    stage = str(block.get("stage") or "the attempt")
+    kind = str(block.get("kind") or "")
+    failure_class = str(block.get("class") or "")
+    if failure_class == "link_crypto":
+        if kind == "auth":
+            return (
+                f"a sealed record could not be authenticated at {stage}; the link "
+                "closed rather than resynchronise (by design)"
+            )
+        if kind == "limit":
+            return (
+                f"a record exceeded the wire's record-size limit at {stage}; the link "
+                "is closed rather than fragmented"
+            )
+        if kind == "parse":
+            return (
+                f"a record at {stage} decrypted to something that was not a JSON frame; "
+                "the link is closed"
+            )
+        if kind == "sequence":
+            return (
+                f"the link's sequence numbers were exhausted at {stage}; reconnect with "
+                "a fresh handshake"
+            )
+        return f"a sealed record failed at {stage} ({kind or 'unknown kind'})"
+    if failure_class == "peer_closed":
+        return (
+            f"the peer closed the connection at {stage} without a frame; the reason "
+            "is not visible from here by design"
+        )
+    if failure_class == "timeout":
+        if kind == "pairing_unanswered":
+            return (
+                "the parked ceremony ran out its window with no answer; a person still "
+                "needs to read the code on both devices"
+            )
+        if isinstance(budget_s, (int, float)) and budget_s:
+            return f"no frame arrived at {stage} within {int(budget_s)}s"
+        return f"no frame arrived at {stage} within its deadline"
+    if failure_class == "io":
+        return f"the connection failed at {stage} ({kind or 'an OS error'})"
+    return ""
+
+
+def _record_reading(record: dict[str, Any]) -> str:
+    """One line for the persisted last-attempt record, for a human."""
+    ts = record.get("ts")
+    when = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+        if isinstance(ts, (int, float))
+        else "unknown time"
+    )
+    block = _attempt_block_from_record(record) or {}
+    if record.get("ok"):
+        what = "succeeded"
+    else:
+        what = f"{block.get('class')}:{block.get('kind')} at {block.get('stage')}"
+    return f"{when} — {what} ({block.get('host') or 'no host'})"
+
+
+def _explain_lines(
+    block: dict[str, Any] | None,
+    preflight: list[dict[str, str]],
+    record: dict[str, Any] | None,
+) -> list[str]:
+    """The human half of ``join --explain``: class, preflight lines, the record."""
+    lines: list[str] = []
+    if block:
+        head = f"class: {block.get('class')}:{block.get('kind')} at {block.get('stage')}"
+        budget = record.get("budget_s") if record else None
+        sentence = _join_class_sentence(block, budget if isinstance(budget, (int, float)) else None)
+        lines.append(f"{head} — {sentence}" if sentence else head)
+    if preflight:
+        lines.append(
+            "preflight: "
+            + "; ".join(
+                f"{entry.get('check')} {entry.get('state')} ({entry.get('reading')})"
+                for entry in preflight
+            )
+        )
+    if record is not None:
+        lines.append(f"last record: {_record_reading(record)}")
+    return lines
+
+
+def _explain_report(
+    args: argparse.Namespace,
+    *,
+    ok: bool,
+    code: str,
+    message: str,
+    preflight: list[dict[str, str]],
+    store: Any,
+    block: dict[str, Any] | None,
+    payload: dict[str, Any] | None = None,
+    lines: list[str] | None = None,
+    rc: int | None = None,
+) -> int:
+    """``join --explain``'s one output: the attempt + preflight + last record.
+
+    ONE function for every seat (a preflight refusal before any dial, a refused or
+    failed attempt, and a SUCCESS — success is a result too, and the answer
+    "nothing failed" is only trustworthy beside the same preflight and the same
+    persisted record every other seat reports).
+    """
+    record = _attempt_record(store)
+    if block is None:
+        block = _attempt_block_from_record(record)
+    body: dict[str, Any] = {"ok": ok}
+    if not ok:
+        if code:
+            body["code"] = code
+        if message:
+            body["message"] = message
+    for key, value in (payload or {}).items():
+        body.setdefault(key, value)
+    if block:
+        body["join"] = block
+    body["explain"] = {"preflight": preflight, "record": record}
+    out = list(lines or ([] if ok else ([message] if message else [])))
+    out.extend(_explain_lines(block, preflight, record))
+    emitted = _emit(args, body, out)
+    return emitted if rc is None else rc
+
+
+def _explain_refusal(
+    args: argparse.Namespace,
+    exc: BaseException,
+    preflight: list[dict[str, str]],
+    store: Any,
+    *,
+    from_attempt: bool,
+    rc: int | None = None,
+) -> int:
+    """One refusal, reported: a pre-dial failure names its own class, a failed
+    attempt takes its block from the record it just persisted."""
+    code = str(getattr(exc, "code", "") or "join_failed")
+    return _explain_report(
+        args,
+        ok=False,
+        code=code,
+        message=str(getattr(exc, "sentence", "") or exc),
+        preflight=preflight,
+        store=store,
+        block=None if from_attempt else _preflight_block(code),
+        rc=rc,
+    )
+
+
 def _join_one(
     *,
     host: str,
@@ -2610,7 +3114,11 @@ def _join_one(
 
     from local_operator.network import wire
     from local_operator.network.identity import mint_instance_id
-    from local_operator.network.types import HandshakeRefusal, MeshRefusal
+    from local_operator.network.types import (
+        HandshakeRefusal,
+        JoinParkUnanswered,
+        MeshRefusal,
+    )
 
     Handshake = helpers["Handshake"]
     Credential = helpers["Credential"]
@@ -2623,11 +3131,20 @@ def _join_one(
         port = int(port_text)
     except ValueError:
         return None
+    # THE LOCAL RECORD OF THIS ATTEMPT (F4): every stage below updates it, every
+    # failure writes it to the store, and the success path writes it too — a
+    # record exists after EVERY completed attempt, which is what lets
+    # ``join --explain`` and a status reader say what the last attempt was without
+    # dialing again. Nothing in it ever crosses the wire.
+    attempt = _JoinAttempt(host=host)
+    attempt.budget_s = float(settings.handshake_timeout_s)
     try:
         sock = socket.create_connection(
             (address or host, port), timeout=settings.handshake_timeout_s
         )
     except OSError as exc:
+        attempt.note("dial", exc.__class__.__name__)
+        _record_join_attempt(attempt, envelope, store, ok=False)
         return f"nothing was listening at {host} ({exc.__class__.__name__})"
     deadline = wire.deadline_in(settings.handshake_timeout_s)
     # ONE ANSWER, used for the hello we send AND for our own durable record: the
@@ -2642,6 +3159,7 @@ def _join_one(
     advertised = relay_mod.advertise_endpoints(settings, declared=declared_hosts)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        attempt.stage = "hello"
         handshake = Handshake.new(
             role="dialer",
             identity=identity,
@@ -2664,6 +3182,7 @@ def _join_one(
         }
         handshake.send_hello(sock)
         reader = wire.FrameReader(sock)
+        attempt.stage = "challenge"
         handshake.read_challenge(reader, deadline)
         credential = Credential(
             "invite",
@@ -2671,9 +3190,13 @@ def _join_one(
             wire.invite_key(envelope.material, envelope.network_id, envelope.invite_id),
         )
         handshake.send_auth(sock, credential)
+        attempt.stage = "welcome"
         handshake.read_welcome(reader, deadline)
+        attempt.stage = "establish"
         result = handshake.establish()
+        attempt.result = result
         codec = handshake.codec()
+        attempt.codec = codec
         fingerprint = wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash))
         # THE SHARE LIST COMES FIRST (when the owner advertised it): one bounded
         # read, before either prompt, so both humans see the same rows before the
@@ -2686,7 +3209,13 @@ def _join_one(
             codec=codec,
             reader=reader,
             remaining_s=invite_mod.remaining_seconds(envelope),
+            attempt=attempt,
         )
+        # The offer read is done; the NEXT wire step is the ready frame, whichever
+        # seat (park, automated, prompt) decides its value. Marking it here means a
+        # failure on that step — including the declined local abort — reads
+        # ``ready_send`` rather than the stale ``offer_read``.
+        attempt.stage = "ready_send"
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
@@ -2700,7 +3229,7 @@ def _join_one(
             # PHASE ONE. Everything above this line is the ceremony a terminal runs;
             # below it, who answers is the only difference — and that difference is
             # why this is a branch rather than a prompt with a longer timeout.
-            return _park_join(
+            outcome = _park_join(
                 args=args,
                 store=store,
                 envelope=envelope,
@@ -2714,8 +3243,12 @@ def _join_one(
                 advertised=advertised,
                 handshake=handshake,
                 offer_view=offer_view,
+                attempt=attempt,
                 helpers=helpers,
             )
+            attempt.stage = "joined"
+            _record_join_attempt(attempt, envelope, store, ok=True)
+            return outcome
         elif getattr(args, "automated", False):
             # NO HUMAN AT THIS END (design §2.6; M4). The value that crosses the
             # wire is THIS device's own derivation — the value a person at this
@@ -2740,7 +3273,7 @@ def _join_one(
         if typed is None:
             sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
             raise MeshRefusal("declined", "this device declined the pairing")
-        return _finish_pairing(
+        outcome = _finish_pairing(
             typed=typed,
             sock=sock,
             codec=codec,
@@ -2753,8 +3286,12 @@ def _join_one(
             advertised=advertised,
             fingerprint=fingerprint,
             offer_view=offer_view,
+            attempt=attempt,
             helpers=helpers,
         )
+        attempt.stage = "joined"
+        _record_join_attempt(attempt, envelope, store, ok=True)
+        return outcome
     except HandshakeRefusal as refusal:
         # NOT named as a peer refusal: the listener closes the socket on a refusal
         # rather than explaining (an oracle would let a stranger probe token
@@ -2765,10 +3302,22 @@ def _join_one(
         # BEFORE ``MeshRefusal``, and it has to be: ``HandshakeRefusal`` is a
         # SUBCLASS of it, so the broader clause would swallow this one and the
         # sentence below would be unreachable.
+        attempt.note("handshake", refusal.code)
+        _record_join_attempt(attempt, envelope, store, ok=False)
         return f"the handshake at {host} stopped: {refusal.sentence}"
-    except MeshRefusal:
+    except MeshRefusal as exc:
+        if isinstance(exc, JoinParkUnanswered):
+            # NOBODY ANSWERED IS NOT A REFUSAL: the parked window ran out with no
+            # transcription. The class table calls that a timeout; the code is
+            # preserved as the finer token.
+            attempt.note("timeout", exc.code)
+        else:
+            attempt.note("refused", exc.code)
+        _record_join_attempt(attempt, envelope, store, ok=False)
         raise
     except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
+        attempt.note(*_join_class_of(exc))
+        _record_join_attempt(attempt, envelope, store, ok=False)
         return f"the handshake at {host} stopped ({exc.__class__.__name__})"
     finally:
         try:
@@ -2831,6 +3380,7 @@ def _drain_pair_offer(
     codec: Any,
     reader: Any,
     remaining_s: float,
+    attempt: _JoinAttempt | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """The one bounded read of the share list, right after ``welcome``.
 
@@ -2859,6 +3409,12 @@ def _drain_pair_offer(
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return "absent", []
     budget = min(PAIR_OFFER_WAIT_S, max(0.0, remaining_s))
+    if attempt is not None:
+        # The stage and the budget the WHOLE attempt is at: a failure opening this
+        # record is "the first sealed read failed", which is exactly the fact run
+        # 10 could not see.
+        attempt.stage = "offer_read"
+        attempt.budget_s = float(budget)
     try:
         frame = codec.open(reader.read_record_payload(wire.deadline_in(budget)))
     except TimeoutError:
@@ -2893,6 +3449,7 @@ def _finish_pairing(
     fingerprint: str,
     offer_view: dict[str, Any],
     helpers: dict[str, Any],
+    attempt: _JoinAttempt | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Send the human's transcription and turn the answer into a receipt.
 
@@ -2912,6 +3469,8 @@ def _finish_pairing(
     from local_operator.network.types import MeshRefusal
 
     invite_mod = helpers["invite_mod"]
+    if attempt is not None:
+        attempt.stage = "ready_send"
     sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=typed)))
     # The wait is the CONFIRM budget, not the handshake timeout: the other side
     # now has to reach a human, and timing out at 10 s would fail every honest
@@ -2920,7 +3479,11 @@ def _finish_pairing(
     # of "what is left", so the promise and this wait cannot drift with the token's
     # age (agent review round 1, MAJOR 2).
     remaining = invite_mod.remaining_seconds(envelope)
-    deadline = wire.deadline_in(helpers["pair_timeout_seconds"](remaining))
+    wait_s = float(helpers["pair_timeout_seconds"](remaining))
+    deadline = wire.deadline_in(wait_s)
+    if attempt is not None:
+        attempt.stage = "result_read"
+        attempt.budget_s = wait_s
     answer = codec.open(reader.read_record_payload(deadline))
     if answer.get("op") == "net_pair_offer":
         # A LATE SHARE LIST IS TOLERATED ONCE (the race §6.6 names): the drain in
@@ -3200,6 +3763,7 @@ def _park_join(
     handshake: Any,
     offer_view: dict[str, Any],
     helpers: dict[str, Any],
+    attempt: _JoinAttempt | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Phase one: hold the open ceremony and wait for a second invocation's answer.
 
@@ -3314,6 +3878,7 @@ def _park_join(
             fingerprint=fingerprint,
             offer_view=offer_view,
             helpers=helpers,
+            attempt=attempt,
         )
     except MeshRefusal as refusal:
         store.clear_join_answer(envelope.invite_id)

@@ -130,6 +130,13 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
+        # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME (F4, drill
+        # 2026-10-04): not a refusal — nothing decided anything — and the row that
+        # answers "the relay saw it" when a join stops before any pairing record
+        # exists. Bounded to connections that got past their hello, so port scans
+        # leave nothing; ``cause`` carries the local socket class and
+        # ``detail.stage`` the statement boundary it died at.
+        "handshake_stopped",
         "authorisation_refused",
         "link_opened",
         "session_stream_opened",
@@ -257,6 +264,13 @@ CAUSES: frozenset[str] = frozenset(
         "peer_closed",
         "owner_gone",
         "peer_unreachable",
+        # The LOCAL class of a connection that died in a handshake or a pairing
+        # (F4, drill 2026-10-04): a sealed record that failed against this side's
+        # own keys, and everything else the OS said went wrong. Countable here so
+        # an incident reader can tell a crypto failure apart from a peer that
+        # merely departed, without parsing a sentence.
+        "link_crypto",
+        "io",
     }
 )
 
@@ -264,7 +278,15 @@ CAUSES: frozenset[str] = frozenset(
 #: the writer, which is what makes "never key material" checkable rather than
 #: aspirational.
 DETAIL_KEYS: dict[str, frozenset[str]] = {
-    "pairing_refused": frozenset({"cause", "subject"}),
+    # ``kind``/``stage`` ride the SOCKET-CLASS rows only (F4, drill 2026-10-04):
+    # ``kind`` is the codec's local class (auth/sequence/parse/limit) and
+    # ``stage`` the statement boundary the read was at. Both are LOCAL facts,
+    # never sent to any peer.
+    "pairing_refused": frozenset({"cause", "subject", "kind", "stage"}),
+    # The relay's own row for a connection that got past its hello and then died
+    # before the welcome: stage + mode + addr say WHERE, and ``kind`` distinguishes
+    # the codec's classes for the one case that has them.
+    "handshake_stopped": frozenset({"stage", "mode", "their_addr", "their_device", "kind"}),
     "pairing_awaiting_confirmation": frozenset(
         {
             "subject",

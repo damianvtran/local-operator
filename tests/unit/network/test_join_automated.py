@@ -19,6 +19,7 @@ supplied — the same discipline ``test_join_park`` and ``test_relay_e2e`` state
 from __future__ import annotations
 
 import argparse
+import json
 from argparse import Namespace
 from typing import Any
 
@@ -35,6 +36,7 @@ from local_operator.network.handshake import (
     sas_matches,
 )
 from tests.unit.network.test_join_park import _minted
+from tests.unit.network.test_pair_offer import _FailingHandshake
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _await_event,
     _events,
@@ -253,3 +255,59 @@ def test_automated_refuses_flag_pairs_it_cannot_honour(
     ):
         assert net_cli._cmd_join(_args(**{conflict: True})) == 2  # noqa: SLF001
         assert "--automated" in capsys.readouterr().err
+
+
+def test_explain_reports_the_class_one_attempt_produces(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F4: ``join --explain`` runs ONE attempt and reports the local block.
+
+    The attempt is the automated one (no human), forced onto the sealed layer by
+    the same failing codec the joiner-record cell uses, so the class it reports is
+    the one a re-run would produce: ``link_crypto``/``auth`` at ``offer_read``.
+    The report carries the preflight readings and the persisted last-attempt
+    record beside the block, and the preflight must say the token itself was FINE
+    — that is what tells the reader the failure is not the token.
+    """
+    server_a, server_b, _host, _port = devices
+    record, minted = _minted(server_a)
+    monkeypatch.setattr("local_operator.network.handshake.Handshake", _FailingHandshake)
+
+    args = _automated_args(name=server_b.identity.name)
+    args.explain = True
+    args.network_command = "join"
+    args.advertise_hosts = []
+    args.token = minted.token
+    rc = net_cli.main(args)
+    assert rc == 1
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["ok"] is False
+    block = body["join"]
+    assert block["stage"] == "offer_read"
+    assert block["class"] == "link_crypto"
+    assert block["kind"] == "auth"
+    checks = {entry["check"]: entry["state"] for entry in body["explain"]["preflight"]}
+    # The token, its expiry and the endpoints were all FINE: the class below is
+    # the find, and the remedy is not "mint a new invite".
+    assert checks["token"] == "ok"
+    assert checks["hosts"] == "ok"
+    assert checks["expiry"] == "ok"
+    # The record is the persisted last-attempt record, read back from the store.
+    recorded = body["explain"]["record"]
+    assert recorded["ok"] is False
+    assert recorded["class"] == "link_crypto"
+    assert recorded["kind"] == "auth"
+    assert recorded["stage"] == "offer_read"
+    # NEGATIVE: nothing was admitted anywhere.
+    assert store.load(record.network_id, server_a.root).member(server_b.identity.device_id) is None
+
+
+def test_explain_refuses_the_confirm_combination(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--explain`` runs its own attempt; ``--confirm`` answers a parked one."""
+    args = _automated_args(confirm="000000")
+    args.explain = True
+    assert net_cli._cmd_join(args) == 2  # noqa: SLF001
+    assert "use one or the other" in capsys.readouterr().err

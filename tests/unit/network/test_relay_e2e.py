@@ -173,6 +173,7 @@ def _join(
     envelope: Any,
     typed_code: str = "000000",
     settings: relay.NetworkSettings | None = None,
+    handshake_cls: Any = Handshake,
 ) -> Any:
     """Drive the joining side's ceremony, with the human step supplied by the test.
 
@@ -197,7 +198,7 @@ def _join(
         settings=settings or relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
         args=args,
         wire=wire,
-        Handshake=Handshake,
+        Handshake=handshake_cls,
         Credential=Credential,
         pair_abort_frame=pair_abort_frame,
         pair_timeout_seconds=pair_timeout_seconds,
@@ -596,6 +597,93 @@ def test_an_unanswered_confirmation_times_out_and_admits_nobody(
     assert "pairing_refused" in _events(server_a)
     # And the parked question was cleaned up rather than left behind holding a code.
     assert store.pending_pairings(server_a.root) == []
+
+
+class _CorruptingCodec:
+    """The real codec, corrupting its FIRST sealed frame in flight (F4).
+
+    A one-byte flip keeps the record's framing valid and its tag invalid: the wire
+    shape of "a record failed authentication". Later frames seal normally, so only
+    the ready frame is affected.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.corrupted = False
+
+    def seal(self, frame: dict[str, Any]) -> bytes:
+        sealed = bytearray(self.inner.seal(frame))
+        if not self.corrupted:
+            self.corrupted = True
+            sealed[-1] ^= 0x01
+        return bytes(sealed)
+
+    def open(self, payload: Any) -> dict[str, Any]:
+        return self.inner.open(payload)
+
+
+class _CorruptingHandshake(Handshake):
+    """The real handshake, whose joiner codec corrupts its first sealed frame."""
+
+    def codec(self) -> Any:
+        return _CorruptingCodec(super().codec())
+
+
+def test_a_forced_sealed_failure_is_classified_on_the_inviter(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F4 (drill 2026-10-04): the inviter's audit names the real class of a sealed
+    failure — ``link_crypto``, its kind and its stage — where it used to say
+    ``cause=policy``.
+
+    The joiner seals the ready frame and the ciphertext is corrupted in flight;
+    the inviter's first sealed READ fails, and the row it files must name that.
+    The joiner's own view is the abort the inviter sends (the wire carries only
+    ``error``): its record keeps that word, which is the honest local reading —
+    the fine class is visible only on the end whose keys refused the record.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    _type_the_code(monkeypatch)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        _join(
+            server_b,
+            host=host,
+            port=port,
+            token=token,
+            envelope=envelope,
+            handshake_cls=_CorruptingHandshake,
+        )
+    # The wire copy is UNCHANGED: the abort says ``error``, the coarse word it
+    # always said for this class. The finer class stays local to the inviter.
+    assert refused.value.code == "error"
+
+    _await_event(server_a, "pairing_refused")
+    rows = [row for row in server_a.audit.tail(limit=500) if row.get("event") == "pairing_refused"]
+    assert rows, "the inviter filed no row for the sealed failure"
+    row = rows[-1]
+    assert row["cause"] == "link_crypto", row
+    assert row["outcome"] == "failed", row
+    assert row["detail"]["kind"] == "auth", row
+    assert row["detail"]["stage"] == "ready_read", row
+    assert row["detail"]["cause"] == "error", row
+    assert row["detail"]["subject"] == server_b.identity.device_id, row
+    # Nobody was admitted, and the failed ceremony spent the invite.
+    refreshed = store.load(record.network_id, server_a.root)
+    assert refreshed.member(server_b.identity.device_id) is None
+    assert refreshed.invites[0].state == "consumed", refreshed.invites[0]
+
+    # THE JOINER'S OWN RECORD, from the same failure, keeps the word the wire
+    # carried — it cannot see the class, and its record must not pretend to.
+    attempt = store.join_attempt()
+    assert attempt is not None, "the joiner recorded nothing for its failed attempt"
+    assert attempt["ok"] is False
+    assert attempt["class"] == "refused"
+    assert attempt["kind"] == "error"
+    assert attempt["stage"] == "result_read"
 
 
 def test_a_replayed_invite_is_refused(
