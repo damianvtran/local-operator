@@ -1971,6 +1971,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
     )
+    # A SECOND positional must PARSE rather than die inside argparse. Without
+    # this, `lop exec "Some Title" "do the work"` — the shape an agent reaches
+    # for when it mistakes the title for the first argument — exits 2 with
+    # argparse's bare "unrecognized arguments: do the work", which cannot name
+    # `--name` as the fix and reads like a broken install. This hidden catch-all
+    # turns that into a refusal we author (see the exec branch in `main`), whose
+    # message names the flag that actually titles the run. argparse.SUPPRESS
+    # keeps it out of `--help`: it exists to be refused, not used.
+    exec_parser.add_argument("extra", nargs="*", default=[], help=argparse.SUPPRESS)
     from local_operator.exec_startup import add_startup_arguments
 
     add_startup_arguments(exec_parser)
@@ -14192,6 +14201,48 @@ def main() -> int:
             print("usage: lop install {status, prune, migrate}", file=sys.stderr)
             return 1
         elif args.subcommand == "exec":
+            # Refuse a second positional BEFORE anything else in the branch. The
+            # trap is that a title reads as a second prompt, so
+            # `lop exec "Some Title" "do the work"` would otherwise silently
+            # treat the title as the prompt and run under the wrong brief.
+            # `--workstream` is the flag that publishes a run and takes no value,
+            # which is exactly why the title cannot be passed positionally.
+            # `args.command` is never None here: the catch-all `extra` only
+            # receives positionals that follow a first one.
+            extras = getattr(args, "extra", None) or []
+            if extras:
+                quoted = [repr(part) for part in (args.command, *extras)]
+                received = (
+                    ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
+                    if len(quoted) > 2
+                    else " and ".join(quoted)
+                )
+                # Exactly two positionals is the common shape — a title mistaken
+                # for the prompt — and can be repaired with a concrete command.
+                # Three or more cannot: a `--name <title> <prompt>` example would
+                # silently DROP the tail, handing the caller a valid command that
+                # runs a different brief than the one they composed. Those get the
+                # rule instead of a misleading example.
+                if len(quoted) == 2:
+                    hint = (
+                        "The first positional is the prompt, not a title. To name the run, "
+                        "pass the title via --name:\n"
+                        # shlex.quote, not repr: the suggestion is composed to be pasted
+                        # into a shell, and repr's escaping is Python's, not the shell's
+                        # (a title like `O'Brien's audit` renders differently under each).
+                        f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+                    )
+                else:
+                    hint = (
+                        "The first positional is the prompt, not a title: pass the title via "
+                        "--name, and quote the prompt as the ONE positional — the extra "
+                        "positionals are not consumed.\n"
+                    )
+                parser.error(
+                    f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
+                    f"{received}.\n{hint}"
+                    "(--workstream is a flag — it publishes the run and takes no value.)"
+                )
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.

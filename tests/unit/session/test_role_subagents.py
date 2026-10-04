@@ -424,6 +424,15 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     assert (
         actual_names == expected_names
     ), f"{agent_name}: actual={actual_names!r}, expected={expected_names!r}"
+    # Durability pin for the tool that IS an agent's route to other sessions:
+    # the set comparison above is satisfied by any self-consistent inventory, so
+    # a future profile edit could quietly hand `sessions` to a read-only role (or
+    # drop it from the delegating one) and still pass. Named explicitly here so
+    # that widening or narrowing the surface fails loudly instead.
+    if agent_name == "manager":
+        assert "sessions" in actual_names
+    elif agent_name in ("reviewer", "scout"):
+        assert "sessions" not in actual_names
     assert [tool.name for tool in stream.requests[0].tools] == expected_names
     assert set(TOOL_BUILDERS) >= set(expected_names)
     await parent.dispose()
