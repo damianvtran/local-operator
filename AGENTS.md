@@ -3109,11 +3109,10 @@ below):
    `p50` sat at 14 ms; the same decoupling later showed a queue at a record 915
    with a sub-1% shed, so the sample contradicted the state in **both**
    directions.
-3. **The recovery set** — the deletion gate's first condition was derived from
-   the set being non-empty; across 20 consecutive samples the set was **never**
-   empty, so the condition was never exercised — **unobservable, not quiet**:
-   the "quiet window" this workload was being graded against is not a state it
-   produces.
+3. **The recovery set** — the deletion gate's first condition requires the set to
+   be empty; across 20 consecutive samples the set was **never** empty, so the
+   condition was never exercised — **unobservable, not quiet**: the "quiet
+   window" this workload was being graded against is not a state it produces.
 4. **The sweep's shard count** — `0 of 0, ok`, an empty set graded as a pass.
 5. **The heap max** — 78 against 75 and 73 read as a rise; confirmation showed
    the spread above, so the rise could have been phase. **Caught before the call
