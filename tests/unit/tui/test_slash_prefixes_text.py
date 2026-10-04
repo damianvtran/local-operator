@@ -81,6 +81,10 @@ PREFIXES_TEXT_POLICY = {
     "theme": True,
     # --- everything else: the trailing text is prose, never an argument -------
     "help": False,
+    # The legend takes no argument at all — `/sidebar`'s shape: a trailing
+    # sentence after the word stays a message, and the handler refuses it
+    # with a notice rather than running it as a command with text.
+    "keys": False,
     "exit": False,
     "clear": False,
     # WHICH message is chosen in the picker the command opens, so there is
@@ -256,6 +260,7 @@ ARGUMENT_SHAPE_POLICY = {
     # The page or panel IS the receipt and takes no argument at all; these open a
     # surface rather than consuming text, so a sentence after them is a message.
     "help": ArgumentShape.NONE,
+    "keys": ArgumentShape.NONE,
     "exit": ArgumentShape.NONE,
     "clear": ArgumentShape.NONE,
     "copy": ArgumentShape.NONE,
