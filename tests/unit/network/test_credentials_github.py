@@ -107,7 +107,7 @@ class _FakeGithub:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:  # noqa: D102 — silence
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
                 pass
 
             def _json(self, status: int, payload: dict[str, Any] | None) -> None:
@@ -206,7 +206,9 @@ class _GitBackend:
         self.hold_event: threading.Event | None = None
         self.saw_receive_pack = threading.Event()
 
-    def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> tuple:
+    def handle(
+        self, method: str, target: str, headers: dict[str, str], body: bytes
+    ) -> tuple[str, dict[str, str], bytes]:
         path, _, query = target.partition("?")
         if method == "POST" and path.endswith("/git-receive-pack"):
             self.saw_receive_pack.set()
@@ -367,7 +369,7 @@ class _PlainGitServer:
         backend = self.backend
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
                 pass
 
             def _serve(self) -> None:
@@ -1469,9 +1471,15 @@ def test_the_printenv_invariant_masks_the_injected_token(
 
     variables = VariableStore(cwd=str(tmp_path))
     context = ToolContext(cwd=str(tmp_path), variables=variables, session_id="sess-printenv")
-    result = asyncio.run(
-        builtin.execute_bash("bash-printenv", {"command": "printenv GH_TOKEN"}, None, None, context)
-    )
+
+    async def _print_env() -> Any:
+        # A coroutine wrapper: the guarded tool returns an awaitable, and
+        # ``asyncio.run`` takes a coroutine specifically.
+        return await builtin.execute_bash(
+            "bash-printenv", {"command": "printenv GH_TOKEN"}, None, None, context
+        )
+
+    result = asyncio.run(_print_env())
     assert token not in result.text, result.text
     assert "[redacted]" in result.text, "the result did not show the masking at all"
 
