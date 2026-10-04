@@ -3100,19 +3100,20 @@ Two faces, one root:
   shard sweep printed `0 of 0, ok`: an empty set as a passing state.
 
 The five instances this heading was written from, all measured on the campaign
-desk's own surfaces in one night (its figures, quoted as ranges and percentiles
-per check 2 below):
+desk's own surfaces (its figures, quoted as ranges and percentiles per check 2
+below):
 
 1. **The queue** — the withdrawn 74/37/16 fractions: aliasing at ~15 s against a
    ~30 s period, certifying shape 35-65% across eleven consecutive blocks at ~8 s.
 2. **The latency fraction** — a `p95` line in a new unit failing while the block
-   `p50` sat at 13 ms; the same decoupling later showed a queue at a record 915
+   `p50` sat at 14 ms; the same decoupling later showed a queue at a record 915
    with a sub-1% shed, so the sample contradicted the state in **both**
    directions.
 3. **The recovery set** — the deletion gate's first condition was derived from
-   the set being non-empty; 20 consecutive samples with an empty set showed the
-   condition was **unobservable**, not quiet: the "quiet window" was never a
-   state this workload produces.
+   the set being non-empty; across 20 consecutive samples the set was **never**
+   empty, so the condition was never exercised — **unobservable, not quiet**:
+   the "quiet window" this workload was being graded against is not a state it
+   produces.
 4. **The sweep's shard count** — `0 of 0, ok`, an empty set graded as a pass.
 5. **The heap max** — 78 against 75 and 73 read as a rise; confirmation showed
    the spread above, so the rise could have been phase. **Caught before the call
@@ -3124,15 +3125,17 @@ rather than the data; a sampler that started but did not sample; and a fallback
 that had never been run.
 
 Three of the five were found by the desk auditing a claim it was about to make
-rather than by a failure, and two by a lane's instrument catching its own gap —
-the heap one on 12 samples at 5 s, by confirming before reporting. That is the
-habit this heading exists to leave behind: **confirm the reading before you
-report it.**
+rather than by a failure, and two by a lane's instrument catching its own gap.
+The habit they share is the one this heading exists to leave behind: **confirm
+the reading before you report it** — which is what turned the heap maximum into a
+confirmation (12 samples at 5 s) instead of a call.
 
 **The check, before any such number is quoted as a state:**
 
-1. **What is the sampling interval, and what is the quantity's own period?** If
-   they are within an order of magnitude, the reading is aliased.
+1. **What is the sampling interval, and what is the quantity's own period?**
+   The sample has to sit comfortably **below** the period, not at it: the bar
+   that was set for the surface above is ≤10 s against a ~30 s period for
+   anything certifying, with ~31 s pilot-grade.
 2. **Quote it as a range or a percentile, never a single value** — p50 over a
    short burst, with the max as a secondary figure so the tail is not lost.
 3. **Compute any trend on the percentile, not the raw extreme.**
@@ -3142,8 +3145,11 @@ report it.**
 5. **Is a "no change" verdict distinguishable from "no data"?** Absence of a
    field must mean "no material change", never "no reading".
 6. **Is the verdict computed from a value the instrument actually holds?** That
-   is the third rule of the section above — the two conventions meet at this
-   question, and either alone leaves a hole the other covers.
+   is the question the rule above also asks, from the other side — *never assert
+   a verdict from a value you do not have* — so the two conventions meet here:
+   one catches a verdict taken from a value the instrument never read, the other
+   a verdict taken from a sample that does not describe the quantity, and a
+   reading can be both.
 
 ### When a test is already flaking
 
