@@ -163,7 +163,10 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # whose provisioning has no desktop proxy; `/links`, whose whole
             # reason for existing is that a TERMINAL cannot open the hyperlink it
             # paints — a desktop browser renders the same markdown with real,
-            # clickable links, so there is nothing for a proxy to add; and
+            # clickable links, so there is nothing for a proxy to add; `/keys`,
+            # whose legend describes THIS terminal's keyboard (`?`/`/keys`,
+            # issue #1944) and has no desktop surface it would describe — the
+            # decision is stated on the `keys` entry in `slash_commands.py`; and
             # `/notifications`, whose affordance on the desktop is the sidebar's
             # OWN control, and a destination the renderer has no adapter for is a
             # row that is offered and then dead-ends (the `/mobile` lesson); and
@@ -194,7 +197,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
-            assert withheld == {"links", "mobile", "network", "notifications"}
+            assert withheld == {"keys", "links", "mobile", "network", "notifications"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
             # catalogue's `aliases` are copied straight off `spec.aliases`
