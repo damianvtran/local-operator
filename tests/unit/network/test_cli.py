@@ -1124,6 +1124,98 @@ def test_an_informational_address_does_not_red_the_report_and_a_real_failure_sti
     assert "172.31.22.23" not in machine["message"]
 
 
+def test_the_transport_only_pair_reads_complete_once_never_askable_addresses_are_scoped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drill finding, 2026-10-04 (F9): the Mac's ``172.20.x`` LAN addresses,
+    dialled from a node holding no address on that network, are questions that
+    cannot be asked from there.
+
+    The two rows are EXCLUDED FROM THE DECISION and still VISIBLE in the
+    reading (named out of scope, rendered ``n/a``), so nothing
+    reachability-shaped reddens the report; a failing MCP row still reddens
+    ``ready`` (its own fold is F8's separate question) and is the only row the
+    message names.
+    """
+    checks: list[dict[str, Any]] = [
+        {"check": "identity", "ok": True, "detail": "present"},
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "127.0.0.1:4098",
+            "ok": True,
+            "detail": "ok",
+            "observed": {"outcome": "connected_unpinned", "attempted": True},
+            "remedies": [],
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "172.20.0.246:4097",
+            "ok": False,
+            "detail": "no_answer",
+            "observed": {"outcome": "no_answer", "attempted": True, "winner": "127.0.0.1:4098"},
+            "remedies": ["re-run the report"],
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "172.20.13.239:4097",
+            "ok": False,
+            "detail": "no_answer",
+            "observed": {
+                "outcome": "no_answer_elsewhere",
+                "attempted": True,
+                "winner": "127.0.0.1:4098",
+            },
+            "remedies": [],
+        },
+    ]
+    readiness._mark_out_of_scope(checks[2:], ["10.9.0.5"])  # noqa: SLF001 — the rule under test
+    payload: dict[str, Any] = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 0  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is True
+    scoped = [r for r in machine["checks"] if str(r.get("endpoint", "")).startswith("172.20")]
+    assert len(scoped) == 2
+    for row in scoped:
+        assert row["ok"] is True and row["observed"]["out_of_scope"] is True
+    assert scoped[0]["remedies"] == []  # an action item under a non-failing row misreads
+
+    # The human reading names them out of scope and renders them as neither
+    # a failure nor a verification.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=False, peer="")) == 0  # noqa: SLF001
+    human = capsys.readouterr().out
+    assert "n/a  reachability cloud-node-1 172.20.0.246:4097: out of scope: " in human
+    assert "FAIL reachability cloud-node-1 172.20" not in human
+
+    # An MCP row still reddens `ready`'s own fold (Slice B keeps it) and is the
+    # only row the message names.
+    checks.append(
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "detail": (
+                "this device has no MCP login for https://mcp.slack.com/mcp; " "sign in here first"
+            ),
+            "remedies": [],
+        }
+    )
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is False and machine["code"] == "unhealthy"
+    assert "mcp_credential" in machine["message"]
+    assert "172.20" not in machine["message"]
+
+
 def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_red(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2220,7 +2312,7 @@ def test_credentials_lists_the_shareable_ledger_per_server(
         "transport": "http",
         "login_here": False,
         "shared_with": [],
-        "remedy": f"run '/mcp login {NOTION_URL}' here first",
+        "remedy": "sign in here first",
     }
     # The provider row: kind and label from the same classifier the share records
     # with, the held sentence's remedy, no share yet (nothing declares it).
@@ -2269,9 +2361,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     ), out
     assert "      organization account — share only to your own devices" in out, out
     assert "      signed in as owner@example.test" in out, out
-    assert (
-        f"  notion  http  no login here yet — run '/mcp login {NOTION_URL}' here first" in out
-    ), out
+    assert "  notion  http  no login here yet — sign in here first" in out, out
     assert "fs" not in out
 
 

@@ -721,6 +721,156 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     assert "--automated" in " ".join(join_calls[0][1])
 
 
+def _drill_run_local(token: Path, ready_payload: dict[str, Any]):
+    """``_happy_run_local`` with the ready payload swapped for the drill's."""
+
+    def run_local(argv: list[str], *, timeout: float) -> onboard.CommandResult:
+        joined = " ".join(argv)
+        if "invite" in joined:
+            return onboard.CommandResult(
+                tuple(argv), 0, json.dumps(_invite_payload(token)), "", at=0.0
+            )
+        if "ready" in joined:
+            return onboard.CommandResult(tuple(argv), 0, json.dumps(ready_payload), "", at=0.0)
+        return onboard.CommandResult(tuple(argv), 0, "", "", at=0.0)
+
+    return run_local
+
+
+def _reachability_check(endpoint: str, *, ok: bool, out_of_scope: bool = False) -> dict[str, Any]:
+    observed: dict[str, Any] = {"outcome": "no_answer", "attempted": True}
+    if out_of_scope:
+        observed["out_of_scope"] = True
+    return {
+        "check": "reachability",
+        "class": "admission",
+        "device_id": "d_node",
+        "device_name": "cloud-node-1",
+        "endpoint": endpoint,
+        "ok": ok,
+        "detail": "no_answer",
+        "observed": observed,
+        "remedies": [],
+    }
+
+
+def _mcp_login_check(*, ok: bool = False) -> dict[str, Any]:
+    return {
+        "check": "readiness",
+        "capability": "mcp_credential",
+        "class": "equipment",
+        "device_id": "d_node",
+        "device_name": "cloud-node-1",
+        "ok": ok,
+        "detail": (
+            "this device has no MCP login for https://mcp.slack.com/mcp; sign in here first"
+            if not ok
+            else "cloud-node-1 borrows the login for slack from this device (a grant is "
+            "issued per request; nothing to copy)"
+        ),
+        "observed": {"server": "slack"},
+        "remedies": [],
+    }
+
+
+def test_verify_reports_mcp_logins_without_failing_on_them(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill finding, 2026-10-04 (F8): the last cell was gated on something the
+    onboarding flow does not own.
+
+    The drill's ready payload carries the transport-only pair (one unpinnable
+    accept, two never-askable ``172.20.x`` rows from F9) plus a Slack MCP row
+    that nothing in the pair can clear — and its own ``ok`` is ``false``. The
+    step must still fold the record to ``connected``, and the receipt must NAME
+    the MCP gap without letting it hold the verdict.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    fake = FakeApprovals(_record())
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    ready = {
+        "ok": False,  # ready's own fold still reddens on the MCP row (slice B)
+        "identity_present": True,
+        "checks": [
+            {"check": "identity", "class": "admission", "ok": True, "detail": "present"},
+            _reachability_check("127.0.0.1:4098", ok=True),
+            _reachability_check("172.20.0.246:4097", ok=True, out_of_scope=True),
+            _reachability_check("172.20.13.239:4097", ok=True, out_of_scope=True),
+            _mcp_login_check(ok=False),
+        ],
+    }
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_drill_run_local(token, ready),
+    )
+
+    assert payload["state"] == "connected", payload
+    verify = next(row for row in payload["steps"] if row["step"] == "verify")
+    assert verify["ok"] is True
+    detail = verify["detail"]
+    assert detail.startswith("every readiness check needed for onboarding passed for cloud-node-1")
+    assert "mcp logins: slack — not required for onboarding" in detail
+    assert "/mcp login" not in detail  # §2.9: no terminal command in a remedy
+    # The raw fact is still recorded: ready itself did not pass.
+    assert verify["data"]["ready_ok"] is False
+
+
+def test_verify_names_a_failing_admission_check_and_still_gates_on_equipment(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F8 counter-probe: the fold is not a blanket exemption.
+
+    An in-scope reachability failure and a still-gating equipment failure
+    (operator authority) both hold the verdict, each named by its own key —
+    never the generic ``readiness`` the old list printed.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    fake = FakeApprovals(_record())
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    ready = {
+        "ok": False,
+        "identity_present": True,
+        "checks": [
+            {"check": "identity", "class": "admission", "ok": True, "detail": "present"},
+            _reachability_check("10.9.1.5:4097", ok=False),
+            {
+                "check": "readiness",
+                "capability": "operator_authority",
+                "class": "equipment",
+                "device_id": "d_node",
+                "device_name": "cloud-node-1",
+                "ok": False,
+                "detail": "no operator authority is installed on cloud-node-1",
+                "remedies": ["ask Local Operator to set up operator authority on cloud-node-1"],
+            },
+            _mcp_login_check(ok=False),
+        ],
+    }
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_drill_run_local(token, ready),
+    )
+
+    assert payload["state"] == "failed", payload
+    verify = next(row for row in payload["steps"] if row["step"] == "verify")
+    assert verify["ok"] is False
+    detail = verify["detail"]
+    assert "reachability 10.9.1.5:4097" in detail
+    assert "operator_authority" in detail
+    assert "mcp_credential" not in detail  # non-gating: not in the failure list
+    assert "still fail: readiness" not in detail  # the generic name is gone
+
+
 def test_a_refusal_the_node_reserves_is_a_satisfied_state_not_a_failure(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

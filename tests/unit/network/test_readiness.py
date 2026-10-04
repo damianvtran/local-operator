@@ -564,7 +564,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         by_server["unreadable"]["ok"] is False
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
     )
-    assert "'/mcp login https://g.example/mcp' here first" in by_server["declared"]["detail"]
+    assert "sign in here first" in by_server["declared"]["detail"]
     assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
@@ -591,7 +591,7 @@ def test_shareable_lines_render_every_login_state_once() -> None:
             "server": "notion",
             "transport": "sse",
             "login_here": False,
-            "remedy": "run '/mcp login https://n.example/mcp' here first",
+            "remedy": "sign in here first",
             "shared_with": [],
         },
         {"server": "odd", "transport": "http", "login_here": None, "remedy": "", "shared_with": []},
@@ -608,7 +608,7 @@ def test_shareable_lines_render_every_login_state_once() -> None:
         "  slack  http  login held — share: lop network credential share mcp:https://h.example/mcp"
         " --with <device>",
         "      shared with cloud-node-1 (session)",
-        "  notion  sse  no login here yet — run '/mcp login https://n.example/mcp' here first",
+        "  notion  sse  no login here yet — sign in here first",
         "  odd  http  login state not known — this device's credential store could not be read",
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>",
@@ -1009,9 +1009,17 @@ def test_an_unpinned_link_reads_as_the_link_fact_not_an_address() -> None:
     reading = readiness.reachability_reading(
         _row("connected_unpinned", detail="accepted_unpinned_link", ok=True)
     )
-    assert reading == ("the peer is up (its link is live); this address accepted a TCP connection")
+    assert reading == (
+        "the peer is up (its link is live); this address accepted a TCP connection — "
+        "the link's transport endpoint cannot be pinned to a declared address of the "
+        "peer (its recorded address is not one of the peer's declared endpoints)"
+    )
     assert "the peer answered" not in reading
     assert "not identified" not in reading
+    # What cannot be pinned and why (2026-10-04): the record it keeps cannot be
+    # named as a dialable address of the peer — an address fact, not a caveat on
+    # the mesh.
+    assert "cannot be pinned to a declared address of the peer" in reading
 
     # The same state on an address that did NOT answer names no address either.
     silent = readiness.reachability_reading(
@@ -1335,6 +1343,180 @@ def test_doctor_keeps_not_attempted_failing_and_repair_rows_untouched() -> None:
     assert rows[1]["ok"] is True  # bad_endpoint IS one: it cannot be dialled
     assert rows[2]["ok"] is True  # the verification row itself, untouched
     assert rows[3]["ok"] is False  # a different check; the flip never touches it
+
+
+# ---------------------------------------------------------------------------
+# Out-of-scope candidates (drill finding, 2026-10-04): excluded from the
+# decision, visible in the reading
+# ---------------------------------------------------------------------------
+
+
+def test_a_private_address_off_this_devices_networks_is_out_of_scope_not_a_failure() -> None:
+    """F9: the Mac's ``172.20.x`` LAN addresses, dialled from a node holding no
+    address on that network, are questions that cannot be asked from there.
+
+    The row must not read as a failure (nothing failed) and must not read as
+    verified either: it is still REPORTED, named out of scope, keeps every
+    observed fact, and stops participating in the verdict.
+    """
+    rows = [
+        _reach_row("172.20.0.246:4097", "no_answer", ok=False, detail="no_answer"),
+        _reach_row(
+            "172.20.13.239:4097",
+            "no_answer_elsewhere",
+            ok=False,
+            detail="no_answer",
+            winner="127.0.0.1:4098",
+        ),
+        # Same /16 as this device: a real failure, not a scope exclusion.
+        _reach_row("10.9.1.5:4097", "no_answer", ok=False, detail="no_answer"),
+        # Public and unroutable: also a real failure.
+        _reach_row("203.0.113.7:4097", "no_answer", ok=False, detail="no_answer"),
+    ]
+    readiness._mark_out_of_scope(rows, ["10.9.0.5"])
+    assert [row["ok"] for row in rows] == [True, True, False, False]
+    for row in rows[:2]:
+        assert row["observed"]["out_of_scope"] is True
+        assert row["remedies"] == []
+        reading = readiness.reachability_reading(row)
+        assert reading == readiness.out_of_scope_clause(row)
+        assert reading.startswith("out of scope: ")
+        assert "nothing answered" not in reading
+        assert "the peer cannot be asked at it from here" in reading
+    # The observed facts the composer wrote stay on the row.
+    assert rows[0]["observed"]["outcome"] == "no_answer"
+
+
+def test_an_answer_refutes_the_scope_exclusion() -> None:
+    """Only rows that got NO answer are scope candidates: a refusal or a started
+    handshake is an answer, and an answer refutes "cannot route to it"; a
+    connected row is a positive and is never touched."""
+    rows = [
+        _reach_row(
+            "172.20.0.246:4097",
+            "refused",
+            ok=False,
+            detail="connect_failed:ConnectionRefusedError",
+        ),
+        _reach_row("172.20.0.247:4097", "handshake_failed", ok=False, detail="handshake_failed:x"),
+        _reach_row("172.20.0.248:4097", "connected_unpinned", ok=True),
+    ]
+    readiness._mark_out_of_scope(rows, ["10.9.0.5"])
+    assert [row["ok"] for row in rows] == [False, False, True]
+    assert all(row["observed"].get("out_of_scope") is None for row in rows)
+
+
+def test_the_scope_rule_is_a_class_and_position_property() -> None:
+    """Never a carve-out for the drill's pair (F9): the SAME candidate flips
+    with the reading device's own addresses, and no non-RFC1918 class is ever
+    scoped."""
+    candidate = "172.20.0.246:4097"
+    for own, scoped in (
+        ([], True),  # no addresses at all: off every network
+        (["10.9.0.5"], True),  # a different private network
+        (["172.20.0.5"], False),  # same /16: askable; the honest negative stands
+        (["172.20.99.99", "10.0.0.1"], False),
+    ):
+        rows = [_reach_row(candidate, "no_answer", ok=False, detail="no_answer")]
+        readiness._mark_out_of_scope(rows, own)
+        assert (rows[0]["ok"] is True) is scoped, own
+    for endpoint in ("127.0.0.1:4098", "203.0.113.7:4097", "169.254.1.1:4097", "100.64.0.1:4097"):
+        rows = [_reach_row(endpoint, "no_answer", ok=False, detail="no_answer")]
+        readiness._mark_out_of_scope(rows, [])
+        assert rows[0]["ok"] is False, endpoint
+
+
+def test_the_renderer_reads_an_out_of_scope_row_as_not_a_failure() -> None:
+    scoped = _reach_row("172.20.0.246:4097", "no_answer", ok=False, detail="no_answer")
+    readiness._mark_out_of_scope([scoped], ["10.9.0.5"])
+    failing = _reach_row("10.9.1.5:4097", "no_answer", ok=False, detail="no_answer")
+    lines = readiness.render_check_lines([scoped, failing])
+    assert lines[0].startswith("n/a  reachability cloud-node-1 172.20.0.246:4097:")
+    assert "out of scope" in lines[0]
+    assert lines[1].startswith("FAIL reachability cloud-node-1 10.9.1.5:4097:")
+
+
+def test_onboarding_failures_holds_admission_plus_still_gating_equipment() -> None:
+    """F8: the onboarding fold is admission plus equipment still marked gating;
+    the MCP pair is reported but non-fatal."""
+    checks = [
+        {"check": "reachability", "class": "admission", "ok": False},
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "class": "equipment",
+            "ok": False,
+        },
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "ok": False,
+            "observed": {"server": "slack"},
+        },
+        {"check": "readiness", "capability": "mcp_servers", "class": "equipment", "ok": False},
+        {"check": "readiness", "capability": "git_identity", "class": "equipment", "ok": True},
+        {"check": "identity", "class": "admission", "ok": True},
+    ]
+    failing = readiness.onboarding_failures(checks)
+    assert [row.get("capability") or row["check"] for row in failing] == [
+        "reachability",
+        "operator_authority",
+    ]
+
+
+def test_equipment_note_names_failed_mcp_rows_and_nothing_else() -> None:
+    checks = [
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "ok": False,
+            "observed": {"server": "slack"},
+        },
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "ok": False,
+            "observed": {"server": "notion"},
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "class": "equipment",
+            "ok": False,
+        },
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "ok": True,
+            "observed": {"server": "linear"},
+        },
+    ]
+    assert readiness.equipment_note(checks) == (
+        "mcp logins: slack, notion — not required for onboarding"
+    )
+    assert (
+        readiness.equipment_note(
+            [{"check": "readiness", "capability": "mcp_servers", "class": "equipment", "ok": False}]
+        )
+        == "mcp servers: none declared — not required for onboarding"
+    )
+    assert (
+        readiness.equipment_note(
+            [
+                {
+                    "check": "readiness",
+                    "capability": "mcp_credential",
+                    "class": "equipment",
+                    "ok": True,
+                }
+            ]
+        )
+        == ""
+    )
 
 
 # ---------------------------------------------------------------------------

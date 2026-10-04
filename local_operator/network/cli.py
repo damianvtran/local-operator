@@ -6691,6 +6691,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
     checks.append(
         {
             "check": "identity",
+            "class": readiness_mod.CLASS_ADMISSION,
             "ok": identity_file.exists(),
             "detail": "present" if identity_file.exists() else "identity_missing",
         }
@@ -6699,6 +6700,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         checks.append(
             {
                 "check": "network",
+                "class": readiness_mod.CLASS_ADMISSION,
                 "ok": not record.stale,
                 "detail": record.stale or "ok",
                 "network_id": record.network_id,
@@ -6709,6 +6711,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
             checks.append(
                 {
                     "check": "membership",
+                    "class": readiness_mod.CLASS_ADMISSION,
                     "network_id": record.network_id,
                     "ok": False,
                     "code": standing["state"],
@@ -6724,6 +6727,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
             checks.append(
                 {
                     "check": "reachability",
+                    "class": readiness_mod.CLASS_ADMISSION,
                     "device_id": member.device_id,
                     "device_name": member.name,
                     "endpoint": (member.endpoints or [""])[0],

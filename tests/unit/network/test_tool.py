@@ -530,7 +530,7 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
                 "transport": "http",
                 "login_here": False,
                 "shared_with": [],
-                "remedy": "run '/mcp login https://n.example/mcp' here first",
+                "remedy": "sign in here first",
             },
             {
                 "provider": "radient",
@@ -547,7 +547,7 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
         "  slack  http  login held — share: lop network credential share mcp:https://h.example/mcp"
         " --with <device>",
         "      shared with cloud-node-1 (session)",
-        "  notion  http  no login here yet — run '/mcp login https://n.example/mcp' here first",
+        "  notion  http  no login here yet — sign in here first",
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>",
         "      organization account — share only to your own devices",
@@ -754,11 +754,10 @@ _UNHEALTHY_READY: dict[str, Any] = {
             "code": "no_credential",
             "detail": (
                 "if the `files` server needs a sign-in, this device has no MCP login for "
-                "https://mcp.example.test/files — run '/mcp login "
-                "https://mcp.example.test/files' here first"
+                "https://mcp.example.test/files — sign in here first"
             ),
             "remedies": [
-                "run '/mcp login https://mcp.example.test/files' here, then `lop network "
+                "sign in here first, then `lop network "
                 "credential share mcp:https://mcp.example.test/files --with cloud-node-1`"
             ],
             "source": "local",
@@ -801,7 +800,8 @@ def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
     text = _text(result)
     assert "FAIL readiness operator_authority cloud-node-1" in text
     assert "lop operator install" in text
-    assert "mcp login https://mcp.example.test/files" in text
+    assert "sign in here first, then" in text
+    assert "credential share mcp:https://mcp.example.test/files" in text
     assert _payload(result)["code"] == "unhealthy"
 
 

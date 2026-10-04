@@ -59,7 +59,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from local_operator.network import onboard_approvals as approvals_adapter
 from local_operator.network.types import MeshRefusal
@@ -773,6 +773,25 @@ def _json_from(text: str) -> dict[str, Any] | None:
     except ValueError:
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _verify_failure_names(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The named checks a failed onboarding fold reads as.
+
+    A capability row is named by its ``capability`` — the F8 fix: this list used
+    to print the generic kind, "readiness", for every capability row — and a
+    reachability row by its endpoint, because a pair can have several.
+    """
+    names: list[str] = []
+    for row in rows:
+        kind = str(row.get("check") or "")
+        if kind == "readiness":
+            names.append(str(row.get("capability") or kind))
+        elif kind == "reachability" and row.get("endpoint"):
+            names.append(f"reachability {row['endpoint']}")
+        else:
+            names.append(kind or "?")
+    return names
 
 
 def _invite_network_label(
@@ -2126,8 +2145,15 @@ class OnboardRun:
 
         The Mac-side ``lop network ready --peer <device>`` is the acceptance
         surface (its rows are what the operator sees); the node-side ``doctor``
-        and ``peers`` are recorded alongside. ``verify`` fails on a ready
-        payload that says it is not ok, and on a member row that never appeared.
+        and ``peers`` are recorded alongside.
+
+        THE FOLD IS THE ONBOARDING FOLD, NOT ``ready``'s OWN ``ok`` (F8 ruling,
+        2026-10-04): "the device is onboarded" and "every declared MCP server is
+        signed in" are different questions. A failed MCP row is REPORTED —
+        named in the receipt through ``readiness.equipment_note`` — but cannot
+        fail the flow; the sites that need an MCP login refuse at their own
+        point of use. A failing admission row (or a still-gating equipment row,
+        e.g. operator authority) fails the step, each named by its own key.
         """
         name = str(self.view.device.get("name") or "")
         device_id = ""
@@ -2138,7 +2164,10 @@ class OnboardRun:
         doctor = self._node_json("lop network doctor", timeout=self._step_timeout("verify"))
         peers = self._remote_lop("lop network peers --json", timeout=60.0)
         ready: dict[str, Any] | None = None
+        note = ""
         if name or device_id:
+            from local_operator.network import readiness as readiness_mod
+
             peer = name or device_id
             ready_result = self.run_local(
                 [*self.local_cli, "network", "ready", "--peer", peer, "--json"],
@@ -2153,27 +2182,38 @@ class OnboardRun:
                     + (tail[-1][:200] if tail else "no output"),
                     {"peer": peer},
                 )
-            if not ready.get("ok"):
-                failing = [
-                    str(row.get("check") or row.get("name") or "?")
-                    for row in (ready.get("rows") or ready.get("checks") or [])
-                    if not (row.get("ok") if isinstance(row, dict) else True)
-                ]
+            rows = ready.get("rows") or ready.get("checks") or []
+            failures = list(readiness_mod.onboarding_failures(rows))
+            if not ready.get("identity_present", True):
+                failures.insert(0, {"check": "identity", "ok": False})
+            failing = _verify_failure_names(failures)
+            if failing or (not rows and not ready.get("ok")):
                 return _StepOutcome(
                     False,
                     "the machine is not ready yet"
                     + (f" — these checks still fail: {', '.join(failing)}" if failing else ""),
                     {"peer": peer, "ready": {"ok": ready.get("ok")}},
                 )
+            note = readiness_mod.equipment_note(rows)
         else:
             return _StepOutcome(
                 False,
                 "the request names no device to verify against; the join step must "
                 "have recorded one",
             )
+        detail = "every readiness check passed" + (" for " + name if name else "")
+        if note:
+            # REPORTED, NOT HIDDEN (F8): the MCP logins ride the receipt even
+            # when they did not hold the step — the operator is told the login
+            # is a convenience, not a blocker.
+            detail = (
+                "every readiness check needed for onboarding passed"
+                + (" for " + name if name else "")
+                + f"; {note}"
+            )
         return _StepOutcome(
             True,
-            "every readiness check passed" + (" for " + name if name else ""),
+            detail,
             {
                 "peer": name or device_id,
                 "ready_ok": bool(ready and ready.get("ok")),
