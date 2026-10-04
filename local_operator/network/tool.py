@@ -806,20 +806,35 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         from local_operator.network import readiness as readiness_mod
         from local_operator.resume import doctor_detail_words
 
-        lines = [
-            (
+        lines = []
+        for check in payload.get("checks") or []:
+            observed = check.get("observed")
+            observed = observed if isinstance(observed, dict) else {}
+            if observed.get("out_of_scope"):
+                # THE SAME READING THE CLI'S DOCTOR GIVES (F9; design round 1,
+                # D3): excluded from the decision, named as out of scope, and
+                # the raw dial result does not ride along.
+                lines.append(
+                    (
+                        f"n/a  {check.get('check')} {check.get('device_id', '')} "
+                        f"{check.get('endpoint', '')} — {readiness_mod.out_of_scope_clause(check)}"
+                    ).rstrip()
+                )
+                continue
+            line = (
                 f"{'ok  ' if check.get('ok') else 'FAIL'} {check.get('check')} "
                 f"{check.get('device_id', '')} {check.get('endpoint', '')} "
                 f"{doctor_detail_words(str(check.get('detail', '')))}"
-                + (f" — {clause}" if (clause := readiness_mod.informational_clause(check)) else "")
-            ).rstrip()
-            for check in payload.get("checks") or []
-        ]
+            )
+            clause = readiness_mod.informational_clause(check)
+            if clause:
+                line += f" — {clause}"
+            lines.append(line.rstrip())
         if not lines:
             lines = ["nothing to check: no networks, or no other members yet"]
         if not payload.get("identity_present", True):
             lines.append(
-                "this device has no mesh identity: run `lop network init`, or "
+                "this device has no mesh identity: create a network here, or "
                 "re-pair with a new invite"
             )
         return lines

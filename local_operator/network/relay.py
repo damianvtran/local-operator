@@ -8773,13 +8773,13 @@ class RelayServer:
                     "code": "not_implemented" if planned else "unknown_local_op",
                     "message": (
                         f"{op} is not in this build: {owner} owns that slice. Nothing "
-                        "was changed and no session was touched. `lop network doctor` "
-                        "reports what this build does serve."
+                        "was changed and no session was touched. The doctor on this "
+                        "device reports what this build does serve."
                         if planned
                         else (
                             f"this relay does not know the action {op!r}. Nothing was "
-                            "changed. Check the spelling, or run `lop network doctor` "
-                            "for what this build serves."
+                            "changed. Check the spelling, or check the doctor on this "
+                            "device for what this build serves."
                         )
                     ),
                 }
@@ -9063,8 +9063,7 @@ class RelayServer:
                     "shares_not_offered",
                     f"{unoffered[0]!r} is not being served in this ceremony, so it cannot be "
                     "granted by it — the list can only be reduced here; to share it after "
-                    f"the join, run `lop network credential share {unoffered[0]} --with "
-                    f"{pending.joiner_device_id}` on this device",
+                    f"the join, share it with {pending.joiner_device_id} on this device",
                 )
         decision = PairDecision(
             invite_id=pending.invite_id,
@@ -10273,6 +10272,17 @@ class RelayServer:
                         "detail": attempt.detail,
                     }
                 )
+        # SCOPE FIRST, THEN INFORMATIONAL (F9; design round 1, D3): the same
+        # order ``ready`` applies, and the same reason — an out-of-scope
+        # candidate must not be re-dressed by the flip that serves addresses
+        # which WERE askable; the two rules must not both claim a row. ``doctor``
+        # reads the same addresses that ``ready`` does, so it must not point its
+        # reader at a question that cannot be asked from here either. The
+        # own-address read is a local interface-table read (no traffic), once
+        # per member probed.
+        from local_operator.network import readiness as readiness_mod
+
+        readiness_mod.mark_out_of_scope(rows, addresses.local_ipv4_addresses())
         # INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): the same
         # semantics ``ready`` applies to its own rows — ONE home,
         # ``readiness.mark_informational`` — because doctor's reader met the same
@@ -10280,8 +10290,6 @@ class RelayServer:
         # reds the whole report while the handshake VERIFIED the member at
         # another address. The flip touches reachability rows only; the
         # credential-repair rows beside them stay exactly as they are.
-        from local_operator.network import readiness as readiness_mod
-
         readiness_mod.mark_informational(rows)
         return rows
 
@@ -12254,8 +12262,10 @@ def generation_words(facts: Mapping[str, Any]) -> str:
         return f"{running} — cannot confirm it is current"
     if not stale:
         return str(running)
+    # F10's wording ("behind install X") with the §2.9 repave (this slice): the
+    # sentence names the action, never the command.
     where = f"behind install {own}" if (own and own != running) else "behind the install"
-    return f"{running} — {where}; `lop network restart`"
+    return f"{running} — {where}; restart the relay"
 
 
 def generation_clause(facts: Mapping[str, Any]) -> str:

@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.network import addresses as addresses_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import identity as identity_mod
 from local_operator.network import readiness, relay, store, wire
@@ -507,6 +508,10 @@ def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
     assert "its link is live" in reading
     assert "not identified" not in reading
     assert "link_address" not in live_row["observed"]
+    # THE WHY LIVES IN ``detail`` (design round 1, D5): the reading stays in the
+    # family's register while the address fact that explains it is one field
+    # over.
+    assert "not one the peer declares" in live_row["detail"]
     dead_row = rows["127.0.0.1:1"]
     assert dead_row["ok"] is False
     assert "its link is live" in dead_row["remedies"][0]
@@ -516,6 +521,133 @@ def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
     # gone and the row legitimately reads connected_link instead.)
     if ephemeral not in (live, "127.0.0.1:1"):
         assert ephemeral not in json.dumps(payload)
+    server_b.stop()
+
+
+def test_a_private_candidate_off_this_devices_networks_is_excluded_and_still_reported(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Drill finding, 2026-10-04 (F9): the Mac's ``172.20.x`` LAN addresses,
+    dialled from a node holding no address on that network, are excluded from
+    the decision and STILL REPORTED — named out of scope, never a FAIL row.
+
+    This is the REAL composer (``_reachability_rows`` builds from a member
+    whose declared set carries the drill's shape); only the dial and this
+    device's own addresses are stubbed, because both are properties of the
+    machine the test happens to run on.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, host, port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    # An inbound link, like the drill's transport forward: A's record of B is
+    # an ephemeral socket, so the accept cannot be pinned (connected_unpinned).
+    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert peer_link is not None, reason
+    link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001
+    assert link is not None
+    _await_membership_pull(link)
+    _set_peer_endpoints(
+        server_a,
+        record,
+        server_b.identity.device_id,
+        [live, "172.20.0.246:4097", "172.20.13.239:4097"],
+    )
+    monkeypatch.setattr(addresses_mod, "local_ipv4_addresses", lambda: ["10.9.0.5"])
+    probe = relay.CandidateProbe(
+        sock=None,
+        winner="",
+        attempts=[
+            relay.CandidateAttempt(endpoint=live, connected=True, detail="ok", latency_ms=1.0),
+            relay.CandidateAttempt(
+                endpoint="172.20.0.246:4097",
+                connected=False,
+                detail=relay.DETAIL_NO_ANSWER,
+                latency_ms=None,
+            ),
+            relay.CandidateAttempt(
+                endpoint="172.20.13.239:4097",
+                connected=False,
+                detail=relay.DETAIL_NO_ANSWER,
+                latency_ms=None,
+            ),
+        ],
+        complete=True,
+        reason="",
+    )
+    monkeypatch.setattr(relay, "probe_candidates", lambda *a, **k: probe)
+
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    rows = {row["endpoint"]: row for row in _rows(payload, "reachability")}
+    live_row = rows[live]
+    assert live_row["ok"] is True
+    assert live_row["observed"]["outcome"] == "connected_unpinned"
+    for endpoint in ("172.20.0.246:4097", "172.20.13.239:4097"):
+        row = rows[endpoint]
+        assert row["ok"] is True, row
+        assert row["observed"]["out_of_scope"] is True, row
+        assert row["observed"]["outcome"] == "no_answer"  # facts kept, not dropped
+        assert row["remedies"] == []
+        reading = readiness.reachability_reading(row)
+        assert reading.startswith("out of scope: "), reading
+        assert "the peer cannot be asked at it from here" in reading
+    # rc is still 1 for the fresh fixture's capability rows, but the scoped
+    # addresses must not be among the named failures.
+    assert rc == 1
+    assert "172.20" not in payload.get("message", "")
+    server_b.stop()
+
+
+def test_the_same_private_candidate_stays_red_when_this_device_shares_its_network(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Counter-probe for the scope rule: the exclusion is a property of the
+    address class AND this device's network position — the SAME drill rows keep
+    their honest negative when this device holds an address on ``172.20``.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, host, port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert peer_link is not None, reason
+    link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001
+    assert link is not None
+    _await_membership_pull(link)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live, "172.20.0.246:4097"])
+    monkeypatch.setattr(addresses_mod, "local_ipv4_addresses", lambda: ["172.20.0.5", "10.9.0.5"])
+    probe = relay.CandidateProbe(
+        sock=None,
+        winner="",
+        attempts=[
+            relay.CandidateAttempt(endpoint=live, connected=True, detail="ok", latency_ms=1.0),
+            relay.CandidateAttempt(
+                endpoint="172.20.0.246:4097",
+                connected=False,
+                detail=relay.DETAIL_NO_ANSWER,
+                latency_ms=None,
+            ),
+        ],
+        complete=True,
+        reason="",
+    )
+    monkeypatch.setattr(relay, "probe_candidates", lambda *a, **k: probe)
+
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    rows = {row["endpoint"]: row for row in _rows(payload, "reachability")}
+    dead = rows["172.20.0.246:4097"]
+    assert dead["ok"] is False
+    assert "out_of_scope" not in dead["observed"]
+    assert "the peer cannot be asked" not in readiness.reachability_reading(dead)
+    assert rc == 1
     server_b.stop()
 
 
@@ -625,10 +757,10 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     assert "ask Local Operator to set up" in " ".join(operator_row["remedies"])
     git_row = _capability(payload, readiness.CAPABILITY_GIT)
     assert (git_row["ok"], git_row["code"]) == (False, readiness.CODE_NO_GIT_IDENTITY)
-    assert "git config --global user.name" in " ".join(git_row["remedies"])
+    assert "set its git author name and email" in " ".join(git_row["remedies"])
     mcp_row = _capability(payload, readiness.CAPABILITY_MCP_SERVERS)
     assert (mcp_row["ok"], mcp_row["code"]) == (False, readiness.CODE_NO_MCP_SERVERS)
-    assert "/mcp add" in " ".join(mcp_row["remedies"])
+    assert "push the MCP server definitions" in " ".join(mcp_row["remedies"])
     model_row = _capability(payload, readiness.CAPABILITY_MODEL_CREDENTIAL)
     assert (model_row["ok"], model_row["code"]) == (False, readiness.CODE_NOT_CONFIGURED)
     assert "/model default" in " ".join(model_row["remedies"])

@@ -225,6 +225,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "classifier input (the probe's own code, compared against the producer's "
         "constants); the row's sentence is rendered by the glossing renderers",
     ),
+    # The scope rule's classifier (F9; design round 1, D3): the same dialect read
+    # as ``_did_not_lead`` — the probe's own code, compared against the producer's
+    # constants (plus ``observed.outcome`` when present) — and never printed from
+    # this site; the reading is rendered by the glossing renderers.
+    ("local_operator/network/readiness.py", "_no_answer_row", "detail"): (
+        1,
+        "classifier input (both dialects' codes, compared against the producers' "
+        "constants); the row's sentence is rendered by the glossing renderers",
+    ),
     (
         "local_operator/network/readiness.py",
         "render_check_lines",

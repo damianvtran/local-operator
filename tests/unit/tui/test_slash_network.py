@@ -1496,25 +1496,20 @@ async def test_the_invite_arm_addresses_a_multi_word_name_the_way_its_siblings_d
 
 
 @pytest.mark.asyncio
-async def test_the_invite_refusal_names_a_remedy_the_caret_accepts(
+async def test_the_invite_refusal_names_the_product_action_not_a_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """U4: the refusal used to say what was missing and stop.
+    """U4, re-cut by §2.9 (design round 1, D2, 2026-10-04): the refusal names
+    the action, never a spelling to paste.
 
-    Measured on a device that had just been told to invite: ``✗ name a network:
-    this device is in none``. Every other refusal in this family ends with the
-    command that gets the reader out — the CLI's own join failures do (``mint one
-    on the other device with `lop network invite`, bring the file across, then run
-    …``) — and this one named no way forward on the surface where `invite` is a
-    one-word command away from the empty state that does not cover it.
-
-    The remedy is asserted WHERE IT IS ADDRESSED: the same sentence reaches a
-    shell and a composer, so the composer's copy has to name a command the caret
-    runs — `tui_spelling` renames the CLI's `init` to this front end's `new` — and
-    the remedy the frame carries is then handed to the real arm to prove it is
-    accepted. The create itself is not EXECUTED here: the composer's `new` arm
-    starts the relay (`_cmd_init` without `--no-start`), and a unit test must not
-    leave a daemon behind — the executed half is the receipt test above.
+    U4 required every refusal in this family to end with the way forward; it
+    rendered as the CLI's own command, which the composer renamed through
+    ``tui_spelling``. §2.9 (frozen since) forbids a command in a refusal
+    sentence — for the shell reader most of all — so the sentence now names the
+    product action alone and reads the same in both frames; the commands live
+    in the empty state's own teaching rows (its own test). What U4 got measured
+    is kept: the action the sentence names is the caret's own create arm,
+    exercised below.
     """
     from local_operator.tui.network_cli import run_network, tui_spelling
 
@@ -1525,18 +1520,15 @@ async def test_the_invite_refusal_names_a_remedy_the_caret_accepts(
     assert not refused.ok, refused.lines
     sentence = refused.lines[-1]
     assert "name a network: this device is in none" in sentence, sentence
-    assert "lop network init <name>" in sentence, sentence
-    composer = tui_spelling(sentence)
-    assert composer.endswith("`/network new <name>` creates the first one"), composer
-
-    remedy = composer.split("`", 2)[1]
-    assert remedy == "/network new <name>", remedy
+    assert "create a network here" in sentence, sentence
+    assert "`" not in sentence and "lop network" not in sentence, sentence
+    assert tui_spelling(sentence) == sentence, sentence
     recorder = _Recorder()
     monkeypatch.setattr("local_operator.tui.app.run_network", recorder)
     app = _app_fixture()
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
-        await _submit(pilot, app, remedy.replace(" <name>", " devmesh"))
+        await _submit(pilot, app, "/network new devmesh")
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert recorder.argv == ["init", "devmesh"], recorder.argv
