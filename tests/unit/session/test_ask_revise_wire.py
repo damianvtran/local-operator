@@ -15,13 +15,14 @@ two things that only exist above it:
   dead" are different claims.
 
 * **THE WINDOW'S REACHABILITY** — ``queue.revise`` accepts while the
-  ``ask-response-<ask_id>`` row is absent, and ``AskQueue.reconcile`` marks that
-  row present (in ``_handed``) BEFORE it hands the batch on. So an ANSWERING
-  path that awaits its own reconcile closes the window at its own ACK, while an
-  in-process owner answer — which only SCHEDULES the reconcile (``_settled`` →
-  ``_kick``) — leaves it open until the loop runs that task. That contrast is
-  the interesting, load-bearing fact for the surface lanes, so both arms are
-  pinned here rather than argued in prose.
+  ``ask-response-<ask_id>`` row is not DURABLE, and durable means the transcript's
+  append resolved — not that reconcile handed the message to a delivery path, and
+  certainly not that the answering op's ACK returned (amended 2026-10-04: the ACK
+  used to close it via ``_handed``, which is why a person could not land a
+  revision in a live session; #1936). The delivery turn's first append — or a
+  mid-turn steer's boundary append — is what closes it, and until then the row
+  that lands RE-RESOLVES from the fold, so a revision accepted in the gap is what
+  the model reads. Both arms are pinned here rather than argued in prose.
 
 The session is the real one (``make_session``), the queue is the real queue, and
 the op is driven through ``ServingSessionHandle`` — the seam every wire client
@@ -31,15 +32,16 @@ crosses. Only ``asyncio`` and the isolated config root are test fixtures.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.asks import render, store
-from local_operator.harness.types import StreamEndEvent
+from local_operator.harness.types import CustomMessage, StreamEndEvent, StreamTextDelta
 from local_operator.session.runtime.serving import ServingSessionHandle
-from tests.unit.session.test_session import make_session
+from tests.unit.session.test_session import make_session, wait_for
 
 #: A value that must never reach the log, the store or a later turn.
 SENTINEL = "sk-live-do-not-persist"
@@ -98,6 +100,24 @@ def _enqueue(queue: Any, questions: list[dict[str, Any]]) -> str:
     outcome = queue.enqueue(questions, None)
     assert outcome["ok"] is True, outcome
     return str(outcome["details"]["ask_id"])
+
+
+async def _run_delivery_turns(session: Any) -> None:
+    """Run the session's spawned delivery turn(s) to completion, oldest first.
+
+    A delivery turn is opened through ``_spawn_background``; the response row
+    becomes durable at that turn's first append, so a cell that wants the row
+    CONSUMED must let the task RUN rather than assert across it. Bounded and
+    looped because a turn can spawn follow-ups; draining rather than sleeping
+    keeps the ordering a statement about the code, not the scheduler
+    (AGENTS.md, timing section).
+    """
+    for _ in range(10):
+        pending = [task for task in list(session._background_tasks) if not task.done()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("delivery turns never settled")
 
 
 def _secret_and_plain(
@@ -184,11 +204,16 @@ async def test_a_refused_revision_never_stores_or_announces_its_secret(
 
     monkeypatch.setattr(render, "apply_secret_answers", spy)
 
-    # -- the refused arm: answered AND delivered, so the row exists and closes the
-    # window before revise_ask is even called.
+    # -- the refused arm: answered AND consumed, so the row is DURABLE and
+    # closes the window before revise_ask is even called. The awaited reconcile
+    # HANDS the row to the delivery path; the idle-spawned turn's first append
+    # is what makes it durable, so the turn is run to completion here — the
+    # refusal below is then a statement about the consumed row, not scheduler
+    # order (consumption bound, amended 2026-10-04).
     delivered_ask = _enqueue(queue, _questions(secret="API_KEY"))
     assert session.respond_ask(delivered_ask, {"API_KEY": ["API_KEY"]})["ok"] is True
     await session.reconcile_asks()
+    await _run_delivery_turns(session)
     assert store.response_row_id(delivered_ask) in queue.present_row_ids()
     calls.clear()
     refused = session.revise_ask(delivered_ask, {"API_KEY": [SENTINEL]}, by="desktop")
@@ -340,15 +365,16 @@ async def test_a_revision_is_accepted_through_the_op_while_delivery_has_not_run(
 
     The owner surface answers IN PROCESS — ``Session.respond_ask`` is
     synchronous and only SCHEDULES its reconcile (``_settled`` → ``_kick``) — so
-    between that answer and the loop running the scheduled task there is no
-    response row, and a revision arriving over the handle (the desktop/relay
-    seam) is accepted and supersedes. The handle's own ``reconcile_asks`` then
-    delivers the row carrying the REVISED map.
+    between that answer and the delivery path's append there is no durable row,
+    and a revision arriving over the handle (the desktop/relay seam) is accepted
+    and supersedes.
 
-    This ordering is not a fixture artefact: no await stands between the answer
-    and the op (the answer path only SCHEDULED its reconcile, and the handle runs
-    inline for a caller already on the session's loop), and the asserts below
-    show the window shutting exactly where §10 says it shuts — on the row.
+    THE ACK CLOSES NOTHING (amended 2026-10-04): the handle's own
+    ``reconcile_asks`` hands the row to the delivery path and SPAWNS the
+    delivery turn — which this cell then runs, because the row it appends must
+    be the REVISED one (every append re-resolves from the fold) and the window
+    must only shut there. The asserts walk that boundary explicitly: open before
+    the op, still open right after the ACK, shut after the append.
     """
     session, queue = _ask_session(tmp_path)
     ask_id = _enqueue(queue, _questions(2))
@@ -362,8 +388,16 @@ async def test_a_revision_is_accepted_through_the_op_while_delivery_has_not_run(
     outcome = await handle.ask_revise(ask_id, {"q0": ["yes"], "q1": ["maybe"]}, by="desktop")
     assert outcome == "revised"
 
-    # The op awaited its own reconcile, and what it delivered is the REVISION.
+    # The op's awaited reconcile hands the row off and spawns the delivery turn;
+    # the ACK is not the close — the row is still not durable here.
+    assert row_id not in queue.present_row_ids(), "the ACK closes nothing"
+    await _run_delivery_turns(session)
+
+    # The append is the close, and what it landed is the REVISION — re-resolved
+    # from the fold, into the transcript entry the model reads.
     assert row_id in queue.present_row_ids()
+    entry = next(e for e in session._transcript.entries() if e.id == row_id)
+    assert entry.payload["details"]["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
     record = queue.find(ask_id)
     assert record is not None
     assert record["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
@@ -378,3 +412,206 @@ async def test_a_revision_is_accepted_through_the_op_while_delivery_has_not_run(
     # sentence — the one the surface renders rather than a paraphrase.
     with pytest.raises(ValueError, match="already delivered"):
         await handle.ask_revise(ask_id, {"q0": ["maybe"], "q1": ["maybe"]}, by="desktop")
+
+
+# ---------------------------------------------------------------------------
+# the consumption bound, session layer (amended 2026-10-04)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_revision_is_carried_into_the_row_the_delivery_turn_appends(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """THE IDLE CARRY: the message handed at reconcile is a PREVIEW, and the row
+    the delivery turn appends is rebuilt from the fold at the append.
+
+    Holding ``_turn_lock`` keeps the spawned delivery turn parked, so the state
+    is exact rather than racy: answered, handed, nothing durable — the revision
+    accepted here is the one a real user sends in the seconds after the answer,
+    and it MUST be what the model reads (the append re-resolves; without that,
+    the window would accept-and-drop). Then the lock releases, the turn runs,
+    and the transcript entry is asserted — and the post-append revision refused.
+    """
+    session, queue = _ask_session(tmp_path)
+    ask_id = _enqueue(queue, _questions(2))
+    loop = asyncio.get_running_loop()
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+
+    await session._turn_lock.acquire()
+    try:
+        answered = await handle.ask_respond(ask_id, {"q0": ["no"], "q1": ["maybe"]}, by="terminal")
+        assert answered == "answered"
+        row_id = store.response_row_id(ask_id)
+        assert row_id not in queue.present_row_ids(), "hand-off consumed nothing"
+        outcome = await handle.ask_revise(ask_id, {"q0": ["yes"], "q1": ["maybe"]}, by="desktop")
+        assert outcome == "revised"
+        assert row_id not in queue.present_row_ids(), "still nothing durable"
+    finally:
+        session._turn_lock.release()
+
+    await _run_delivery_turns(session)
+
+    assert row_id in queue.present_row_ids()
+    entry = next(e for e in session._transcript.entries() if e.id == row_id)
+    assert entry.payload["details"]["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+    with pytest.raises(ValueError, match="already delivered"):
+        await handle.ask_revise(ask_id, {"q0": ["maybe"], "q1": ["maybe"]}, by="desktop")
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_revision_is_carried_by_the_boundary_append(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """THE STEERING CARRY: an answer during a running turn parks on the steering
+    queue, and the boundary append carries a revision accepted while the turn is
+    still mid-flight — the exact moment a mis-tap is cheapest to fix (#1936).
+
+    The turn is held inside its provider stream until the test releases it, so
+    `mid-turn` is a fact of the run, not a clock race; the waits are on events
+    the code already publishes (AGENTS.md, timing section). The revision arrives
+    after the hand-off is visible on the steering queue — i.e. strictly later
+    than anything the old ACK-bound code would have refused.
+    """
+    released = asyncio.Event()
+
+    def stream(request: Any, signal: Any) -> Any:
+        async def gen() -> Any:
+            yield StreamTextDelta(delta="working")
+            await released.wait()
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    async def handler(questions: Any) -> Any:
+        return None
+
+    session = make_session(tmp_path, stream)
+    session.set_ask_handler(handler)
+    queue = session.ask_queue()
+    assert queue is not None, "the queued arm must be live for this cell"
+    ask_id = _enqueue(queue, _questions(2))
+    loop = asyncio.get_running_loop()
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+
+    turn = asyncio.create_task(session.prompt("do the work"))
+    await wait_for(lambda: session.is_streaming)
+
+    # The answer lands while the turn is mid-flight: the delivery goes to the
+    # steering queue (the session is busy), visible as that queue going non-empty.
+    assert session.respond_ask(ask_id, {"q0": ["no"], "q1": ["maybe"]}, by="terminal")["ok"]
+    await wait_for(lambda: not session._steering_queue.empty())
+    row_id = store.response_row_id(ask_id)
+    assert row_id not in queue.present_row_ids(), "the boundary has not been crossed"
+
+    # The revision arrives AFTER that hand-off was visible, still mid-turn: the
+    # window is the append, so it is accepted (the old bound refused exactly here).
+    outcome = await handle.ask_revise(ask_id, {"q0": ["yes"], "q1": ["maybe"]}, by="desktop")
+    assert outcome == "revised"
+
+    # Cross the boundary: the drain appends the row (re-resolved from the fold)
+    # and injects it into the same turn's context.
+    released.set()
+    await turn
+
+    assert row_id in queue.present_row_ids()
+    entry = next(e for e in session._transcript.entries() if e.id == row_id)
+    assert entry.payload["details"]["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+    injected = [m for m in session._context.messages if getattr(m, "id", None) == row_id]
+    assert injected, "the drained steer must reach live context"
+    assert isinstance(injected[0], CustomMessage)
+    assert injected[0].details["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+
+    with pytest.raises(ValueError, match="already delivered"):
+        await handle.ask_revise(ask_id, {"q0": ["no"], "q1": ["maybe"]}, by="desktop")
+
+
+def test_a_stopped_sessions_revision_lands_through_the_boot_reconcile(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """THE KEPT CASE: an ask answered while the session was STOPPED.
+
+    With no running loop the answer and the revision are log writes and nothing
+    else — ``_kick`` cannot schedule, and the next runtime's boot reconcile is
+    the backstop (design §2.2) — so the window is the log alone and that boot is
+    what delivers. The row it appends must carry the revision. The +60 s is a
+    CLOCK shift rather than a sleep: the property is "elapsed time does not
+    close the window", and the fold is the clock's only reader.
+    """
+    session, queue = _ask_session(tmp_path)
+    ask_id = _enqueue(queue, _questions(2))
+    accepted = session.respond_ask(ask_id, {"q0": ["no"], "q1": ["maybe"]}, by="terminal")
+    assert accepted["ok"] is True
+
+    shifted = int(time.time() * 1000) + 60_000
+    queue._now = lambda: shifted
+    revised = session.revise_ask(ask_id, {"q0": ["yes"], "q1": ["maybe"]}, by="desktop")
+    assert revised["ok"] is True and revised["revised"] is True
+
+    # A stopped session has no loop for the schedules its writes imply (the wake
+    # arm/retire, the reconcile kicks). CPython's policy still hands plain
+    # ``ensure_future`` a fresh, NEVER-STARTED loop, so those tasks sit on it
+    # unrun — which IS the stopped state — and the boot below must run on the
+    # one loop that actually executes: settle the strays first (cancel, let
+    # their own loop process the cancels, close it), so neither the delivery
+    # drain nor ``dispose`` ever meets a foreign-loop task.
+    stray_loops = {task.get_loop() for task in session._background_tasks if not task.done()}
+    for task in list(session._background_tasks):
+        task.cancel()
+    for stray in stray_loops:
+        if not stray.is_running() and not stray.is_closed():
+            stray.run_until_complete(asyncio.sleep(0))
+            stray.close()
+
+    async def boot() -> None:
+        await session.reconcile_asks(load_time=True)
+        await _run_delivery_turns(session)
+        await session.dispose()
+
+    asyncio.run(boot())
+
+    row_id = store.response_row_id(ask_id)
+    assert row_id in queue.present_row_ids()
+    entry = next(e for e in session._transcript.entries() if e.id == row_id)
+    assert entry.payload["details"]["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
+
+
+@pytest.mark.asyncio
+async def test_the_wire_flag_stays_false_until_the_append_lands(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """THE WIRE READING: ``delivered`` is the consumption flag now.
+
+    A surface gating the change affordance on ``delivered:false`` must see the
+    flag true only once the answer is committed to the conversation — exactly
+    the window — so this cell records every publication the queue pushes and
+    checks the two ends of the arc: false after the ACK, true after the append.
+    """
+    session, queue = _ask_session(tmp_path)
+    loop = asyncio.get_running_loop()
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+    # AFTER the handle, not before: constructing the handle installs its OWN
+    # ask-state sink on the session (the repaint path for attached surfaces),
+    # and the last installer wins — this cell's readings need the raw
+    # publications, so the recorder must be what the session carries.
+    published: list[list[dict[str, Any]]] = []
+    session.set_ask_state_sink(lambda rows, count: published.append(list(rows or [])))
+    ask_id = _enqueue(queue, _questions())
+
+    assert await handle.ask_respond(ask_id, {"q0": ["yes"]}, by="desktop") == "answered"
+
+    def delivered_now() -> Any:
+        rows = [row for row in published[-1] if row["ask_id"] == ask_id]
+        assert rows, published[-1]
+        return rows[0]["delivered"]
+
+    row_id = store.response_row_id(ask_id)
+    assert row_id not in queue.present_row_ids()
+    assert delivered_now() is False, "the ACK must not read as consumption"
+
+    await _run_delivery_turns(session)
+
+    assert row_id in queue.present_row_ids()
+    assert delivered_now() is True, "the append is where the flag flips"

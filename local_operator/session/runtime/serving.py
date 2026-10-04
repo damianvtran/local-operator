@@ -4932,7 +4932,11 @@ class ServingSessionHandle(SessionHandle):
             # than claiming the ask is done.
             return f"answered {total - waiting} of {total}; the next question is on the card"
         # Await the delivery for the same reason the queued-ask op does: the
-        # caller's "answered" must be a claim about a row that EXISTS.
+        # caller's "answered" claims the answer is durably RECORDED and its
+        # delivery initiated. Awaiting the queue's reconcile is what initiates
+        # it — the response row itself lands when the delivery path reaches its
+        # append (the idle-spawned turn's first write), and the revision window
+        # stays open until it does (design §10, the consumption bound).
         await self._session.reconcile_asks()
         return "answered"
 
@@ -4941,10 +4945,13 @@ class ServingSessionHandle(SessionHandle):
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
 
-        Delivery is awaited rather than merely scheduled, so the caller's
-        "answered" is a claim about a row that exists: the queue's own reconcile
-        is idempotent, and awaiting it here means a test (or a person watching the
-        phone) sees the response turn land before the ACK returns.
+        Delivery is awaited rather than merely scheduled because it is what
+        STARTS the delivery: the ACK's honest claim is that the answer is
+        durably recorded and its delivery initiated. The response row itself
+        lands when the delivery path reaches its append — the idle-spawned
+        turn's first write, or the next boundary for a mid-turn steer — and the
+        revision window stays open until it does (design §10, the consumption
+        bound).
         """
         outcome = self._session.respond_ask(ask_id, answers, by=by or "remote")
         if not outcome.get("ok"):
@@ -4959,24 +4966,27 @@ class ServingSessionHandle(SessionHandle):
         The same op family, the same atomic whole-ask body and the same awaited
         reconcile as :meth:`ask_respond`: what changes is INTENT, not shape. This
         is the sanctioned replacement of an answer the log already holds, so it
-        supersedes while the response row is absent and refuses once it exists —
-        where a second ``ask_respond`` refuses on the first recorded answer. The
-        caller must say REVISE in those words; no layer infers it from comparing
-        values (design §10).
+        supersedes while the response row is not yet DURABLE — or while an
+        append of it is in flight — and refuses once it is, where a second
+        ``ask_respond`` refuses on the first recorded answer. The caller must
+        say REVISE in those words; no layer infers it from comparing values
+        (design §10).
 
         THE HOP IS PART OF THE CONTRACT, not boilerplate: ``AskQueue.revise``
-        justifies accepting on the ground that the response-row check and the log
-        append run on the session's own loop — the only writer of that row — so
-        this body MUST run there too. Without it, a relay/desktop call would read
-        the fold and write the log on the caller's thread, concurrently with
-        ``reconcile`` on the loop, which is exactly the accepted-and-then-dropped
-        interleaving §10 forbids.
+        justifies accepting on the ground that the durability check (durable
+        row plus the in-flight commit guard) and the log append run on the
+        session's own loop — the only writer of that row — so this body MUST run
+        there too. Without it, a relay/desktop call would read the fold and
+        write the log on the caller's thread, concurrently with ``reconcile`` on
+        the loop, which is exactly the accepted-and-then-dropped interleaving
+        §10 forbids.
         """
         outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the revision was refused"))
-        # Awaited for the same reason ``ask_respond`` awaits it: the caller's
-        # word must be a claim about a row that EXISTS.
+        # Awaited for the same reason ``ask_respond`` awaits it: it starts the
+        # delivery the word describes; the row itself lands at the delivery
+        # path's append, and the window closes there (consumption, not the ACK).
         await self._session.reconcile_asks()
         # The revision degrades to a first answer when the ask had none recorded;
         # saying "revised" there would be the one place this path lied.
