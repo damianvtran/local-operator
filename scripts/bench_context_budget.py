@@ -1139,7 +1139,33 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: tiers-configured machine reads 100,319 = ~36,086 on the shipped default, 212
 #: over this ceiling, which is the recorded config dependence rather than this
 #: change; CI remains the binding reading.
-BUDGET_BILLED_TOKENS = 35_874
+#:
+#: RAISED 35,874 -> 35,937 for the PEER-ADDRESS ROLE-WORD GUARD
+#: (``fix/role-word-recipient``). No tool, field or counter moves; the delta is
+#: the two ``target`` field descriptions the fix requires and nothing else.
+#: ``SendParams.target`` and ``SessionsParams.target`` now state the two rules
+#: the resolver applies — an EXACT conversation name / session id / cwd basename
+#: wins over any substring, and a team role word (``manager``) is refused — so a
+#: model reading the schema learns the guard exists. The guard itself lives in
+#: the resolver; the copy is not a gate, which is why the failure being fixed
+#: (a bare ``manager`` silently landing on a namesake TITLE) could not be
+#: prevented by wording alone — but a model that is never told still types it.
+#:
+#: Measured with THIS script on the same tree pair, CLEAN arm (isolated HOME and
+#: config dir, which is what CI renders — the config dependence the ``tool://``
+#: entry above explains does not apply):
+#:
+#:   origin/main (e01d66d0d)   99,557 chars = ~35,812  (62 left, the band main carries)
+#:   head (this branch)        99,733 chars = ~35,875
+#:   delta                        176 chars =   ~63
+#:
+#: and the delta is the two edited fields: +112 chars on ``send``'s ``target``
+#: and +59 on ``sessions``' ``target`` = 171 chars, the remaining ~5 being
+#: this script's char-to-token rounding across the whole surface. The ceiling is
+#: therefore the measured head + 62, the same band main carried before this
+#: change, rather than the hand-summed budget + delta. The tighten band (1,200)
+#: is nowhere near tripped.
+BUDGET_BILLED_TOKENS = 35_937
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

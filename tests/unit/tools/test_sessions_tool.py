@@ -988,12 +988,21 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     (what `paused` covers, the default cap, the dry-run preview) lives in
     the on-demand ``op='help'`` reference and the CLI's `--help`, which is
     where the budget wants it.
+
+    RAISED 1085 -> 1099 for the role-word fix (``fix/role-word-recipient``).
+    ``SessionsParams.target`` now states the two new rules the resolver applies
+    — an exact name/id beats a substring, and a team role word is refused —
+    which grew the derived ``parameters`` JSON by 14 tokens (1,084 -> 1,098
+    measured with this test's own ruler; the ceiling is +1 over the measurement,
+    as before). The tool DESCRIPTION is unchanged (230), because the statement
+    belongs on the field it governs, not in the per-op summary. The full
+    vocabulary stays in ``op='help'``.
     """
     from local_operator.compaction.tokens import count_text_tokens
     from local_operator.tools.builtin import _SESSIONS_TOOL_DESCRIPTION
 
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
-    assert count_text_tokens(params) <= 1085
+    assert count_text_tokens(params) <= 1099
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 231
 
 
@@ -2067,3 +2076,35 @@ async def test_resume_set_form_really_reopens_each_session(root: Path) -> None:
     finally:
         for session_id in ("bulk00000001", "bulk00000002"):
             await _reap_worker(root, session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["info", "resume", "stop", "peek"])
+async def test_a_role_word_address_is_refused_for_every_target_op(
+    op: str, root: Path, tmp_path: Path
+) -> None:
+    """All four address-bearing ops inherit the guard.
+
+    ``stop`` is the one that makes this a SAFETY pin rather than a nicety: the
+    substring tier would have ended the unrelated session whose title merely
+    contains the word. ``info``/``peek`` would have described it as the target;
+    ``resume`` would have reopened it.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    teams = TeamRegistry(tmp_path)
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    record = _publish_record(root, "dddd77778888", "Article-search campaigns: manager")
+    try:
+        args: dict[str, Any] = {"op": op, "target": "manager"}
+        if op == "resume":
+            args["prompt"] = "go"
+        result = await execute_sessions("t", args, None, None, _context(root, team_registry=teams))
+        assert result.is_error
+        assert "is a team role (roles on: lopdev), not a session address" in result.text
+        # Not the no-match form: that phrasing would send the caller to the
+        # stored half, where a namesake could be acted on instead.
+        assert "no live session matches" not in result.text
+        assert "no session matches" not in result.text
+    finally:
+        registry.unpublish(record.pid, root)

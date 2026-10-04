@@ -27,7 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
@@ -541,6 +541,145 @@ def skipped_clause(skipped: "Sequence[Any]") -> str:
     return f"; {count} match{'es' if count != 1 else ''} skipped (not engaged yet)"
 
 
+def exact_ignored_clause(count: int) -> str:
+    """The receipt's tail when an EXACT name match passed substring matches over.
+
+    The exact tier resolves a whole-value name ahead of the substring tier, which
+    can leave name-matches behind that the substring tier would otherwise have
+    surfaced (or refused as ambiguous). Staying silent would be a small
+    regression in transparency: the sender typed a name and one row matched it
+    EXACTLY, so the receipt says how many other rows were set aside. ``""`` for
+    none, so a caller appends it unconditionally, exactly like
+    :func:`skipped_clause` — and the wording lives HERE so the CLI's print and
+    the ``send`` tool's result text cannot drift.
+    """
+    if not count:
+        return ""
+    return f"; {count} other match{'es' if count != 1 else ''} ignored (exact name matched)"
+
+
+def _address_fields(rec: Any) -> "list[str]":
+    """The three fields the name path matches against, in precedence order.
+
+    ``conversation_name`` -> ``session_id`` -> cwd basename. The order is load-
+    bearing: it is both the substring tier's field order and the exact tier's
+    rank, so a name match outranks an id match outranks a cwd match everywhere.
+    """
+    return [
+        rec.conversation_name or "",
+        rec.session_id or "",
+        os.path.basename(rec.cwd or ""),
+    ]
+
+
+def _address_fields_lower(rec: Any) -> "list[str]":
+    return [field.lower() for field in _address_fields(rec)]
+
+
+def _address_contains(rec: Any, needle: str) -> bool:
+    """Whether ``needle`` is a SUBSTRING of any addressed field.
+
+    Distinct from membership: ``needle in _address_fields_lower(rec)`` would
+    test whole-value equality against the list's elements, which is exactly the
+    silent-namesake confusion this module is fixing. ``needle`` arrives
+    lowercased by the caller.
+    """
+    return any(needle in field for field in _address_fields_lower(rec))
+
+
+def _exact_field_rank(rec: Any, needle: str) -> "int | None":
+    """The precedence rank of the first field that EQUALS ``needle``, else None.
+
+    Whole-value equality, not containment: ``manager`` must not be an exact
+    match for ``Article-search campaigns: manager``. ``needle`` arrives already
+    lowercased by the caller.
+    """
+    for rank, field in enumerate(_address_fields_lower(rec)):
+        if field == needle:
+            return rank
+    return None
+
+
+def _normalize_role_words(
+    role_words: "Mapping[str, Sequence[str]] | Iterable[str] | None",
+) -> "tuple[frozenset[str], dict[str, tuple[str, ...]]]":
+    """Split the vocabulary argument into (words, word -> defining teams).
+
+    ``role_words`` accepts either the rich mapping
+    :func:`local_operator.teams.role_word_set` returns (casefolded role word ->
+    the team names that define it) or a plain iterable of words. The plain form
+    is what a unit test pins the recognition rule with; production passes the
+    richer mapping because :func:`role_refusal`'s ``(roles on: …)`` clause needs
+    the team provenance. ``None`` (the default) is the DISABLED state — exactly
+    today's behaviour — so a caller that does not opt in keeps the resolver
+    hermetic (a default of "go read the operator's teams" would make these tests
+    environment-dependent on a host whose real store has a ``manager`` role).
+    """
+    if not role_words:
+        return frozenset(), {}
+    if isinstance(role_words, Mapping):
+        words = frozenset(str(word).casefold() for word in role_words)
+        teams = {str(word).casefold(): tuple(names) for word, names in role_words.items()}
+        return words, teams
+    return frozenset(str(word).casefold() for word in role_words), {}
+
+
+def role_team_clause(teams: "Sequence[str]") -> str:
+    """The ``(roles on: A, B and N more)`` parenthetical, capped at two names.
+
+    Names the teams that define the role so the sender can see WHY the word is
+    reserved (and where to look if a role was renamed). ``""`` when the
+    vocabulary arrived as a bare iterable with no provenance.
+    """
+    names = [str(name) for name in teams if str(name)]
+    if not names:
+        return ""
+    if len(names) <= 2:
+        listing = ", ".join(names)
+    else:
+        listing = f"{names[0]}, {names[1]} and {len(names) - 2} more"
+    return f" (roles on: {listing})"
+
+
+def role_refusal(
+    needle: str,
+    *,
+    teams: "Sequence[str]" = (),
+    pid_hint: str = "an exact pid",
+    session_hint: str = "a session id",
+    near_misses: int = 0,
+) -> str:
+    """The ONE sentence that refuses a team ROLE WORD used as an address.
+
+    A bare role word (``manager``, ``reviewer``) is a DELEGATION handle — see
+    ``task(agent='<role>')`` — and never a session address, but it is a tempting
+    needle for the substring tier, where it silently lands on any session whose
+    TITLE happens to contain it: the wrong-recipient defect this refusal exists
+    for (a nine-digest misroute was traced to ``target="manager"`` resolving to a
+    session titled ``…: manager`` with ``candidates == []`` and ``error == ""``).
+
+    **The string must never contain ``no live session matches``.**
+    :func:`live_scan_found_nothing` is a substring test on that phrase, and that
+    predicate is the ONLY key that opens the stored fallback — a role refusal
+    phrased as a no-match would spool the note to a stored namesake the caller
+    never named, which is the same hazard the unengaged refusal guards against.
+    A unit test pins the phrase's absence.
+
+    ``teams`` names the teams that define the role. ``near_misses`` is how many
+    running sessions the scan DID find containing the needle — the hook that
+    tells the sender the ambiguity was real and ``lop sessions`` would list them.
+    """
+    sentence = (
+        f"{needle!r} is a team role{role_team_clause(teams)}, not a session address — "
+        f"pass {pid_hint} or {session_hint} instead "
+        f"(`lop sessions` lists the sessions whose names contain {needle!r})."
+    )
+    if near_misses > 0:
+        plural = "s" if near_misses != 1 else ""
+        sentence += f"; {near_misses} running session name{plural} contain it"
+    return sentence
+
+
 def session_has_durable_history(session_id: str, *, root: "Path | None" = None) -> bool:
     """Whether a session's OWN transcript already holds a real turn.
 
@@ -592,18 +731,37 @@ def resolve_peer_target(
     require_started: bool = True,
     skipped: "list[Any] | None" = None,
     capability: str = PEER_MESSAGE_CAPABILITY,
+    # ``role_words`` is the team-role vocabulary this call REFUSES as an
+    # address (see :func:`role_refusal`). ``None`` — the default — is DISABLED,
+    # i.e. exactly today's behaviour, so the resolver stays hermetic for a
+    # caller that does not opt in and for the unit tests' doubles; every
+    # PRODUCTION caller passes it (a source-scan test pins that).
+    role_words: "Mapping[str, Sequence[str]] | Iterable[str] | None" = None,
+    # ``exact_ignored`` mirrors ``skipped``: the out-parameter through which the
+    # exact tier hands back the substring matches it passed over, so a delivery
+    # receipt can say so (:func:`exact_ignored_clause`).
+    exact_ignored: "list[Any] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
-    Priority: ``pid`` (exact), ``session`` (exact session_id), then the ``target``
-    substring matched case-insensitively against conversation_name, then
-    session_id, then the cwd basename. An ALL-DIGIT ``target`` is tried as a
-    pid first: the picker rows, ``lop sessions`` and every disambiguation
-    line present the pid as the thing to retype, and a vocabulary whose
-    listed form cannot be typed back is a dead end (found by the ``/stop``
-    argument picker: every row it offered failed to resolve). Only when no
-    record has that pid does the digit string fall through to the substring
-    match, so a session id or name that happens to be numeric still works.
+    Priority: ``pid`` (exact), ``session`` (exact session_id), then a ``target``
+    EXACT whole-value match on conversation_name, then session_id, then the cwd
+    basename; if no record matches exactly, a team ROLE WORD is refused; only
+    then does the case-insensitive ``target`` SUBSTRING tier run over the same
+    three fields. The exact tier exists because the substring tier used to
+    answer a full name with an ambiguity list — or, when just one other row
+    contained it, SILENTLY with that namesake. The role tier exists because a
+    bare role word (``manager``) is a delegation handle, not an address, yet is
+    a tempting needle for exactly that silent substring hit; it is refused
+    ahead of both the substring tier and the stored fallback (``role_words``
+    carries the vocabulary; see :func:`role_refusal`). An ALL-DIGIT ``target``
+    is tried as a pid first: the picker rows, ``lop sessions`` and every
+    disambiguation line present the pid as the thing to retype, and a
+    vocabulary whose listed form cannot be typed back is a dead end (found by
+    the ``/stop`` argument picker: every row it offered failed to resolve).
+    Only when no record has that pid does the digit string fall through to the
+    substring match, so a session id or name that happens to be numeric still
+    works.
 
     Only ``live`` records are eligible (a record whose owner has stopped
     reporting for ``HEARTBEAT_TIMEOUT_S`` is not one a plain send should assume
@@ -761,6 +919,65 @@ def resolve_peer_target(
             return resolve_scanned_pid(as_pid)
 
     needle = needle_source.lower()
+    role_vocabulary, role_teams = _normalize_role_words(role_words)
+
+    # --- EXACT tier: a whole-value name/id/cwd match, ahead of the substring --
+    # A sender who types a session's FULL name reaches THAT session even when
+    # other names merely contain it. The substring tier used to answer with the
+    # ambiguity list, or — when only one row contained it — SILENTLY with a
+    # namesake, and that silent single hit is the wrong-recipient defect this
+    # tier is the first half of the fix for. Field precedence is name, then
+    # session id, then cwd basename, mirroring the substring tier's field order.
+    #
+    # ``require_started`` is applied here EXACTLY as the substring tier applies
+    # it — an unstarted composer window is invisible to a name address too, and
+    # is neither resolved nor promoted into a blocker of the substring match
+    # that follows. Falling through keeps the unengaged gate's own semantics
+    # (D3: an unstarted session is invisible) and its single pinned refusal; the
+    # tier therefore only ever ADDS resolution precedence.
+    exact_ranked = [
+        (rank, order, rec)
+        for order, (rec, _state) in enumerate(live)
+        if (not require_started or getattr(rec, "started", True))
+        and (rank := _exact_field_rank(rec, needle)) is not None
+    ]
+    if exact_ranked:
+        if len(exact_ranked) == 1:
+            winner = exact_ranked[0][2]
+            if exact_ignored is not None:
+                exact_ignored.extend(
+                    rec
+                    for rec, _state in live
+                    if rec is not winner and _address_contains(rec, needle)
+                )
+            return winner, [], ""
+        # More than one record matched EXACTLY. Surfacing them is the whole
+        # point — picking one silently is the hazard this tier removes — and
+        # they are ordered by the field that matched (name, then id, then cwd)
+        # so the list is deterministic.
+        exact_ranked.sort(key=lambda item: (item[0], item[1]))
+        return None, [rec for _rank, _order, rec in exact_ranked], ""
+
+    # --- ROLE tier: a team role word is a delegation handle, not an address --
+    # Refuse BEFORE the substring tier (which would silently land on a namesake)
+    # and before the stored fallback. The wording is chosen so that
+    # :func:`live_scan_found_nothing` stays False on the refusal, which is what
+    # keeps the stored half shut (see :func:`role_refusal`).
+    if needle in role_vocabulary:
+        near = sum(1 for rec, _state in live if _address_contains(rec, needle))
+        return (
+            None,
+            [],
+            role_refusal(
+                needle_source,
+                teams=role_teams.get(needle, ()),
+                pid_hint=pid_hint,
+                session_hint=session_hint,
+                near_misses=near,
+            ),
+        )
+
+    # --- SUBSTRING tier: unchanged ------------------------------------------
     matches: list[Any] = []
     # Live matches held back ONLY because the session has not been engaged yet.
     # Kept rather than dropped so the refusal below can name what it reached and
@@ -778,12 +995,7 @@ def resolve_peer_target(
         # preserved) — see the mixed-version note there. That is exactly why the
         # receive-side gate exists: an older SENDER resolves such a record and
         # dials it, and only the receiver can refuse.
-        haystacks = [
-            rec.conversation_name or "",
-            rec.session_id or "",
-            os.path.basename(rec.cwd or ""),
-        ]
-        if not any(needle in field.lower() for field in haystacks):
+        if not _address_contains(rec, needle):
             continue
         if require_started and not getattr(rec, "started", True):
             unengaged.append(rec)
@@ -971,12 +1183,33 @@ def session_id_unowned(error: str) -> bool:
     )
 
 
+def _exact_needle_matches_stored(needle_folded: str, candidate: StoredCandidate) -> bool:
+    """Whole-value equality of a stored row's name or session id.
+
+    The stored twin of :func:`_exact_field_rank`. A stored session has no cwd in
+    its address (see :class:`StoredCandidate`), so the fields are name then id;
+    ``needle_folded`` arrives already lowercased.
+    """
+    return (
+        candidate.conversation_name.lower() == needle_folded
+        or candidate.session_id.lower() == needle_folded
+    )
+
+
+def _stored_withheld_label(needle: str, rows: "Sequence[StoredCandidate]") -> str:
+    """The cold-refusal label for stored rows held back for being unengaged."""
+    if len(rows) == 1:
+        return f"the only stored match for {needle!r} (session {rows[0].session_id!r})"
+    return f"{len(rows)} stored matches for {needle!r}"
+
+
 def resolve_stored_target(
     needle: str,
     *,
     live_ids: "set[str] | None" = None,
     limit: int = STORED_DISCOVERY_LIMIT,
     root: "Path | None" = None,
+    role_words: "Mapping[str, Sequence[str]] | Iterable[str] | None" = None,
 ) -> "tuple[str | None, list[StoredCandidate], str]":
     """Match a substring against STORED sessions the live scan did not claim.
 
@@ -1005,6 +1238,18 @@ def resolve_stored_target(
     stored half of the same rule the live resolver applies with
     ``require_started``. The read is one :func:`session_has_durable_history`
     pass per MATCHING row only, and the no-match answer is unchanged.
+
+    The same EXACT and ROLE tiers the live resolver runs are mirrored here, so a
+    caller that reaches this function directly (a future one, or
+    :func:`resolve_switch_target`'s inner call) cannot bypass the guard: an exact
+    whole-value name/id match resolves ahead of any substring match, more than
+    one exact match becomes candidates, and a team role word is refused. A stored
+    row whose NAME exactly equals a role word still resolves — symmetric with the
+    live rule, and the reason the exact tier is implemented here rather than
+    relying on the live short-circuit.
+
+    ``role_words`` is the same vocabulary :func:`resolve_peer_target` takes; the
+    default leaves the guard DISABLED.
 
     Returns ``(session_id, candidates, error)`` shaped like
     :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
@@ -1039,10 +1284,25 @@ def resolve_stored_target(
     # no-match, and reporting it as one would be a false statement about a
     # session the user can see on the picker.
     withheld: list[StoredCandidate] = []
+    # EXACT whole-value hits, kept apart from substring matches so the exact
+    # tier can resolve ONE of them and surface the ambiguous many — the live
+    # tier's rule, mirrored. A stored session has no recoverable cwd, so the
+    # precedence is name then session id.
+    exact: list[StoredCandidate] = []
+    exact_withheld: list[StoredCandidate] = []
     for row in rows:
         if row.id in excluded:
             continue
         candidate = StoredCandidate(session_id=row.id, conversation_name=row.name)
+        if _exact_needle_matches_stored(needle_folded, candidate):
+            # An exact name/id that has no history is refused, not skipped: the
+            # caller named it exactly, so the honest answer is the cold
+            # unengaged refusal, not a fall-through to a substring namesake.
+            if not session_has_durable_history(row.id, root=directory):
+                exact_withheld.append(candidate)
+                continue
+            exact.append(candidate)
+            continue
         haystacks = [candidate.conversation_name, candidate.session_id]
         if any(needle_folded in field.lower() for field in haystacks):
             # Hold back the never-engaged row instead of resolving onto it: a
@@ -1054,17 +1314,33 @@ def resolve_stored_target(
                 withheld.append(candidate)
                 continue
             matches.append(candidate)
+    if exact:
+        if len(exact) > 1:
+            return None, exact, ""
+        return exact[0].session_id, [], ""
+    if exact_withheld:
+        label = _stored_withheld_label(needle, exact_withheld)
+        return None, [], unengaged_refusal(label, count=len(exact_withheld), cold=True)
+    # ROLE tier, mirrored: a team role word is refused before any substring match
+    # (see :func:`role_refusal`), and after an exact hit so a stored session
+    # literally named the role word still resolves.
+    role_vocabulary, role_teams = _normalize_role_words(role_words)
+    if needle_folded in role_vocabulary:
+        return (
+            None,
+            [],
+            role_refusal(
+                needle.strip(),
+                teams=role_teams.get(needle_folded, ()),
+                near_misses=len(matches) + len(withheld),
+            ),
+        )
     if not matches:
         if withheld:
             # Named in the same grammar the live substring branch uses, with the
             # session id the user would retype rather than a pid a stored
             # session cannot satisfy.
-            if len(withheld) == 1:
-                label = (
-                    f"the only stored match for {needle!r} " f"(session {withheld[0].session_id!r})"
-                )
-            else:
-                label = f"{len(withheld)} stored matches for {needle!r}"
+            label = _stored_withheld_label(needle, withheld)
             # ``cold=True``: a stored row has no runtime anyone can type into,
             # so the remedy is the conversation being opened and used, not the
             # owner sending into a window that is already there (D5).
@@ -2087,6 +2363,7 @@ def resolve_switch_target(
     session: "str | None",
     pid_hint: str = "an exact pid",
     session_hint: str = "a session id",
+    role_words: "Mapping[str, Sequence[str]] | Iterable[str] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a model-switch address to ONE live, engaged record (design D4).
 
@@ -2099,7 +2376,9 @@ def resolve_switch_target(
     use /model" sentence.
 
     Returns ``resolve_peer_target``'s triple. Blocking (registry and directory
-    scans): callers run it off the loop.
+    scans): callers run it off the loop. ``role_words`` is forwarded to both
+    resolvers so a team role word is refused here exactly as it is on the send
+    path (see :func:`role_refusal`).
     """
     record, candidates, error = resolve_peer_target(
         target=target,
@@ -2108,6 +2387,7 @@ def resolve_switch_target(
         pid_hint=pid_hint,
         session_hint=session_hint,
         capability=MODEL_SWITCH_CAPABILITY,
+        role_words=role_words,
     )
     if record is not None or candidates:
         return record, candidates, error
@@ -2115,7 +2395,9 @@ def resolve_switch_target(
         stored = resolve_cold_session(session) or ""
         return None, [], not_running_detail(stored) if stored else error
     if (target or "").strip() and live_scan_found_nothing(error):
-        stored_id, stored_candidates, _withheld = resolve_stored_target(target or "")
+        stored_id, stored_candidates, _withheld = resolve_stored_target(
+            target or "", role_words=role_words
+        )
         if stored_candidates:
             # Several stored namesakes: naming one would pick a recipient the
             # call did not name, so the count is the answer.
@@ -2127,7 +2409,10 @@ def resolve_switch_target(
             )
         if stored_id:
             live, _ignored, live_error = resolve_peer_target(
-                session=stored_id, session_hint=session_hint, capability=MODEL_SWITCH_CAPABILITY
+                session=stored_id,
+                session_hint=session_hint,
+                capability=MODEL_SWITCH_CAPABILITY,
+                role_words=role_words,
             )
             if live is not None:
                 return live, [], ""

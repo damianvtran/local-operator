@@ -42,12 +42,20 @@ from tests.unit.harness.test_comms import ChangeSignal, wait_for
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
-#: The exact bytes origin/main 5473ef38e's ``_effective_prompt`` produced for a
-#: plain ``task`` member of this fixture's ``org`` team. Captured by running
-#: that commit's function (not re-derived from today's code), so a change to
-#: depth-1 launch text fails here by name (BEN-1 N0).
-ORIGIN_MAIN_ORG_TASK_BYTES = (
-    "[team: org]\n\nYou are task on this team. The manager is manager.\n\n"
+#: The exact depth-1 launch bytes for a plain ``task`` member of this
+#: fixture's ``org`` team, FROZEN so a change to depth-1 launch text fails here
+#: by name. Originally captured from origin/main 5473ef38e (BEN-1 N0, which
+#: proved the nested-team refactor did not move these bytes).
+#:
+#: RE-BASELINED by the role-word address fix: the team brief's
+#: "The manager is <role>." line was replaced with the escalation preamble's
+#: hub phrasing ("You report to <role>, through hub."), because the old line
+#: modelled the manager's ROLE NAME as something to address — and a sender
+#: reading a roster did exactly that, typing ``target="manager"`` into a
+#: resolver whose substring tier then landed on any session whose title
+#: contained the word. Update deliberately, never to admit a cosmetic edit.
+FROZEN_ORG_TASK_BYTES = (
+    "[team: org]\n\nYou are task on this team. You report to manager, through hub.\n\n"
     "Teammates:\n- manager: manager (you, when this team is invoked)\n- coder\n"
     "- pod (team)\n\nCollaboration:\nReview before merge.\n\nProject:\nwidgets\n\n"
     "implement the button"
@@ -141,12 +149,12 @@ async def build(parent: Session, agent: str, job_id: str, prompt: str = "work"):
 # -- N0: depth-1 bytes ---------------------------------------------------------
 
 
-def test_depth_one_member_bytes_equal_origin_main(tmp_path, teams):
+def test_depth_one_member_bytes_are_frozen(tmp_path, teams):
     root = make_root(tmp_path, teams)
     target = resolve_launch_target("task", root)
     assert (target.depth, target.is_team_launch) == (1, False)
     text, _ = _effective_prompt("implement the button", "task", root, target)
-    assert text == ORIGIN_MAIN_ORG_TASK_BYTES
+    assert text == FROZEN_ORG_TASK_BYTES
     # ...and identical to the legacy no-target path, for a role too.
     for role in ("task", "coder", "reviewer", "scout"):
         with_target, _ = _effective_prompt(
@@ -469,7 +477,7 @@ def _settle(comms: SubagentComms, job_id: str, tmp_path: Path) -> None:
     comms._records[job_id].session_dir = directory
 
 
-def test_a_depth_one_resume_message_is_origin_main_bytes(tmp_path, teams, monkeypatch):
+def test_a_depth_one_resume_message_is_the_frozen_bytes(tmp_path, teams, monkeypatch):
     root = make_root(tmp_path, teams)
     comms = root.subagent_comms
     comms.record_launch(
@@ -484,7 +492,7 @@ def test_a_depth_one_resume_message_is_origin_main_bytes(tmp_path, teams, monkey
     seen = _resume_spy(monkeypatch)
     new_id, error = comms.resume("job-1", "implement the button")
     assert error is None and new_id == "job-new"
-    assert seen["effective_prompt"] == ORIGIN_MAIN_ORG_TASK_BYTES
+    assert seen["effective_prompt"] == FROZEN_ORG_TASK_BYTES
 
 
 @pytest.mark.asyncio

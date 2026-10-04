@@ -166,6 +166,16 @@ _WALK_DEPTH_CAP = 2
 #: ``scripts/bench_context_budget.py`` — the two ledgers move together.
 #: Measured through this file's own renderer on the flip head; every other
 #: entry is byte-identical.
+#:
+#: RE-MEASURED 2026-10-04 by the peer-address role-word guard
+#: (``fix/role-word-recipient``): ``send`` and ``sessions`` alone moved,
+#: 614 -> 639 and 850 -> 864. Both moves ARE the change: each tool's ``target``
+#: field description now states the two rules the resolver applies — an EXACT
+#: conversation name / session id / cwd basename wins over any substring, and a
+#: team role word (``manager``) is refused — which is what a model reads before
+#: it types a target. Every other entry is byte-identical, and the same two
+#: descriptions are the whole of ``scripts/bench_context_budget.py``'s raise
+#: (``35,874 -> 35,937``) — the two ledgers move together.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 849,
     "ask": 1205,
@@ -188,8 +198,8 @@ MEASURED_TOKENS: dict[str, int] = {
     "read": 358,
     "read_variable": 74,
     "secret": 209,
-    "send": 614,
-    "sessions": 850,
+    "send": 639,
+    "sessions": 864,
     "task": 505,
     "team": 540,
     "team_delete": 93,

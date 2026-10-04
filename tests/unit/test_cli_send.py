@@ -1186,3 +1186,26 @@ def test_a_live_composer_still_refuses_when_the_store_has_no_history(
     assert "its owner has to send a first message" in err, err
     assert "once someone opens it" not in err, err
     assert "could not deliver" not in err, err
+
+
+def test_a_role_word_target_is_refused_with_exit_1_and_delivers_nothing() -> None:
+    """``lop send manager`` refuses with the shared sentence, delivering nothing.
+
+    The vocabulary is stubbed so this machine's real teams tree never leaks into
+    the assertion, but the RESOLVER is real: the user meets exactly the refusal
+    the resolver composes.
+    """
+    args = _parse_send(["manager", "BODY"])
+    with (
+        patch("local_operator.cli._role_words", return_value={"manager": ("lopdev",)}),
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(args)
+    assert rc == 1
+    send.assert_not_called()
+    message = red.call_args[0][0]
+    assert "is a team role (roles on: lopdev), not a session address" in message
+    assert "`lop sessions` lists the sessions whose names contain 'manager'" in message
+    # NOT the no-match form — that wording reopens the stored fallback.
+    assert "no live session matches" not in message
