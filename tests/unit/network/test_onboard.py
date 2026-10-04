@@ -30,8 +30,7 @@ from local_operator.network import onboard, onboard_approvals
 from local_operator.network import store as network_store
 from local_operator.network.types import MeshRefusal
 from local_operator.operator import OperatorAnchor
-from local_operator.operator.trust import statement_digest
-from local_operator.operator.verify import key_id_for, spki_fp
+from local_operator.operator.verify import key_id_for
 
 # ---------------------------------------------------------------------------
 # Doubles
@@ -240,6 +239,25 @@ def _anchor() -> OperatorAnchor:
     )
 
 
+def _minted_anchor_block(anchor: OperatorAnchor) -> dict[str, Any]:
+    """The card's anchor trio, minted through the REAL mint surface (F5).
+
+    The bug F5 fixes stayed invisible in this file for one reason: this builder
+    hand-wrote the card with the runner's own ``verify.spki_fp``, so both ends
+    of every cell agreed while the shipped mint recorded a different truncation
+    of the same digest. Deriving the card through ``local_anchor_trio`` — the
+    function the CLI's request verb calls — with the local store faked is what
+    makes a mint/runner format drift fail these cells instead of shipping.
+    """
+    from local_operator.network import approvals as approval_store
+
+    with pytest.MonkeyPatch.context() as patch:
+        _fake_local_store(patch, anchor)
+        trio = approval_store.local_anchor_trio()
+    assert trio is not None, "the faked local store must mint a trio"
+    return {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")}
+
+
 def _record(**what_over: Any) -> dict[str, Any]:
     anchor = _anchor()
     what: dict[str, Any] = {
@@ -248,11 +266,7 @@ def _record(**what_over: Any) -> dict[str, Any]:
         "build": "0.64.12",
         "network_id": "n_1",
         "role": "drive",
-        "anchor": {
-            "key_id": anchor.key_id,
-            "spki_fp": spki_fp(anchor.spki),
-            "statement_digest": statement_digest(anchor),
-        },
+        "anchor": _minted_anchor_block(anchor),
         "unattended": True,
         "grant": ["approve"],
     }
@@ -298,20 +312,34 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return root
 
 
-def _install_fakes(monkeypatch: pytest.MonkeyPatch) -> OperatorAnchor:
-    """The LOCAL operator store: a synthetic statement, no keychain anywhere.
+def _fake_local_store(patch: Any, anchor: OperatorAnchor) -> None:
+    """Point EVERY import home of the local operator store at a synthetic statement.
 
-    TWO targets on purpose: the runner imports ``load_anchor`` from the package
-    and ``load_staged_anchor`` from ``trust`` at call time, so a patch on one
-    home would leave the other import resolving the real filesystem.
+    The homes are the ones the product resolves at call time: ``trust``'s own
+    ``load_anchor``/``load_staged_anchor`` (what the shared reader
+    ``trust.load_local_anchor`` — and therefore both sides of the F5 comparison,
+    the mint's ``local_anchor_trio`` and the runner's ``step_anchor`` — reads)
+    and the package-level aliases a caller importing ``from local_operator.operator
+    import ...`` sees. A patch on one home would leave another resolving the real
+    filesystem — this host has a real anchor; CI does not.
+
+    ``patch`` is the pytest ``monkeypatch`` fixture or a
+    ``pytest.MonkeyPatch.context()`` — both speak ``setattr``.
     """
+
+    def loaded(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(anchor=anchor, usable=True, path="/etc/x")
+
+    patch.setattr("local_operator.operator.trust.load_anchor", loaded)
+    patch.setattr("local_operator.operator.trust.load_staged_anchor", lambda *a, **k: anchor)
+    patch.setattr("local_operator.operator.load_anchor", loaded)
+    patch.setattr("local_operator.operator.load_staged_anchor", lambda *a, **k: anchor)
+
+
+def _install_fakes(monkeypatch: pytest.MonkeyPatch) -> OperatorAnchor:
+    """The LOCAL operator store, faked for the RUNNER cells; returns the statement."""
     anchor = _anchor()
-    monkeypatch.setattr("local_operator.operator.trust.load_staged_anchor", lambda *a, **k: anchor)
-    monkeypatch.setattr("local_operator.operator.load_staged_anchor", lambda *a, **k: anchor)
-    monkeypatch.setattr(
-        "local_operator.operator.load_anchor",
-        lambda *a, **k: SimpleNamespace(anchor=anchor, usable=True, path="/etc/x"),
-    )
+    _fake_local_store(monkeypatch, anchor)
     return anchor
 
 
@@ -415,6 +443,16 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     assert payload["ok"] is True
     assert [row["step"] for row in payload["steps"]] == list(onboard.STEP_NAMES)
     assert all(row["ok"] for row in payload["steps"])
+    # F5 acceptance: the anchor cell emits its success sentence, and the runner's
+    # re-derivation agrees byte-for-byte with the card the REAL mint recorded —
+    # the assertion pair that fails on either half of the old format split.
+    anchor_step = next(row for row in payload["steps"] if row["step"] == "anchor")
+    assert (
+        anchor_step["detail"]
+        == f"operator anchor {record['what']['anchor']['key_id']} installed and trusted"
+    )
+    assert anchor_step["data"]["spki_fp"] == record["what"]["anchor"]["spki_fp"]
+    assert anchor_step["data"]["statement_digest"] == record["what"]["anchor"]["statement_digest"]
     assert [state for _, state, _ in fake.finished] == ["connected"]
     # The pre-approval contract in one assertion: NOTHING ran before the invite
     # step, and the invite step is local — no transport call at all.

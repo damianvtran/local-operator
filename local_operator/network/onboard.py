@@ -1789,16 +1789,18 @@ class OnboardRun:
         (a)), and HERE, before planting — are the design, not decoration: the
         runner re-derives ``{key_id, spki_fp, statement_digest}`` from the local
         store, refuses on any difference from the record, and ships the exact
-        bytes whose digest it checked.
+        bytes whose digest it checked. The source is ONE function
+        (``trust.load_local_anchor``: the installed, usable anchor; else the
+        staged statement) and the values come from ONE builder
+        (``trust.anchor_trio``), so "the local store" cannot mean two different
+        files — or two different truncations — on the two sides of the
+        handshake (F5).
         """
-        from local_operator.operator import anchor_bytes, load_anchor
-        from local_operator.operator.trust import load_staged_anchor, statement_digest
-        from local_operator.operator.verify import key_id_for, spki_fp
+        from local_operator.operator import anchor_bytes
+        from local_operator.operator.trust import anchor_trio, load_local_anchor
         from local_operator.paths import config_dir
 
-        anchor = load_staged_anchor(config_dir())
-        if anchor is None:
-            anchor = load_anchor().anchor
+        anchor = load_local_anchor(config_dir())
         if anchor is None:
             return _StepOutcome(
                 False,
@@ -1806,11 +1808,7 @@ class OnboardRun:
                 "anchor to install on the machine being onboarded",
             )
         payload = anchor_bytes(anchor)
-        trio = {
-            "key_id": key_id_for(anchor.spki),
-            "spki_fp": spki_fp(anchor.spki),
-            "statement_digest": statement_digest(anchor),
-        }
+        trio = anchor_trio(anchor)
         want = self.view.what.get("anchor") or {}
         mismatched = [
             field_name
@@ -1822,7 +1820,19 @@ class OnboardRun:
                 False,
                 "the anchor this machine holds does not match the one the request "
                 f"approved ({', '.join(mismatched)}); nothing was planted",
-                {"mismatch": mismatched},
+                {
+                    "mismatch": mismatched,
+                    # BOTH ends beside the field names (F5): a report that names
+                    # only the fields costs the next reader the two values it
+                    # exists to show — the shape the join step's
+                    # ``membership.source`` cross-check reads. Public fingerprints
+                    # only; never key material.
+                    "held": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
+                    "approved": {
+                        key: str(want.get(key) or "")
+                        for key in ("key_id", "spki_fp", "statement_digest")
+                    },
+                },
             )
         staging = Path(tempfile.mkdtemp(prefix="lop-onboard-anchor-"))
         try:

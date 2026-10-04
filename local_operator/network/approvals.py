@@ -820,49 +820,31 @@ def sign_decision(
         signer.close()
 
 
-def spki_fingerprint(spki: bytes) -> str:
-    """The human-comparable fingerprint of a public key: ``9A3C-12EF-3456``.
-
-    Three groups of four uppercase hex characters from ``sha256(spki)`` — the
-    shape the card renders beside "matches your operator key". Derived, never
-    stored: the stored value is the digest itself.
-    """
-    digest = hashlib.sha256(bytes(spki)).hexdigest().upper()
-    return f"{digest[0:4]}-{digest[4:8]}-{digest[8:12]}"
-
-
 def local_anchor_trio(root: Path | None = None) -> dict[str, Any] | None:
     """``{key_id, spki_fp, statement_digest, spki}`` from the LOCAL operator store.
 
-    The provenance trio of §2.5/§2.6, derived in ONE place so mint, approve and
-    the runner cannot disagree: the installed (root-owned, usable) anchor wins;
-    otherwise the STAGED statement — which is what the local bootstrap has
-    between ``init`` and the privileged install, and what its install step
-    consumes. ``None`` when neither exists: there is nothing to plant or to
+    The provenance trio of §2.5/§2.6 plus the public point. ONE source and ONE
+    derivation (F5): :func:`local_operator.operator.trust.load_local_anchor`
+    reads the store in one trust order (the installed, usable anchor first; else
+    the STAGED statement — the bootstrap artifact between ``init`` and the
+    privileged install, and what that install consumes), and
+    :func:`local_operator.operator.trust.anchor_trio` builds the values, whose
+    ``spki_fp`` is ``local_operator.operator.verify.spki_fp`` — the value
+    ``lop operator anchor export`` prints as "the value to compare". Mint,
+    approve, :func:`verify_for_run` and the onboarding runner all read through
+    those two functions, so the card a human approves and the statement a runner
+    plants cannot disagree about which file, or which truncation, they mean.
+    ``None`` when neither statement exists: there is nothing to plant or to
     verify against. The staged read resolves against ``root`` (the ambient
-    config dir when omitted), so a caller acting on an explicit store root
-    reads THAT root's statement.
+    config dir when omitted), so a caller acting on an explicit store root reads
+    THAT root's statement.
     """
-    from local_operator.operator.trust import (
-        anchor_bytes,
-        load_anchor,
-        load_staged_anchor,
-    )
-    from local_operator.paths import config_dir
+    from local_operator.operator.trust import anchor_trio, load_local_anchor
 
-    loaded = load_anchor()
-    anchor = loaded.anchor if loaded.usable else None
-    if anchor is None:
-        anchor = load_staged_anchor(root if root is not None else config_dir())
+    anchor = load_local_anchor(root)
     if anchor is None:
         return None
-    statement = anchor_bytes(anchor)
-    return {
-        "key_id": anchor.key_id,
-        "spki_fp": spki_fingerprint(anchor.spki),
-        "statement_digest": "sha256:" + hashlib.sha256(statement).hexdigest(),
-        "spki": anchor.spki,
-    }
+    return {**anchor_trio(anchor), "spki": anchor.spki}
 
 
 def _verify_decision_signature(

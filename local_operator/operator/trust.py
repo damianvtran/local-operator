@@ -52,7 +52,8 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.operator.keychain import FILE_ONLY, SECURE_ENCLAVE
-from local_operator.operator.verify import key_id_for
+from local_operator.operator.verify import key_id_for, spki_fp
+from local_operator.paths import config_dir
 
 #: The anchor's own format version. Read rather than assumed so a future shape
 #: can be refused by an old runtime instead of misread.
@@ -355,6 +356,28 @@ def statement_digest(anchor: OperatorAnchor) -> str:
     return f"sha256:{digest}"
 
 
+def anchor_trio(anchor: OperatorAnchor) -> dict[str, Any]:
+    """The provenance trio ``{key_id, spki_fp, statement_digest}`` for one statement.
+
+    ONE builder (F5): the approval mint records these values, approve re-derives
+    them, and the onboarding runner re-derives them once more before planting.
+    Three derivations over one function is the design; three AGREEMENTS in prose
+    is what let two truncations of the same ``sha256`` ship side by side — the
+    card recorded ``94A6-A6C1-110D`` (12 hex, 3 groups) while the runner derived
+    ``94A6-A6C1-110D-773B`` (16 hex, 4 groups), so every card that build filed
+    was refused ``{"mismatch": ["spki_fp"]}`` before anything was planted.
+    ``spki_fp`` here is ``local_operator.operator.verify.spki_fp`` — the value
+    ``lop operator anchor export`` prints as "the value to compare" — and the
+    digest is :func:`statement_digest` over the canonical bytes, so a card can
+    never disagree with the statement it authorises.
+    """
+    return {
+        "key_id": key_id_for(anchor.spki),
+        "spki_fp": spki_fp(anchor.spki),
+        "statement_digest": statement_digest(anchor),
+    }
+
+
 def staging_path(config_root: Path) -> Path:
     """Where the anchor waits for the one privileged step.
 
@@ -386,6 +409,31 @@ def load_staged_anchor(config_root: Path) -> OperatorAnchor | None:
         return OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, ValueError):
         return None
+
+
+def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
+    """The local statement a provenance derivation reads, in ONE trust order.
+
+    Installed-and-usable first — it is what the runtime honours — then the
+    STAGED statement: the bootstrap artifact between ``init``/``setup`` and the
+    privileged install, and the carrier ``devices --revoke``/``--authorise``
+    stage before their install consumes it. The staged read resolves against
+    ``config_root`` (the ambient config dir when omitted).
+
+    ONE reader, deliberately (F5): the approval mint (``local_anchor_trio``),
+    the approve-time comparison, ``verify_for_run`` and the onboarding runner's
+    ``step_anchor`` all derive from this function, so "the local store" cannot
+    mean two different files on the two sides of one handshake. The precedence
+    only matters where the two files differ (a re-init, or a staged device-list
+    change before its install) — and there, installed-first is the coherent
+    choice: a card records, and a runner ships, what this machine currently
+    trusts; a staged candidate becomes readable the moment its own privileged
+    install lands it.
+    """
+    loaded = load_anchor()
+    if loaded.usable:
+        return loaded.anchor
+    return load_staged_anchor(config_root if config_root is not None else config_dir())
 
 
 def install_commands(staging: Path, target: Path) -> list[list[str]]:
