@@ -25,8 +25,8 @@ THE STEPS (named receipts, §3.3 steps 3-10; steps 1-2 are the request path):
     install   ``uv tool install [--force] --refresh local-operator==<tag>`` | ``lop-update <tag>``
     join      identity + ``lop network join @<token> --automated``
     anchor    ``lop operator anchor export`` → node → ``install --from`` (F4b)
-    grants    ``lop network member grant <net> <mac> approve unattended``
     relay     install/start the relay service; linger check (OQ11)
+    grants    ``lop network member grant <net> <mac> approve unattended``
     verify    ``doctor``/``ready``/``peers`` → the record folds to ``connected``
 
 CREDENTIAL HANDLING (§3.2). The record stores a REFERENCE, never material. The
@@ -71,14 +71,25 @@ from local_operator.network.types import MeshRefusal
 #: Step names, in order. These ARE the interface (§6 row (b): "runner step
 #: names" are frozen): the record's receipts and the run payload both carry
 #: them, and the drill's matrix asserts them.
+#:
+#: ``relay`` PRECEDES ``grants`` ON PURPOSE (F7b). ``step_relay``'s restart is
+#: what rolls a relay that is already running onto the build the ``install``
+#: step landed, and the ``grants`` write is the node's own relay to execute
+#: whenever one answers — ``_apply_capability_change`` prefers the relay and
+#: only a MISSING answer falls back in-process. A relay still on the previous
+#: build answers with a refusal that does not fall back, so with ``grants``
+#: first a gate shipped in the same release could never be in effect in the
+#: pre-run process: the write settled as ``applied:false, reason:not_admin``
+#: and nothing re-attempted it after the relay moved. Pinned by
+#: ``test_the_relay_step_runs_before_the_grants_step``.
 STEP_NAMES: tuple[str, ...] = (
     "invite",
     "pre_read",
     "install",
     "join",
     "anchor",
-    "grants",
     "relay",
+    "grants",
     "verify",
 )
 
@@ -1372,7 +1383,7 @@ class OnboardRun:
             # §3.4 names `lop-update` for an existing build; a node with a build
             # but no updater script still has uv, and a pinned reinstall is the
             # remaining documented spelling. The running relay picks the new
-            # build up at step 9's restart. `--refresh` as at the fresh-install
+            # build up at step 8's restart. `--refresh` as at the fresh-install
             # branch: a cached index can hide the release this run is for.
             command = f"uv tool install --force --refresh local-operator=={shlex.quote(tag)}"
             method = "uv-tool-reinstall"
@@ -1933,12 +1944,16 @@ class OnboardRun:
         )
 
     def step_grants(self) -> _StepOutcome:
-        """§3.3 step 8: what the node lets THIS device do, granted per scope.
+        """§3.3 step 9: what the node lets THIS device do, granted per scope.
 
         Each device decides what a peer may do on IT, so both the ``approve``
         scope ("answer approval prompts for sessions here") and the
         ``unattended`` scope ("start sessions here without approval prompts")
-        are grants the NODE holds about the operator's device id.
+        are grants the NODE holds about the operator's device id. Runs AFTER
+        :meth:`step_relay` (F7b): when a relay answers on the node, the relay
+        executes this write from its own loaded build, so a write attempted
+        before the relay moved would meet the pre-run build's gate — and that
+        refusal settles where it lands rather than falling back.
         """
         caps = [str(cap) for cap in (self.view.what.get("grant") or []) if cap]
         if bool(self.view.what.get("unattended")):
@@ -2032,14 +2047,18 @@ class OnboardRun:
         )
 
     def step_relay(self) -> _StepOutcome:
-        """§3.3 step 9 (+ OQ11): supervision via the service arm; linger caveat.
+        """§3.3 step 8 (+ OQ11): supervision via the service arm; linger caveat.
 
         ``lop network restart`` is the one job: after the build step it also
         moves a running relay onto the new build, and on Linux it installs the
         systemd ``--user`` unit when the host has none (both arms live in
-        ``network/relay.py``'s supervision block). Linger absence does NOT fail
-        the onboard — it is recorded, because OQ11's default is the caveat and
-        an onboarded device that drops its relay at logout is still onboarded.
+        ``network/relay.py``'s supervision block). It runs BEFORE
+        :meth:`step_grants` (F7b): with a relay answering on the node, the grant
+        write is the relay's own to execute, and a relay still on the previous
+        build refuses it without falling back — so the move must precede the
+        write and nothing later re-attempts it. Linger absence does NOT fail the
+        onboard — it is recorded, because OQ11's default is the caveat and an
+        onboarded device that drops its relay at logout is still onboarded.
         """
         restart = self._remote_lop(
             "lop network restart --json", timeout=self._step_timeout("relay")
