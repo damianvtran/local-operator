@@ -1386,6 +1386,359 @@ def test_an_undecodable_target_with_a_served_list_keeps_the_generic_sentence(
     assert "relay_serves_target" not in failing["data"]
 
 
+# ---------------------------------------------------------------------------
+# Join entry: satisfied when the node is already an active member (slice A)
+# ---------------------------------------------------------------------------
+
+
+def _mint_token(token: Path, *, network_id: str = "n_1", epoch: int = 1) -> None:
+    """Write a REAL decodable invite token — the entry check reads its epoch."""
+    from local_operator.network import invite as invite_mod
+    from local_operator.network import wire as wire_mod
+    from local_operator.network.types import NetworkRecord
+
+    record = NetworkRecord(
+        network_id=network_id, name="damian-mesh", epoch=epoch, self_device_id="d_mac"
+    )
+    minted = invite_mod.mint(record, wire_mod.b64u(bytes(range(32))), role="drive", ttl_s=600.0)
+    token.write_text(minted.token, encoding="utf-8")
+
+
+def _inviter_record(*, member: bool = True, burned: bool = False):
+    """THIS device's record for the invite's network, as the store holds it."""
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    rows = (
+        [
+            MemberRecord(
+                device_id="d_node",
+                public_key="pk-node",
+                name="cloud-node-1",
+                role="drive",
+                lifecycle="active",
+            )
+        ]
+        if member
+        else []
+    )
+    record = NetworkRecord(
+        network_id="n_1",
+        name="damian-mesh",
+        epoch=1,
+        self_device_id="d_mac",
+        members=rows,
+    )
+    if burned:
+        record.removed_ids = ["d_node"]
+    return record
+
+
+def _status_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "network_id": "n_1",
+        "name": "damian-mesh",
+        "epoch": 1,
+        "role": "drive",
+        "trust": "active",
+        "members": 2,
+        "links": 1,
+        "stale": "",
+        "self_device_id": "d_node",
+        "membership_state": "active",
+        "membership": {"state": "active", "sentence": "this device is an active member"},
+    }
+    row.update(overrides)
+    return row
+
+
+def _status_output(*rows: dict[str, Any]) -> dict[str, Any]:
+    """The node's ``lop network status --json`` as the entry check reads it."""
+    return {
+        "stdout": json.dumps(
+            {
+                "ok": True,
+                "relay_running": True,
+                "relay_answering": True,
+                "relay_state": "live",
+                "port": 4097,
+                "networks": list(rows),
+            }
+        )
+    }
+
+
+def test_an_already_active_member_skips_the_join_without_a_push_or_dial(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Run 10: re-joining a clean active member must satisfy the step, not re-run it.
+
+    The node's own row said ``membership_state: active`` at the invite's epoch,
+    the member table carried the device, and the attempt still went to the wire —
+    where it exercised the join MECHANISM rather than the requirement ("is this
+    node admitted?"). Both local reads agree here, so the step is satisfied:
+    no push, no dial, and the receipt carries the reads.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(), None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(_status_row()))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["ok"] is True
+    assert join["detail"] == (
+        "cloud-node-1 is already an active member of damian-mesh (epoch 1); admission "
+        "is satisfied and no re-join was attempted — the invite goes unused and expires."
+    )
+    assert join["data"]["membership"] == {
+        "state": "active",
+        "epoch": 1,
+        "device_id": "d_node",
+        "source": ["node status", "inviter member table"],
+    }
+    assert join["data"]["device_id"] == "d_node"
+    # NO PUSH, NO DIAL — the invite never leaves this machine and no join runs.
+    assert not [c for c in transport.calls if c[0] == "copy" and "lop-invite-" in c[1][1]]
+    assert not [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+
+
+def test_a_same_named_other_network_row_cannot_satisfy(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Names are not unique by design — the id is the identity (reviewer r1, MINOR-1).
+
+    Reproduced at head ``daf9a4819``: with a same-named row for a DIFFERENT network
+    id listed BEFORE the invite's own row, the ``network_id OR name`` matcher read
+    the other network's ``active`` row and reported satisfied while the invite's
+    own row says ``removed`` — the outcome was row-order dependent. The id-only
+    match must fall through to the join here.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(), None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    other = _status_row(network_id="n_9", membership_state="active")
+    target_row = _status_row(membership_state="removed")
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(other, target_row))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert "already an active member" not in join["detail"]
+    assert "joined damian-mesh as d_node" in join["detail"]
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
+def test_a_node_missing_from_the_inviters_table_still_joins(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One side cannot satisfy the gate: the node says active, the table lacks the
+    row — and the join upserting that row is exactly what the table needs."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(member=False), None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(_status_row()))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["ok"] is True
+    assert "already an active member" not in join["detail"]
+    assert "joined damian-mesh as d_node" in join["detail"]
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
+def test_a_burned_device_is_refused_before_any_push_or_dial(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``removed_ids`` is forever: the refusal is pre-empted from the member table
+    with the relay's own sentence, so a removed device spends no ceremony."""
+    from local_operator.network import relay as relay_mod
+
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    inviter = _inviter_record(burned=True)
+    network_store.save(inviter, None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=[
+            ("uname", {"stdout": PRE_READ_OK}),
+            ("lop-update", {"stdout": "rebuilt\n"}),
+            ("lop --version", {"stdout": "v0.64.12\n"}),
+            (
+                "identity show",
+                {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+            ),
+        ]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed", payload
+    failing = payload["steps"][-1]
+    assert failing["step"] == "join" and failing["ok"] is False
+    assert failing["detail"] == relay_mod.membership_conflict(inviter, "d_node")
+    assert "burned id is never admitted again" in failing["detail"]
+    assert failing["data"]["code"] == "device_id_conflict"
+    assert not [c for c in transport.calls if c[0] == "copy"]
+    assert not [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+
+
+def test_an_epoch_mismatch_still_joins(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The join's job is to write the CURRENT secret: a node whose row sits at an
+    epoch other than the invite's gets the join, not the skip."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token, epoch=1)
+    network_store.save(_inviter_record(), None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(_status_row(epoch=2)))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert "already an active member" not in join["detail"]
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
+def test_a_relay_down_node_row_without_membership_state_still_joins(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A read that cannot tell falls through: the node's relay-down fallback rows
+    carry no ``membership_state``, so the join runs exactly as before."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(), None)
+    fallback = _status_row()
+    fallback.pop("membership_state")
+    fallback.pop("membership", None)
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=HAPPY_OUTPUTS + [("network status", _status_output(fallback))]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert "already an active member" not in join["detail"]
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
+def test_a_fresh_admission_is_unchanged_by_the_entry_check(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No inviter record at all: nothing to confirm with — the join runs exactly
+    as before and its success receipt keeps its shape."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    # Deliberately NO ``network_store.save(...)``: the fresh device's shape.
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(outputs=HAPPY_OUTPUTS)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["detail"] == (
+        "joined damian-mesh as d_node; the code compare passed on the inviting side"
+    )
+    assert join["data"]["device_id"] == "d_node"
+    assert join["data"]["sas"] == "123456"
+    assert join["data"]["network_id"] == "n_1"
+    assert join["data"]["identity_minted"] is False
+    assert [c for c in transport.calls if c[0] == "copy"]
+    join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
+    assert len(join_calls) == 1
+
+
 def test_a_retry_reuses_the_record_with_a_new_run_id(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
