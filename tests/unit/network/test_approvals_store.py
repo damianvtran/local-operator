@@ -16,6 +16,9 @@ the isolated root).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -263,6 +266,113 @@ def test_run_re_entry_from_failed_uses_a_new_run_id(root: Path) -> None:
     with pytest.raises(MeshRefusal) as raised:
         A.begin_run(record["approval_id"], run_id="run_3", root=root)
     assert raised.value.code == "approval_not_runnable", "a connected record must never re-run"
+
+
+# ---------------------------------------------------------------------------
+# The stale-lease re-entry — drill finding, 2026-10-04 (F1)
+# ---------------------------------------------------------------------------
+#
+# A runner killed mid-flight left a card in ``connecting`` that refused every
+# retry: the frozen matrix lets only the RUNNER write ``failed``, and the runner
+# was the thing that died. These cells pin the resolution chosen by the drill
+# decision — ``begin_run`` supersedes a run whose lease is stale, refuses one
+# still in flight, and never invents a step failure (the truthful receipt is
+# ``step=aborted``). A live runner can never be double-entered: the pid in the
+# lease is the guard, and ``procstate.pid_alive`` fails closed toward "alive".
+
+
+def test_a_connecting_record_with_a_dead_lease_is_superseded_by_a_new_run(root: Path) -> None:
+    record = _approved_device_record(root)
+    A.begin_run(record["approval_id"], run_id="run_dead", root=root)
+    A.append_receipt(record["approval_id"], run_id="run_dead", step="invite", ok=True, root=root)
+    # A REAL dead process's pid: spawned and reaped here, so no clock is asked
+    # to stand in for exit.
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    stopped = A._load_raw(record["approval_id"], root)
+    stopped["run"] = {"run_id": "run_dead", "pid": child.pid, "started_at": time.time() - 100.0}
+    A._write_record(stopped, root)
+
+    reopened = A.begin_run(
+        record["approval_id"], run_id="run_new", runner_pid=os.getpid(), root=root
+    )
+    assert reopened["state"] == A.STATE_CONNECTING
+    assert reopened["run"]["run_id"] == "run_new"
+    assert reopened["run"]["pid"] == os.getpid()
+    steps = [r["step"] for r in reopened["receipts"]]
+    assert steps == ["invite", "aborted"], reopened["receipts"]
+    aborted = reopened["receipts"][-1]
+    assert aborted["run_id"] == "run_dead"
+    assert aborted["ok"] is False
+    assert "stopped reporting" in aborted["detail"]
+    # The audit trail shows the gap between the approval that ran and the run
+    # that replaced it.
+    assert reopened["audit"][-1] == "onboard_aborted"
+
+
+def test_a_live_runner_is_never_double_entered(root: Path) -> None:
+    """The guard from the other side: a lease whose pid IS alive refuses, and
+    the refusal leaves the record byte-identical — the in-flight run keeps its
+    receipts and its lease, whatever the caller intended."""
+    record = _approved_device_record(root)
+    A.begin_run(record["approval_id"], run_id="run_live", runner_pid=os.getpid(), root=root)
+    before = A._load_raw(record["approval_id"], root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.begin_run(record["approval_id"], run_id="run_2", root=root)
+    assert raised.value.code == "approval_run_in_flight"
+    after = A._load_raw(record["approval_id"], root)
+    assert after == before, "a refused re-entry must not touch the record"
+
+
+def test_a_lease_less_record_falls_back_to_the_silence_bound(root: Path) -> None:
+    """Records written before the lease existed: silence past the bound (no
+    step can legally be in flight that long) may be superseded; a recent
+    receipt refuses, because it cannot be told apart from a live step."""
+    record = _approved_device_record(root)
+    A.begin_run(record["approval_id"], run_id="run_old", root=root)
+    A.append_receipt(record["approval_id"], run_id="run_old", step="install", ok=True, root=root)
+    raw = A._load_raw(record["approval_id"], root)
+    del raw["run"]
+    raw["receipts"][-1]["at"] = time.time() - (A.STALE_RUN_AFTER_S + 60.0)
+    A._write_record(raw, root)
+    reopened = A.begin_run(record["approval_id"], run_id="run_next", root=root)
+    assert reopened["state"] == A.STATE_CONNECTING
+    assert [r["step"] for r in reopened["receipts"]] == ["install", "aborted"]
+
+    other = _approved_device_record(root)
+    A.begin_run(other["approval_id"], run_id="run_old2", root=root)
+    A.append_receipt(other["approval_id"], run_id="run_old2", step="install", ok=True, root=root)
+    raw2 = A._load_raw(other["approval_id"], root)
+    del raw2["run"]
+    raw2["receipts"][-1]["at"] = time.time() - 1.0
+    A._write_record(raw2, root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.begin_run(other["approval_id"], run_id="run_x", root=root)
+    assert raised.value.code == "approval_run_in_flight"
+
+
+def test_a_lease_less_record_with_no_receipts_fails_closed(root: Path) -> None:
+    """Nothing dates the run at all — no lease, no receipt — so nothing can
+    prove it dead; guessing would risk double-running a live first step."""
+    record = _approved_device_record(root)
+    A.begin_run(record["approval_id"], run_id="run_bare", root=root)
+    raw = A._load_raw(record["approval_id"], root)
+    del raw["run"]
+    raw["receipts"] = []
+    A._write_record(raw, root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.begin_run(record["approval_id"], run_id="run_x", root=root)
+    assert raised.value.code == "approval_run_in_flight"
+
+
+def test_the_staleness_bound_covers_the_runners_largest_step_timeout(root: Path) -> None:
+    """The bound's derivation, pinned: a live runner may be silent for exactly
+    its largest step timeout between two receipts, so the staleness bound must
+    exceed it. If either constant moves, this fails before silence starts
+    meaning something it does not."""
+    from local_operator.network import onboard
+
+    assert A.STALE_RUN_AFTER_S >= max(onboard.STEP_TIMEOUTS.values()) + 60.0
 
 
 def test_receipts_never_touch_state_or_signature_and_stop_at_terminal(root: Path) -> None:
