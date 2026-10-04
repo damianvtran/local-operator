@@ -354,6 +354,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_grant",
         "credential_report",
         "credential_placement",
+        "credential_revoke",
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
@@ -10225,6 +10226,7 @@ def _owning_document(op: str) -> str:
         "credential_grant": "mesh-credentials.md",
         "credential_report": "mesh-credentials.md",
         "credential_placement": "mesh-credentials.md",
+        "credential_revoke": "mesh-credentials.md",
     }
     return owners.get(op, "the design documents")
 

@@ -292,6 +292,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "delete", help="Delete a credential", parents=[parent_parser]
     )
 
+    # The F1 credential shim (github adapter): run BY GIT from a child whose env
+    # the session built — see network/credentials/github.py. Hidden from the help
+    # narrative on purpose (it is an implementation detail of the brokered env,
+    # not a verb an operator types), but a real subcommand so the helper is the
+    # SAME BUILD that injected the env.
+    git_helper_parser = credential_subparsers.add_parser(
+        "git-helper",
+        help=(
+            "Serve the git credential protocol from the brokered environment "
+            "(invoked by git; not for direct use)"
+        ),
+        parents=[parent_parser],
+    )
+    git_helper_parser.add_argument("operation", nargs="?", default="get")
+
     credential_key_help = (
         "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
         "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
@@ -2223,6 +2238,22 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 help="Working directory to run the operator in",
             )
             _propagate_global_flags(subparser)
+
+
+def _credential_git_helper_command(args: argparse.Namespace) -> int:
+    """``lop credential git-helper [get|store|erase]``: the F1 credential shim.
+
+    Invoked BY GIT — git appends the operation as the first argument — from a
+    child whose environment the session built with the github.com-only helper
+    reset pair. It reads the credential protocol on stdin and serves
+    ``$GH_TOKEN``/``$GITHUB_TOKEN`` for a github.com ``https`` request whose
+    path is in the designated allow-list; everything else is silence with exit
+    0, which is how a credential helper says "I have nothing". Never a prompt,
+    never a write, never the token on stdout outside the ``get`` reply.
+    """
+    from local_operator.network.credentials.github import run_git_helper_cli
+
+    return run_git_helper_cli(str(getattr(args, "operation", "") or ""))
 
 
 def credential_update_command(args: argparse.Namespace) -> int:
@@ -13707,6 +13738,8 @@ def main() -> int:
                 return credential_update_command(args)
             elif args.credential_command == "delete":
                 return credential_delete_command(args)
+            elif args.credential_command == "git-helper":
+                return _credential_git_helper_command(args)
             else:
                 parser.error(f"Invalid credential command: {args.credential_command}")
         elif args.subcommand == "config":

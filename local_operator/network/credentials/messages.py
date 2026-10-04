@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from local_operator.network.credentials.github import GITHUB_KEY
 from local_operator.network.credentials.types import BrokerError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -96,6 +97,63 @@ def render_broker_error(
     label = provider or key or "that credential"
     is_mcp = key.startswith("mcp:")
     login = f"/mcp login {key[4:]}" if is_mcp else f"lop login {label}"
+    is_github = provider == GITHUB_KEY or key == GITHUB_KEY
+
+    if is_github:
+        # THE GITHUB ARMS COME FIRST, and each says only what is true for this
+        # credential. It has no local-login remedy (there is no 'lop login github'
+        # in this build), and its "the owner has nothing" state is the INTERIM
+        # state an operator actually meets — a node's push and PR-write wait for a
+        # GitHub App, which is one documented step, while everything else keeps
+        # working. 'not "implemented", not "blocked" — the actual state'.
+        if error.code == "no_local_credential":
+            return (
+                f"{owner} holds no GitHub credential: push and PR-write through the "
+                "mesh are unavailable until a GitHub App is configured there (one "
+                "small step — the network guide has the checklist). Public clones "
+                "and non-GitHub work are unaffected."
+            )
+        if error.code == "not_a_holder":
+            return (
+                f"{owner} does not share its GitHub credential with this device. Ask "
+                f"the operator on {owner} to share it (on that device: 'lop network "
+                "credential share github --with <this device>'). Public clones need "
+                "no credential."
+            )
+        if error.code == "owner_offline":
+            return (
+                f"No GitHub credential is reachable: {owner} owns it and was last "
+                f"seen {render_last_seen(last_seen_s)}. Reconnect that device; public "
+                "clones need no credential."
+            )
+
+    if error.code == "device_scope_required":
+        return (
+            f"{owner} refused to lend '{label}' to a session: this credential is "
+            "bound to the DEVICE, not to a session id (any process on the borrowing "
+            "device may use it while the share stands). Nothing was lent; re-share "
+            f"it with 'lop network credential share {label} --with <device> --scope "
+            "device'."
+        )
+    if error.code == "github_app_unusable":
+        return (
+            f"{owner} could not use its GitHub App credential, so nothing was minted "
+            f"(the App key there needs a look: 'lop secret describe GITHUB_APP' on "
+            f"{owner}). Nothing was lent."
+        )
+    if error.code == "github_repositories_unset":
+        return (
+            f"{owner} has no repositories designated for GitHub brokering, so nothing "
+            f"was minted: set network.credentials.github.repositories on {owner} (the "
+            "network guide's checklist). Nothing was lent."
+        )
+    if error.code == "github_repo_refused":
+        detail = f" ({error.message})" if error.message else ""
+        return (
+            f"GitHub refused the mint for a repository {owner} designated{detail}. "
+            f"Check that the App installation on {owner} covers the designated "
+            "repositories; nothing was lent."
+        )
 
     if error.code == "owner_offline":
         return (

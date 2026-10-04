@@ -73,6 +73,8 @@ KIND_LABELS: dict[str, str] = {
     "oauth-rotating": "OAuth",
     "api-key-static": "API key",
     "mcp-rotating": "MCP login",
+    # The github adapter's row (github.py): a GitHub App's installation tokens.
+    "github-app": "GitHub App",
 }
 
 #: The per-kind default posture (§2.3). A kind absent here has no default and is
@@ -82,6 +84,11 @@ SHARE_DEFAULT_BY_KIND: dict[str, bool] = {
     "oauth-rotating": True,
     "api-key-static": False,
     "mcp-rotating": False,
+    # Closed — and closed hardest: one App covers every designated repository for
+    # EVERY command on the borrower while the share stands, so the join-time
+    # default never offers it; the operator's explicit ``credential share`` is
+    # the only grant path (the same posture §2.3 gives the static key).
+    "github-app": False,
 }
 
 #: Providers whose logins are NEVER auto-offered in a join list. ``radient`` is
@@ -232,8 +239,15 @@ def shape_for_key(key: str, config: Path) -> tuple[str, str, str]:
     aliased MIXED buckets today are ``radient``, ``xai`` and ``zai``; the OAuth
     row wins in all of them.
     """
+    from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
+    if github_mod.is_github_key(key):
+        # The App key is not a store row, so its shape is the key's own name. The
+        # identity label stays empty on purpose: the App is not an account a person
+        # signs into, and inventing a label would be display data with nothing
+        # behind it.
+        return github_mod.GITHUB_KIND, github_mod.GITHUB_KEY, ""
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
@@ -263,8 +277,14 @@ def credential_here(key: str, config: Path) -> bool:
     every device's document whose owner cannot serve it. An unreadable store
     answers ``False`` — the closed direction at a grant seam.
     """
+    from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
+    if github_mod.is_github_key(key):
+        # "Does this device hold it" for the App key is the secret's presence —
+        # the same read-only guard as every other candidate (never constructs a
+        # store, never creates one).
+        return github_mod.app_secret_present(config)
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         store = open_store(config)
@@ -352,6 +372,14 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
             # read as "serve it anyway".
             continue
         rows.append({"key": credential_key_for_mcp(url), "kind": "mcp-rotating", "label": ""})
+
+    from local_operator.network.credentials import github as github_mod
+
+    if github_mod.app_secret_present(config):
+        # The App key, when one is configured: it has no store row, so it is named
+        # here directly. Not ``share_default``'d — it rides the list as an
+        # explicit-only row whose remedy is the operator's own share verb.
+        rows.append({"key": github_mod.GITHUB_KEY, "kind": github_mod.GITHUB_KIND, "label": ""})
 
     rows.sort(key=lambda row: row["key"])
     return rows
