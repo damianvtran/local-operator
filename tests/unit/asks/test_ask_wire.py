@@ -910,9 +910,15 @@ def _ask_row(index: int, *, questions: int = 1, text: str = "Which one?") -> dic
     }
 
 
-def test_the_bound_caps_counts_as_well_as_text() -> None:
-    """The first revision exempted the first row from the budget entirely, so one
-    ask with a hundred long questions could spend the whole frame."""
+def test_the_bound_caps_counts_and_never_cuts_text() -> None:
+    """The counts bound how much rides; they must not touch the strings.
+
+    The first revision clipped every question to 200 characters, each option
+    label to 60 and each description to 80. A label is the ANSWER the surface
+    submits verbatim, so that cap corrupted answers (see
+    ``test_a_long_option_label_reaches_the_ledger_whole``); the fix bounds the
+    NUMBER of things carried and leaves every string the model wrote intact.
+    """
     from local_operator.session.frontend_state import (
         ASK_WIRE_OPTIONS_MAX,
         ASK_WIRE_QUESTIONS_MAX,
@@ -928,19 +934,88 @@ def test_the_bound_caps_counts_as_well_as_text() -> None:
     questions = kept[0]["questions"]
     assert len(questions) <= ASK_WIRE_QUESTIONS_MAX
     for question in questions:
-        assert question["question"].endswith("…") and len(question["question"]) <= 201
+        # Whole, not clipped: the text is exactly what ``_ask_row`` wrote — the
+        # 400-question source is the only reason a question is missing.
+        assert question["question"] == f"{'x' * 500} {int(question['id'][1:])}"
+        assert not question["question"].endswith("…")
         assert len(question["options"]) <= ASK_WIRE_OPTIONS_MAX
-        for option in question["options"]:
-            assert len(option["label"]) <= 61 and len(option["description"]) <= 81
+    # Every option that rides keeps its FULL label and description.
+    for option in questions[0]["options"]:
+        assert option["label"] == "y" * 300
+        assert option["description"] == "z" * 300
 
 
-def test_the_first_row_is_clipped_to_the_budget_rather_than_exempt() -> None:
+def test_the_first_row_rides_whole_when_it_exceeds_the_budget() -> None:
+    """The head ask must be answerable, and answerable INTACT.
+
+    The old behaviour clipped the head row's text until the field fit a 1,000
+    character budget. That kept the frame small but handed the reader (and the
+    answer key) a fragment, so the fix keeps the row whole and lets the budget
+    govern only the tail.
+    """
     from local_operator.session.frontend_state import bound_ask_rows
 
     row = _ask_row(0, questions=6, text="q" * 5_000)
     kept, _dropped = bound_ask_rows([row], budget=1_000)
-    charged = sum(len(q["question"]) for q in kept[0]["questions"])
-    assert charged <= 1_000, charged
+    questions = kept[0]["questions"]
+    assert len(questions) == 6, "the head row's questions all ride"
+    for question in questions:
+        assert question["question"] == f"{'q' * 5_000} {int(question['id'][1:])}"
+        assert not question["question"].endswith("…")
+
+
+def test_a_long_option_label_reaches_the_ledger_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The round trip the wire clip corrupted, driven end to end.
+
+    The answering surface submits the label the wire showed it, and the ledger
+    records that string verbatim. The wire used to clip labels to 60 characters,
+    so a long label became a long ANSWER — measured on the operator's own store
+    (``sessions/439818272d84/asks.jsonl``), where the label "Amend the clause:
+    grade on client latency, record depth beside it" was recorded as
+    ``label[:60] + "…"``. This drives the real path — enqueue → ``ask_wire`` →
+    ``bound_ask_rows`` → answer → log — and asserts the recorded answer is the
+    whole label. It FAILS on the clipping behaviour and passes on the fix.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session, queue = _live_session(tmp_path)
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    label = "Amend the clause: grade on client latency, record depth beside it"
+    assert len(label) > 60, "the fixture must exceed the old 60-character label cap"
+    outcome = queue.enqueue(
+        [
+            {
+                "id": "q0",
+                "question": "Which reading of the clause?",
+                "options": [{"label": label}, {"label": "Keep it as written"}],
+                "multi": False,
+                "secret": False,
+                "persist": False,
+                "recommended": None,
+            }
+        ],
+        None,
+    )
+    assert outcome["ok"] is True, outcome
+    ask_id = outcome["details"]["ask_id"]
+
+    rows, _outstanding = ask_wire(session)
+    assert rows, "a live session publishes its queued ask"
+    kept, _dropped = bound_ask_rows(rows)
+    shown = kept[0]["questions"][0]["options"][0]["label"]
+    assert shown == label, "the wire must carry the label whole, not label[:60] + '…'"
+
+    # The surface answers with the label it was shown — the clip is what chose
+    # the answer before, because the answer IS the label.
+    result = queue.respond(ask_id, {"q0": [shown]})
+    assert result.get("ok") is True, result
+    events = store.read_events(queue.session_dir)
+    answered = [event for event in events if event["kind"] == store.EVENT_ANSWERED]
+    assert len(answered) == 1
+    assert answered[0]["answers"] == {"q0": [label]}, answered[0]["answers"]
+    assert not answered[0]["answers"]["q0"][0].endswith("…")
 
 
 def test_the_snapshot_marks_a_clipped_list_rather_than_shipping_a_bare_count() -> None:
