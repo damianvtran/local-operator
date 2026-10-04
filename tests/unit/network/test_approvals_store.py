@@ -681,6 +681,98 @@ def _approved_device_record(root: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Withdrawal — the filer's own settle (self-settled, no operator involved)
+# ---------------------------------------------------------------------------
+
+
+def test_a_requester_withdraws_its_own_unanswered_request(root: Path) -> None:
+    """The drill's honest end-state for the redundant card: the REQUESTER settles
+    its OWN un-actioned request. One write, no signature (no operator gesture
+    rode it), the record's own trail naming the filer as the withdrawer, and the
+    result is terminal — it can never run and never re-fold as expired."""
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    withdrawn = A.withdraw(
+        record["approval_id"], requested_by=dict(record["requested_by"]), root=root
+    )
+
+    assert withdrawn["state"] == "withdrawn"
+    assert A.is_terminal(withdrawn["state"])
+    # The trail reads "filed by X, withdrawn by X" without re-deriving the rule.
+    assert withdrawn["withdrawn_by"] == record["requested_by"]
+    assert withdrawn["audit"] == ["onboard_requested", "onboard_withdrawn"]
+    raw = A._load_raw(record["approval_id"], root)
+    assert raw["signature"] is None, "no operator gesture rides a withdrawal"
+    assert raw["receipts"] == [], "nothing ran, so nothing is recorded as run"
+    assert float(raw["decided_at"]) > 0.0
+    # Terminal, both directions: never re-runnable, and the expiry fold leaves it
+    # settled as withdrawn rather than re-reading it as a lapse.
+    with pytest.raises(MeshRefusal) as raised:
+        A.begin_run(record["approval_id"], run_id="run_1", root=root)
+    assert raised.value.code == "approval_not_runnable"
+    later = A.presented(raw, now=float(record["expires_at"]) + 600.0)
+    assert later["state"] == "withdrawn"
+
+
+def test_a_non_requester_cannot_withdraw(root: Path) -> None:
+    """Only the surface that filed the request can settle it; a foreign requester
+    block refuses and writes NOTHING."""
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.withdraw(
+            record["approval_id"],
+            requested_by={"session_id": "s9", "device_id": "d_other", "surface": "cli"},
+            root=root,
+        )
+    assert raised.value.code == "approval_requester_mismatch"
+    assert "filed by cli s1" in raised.value.sentence
+    assert "nothing was written" in raised.value.sentence
+    raw = A._load_raw(record["approval_id"], root)
+    assert raw["state"] == "requested"
+    assert raw["audit"] == ["onboard_requested"]
+    assert "withdrawn_by" not in raw
+
+
+def test_a_withdrawal_is_refused_once_answered_or_running(root: Path) -> None:
+    """Past ``requested`` the normal paths own the record — a withdrawal never
+    competes with approve/deny, the run, retry or expiry. And the operator
+    answering a withdrawn record gets a self-explaining refusal, never "the
+    first decision wins" (no operator decision existed)."""
+    approved = _approved_device_record(root)
+    with pytest.raises(MeshRefusal) as answered:
+        A.withdraw(approved["approval_id"], requested_by=dict(approved["requested_by"]), root=root)
+    assert answered.value.code == "approval_withdraw_conflict"
+
+    running = _approved_device_record(root)
+    A.begin_run(running["approval_id"], run_id="run_1", root=root)
+    with pytest.raises(MeshRefusal) as live:
+        A.withdraw(running["approval_id"], requested_by=dict(running["requested_by"]), root=root)
+    assert live.value.code == "approval_withdraw_conflict"
+    # The refusal changed nothing: the run keeps its owner, and deny still lands.
+    assert A.load_record(running["approval_id"], root=root)["state"] == "connecting"
+    A.deny(running["approval_id"], decided_at=CREATED_AT + 30.0, root=root)
+    assert A.load_record(running["approval_id"], root=root)["state"] == "denied"
+
+    settled = A.create_request(**_device_request(A.new_request_id()), root=root)
+    A.withdraw(settled["approval_id"], requested_by=dict(settled["requested_by"]), root=root)
+    with pytest.raises(MeshRefusal) as no_answer:
+        A.deny(settled["approval_id"], root=root)
+    assert no_answer.value.code == "approval_decision_conflict"
+    assert "withdrawn by the surface that filed it" in no_answer.value.sentence
+    assert "first decision wins" not in no_answer.value.sentence
+
+
+def test_a_request_id_spent_on_a_withdrawal_returns_it_unchanged(root: Path) -> None:
+    """F1 across the new terminal: a retry of the spent id returns the withdrawn
+    record verbatim — a re-request never resets a settle."""
+    payload = _device_request(A.new_request_id())
+    record = A.create_request(**payload, root=root)
+    A.withdraw(record["approval_id"], requested_by=dict(record["requested_by"]), root=root)
+    again = A.create_request(**payload, root=root)
+    assert again["approval_id"] == record["approval_id"]
+    assert again["state"] == "withdrawn"
+
+
+# ---------------------------------------------------------------------------
 # The audit trail
 # ---------------------------------------------------------------------------
 
@@ -709,6 +801,19 @@ def test_every_transition_lands_a_mesh_audit_event(root: Path) -> None:
     assert requested["detail"].get("kind") == A.KIND_DEVICE_ONBOARD, requested
     denied = next(event for event in events if event["event"] == "onboard_denied")
     assert denied["subject"] == record["approval_id"], denied
+    # A withdrawal lands its own row, and the filer's surface/session survive the
+    # whitelist — the drill's redundant card must leave a self-explaining trail.
+    second = A.create_request(**_device_request(A.new_request_id()), root=root)
+    A.withdraw(second["approval_id"], requested_by=dict(second["requested_by"]), root=root)
+    events = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    names = [event["event"] for event in events]
+    assert "onboard_withdrawn" in names, names
+    withdrawn = next(event for event in events if event["event"] == "onboard_withdrawn")
+    assert withdrawn["subject"] == second["approval_id"], withdrawn
+    assert withdrawn["detail"].get("surface") == "cli", withdrawn
+    assert withdrawn["detail"].get("session_id") == "s1", withdrawn
     assert all(event["event"] in audit_mod.EVENT_KINDS for event in events), names
 
 

@@ -284,9 +284,10 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # APPROVALS (remote-onboarding §2.3). ONE record per onboarding request, on
     # the device that asked: `request` files it (the agent's first step), the
     # operator answers with `approve` (which signs — the same presence-gated key
-    # `lop operator sign` uses) or `deny`, `list`/`show` are the badge reads, and
-    # `run` is the agent's execution path — which refuses truthfully while this
-    # build ships no install runner.
+    # `lop operator sign` uses) or `deny`, `withdraw` is the FILER's own settle
+    # for a request that should not have been filed (no operator involvement),
+    # `list`/`show` are the badge reads, and `run` is the agent's execution path
+    # — which refuses truthfully while this build ships no install runner.
     approvals = actions.add_parser("approvals", help="Onboarding approval records")
     approval_actions = approvals.add_subparsers(dest="approvals_command")
     approval_list = approval_actions.add_parser("list", help="Pending and recent approvals")
@@ -353,6 +354,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     approval_deny.add_argument("approval")
     approval_deny.add_argument("--json", action="store_true")
+    approval_withdraw = approval_actions.add_parser(
+        "withdraw",
+        help=(
+            "Withdraw your own unanswered request (settled by its filer; "
+            "the operator is not asked)"
+        ),
+    )
+    approval_withdraw.add_argument("approval")
+    approval_withdraw.add_argument(
+        "--session", default="", help="the session id this request was filed from"
+    )
+    approval_withdraw.add_argument("--json", action="store_true")
     approval_run = approval_actions.add_parser(
         "run", help="Execute an approved record (the agent's path)"
     )
@@ -6236,6 +6249,10 @@ _STATE_GLYPHS: dict[str, str] = {
     "connected": "✓",
     "denied": "✗",
     "expired": "✗",
+    # Closed-not-usable like denied/expired — the card can never run — but the
+    # WORD and the line below keep it distinct from both: self-settled by the
+    # filer, not a decision and not a lapse.
+    "withdrawn": "✗",
     "failed": "✗",
 }
 
@@ -6308,6 +6325,25 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     )
     if asked:
         lines.append(f"  asked by: {asked}")
+    if state == "withdrawn":
+        # A withdrawn card is SELF-SETTLED: the store accepts only the surface
+        # that filed it as the writer, and no operator gesture rides the
+        # transition — the copy must read that way, never as a decline
+        # ("the operator said no") or a lapse ("expired").
+        withdrawn = record.get("withdrawn_by") or requested
+        by = " ".join(
+            part
+            for part in (
+                str(withdrawn.get("surface") or ""),
+                str(withdrawn.get("session_id") or ""),
+            )
+            if part
+        )
+        lines.append(
+            f"  withdrawn by: {by} — self-settled by the filer; the operator was not asked"
+            if by
+            else "  withdrawn by its filer — self-settled; the operator was not asked"
+        )
     return lines
 
 
@@ -6450,6 +6486,38 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     return _emit(args, payload, _approval_lines(decided))
 
 
+def _cmd_approvals_withdraw(args: argparse.Namespace) -> int:
+    """The FILER's own settle: withdraw an unanswered request; nobody else can.
+
+    The requester block presented here is the same one `request` files with, so
+    the store can check the caller IS the surface that filed it (a foreign
+    session or device refuses); no operator key is read and nothing is signed —
+    one record transition and its audit row, under the store's own write
+    discipline.
+    """
+    from local_operator.network import approvals as approval_store
+    from local_operator.network.identity import load_or_mint
+
+    try:
+        asked_by_device = load_or_mint().device_id
+    except (OSError, ValueError):
+        asked_by_device = ""
+    record = approval_store.withdraw(
+        args.approval,
+        requested_by={
+            "session_id": args.session,
+            "device_id": asked_by_device,
+            "surface": "cli",
+        },
+    )
+    payload = {
+        "ok": True,
+        "approval_id": record["approval_id"],
+        "state": record["state"],
+    }
+    return _emit(args, payload, _approval_lines(record))
+
+
 def _cmd_approvals(args: argparse.Namespace) -> int:
     """``lop network approvals <verb>`` — the approval record's surfaces.
 
@@ -6491,6 +6559,8 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             "signature": _approval_signature_payload(decided),
         }
         return _emit(args, payload, _approval_lines(decided))
+    if verb == "withdraw":
+        return _cmd_approvals_withdraw(args)
     # verb == "run" — the agent's execution path.
     record = approval_store.load_record(args.approval)
     state = str(record.get("state") or "")
@@ -6542,12 +6612,13 @@ def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
     act in this family.
     """
     verb = getattr(args, "approvals_command", None)
-    if verb in ("list", "show", "request", "approve", "deny", "run"):
+    if verb in ("list", "show", "request", "approve", "deny", "withdraw", "run"):
         return _cmd_approvals(args)
     print(
         "usage: lop network approvals request --host <host> [--user U] [--json]\n"
         "       lop network approvals list|show <id> [--json]\n"
         "       lop network approvals approve|deny <id> [--json]\n"
+        "       lop network approvals withdraw <id> [--session S] [--json]\n"
         "       lop network approvals run <id> [--json]",
         file=sys.stderr,
     )

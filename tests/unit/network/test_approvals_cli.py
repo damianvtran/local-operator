@@ -293,6 +293,98 @@ def test_deny_answers_the_frozen_shape_and_a_second_decision_refuses(
     assert refused["code"] == "approval_decision_conflict"
 
 
+def test_withdraw_settles_the_filers_own_request_without_the_operator(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The honest primitive through the CLI: the filer withdraws, the frozen
+    shape answers ``withdrawn``, and the human half reads self-settled — never
+    as a decline (the operator was not asked) and never as a lapse."""
+    _make_key(root)
+    filed = _request(root, capsys)
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="withdraw",
+            approval=filed["approval_id"],
+            session="s1",
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    payload = json.loads(out)
+    assert payload["state"] == "withdrawn"
+    assert set(payload) >= {"ok", "approval_id", "state"}
+
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="show",
+            approval=filed["approval_id"],
+            json=False,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert " — ✗ withdrawn" in out, out
+    assert "withdrawn by: cli s1" in out, out
+    assert "self-settled by the filer; the operator was not asked" in out, out
+    assert "denied" not in out, out
+    assert "declined" not in out, out
+
+
+def test_a_foreign_surface_cannot_withdraw_via_the_cli(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_key(root)
+    filed = _request(root, capsys)
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="withdraw",
+            approval=filed["approval_id"],
+            session="s9",
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    refused = json.loads(out)
+    assert refused["ok"] is False
+    assert refused["code"] == "approval_requester_mismatch"
+    assert "nothing was written" in refused["message"]
+
+
+def test_withdraw_refuses_once_the_operator_has_answered(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_key(root)
+    filed = _request(root, capsys)
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="approve",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="withdraw",
+            approval=filed["approval_id"],
+            session="s1",
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    refused = json.loads(out)
+    assert refused["code"] == "approval_withdraw_conflict"
+
+
 # ---------------------------------------------------------------------------
 # Refusals: the copy rule (§2.9) and the truth of `run`
 # ---------------------------------------------------------------------------
@@ -628,5 +720,5 @@ def test_the_verb_family_is_registered_and_a_bare_verb_is_a_usage_error(
     rc = net_cli.main(Namespace(network_command="approvals", approvals_command=None))
     err = capsys.readouterr().err
     assert rc == 2
-    for verb in ("list", "show", "request", "approve", "deny", "run"):
+    for verb in ("list", "show", "request", "approve", "deny", "withdraw", "run"):
         assert verb in err, err
