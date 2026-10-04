@@ -85,7 +85,7 @@ def test_anchor_export_says_the_product_action_when_nothing_is_set_up(
     monkeypatch.setattr("local_operator.operator.handlers.load_staged_anchor", lambda *a, **k: None)
     monkeypatch.setattr(
         "local_operator.operator.handlers.load_anchor",
-        lambda *a, **k: SimpleNamespace(anchor=None, usable=False, path="/etc/x"),
+        lambda *a, **k: SimpleNamespace(anchor=None, usable=False, path="/etc/x", exists=False),
     )
     monkeypatch.setattr("local_operator.operator.handlers.config_dir", lambda: tmp_path)
 
@@ -94,6 +94,108 @@ def test_anchor_export_says_the_product_action_when_nothing_is_set_up(
     # D2 (design round 1): #1877's settled wording — the interim agent action,
     # because no surface raises the setup card at this head.
     assert "ask Local Operator to set it up for you" in message
+    assert "`lop " not in message, "no refusal may name a terminal command"
+
+
+def test_anchor_export_distinguishes_a_present_but_unusable_statement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F5 slice B: a statement that EXISTS and failed validation is not "no key yet".
+
+    ``export`` used to print the no-key sentence for both states, sending a
+    reader with a hand-edited or root-unowned statement hunting for a key that
+    is right there on disk. The two states name different next moves, so they
+    are two sentences now: the cell above pins the empty one, this one pins the
+    present-but-refused one — the file, the loader's reason, and the product
+    action — and no terminal command either (§2.9).
+    """
+    monkeypatch.setattr("local_operator.operator.handlers.load_staged_anchor", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_operator.operator.handlers.load_anchor",
+        lambda *a, **k: SimpleNamespace(
+            anchor=None,
+            usable=False,
+            path="/Library/Application Support/local-operator/operators/501.json",
+            exists=True,
+            reason="the anchor is owned by uid 501, not root",
+        ),
+    )
+    monkeypatch.setattr("local_operator.operator.handlers.config_dir", lambda: tmp_path)
+
+    assert handlers._anchor(Namespace(anchor_command="export", file="", json=False)) == 1
+    message = capsys.readouterr().err
+    assert "no operator key yet" not in message, "the key is not the problem — the statement is"
+    assert "the operator key at" in message, "the sibling's noun phrase (F5 review, D2)"
+    assert "exists but is not usable" in message
+    assert "owned by uid 501, not root" in message
+    assert (
+        ", so there is nothing to hand to another machine" in message
+    ), "the sibling's cost clause"
+    assert "set up operator authority again for this machine" in message
+    assert "(one approval and one admin password prompt)" in message
+    assert "`lop " not in message, "no refusal may name a terminal command"
+
+
+def test_anchor_export_does_not_stack_a_second_remedy_on_the_reasons_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F5 review, D1: the key-id refusal's reason is designed standalone and
+    already ends in the product action; when export shows it, ONE remedy
+    survives — the reviewed composition ran 464 characters with the action
+    twice."""
+    monkeypatch.setattr("local_operator.operator.handlers.load_staged_anchor", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_operator.operator.handlers.load_anchor",
+        lambda *a, **k: SimpleNamespace(
+            anchor=None,
+            usable=False,
+            path="/Library/Application Support/local-operator/operators/501.json",
+            exists=True,
+            reason=(
+                f"the statement declares key id {'f' * 32} but its key's id is "
+                "1b9d6bcdbbfd6069d3ba45755cd0ddf6 — it was hand-edited, or written by a "
+                "different key; ask Local Operator to set up operator authority again "
+                "for this machine"
+            ),
+        ),
+    )
+    monkeypatch.setattr("local_operator.operator.handlers.config_dir", lambda: tmp_path)
+
+    assert handlers._anchor(Namespace(anchor_command="export", file="", json=False)) == 1
+    message = capsys.readouterr().err
+    assert "exists but is not usable" in message
+    assert ", so there is nothing to hand to another machine" in message
+    assert message.count("set up operator authority") == 1, message
+    assert message.count("ask Local Operator") == 1, message
+    assert "`lop " not in message, "no refusal may name a terminal command"
+
+
+def test_anchor_export_names_a_staged_statement_that_will_not_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F5 review, R-M1: the staged statement is the artifact export prefers to
+    hand over; when one exists and will not load, the refusal names THAT file —
+    "no operator key yet" while a statement sits on disk was the reviewed
+    confusion, one file over from the installed case."""
+    from local_operator.operator.trust import staging_path
+
+    root = tmp_path / "config"
+    staged = staging_path(root)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("not json at all", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_operator.operator.handlers.load_anchor",
+        lambda *a, **k: SimpleNamespace(
+            anchor=None, usable=False, path="/etc/installed.json", exists=False
+        ),
+    )
+    monkeypatch.setattr("local_operator.operator.handlers.config_dir", lambda: root)
+
+    assert handlers._anchor(Namespace(anchor_command="export", file="", json=False)) == 1
+    message = capsys.readouterr().err
+    assert "no operator key yet" not in message
+    assert f"the operator key at {staged} exists but is not usable" in message
+    assert "set up operator authority again for this machine" in message
     assert "`lop " not in message, "no refusal may name a terminal command"
 
 

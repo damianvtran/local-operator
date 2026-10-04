@@ -52,7 +52,8 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.operator.keychain import FILE_ONLY, SECURE_ENCLAVE
-from local_operator.operator.verify import key_id_for
+from local_operator.operator.verify import key_id_for, spki_fp
+from local_operator.paths import config_dir
 
 #: The anchor's own format version. Read rather than assumed so a future shape
 #: can be refused by an old runtime instead of misread.
@@ -157,41 +158,75 @@ class OperatorAnchor:
         reports a lower level while a misread one reports a boundary that is not
         there.
         """
+        anchor, _ = cls._parse(body)
+        return anchor
+
+    @classmethod
+    def _parse(cls, body: Any) -> tuple["OperatorAnchor | None", str]:
+        """ONE parse, and the refusal's own sentence when there is one to give.
+
+        ``from_json`` is the public spelling; this pair-valued form exists
+        because ONE refusal is actionable and the reader should be told it (F5
+        slice B). When everything about the body holds except
+        ``key_id != key_id_for(spki)`` — the shape a hand edit or a foreign
+        writer produces — both values are named, because the generic sentence
+        ("does not describe an ES256 operator key") sent a reader whose
+        statement looks coherent hunting for the problem in the wrong place.
+        Every other refusal returns ``""``; those bodies are not operator
+        statements at all, and the caller's generic sentence is the whole story.
+        The checks, their order and their strictness are exactly ``from_json``'s;
+        only the explanation is richer.
+        """
         if not isinstance(body, dict) or body.get("v") != ANCHOR_VERSION:
-            return None
+            return None, ""
         if body.get("alg") != "ES256":
-            return None
+            return None, ""
         raw = body.get("spki")
         if not isinstance(raw, str):
-            return None
+            return None, ""
         try:
             spki = bytes.fromhex(raw)
         except ValueError:
-            return None
+            return None, ""
         if len(spki) != 65 or spki[0] != 0x04:
-            return None
+            return None, ""
         key_id = body.get("key_id")
-        if not isinstance(key_id, str) or key_id != key_id_for(spki):
+        if not isinstance(key_id, str):
+            return None, ""
+        if key_id != key_id_for(spki):
             # The id is DERIVED, so a mismatch means the file was hand-edited or
             # assembled by something that does not know the rule. Refusing is
             # what stops a frame's ``operator_key_id`` from being matched against
-            # a value unrelated to the key that will actually verify.
-            return None
+            # a value unrelated to the key that will actually verify. The reason
+            # names both values — and only the product action that replaces the
+            # statement from this machine's own key (§2.9: no terminal
+            # commands in refusal copy).
+            return None, (
+                f"the statement declares key id {key_id} but its key's id is "
+                f"{key_id_for(spki)} — it was hand-edited, or written by a different "
+                "key; ask Local Operator to set up operator authority again for this "
+                "machine"
+            )
         devices = body.get("devices")
         if devices is None:
             devices = []
         if not isinstance(devices, list) or not all(isinstance(d, dict) for d in devices):
-            return None
+            return None, ""
         backend = body.get("backend")
         presence = body.get("presence")
-        return cls(
-            key_id=key_id,
-            spki=spki,
-            backend=str(backend) if isinstance(backend, str) else FILE_ONLY,
-            presence=bool(presence),
-            label=str(body.get("label") or ""),
-            created_at=int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0,
-            devices=tuple(devices),
+        return (
+            cls(
+                key_id=key_id,
+                spki=spki,
+                backend=str(backend) if isinstance(backend, str) else FILE_ONLY,
+                presence=bool(presence),
+                label=str(body.get("label") or ""),
+                created_at=(
+                    int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0
+                ),
+                devices=tuple(devices),
+            ),
+            "",
         )
 
 
@@ -325,13 +360,17 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             reason="the anchor is not readable JSON",
             exists=True,
         )
-    anchor = OperatorAnchor.from_json(body)
+    anchor, refusal = OperatorAnchor._parse(body)
     if anchor is None:
         return AnchorLoad(
             anchor=None,
             path=path,
             root_owned=info.st_uid == 0,
-            reason="the anchor does not describe an ES256 operator key",
+            # ``refusal`` carries the ONE specific sentence ``_parse`` gives (the
+            # declared-vs-derived key id — F5 slice B); every other refusal keeps
+            # the corpus's generic sentence, because none of them names a
+            # different next move.
+            reason=refusal or "the anchor does not describe an ES256 operator key",
             exists=True,
         )
     return AnchorLoad(
@@ -353,6 +392,41 @@ def statement_digest(anchor: OperatorAnchor) -> str:
     """
     digest = hashlib.sha256(anchor_bytes(anchor)).hexdigest()
     return f"sha256:{digest}"
+
+
+def anchor_trio(anchor: OperatorAnchor) -> dict[str, Any]:
+    """The provenance trio ``{key_id, spki_fp, statement_digest}`` for one statement.
+
+    ONE builder (F5): the approval mint records these values, approve re-derives
+    them, and the onboarding runner re-derives them once more before planting.
+    Three derivations over one function is the design; three AGREEMENTS in prose
+    is what let two truncations of the same ``sha256`` ship side by side — the
+    card recorded ``94A6-A6C1-110D`` (12 hex, 3 groups) while the runner derived
+    ``94A6-A6C1-110D-773B`` (16 hex, 4 groups), so every card that build filed
+    was refused ``{"mismatch": ["spki_fp"]}`` before anything was planted.
+    ``spki_fp`` here is ``local_operator.operator.verify.spki_fp`` — the value
+    ``lop operator anchor export`` prints as "the value to compare" — and the
+    digest is :func:`statement_digest` over the canonical bytes, so a card can
+    never disagree with the statement it authorises.
+    """
+    return {
+        "key_id": key_id_for(anchor.spki),
+        "spki_fp": spki_fp(anchor.spki),
+        "statement_digest": statement_digest(anchor),
+    }
+
+
+#: Product words for the trio's machine field names (F5 review, D3): the human
+#: clauses say "key fingerprint" where ``data.mismatch`` says ``spki_fp`` — the
+#: ledger token is for machines, and the labels match what ``lop operator anchor
+#: export`` prints ("key id", "fingerprint"). ONE map so the approve refusal
+#: (``network/approvals.py``) and the runner's refusal (``network/onboard.py``)
+#: cannot drift apart.
+TRIO_LABELS: dict[str, str] = {
+    "key_id": "key id",
+    "spki_fp": "key fingerprint",
+    "statement_digest": "statement digest",
+}
 
 
 def staging_path(config_root: Path) -> Path:
@@ -386,6 +460,31 @@ def load_staged_anchor(config_root: Path) -> OperatorAnchor | None:
         return OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, ValueError):
         return None
+
+
+def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
+    """The local statement a provenance derivation reads, in ONE trust order.
+
+    Installed-and-usable first — it is what the runtime honours — then the
+    STAGED statement: the bootstrap artifact between ``init``/``setup`` and the
+    privileged install, and the carrier ``devices --revoke``/``--authorise``
+    stage before their install consumes it. The staged read resolves against
+    ``config_root`` (the ambient config dir when omitted).
+
+    ONE reader, deliberately (F5): the approval mint (``local_anchor_trio``),
+    the approve-time comparison, ``verify_for_run`` and the onboarding runner's
+    ``step_anchor`` all derive from this function, so "the local store" cannot
+    mean two different files on the two sides of one handshake. The precedence
+    only matters where the two files differ (a re-init, or a staged device-list
+    change before its install) — and there, installed-first is the coherent
+    choice: a card records, and a runner ships, what this machine currently
+    trusts; a staged candidate becomes readable the moment its own privileged
+    install lands it.
+    """
+    loaded = load_anchor()
+    if loaded.usable:
+        return loaded.anchor
+    return load_staged_anchor(config_root if config_root is not None else config_dir())
 
 
 def install_commands(staging: Path, target: Path) -> list[list[str]]:

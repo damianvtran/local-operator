@@ -507,6 +507,44 @@ def test_approve_refuses_a_record_whose_anchor_is_not_the_local_key(root: Path) 
     with pytest.raises(MeshRefusal) as raised:
         A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
     assert raised.value.code == "approval_anchor_mismatch"
+    # F5 review, Q1: the clause names the fields in product words and says the
+    # remedy (refile) — the old sentence reused the rotation wording verbatim
+    # and told the reader nothing to do.
+    sentence = str(raised.value)
+    assert "(key id, key fingerprint, statement digest)" in sentence
+    assert "refile" in sentence
+    assert "nothing was written" in sentence
+
+
+def test_approve_names_only_the_field_a_stale_card_disagrees_on(root: Path) -> None:
+    """F5 review, Q1: the stale-format shape (the retired 12-hex fingerprint)
+    disagrees on the fingerprint ALONE, and the refusal says which field — not
+    just "does not match" — while the untouched fields stay out of the clause."""
+    _make_key(root)
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    record = A.create_request(
+        **_device_request(
+            A.new_request_id(),
+            what={
+                "install": True,
+                "anchor": {
+                    "key_id": trio["key_id"],
+                    "spki_fp": "6DC6-1AAB-622A",
+                    "statement_digest": trio["statement_digest"],
+                },
+            },
+        ),
+        root=root,
+    )
+    decided_at = CREATED_AT + 30.0
+    signature = _sign_decision(root, record, "approve", decided_at)
+    with pytest.raises(MeshRefusal) as raised:
+        A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
+    sentence = str(raised.value)
+    assert "(key fingerprint)" in sentence
+    assert "key id" not in sentence and "statement digest" not in sentence
+    assert "refile" in sentence
 
 
 def test_approve_refuses_a_record_with_no_anchor_provenance(root: Path) -> None:
@@ -601,6 +639,95 @@ def test_a_tombstoned_id_is_refused_for_180_days(root: Path) -> None:
     A.sweep(root=root, now=later + A.TOMBSTONE_PRUNE_AGE_S + 1.0)
     again = A.create_request(**_device_request(request_id), root=root)
     assert again["state"] in {"requested", "expired"}
+
+
+# ---------------------------------------------------------------------------
+# F5 — one derivation, one owner for the anchor trio
+# ---------------------------------------------------------------------------
+
+
+def test_the_card_trio_and_the_runner_share_one_derivation(root: Path) -> None:
+    """F5 cross-module contract: the value the CARD records (this module's
+    ``local_anchor_trio``, what the mint verb calls) and the value the RUNNER
+    re-derives before planting (``trust.anchor_trio``, what ``step_anchor``
+    compares) are byte-for-byte the same — and both are ``verify.spki_fp``.
+    Before F5 the card recorded a 12-hex 3-group truncation while the runner
+    derived a 16-hex 4-group one, so every card this build filed refused with
+    ``{"mismatch": ["spki_fp"]}`` (drill run_eett85dv). Either half drifting
+    back fails this cell.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.verify import key_id_for, spki_fp
+
+    anchor = _make_key(root)
+    card = A.local_anchor_trio(root)
+    assert card is not None
+    assert card["key_id"] == key_id_for(anchor.spki)
+    assert card["spki_fp"] == spki_fp(anchor.spki), "the runner compares THIS value"
+    assert {k: card[k] for k in ("key_id", "spki_fp", "statement_digest")} == trust.anchor_trio(
+        anchor
+    )
+    # The runner's compare is a 4×4-group string; the retired 12-hex shape is gone.
+    assert len(card["spki_fp"].replace("-", "")) == 16
+
+
+def test_the_local_read_prefers_the_installed_statement_over_the_staged(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: ONE store read, ONE precedence — the installed-and-usable statement
+    first, the staged statement as the fallback (the bootstrap window between
+    ``init``/``setup`` and the privileged install).
+
+    The two sides used to read in OPPOSITE orders (the trio installed-first,
+    ``step_anchor`` staged-first), dormant while the two files are identical and
+    a second refusal class the moment they diverge (a re-init before its
+    install). The installed anchor is what the runtime honours, so it is what
+    the card records and what the runner ships; a staged candidate becomes
+    readable — and mintable — the moment its own install lands it.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.verify import key_id_for
+
+    staged = _make_key(root)
+    spki = b"\x04" + bytes(range(64, 128))
+    other = trust.OperatorAnchor(
+        key_id=key_id_for(spki), spki=spki, backend="file-only", presence=False
+    )
+
+    def installed(*_args: Any, **_: Any) -> Any:
+        return trust.AnchorLoad(
+            anchor=other,
+            path=Path("/etc/other.json"),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    picked = trust.load_local_anchor(root)
+    assert picked is not None and picked.spki == other.spki, "installed must win"
+    card = A.local_anchor_trio(root)
+    assert card is not None
+    assert card["spki_fp"] == trust.anchor_trio(other)["spki_fp"]
+
+    # A present-but-NOT-usable installed statement is not authoritative: the
+    # staged statement is the source in the bootstrap window, and the runner's
+    # reader agrees with the mint's there too.
+    def unusable(*_args: Any, **_: Any) -> Any:
+        return trust.AnchorLoad(
+            anchor=other,
+            path=Path("/etc/other.json"),
+            root_owned=False,
+            reason="the anchor is owned by uid 501, not root",
+            exists=True,
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", unusable)
+    picked = trust.load_local_anchor(root)
+    assert picked is not None and picked.spki == staged.spki
+    card = A.local_anchor_trio(root)
+    assert card is not None
+    assert card["statement_digest"] == trust.statement_digest(staged)
 
 
 # ---------------------------------------------------------------------------
