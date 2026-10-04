@@ -53,6 +53,13 @@ from memory; the note and the PRs are the references.
    - `install`: `lop-update <tag>` (build present) or `uv tool install local-operator==<tag>`.
    - `join`: `join @<token> --automated`; the operator's approve is the admit (pre-answered
      confirm); a mismatch refuses and spends the attempt (audit `sas_mismatch`).
+     Satisfied when already active: a node already an active member passes this step with
+     no re-join and no dial; the step's detail reads "<node> is already an active member
+     of <network> (epoch N); admission is satisfied and no re-join was attempted — the
+     invite goes unused and expires." Read it in `lop network approvals run <id> --json`:
+     it is the join receipt's `detail` (`steps[] | select(.step == "join") | .detail`).
+     The human run block shows only the card's state. Test the join mechanism against a
+     genuinely non-member target.
    - `anchor`: F4b trio re-derived locally; `install --from` lands the EXACT approved bytes.
    - `grants`: node-side `member grant <net> <mac-id> approve unattended` per the card's ticks.
    - `relay`: install/start the systemd `--user` unit + linger; linger missing = caveat,

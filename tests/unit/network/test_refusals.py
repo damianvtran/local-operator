@@ -109,7 +109,7 @@ def test_panic_after_disconnect_refuses_by_name_instead_of_tracebacking(
         net_cli._cmd_panic(_args())  # noqa: SLF001
     assert excinfo.value.code == "no_network_secret"
     # The sentence says what state the device is in and what to do about it.
-    assert "rejoin" in excinfo.value.sentence.lower()
+    assert "re-join" in excinfo.value.sentence.lower()
     assert "lop network join" in excinfo.value.sentence
     assert capsys.readouterr().err == ""  # nothing leaked to stderr on the way out
 

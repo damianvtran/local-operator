@@ -1188,7 +1188,7 @@ def _cmd_ls(args: argparse.Namespace) -> int:
         lines.append(
             f"{row['name']}  {row['network_id']}  epoch {row['epoch']}  {row['role']}  "
             f"{row['members']} member(s)  {row['trust']}"
-            + ("  [no secret — rejoin]" if row.get("secret_missing") else "")
+            + ("  [no secret — re-join]" if row.get("secret_missing") else "")
             + (f"  [{row['stale']}]" if row.get("stale") else "")
             + membership_marker(row)
         )
@@ -5270,7 +5270,7 @@ def _secret_caveat(record: Any) -> list[str]:
         return []
     return [
         "⚠ this device has no secret for it (deleted by `/network disconnect`), so it "
-        "is trusted but not usable: rejoin with `lop network join` and a fresh invite"
+        "is trusted but not usable: re-join with `lop network join` and a fresh invite"
     ]
 
 

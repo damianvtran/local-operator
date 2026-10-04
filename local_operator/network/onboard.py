@@ -793,6 +793,24 @@ def _invite_network_label(
         return None
 
 
+def _invite_epoch(token_path: Any) -> int | None:
+    """The minting epoch of the held invite token, or ``None`` when unreadable.
+
+    The join entry check compares the NODE's epoch against the epoch the invite was
+    minted at, and the token's envelope is the only local source of it — the
+    mint's own payload (:func:`cli._invite_locally`) carries no epoch. ``None``
+    means "cannot tell" and is never dressed as a mismatch: the caller falls
+    through to the join, exactly as before the check existed.
+    """
+    try:
+        from local_operator.network import invite as invite_mod
+
+        token = Path(str(token_path)).read_text(encoding="utf-8").strip()
+        return int(invite_mod.decode(token).epoch or 0)
+    except Exception:  # noqa: BLE001 — an entry-check probe must never fail a step
+        return None
+
+
 def _relay_kind_note(status: dict[str, Any]) -> str:
     """What a restart would and would not do to the relay a status reported.
 
@@ -1339,6 +1357,11 @@ class OnboardRun:
         its own derivation — a mismatch refuses, spends the attempt and audits
         ``sas_mismatch``. The compare lives in the relay; this step must never
         turn the send into a bless, and does not.
+
+        A node that is ALREADY an active member both on its own side and in this
+        device's table passes before the token push (``_join_already_active``):
+        the step is satisfied, no re-join is attempted, and the invite goes
+        unused. Everything else runs exactly as it always did.
         """
         if self.invite_path is None:
             return _StepOutcome(False, "no invite token is held; the invite step must run first")
@@ -1346,6 +1369,9 @@ class OnboardRun:
         identity_before = ""
         if show and show.get("ok"):
             identity_before = str(show.get("device_id") or "")
+        satisfied = self._join_already_active(identity_before)
+        if satisfied is not None:
+            return satisfied
         remote_token = f"/tmp/lop-invite-{self.invite_id}.invite"
         pushed = self.transport.copy(self.invite_path, remote_token)
         if pushed.rc != 0:
@@ -1562,6 +1588,115 @@ class OnboardRun:
             self._remote_lop(f"rm -f {shlex.quote(remote_path)}", timeout=30.0)
         except MeshRefusal:
             pass
+
+    def _join_already_active(self, node_device_id: str) -> _StepOutcome | None:
+        """``join``'s question, when local reads already answer it (slice A).
+
+        Run 10 (2026-10-04) re-ran ``join`` over a node that was already an active
+        member — ``ready`` showed ``winner_verified: true`` beside a live link —
+        and the attempt stopped inside the sealed-record phase, so the cell was
+        exercising the join MECHANISM rather than the requirement the step exists
+        to answer: "is this node admitted?". The requirement is answerable without
+        the wire: the node's own ``status`` row for the invite's network ID
+        (``membership_state`` active, at the invite's epoch — matched by
+        ``network_id``; names are not unique by design), the inviter's member
+        table (the row present, active, not burned), and the device id the
+        ``identity show`` read above returned. When the reads agree the step is
+        SATISFIED and returns before the token push — no push, no dial.
+
+        THE GATE IS BOTH-SIDED, and anything short of both sides falls through to
+        the join EXACTLY as before: a status row that is missing, inactive, at
+        another epoch, or built by the relay-down fallback (which carries no
+        ``membership_state`` at all) cannot confirm the node side; an inviter
+        record that cannot be read, or lacks the row, or has it inactive, cannot
+        confirm ours; an unreadable token carries no epoch. The ONE pre-empted
+        refusal is a BURNED id: ``removed_ids`` is forever (R5), the relay would
+        refuse ``device_id_conflict`` however the invite was minted, and its
+        sentence is :func:`relay.membership_conflict`'s own so the two sites
+        cannot drift. A key mismatch is NOT checkable here — ``identity show``
+        exposes no public key — and stays the handshake's job.
+        """
+        if not node_device_id:
+            return None
+        target = _invite_network_label(
+            self.invite_path,
+            network_id=self.invite_network_id,
+            network_name=self.invite_network_name,
+        )
+        if target is None or not target[0]:
+            # A name-only target cannot load the inviter's record, and the record
+            # is half the gate.
+            return None
+        from local_operator.network import relay as relay_mod
+        from local_operator.network import store as network_store
+
+        try:
+            record = network_store.load(target[0], self.root)
+        except Exception:  # noqa: BLE001 — a membership probe must never fail a step
+            return None
+        conflict = relay_mod.membership_conflict(record, node_device_id)
+        if conflict:
+            return _StepOutcome(
+                False,
+                conflict,
+                {"invite_id": self.invite_id, "code": "device_id_conflict", "node_refused": False},
+            )
+        member = record.member(node_device_id)
+        if member is None or not member.active:
+            # Ours alone cannot satisfy the gate: the join upserts this row, and a
+            # table that disagrees with the node is exactly what the join is for.
+            return None
+        epoch = _invite_epoch(self.invite_path)
+        if epoch is None:
+            return None
+        status = self._node_json("lop network status", timeout=60.0)
+        row: dict[str, Any] | None = None
+        for candidate in (status or {}).get("networks") or []:
+            if not isinstance(candidate, dict):
+                continue
+            # THE ID IS THE IDENTITY, the name is not: network names are not
+            # unique by design (``store.match_networks`` refuses ambiguity rather
+            # than picking), so a name match could read a SAME-NAMED OTHER
+            # network's row — satisfied while the invite's own row says
+            # ``removed``, row-order dependent (reviewer round 1, MINOR-1,
+            # reproduced). Every producer row carries a ``network_id``; one
+            # without cannot be vouched for, so not matching it falls through to
+            # the join, the safe direction.
+            if str(candidate.get("network_id") or "") == target[0]:
+                row = candidate
+                break
+        if row is None or str(row.get("membership_state") or "") != "active":
+            return None
+        try:
+            row_epoch = int(row.get("epoch") or 0)
+        except (TypeError, ValueError):
+            return None
+        if row_epoch != epoch:
+            return None
+        where = str(self.view.device.get("name") or "").strip() or "that machine"
+        label = target[1] or target[0] or "the network this join is for"
+        return _StepOutcome(
+            True,
+            f"{where} is already an active member of {label} (epoch {epoch}); admission "
+            "is satisfied and no re-join was attempted — the invite goes unused and "
+            "expires.",
+            {
+                "invite_id": self.invite_id,
+                "device_id": node_device_id,
+                # A DIFFERENT SCHEMA from the relay row block that shares this key
+                # name (``{state, sentence, remedies, ...}``, rendered by
+                # ``relay.membership_lines``): this one is the runner's own
+                # ``{state, epoch, device_id, source}``, machine-only. Same key,
+                # different shape — do not feed one to the other's renderer
+                # (design round 1, D4).
+                "membership": {
+                    "state": "active",
+                    "epoch": epoch,
+                    "device_id": node_device_id,
+                    "source": ["node status", "inviter member table"],
+                },
+            },
+        )
 
     def step_anchor(self) -> _StepOutcome:
         """§3.3 step 7 (+ F4b): copy EXACTLY the digested statement and install it.
