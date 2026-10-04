@@ -3038,10 +3038,12 @@ JSON API carrying them from then, and the **simple index** — the surface `pip`
 and `uv` actually read — still not answering for the new version at
 **15:59:28Z** and answering by **16:00:28Z**. Nothing was run in that gap, and
 that is the point: the gate was a poll of the index the installer reads, so the
-retry waited ~2 minutes rather than failing an `install` step it had already
-passed twice and reading as flakiness. **Name the basis the consumer reads, not
-the one that answers first** — and **put both times on one clock**, since a
-local-clock reading beside a UTC one implies a gap that never existed.
+retry waited out the window — 60 s past the last silent probe, 96 s past the
+first upload, 3m46s past the Release — rather than failing an `install` step the
+drill had already walked green twice and reading as flakiness. **Name the basis
+the consumer reads, not the one that answers first** — and **put both times on
+one clock**, since a local-clock reading beside a UTC one implies a gap that
+never existed.
 
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
