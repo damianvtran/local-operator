@@ -871,6 +871,40 @@ def test_verify_names_a_failing_admission_check_and_still_gates_on_equipment(
     assert "still fail: readiness" not in detail  # the generic name is gone
 
 
+def test_a_missing_identity_receipt_names_identity_once(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 1, Q-1: the insert and the composer's own row must not double.
+
+    ``compose`` already places an ``ok: false`` identity row when the file is
+    missing, and the fold returns it; the step's own insert stands only for a
+    payload whose fold did not carry the row — the receipt names one identity.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: FakeApprovals(_record()))
+    ready = {
+        "ok": False,
+        "identity_present": False,
+        "checks": [
+            {"check": "identity", "class": "admission", "ok": False, "detail": "identity_missing"},
+            _reachability_check("10.9.1.5:4097", ok=True),
+        ],
+    }
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_drill_run_local(token, ready),
+    )
+    assert payload["state"] == "failed", payload
+    verify = next(row for row in payload["steps"] if row["step"] == "verify")
+    assert "identity, identity" not in verify["detail"], verify["detail"]
+    assert verify["detail"].count("identity") == 1, verify["detail"]
+
+
 def test_a_refusal_the_node_reserves_is_a_satisfied_state_not_a_failure(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

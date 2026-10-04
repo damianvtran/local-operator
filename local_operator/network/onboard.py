@@ -2184,7 +2184,13 @@ class OnboardRun:
                 )
             rows = ready.get("rows") or ready.get("checks") or []
             failures = list(readiness_mod.onboarding_failures(rows))
-            if not ready.get("identity_present", True):
+            # THE COMPOSER ALREADY PLACED AN IDENTITY ROW when it is missing
+            # (QA round 1, Q-1): inserting a second one made the receipt read
+            # "identity, identity". The insert stands only for a payload whose
+            # fold did not carry the row.
+            if not ready.get("identity_present", True) and not any(
+                str(row.get("check") or "") == "identity" for row in failures
+            ):
                 failures.insert(0, {"check": "identity", "ok": False})
             failing = _verify_failure_names(failures)
             if failing or (not rows and not ready.get("ok")):

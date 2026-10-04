@@ -220,7 +220,7 @@ def test_git_row_says_what_commits_will_do() -> None:
     assert bad_row["ok"] is False
     assert bad_row["code"] == readiness.CODE_NO_GIT_IDENTITY
     assert "user.name" in bad_row["detail"]
-    assert any("git config --global user.name" in remedy for remedy in bad_row["remedies"])
+    assert any("set its git author name and email" in remedy for remedy in bad_row["remedies"])
 
 
 def test_git_row_fills_the_remedy_with_this_devices_values(
@@ -239,8 +239,8 @@ def test_git_row_fills_the_remedy_with_this_devices_values(
         _member(), _facts(git={"user_name": "", "user_email": ""}), peer_label="cloud-node-1"
     )
     remedy = " ".join(row["remedies"])
-    assert '`git config --global user.name "Damian Tran"`' in remedy
-    assert '`git config --global user.email "damian@gominerva.com"`' in remedy
+    assert "set its git author name and email" in remedy
+    assert "Damian Tran <damian@gominerva.com>" in remedy
     assert "…" not in remedy
 
 
@@ -255,8 +255,7 @@ def test_git_row_keeps_the_placeholder_for_values_this_device_lacks(
         _member(), _facts(git={"user_name": "", "user_email": "someone@e.test"}), peer_label="box"
     )
     remedy = " ".join(row["remedies"])
-    assert '`git config --global user.name "Damian Tran"`' in remedy
-    assert '`git config --global user.email "…"`' in remedy
+    assert "Damian Tran <…>" in remedy
 
 
 # ---------------------------------------------------------------------------
@@ -393,13 +392,15 @@ def test_mcp_servers_row_names_the_missing_file(tmp_path: Path) -> None:
     assert row["code"] == readiness.CODE_NO_MCP_SERVERS
     assert "no user-scope MCP servers" in row["detail"]
     remedy = " ".join(row["remedies"])
-    assert "/mcp add" in remedy
+    assert "push the MCP server definitions" in remedy
     # D1 (design round 1): the remedy must name the verb that makes these rows
     # travel, and must not keep the clause this slice falsified ("server config
     # is per device and is not copied over the mesh") — a shipped surface may
-    # not lie about its own sibling verb.
-    assert "lop network mcp push --peer cloud-node-1" in remedy
+    # not lie about its own sibling verb. §2.9 (2026-10-04): no command rides
+    # the remedy — the verb is the product action, not a spelling to paste.
+    assert "cloud-node-1" in remedy
     assert "per device" not in remedy and "not copied" not in remedy
+    assert "`" not in remedy
 
 
 @pytest.mark.parametrize(("count", "phrase"), [(1, "1 row withheld"), (2, "2 rows withheld")])
@@ -550,16 +551,13 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         by_server["unshared"]["ok"] is False
         and by_server["unshared"]["code"] == readiness.CODE_NOT_SHARED
     )
-    assert (
-        "credential share mcp:https://d.example/mcp --with cloud-node-1"
-        in by_server["unshared"]["remedies"][0]
-    )
+    assert by_server["unshared"]["remedies"][0] == "share it with cloud-node-1 (run here)"
     assert by_server["not-pulled"]["ok"] is False
     assert by_server["not-pulled"]["code"] == readiness.CODE_NOT_SHARED
     assert "has not pulled the placement" in by_server["not-pulled"]["detail"]
-    assert "lop network credentials" in by_server["not-pulled"]["remedies"][0]
+    assert "pull the placement on cloud-node-1" in by_server["not-pulled"]["remedies"][0]
     assert by_server["we-hold"]["ok"] is False
-    assert "mcp:https://e.example/mcp" in by_server["we-hold"]["remedies"][0]
+    assert by_server["we-hold"]["remedies"][0] == "share it with cloud-node-1 (run here)"
     assert (
         by_server["unreadable"]["ok"] is False
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
@@ -792,7 +790,7 @@ def test_model_credential_row_resolves_no_default_first() -> None:
             "not verified from here",
         ),
         ({}, {"rows": ["row"]}, False, "share it"),
-        ({}, {"rows": []}, False, "lop login openai"),
+        ({}, {"rows": []}, False, "sign in to openai here"),
     ],
     ids=["own-login", "borrowed-here", "borrowed-third", "signed-in-here", "neither"],
 )
@@ -830,7 +828,7 @@ def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
     )
     assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
     assert "has not pulled the placement" in row["detail"]
-    assert "lop network credentials" in row["remedies"][0]
+    assert "pull the placement on cloud-node-1" in row["remedies"][0]
 
 
 def test_model_credential_row_reads_the_observation_memory() -> None:
@@ -1010,16 +1008,15 @@ def test_an_unpinned_link_reads_as_the_link_fact_not_an_address() -> None:
         _row("connected_unpinned", detail="accepted_unpinned_link", ok=True)
     )
     assert reading == (
-        "the peer is up (its link is live); this address accepted a TCP connection — "
-        "the link's transport endpoint cannot be pinned to a declared address of the "
-        "peer (its recorded address is not one of the peer's declared endpoints)"
+        "the peer is up (its link is live); something accepted a TCP connection at this address"
     )
     assert "the peer answered" not in reading
-    assert "not identified" not in reading
-    # What cannot be pinned and why (2026-10-04): the record it keeps cannot be
-    # named as a dialable address of the peer — an address fact, not a caveat on
-    # the mesh.
-    assert "cannot be pinned to a declared address of the peer" in reading
+    # THE VERB IS ``something``, LIKE ``connected_unverified`` (design round 1,
+    # D5): "this address accepted" read as a self-contradiction beside a claim
+    # that the address cannot be attributed, and the why now rides the row's
+    # ``detail`` (asserted where the real composer builds it), keeping the
+    # reading in the family's register.
+    assert "something accepted" in reading
 
     # The same state on an address that did NOT answer names no address either.
     silent = readiness.reachability_reading(
@@ -1078,7 +1075,7 @@ def test_remedies_do_not_point_at_unverified_addresses() -> None:
         peer_label="cloud-node-1",
         observed={"winner": "192.0.2.9:4097"},
     )
-    assert unverified == ["start cloud-node-1's relay (`lop network start` there), then re-check"]
+    assert unverified == ["start cloud-node-1's relay, then re-check"]
 
     verified = readiness._reachability_remedies(
         "refused",
@@ -1145,7 +1142,7 @@ def test_reachability_remedies_name_the_discriminating_checks() -> None:
         "no_answer", peer_label="cloud-node-1", observed=row["observed"]
     )
     joined = " ".join(remedies)
-    assert "lop network status --json" in joined
+    assert "on cloud-node-1 check it is up" in joined
     assert "203.0.113.7" in joined
 
 
@@ -1373,7 +1370,7 @@ def test_a_private_address_off_this_devices_networks_is_out_of_scope_not_a_failu
         # Public and unroutable: also a real failure.
         _reach_row("203.0.113.7:4097", "no_answer", ok=False, detail="no_answer"),
     ]
-    readiness._mark_out_of_scope(rows, ["10.9.0.5"])
+    readiness.mark_out_of_scope(rows, ["10.9.0.5"])
     assert [row["ok"] for row in rows] == [True, True, False, False]
     for row in rows[:2]:
         assert row["observed"]["out_of_scope"] is True
@@ -1401,7 +1398,7 @@ def test_an_answer_refutes_the_scope_exclusion() -> None:
         _reach_row("172.20.0.247:4097", "handshake_failed", ok=False, detail="handshake_failed:x"),
         _reach_row("172.20.0.248:4097", "connected_unpinned", ok=True),
     ]
-    readiness._mark_out_of_scope(rows, ["10.9.0.5"])
+    readiness.mark_out_of_scope(rows, ["10.9.0.5"])
     assert [row["ok"] for row in rows] == [False, False, True]
     assert all(row["observed"].get("out_of_scope") is None for row in rows)
 
@@ -1418,22 +1415,90 @@ def test_the_scope_rule_is_a_class_and_position_property() -> None:
         (["172.20.99.99", "10.0.0.1"], False),
     ):
         rows = [_reach_row(candidate, "no_answer", ok=False, detail="no_answer")]
-        readiness._mark_out_of_scope(rows, own)
+        readiness.mark_out_of_scope(rows, own)
         assert (rows[0]["ok"] is True) is scoped, own
     for endpoint in ("127.0.0.1:4098", "203.0.113.7:4097", "169.254.1.1:4097", "100.64.0.1:4097"):
         rows = [_reach_row(endpoint, "no_answer", ok=False, detail="no_answer")]
-        readiness._mark_out_of_scope(rows, [])
+        readiness.mark_out_of_scope(rows, [])
         assert rows[0]["ok"] is False, endpoint
 
 
 def test_the_renderer_reads_an_out_of_scope_row_as_not_a_failure() -> None:
     scoped = _reach_row("172.20.0.246:4097", "no_answer", ok=False, detail="no_answer")
-    readiness._mark_out_of_scope([scoped], ["10.9.0.5"])
+    readiness.mark_out_of_scope([scoped], ["10.9.0.5"])
     failing = _reach_row("10.9.1.5:4097", "no_answer", ok=False, detail="no_answer")
     lines = readiness.render_check_lines([scoped, failing])
     assert lines[0].startswith("n/a  reachability cloud-node-1 172.20.0.246:4097:")
     assert "out of scope" in lines[0]
     assert lines[1].startswith("FAIL reachability cloud-node-1 10.9.1.5:4097:")
+
+
+def test_a_failed_non_gating_row_reads_warn_named_and_not_fatal() -> None:
+    """Design round 1, D1: the fourth state beside ok/FAIL/n-a.
+
+    ``ready`` is the surface the operator is told to read; the same state the
+    verify receipt calls "not required for onboarding" must not read as a bare
+    FAIL there — it reads ``warn`` with the shared clause, while a still-gating
+    equipment failure keeps its honest FAIL.
+    """
+    mcp: dict[str, Any] = {
+        "check": "readiness",
+        "capability": "mcp_credential",
+        "class": "equipment",
+        "device_name": "slack",
+        "ok": False,
+        "detail": "this device has no MCP login for https://mcp.slack.com/mcp; sign in here first",
+    }
+    gating: dict[str, Any] = {
+        "check": "readiness",
+        "capability": "operator_authority",
+        "class": "equipment",
+        "device_name": "cloud-node-1",
+        "ok": False,
+        "detail": "no operator authority is installed on cloud-node-1",
+    }
+    lines = readiness.render_check_lines([mcp, gating])
+    assert lines[0].startswith("warn readiness mcp_credential slack: this device has no MCP login")
+    assert lines[0].endswith("— not required for onboarding")
+    assert lines[1].startswith("FAIL readiness operator_authority cloud-node-1:")
+    # ONE spelling: the clause the renderer appends is the note's own.
+    assert readiness.non_gating_clause(mcp) == readiness.NON_GATING_NOTE
+    assert readiness.non_gating_clause(gating) == ""
+    assert readiness.non_gating_clause({**mcp, "ok": True}) == ""
+
+
+def test_the_scope_rule_reads_the_doctors_dialect_too() -> None:
+    """Design round 1, D3: ONE semantics, TWO producers.
+
+    ``doctor``'s endpoint rows carry the probe's own ``detail`` codes instead of
+    ``observed.outcome``; the scope flip reads them through the producer's
+    constants so the same address cannot read ``n/a`` on ``ready`` and a raw
+    FAIL on ``doctor``. An answer still refutes: a refused connect is not
+    scoped, and neither is a handshake row.
+    """
+    scoped = [
+        {"check": "reachability", "endpoint": "172.20.0.246:4097", "ok": False, "detail": code}
+        for code in ("no_answer", "bad_endpoint", "not_attempted", "connect_failed:TimeoutError:x")
+    ]
+    answers = [
+        {
+            "check": "reachability",
+            "endpoint": "172.20.0.246:4097",
+            "ok": False,
+            "detail": "connect_failed:ConnectionRefusedError",
+        },
+        {
+            "check": "handshake",
+            "endpoint": "172.20.0.246:4097",
+            "ok": False,
+            "detail": "handshake_failed:x",
+        },
+    ]
+    readiness.mark_out_of_scope(scoped + answers, ["10.9.0.5"])
+    assert all(row["ok"] is True and row["observed"]["out_of_scope"] is True for row in scoped)
+    for row in answers:
+        assert row["ok"] is False, row
+        assert "observed" not in row  # the default arrives on the flip, never before (N1)
 
 
 def test_onboarding_failures_holds_admission_plus_still_gating_equipment() -> None:
@@ -1500,9 +1565,26 @@ def test_equipment_note_names_failed_mcp_rows_and_nothing_else() -> None:
     )
     assert (
         readiness.equipment_note(
-            [{"check": "readiness", "capability": "mcp_servers", "class": "equipment", "ok": False}]
+            [
+                {
+                    "check": "readiness",
+                    "capability": "mcp_servers",
+                    "class": "equipment",
+                    "ok": False,
+                    "code": readiness.CODE_NO_MCP_SERVERS,
+                }
+            ]
         )
         == "mcp servers: none declared — not required for onboarding"
+    )
+    # AN UNREAD PARTNER IS NOT A CLAIM ABOUT IT (design round 1, D4): only the
+    # row that actually read the peer's own declaration may say "none declared";
+    # a check the peer's answer did not carry is "unknown".
+    assert (
+        readiness.equipment_note(
+            [{"check": "readiness", "capability": "mcp_servers", "class": "equipment", "ok": False}]
+        )
+        == "mcp servers: unknown — not required for onboarding"
     )
     assert (
         readiness.equipment_note(
@@ -1640,8 +1722,7 @@ def test_compose_names_the_running_build_where_one_can_be_read(
     payload = readiness.compose(server)
 
     assert payload["relay"] == (
-        f"running, pid {os.getpid()}, build 0.61.12 — behind install 0.67.4; "
-        "`lop network restart`"
+        f"running, pid {os.getpid()}, build 0.61.12 — behind install 0.67.4; " "restart the relay"
     ), payload["relay"]
 
 

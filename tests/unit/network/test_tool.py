@@ -1157,6 +1157,29 @@ def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
     assert body.count("127.0.0.1:64994") == 1, body
 
 
+def test_the_agent_digest_of_a_scoped_address_reads_out_of_scope_too() -> None:
+    """F9 at the agent's surface (design round 1, D3): the same reading as the
+    CLI's doctor — excluded from the decision, named out of scope, and the raw
+    dial result does not ride along."""
+    from local_operator.network import readiness as readiness_mod
+
+    scoped: dict[str, Any] = {
+        "check": "reachability",
+        "ok": False,
+        "device_id": "d_" + "b" * 32,
+        "endpoint": "172.20.0.246:4097",
+        "detail": "no_answer",
+    }
+    readiness_mod.mark_out_of_scope([scoped], ["10.9.0.5"])
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "doctor", {"ok": True, "identity_present": True, "checks": [scoped]}
+    )
+    body = "\n".join(lines)
+    assert "n/a  reachability" in body
+    assert "172.20.0.246:4097 — out of scope: " in body
+    assert "no_answer" not in body and "FAIL" not in body
+
+
 def test_the_agent_digest_of_a_ready_run_keeps_refused_and_silent_apart() -> None:
     """The readiness digest reads like the CLI's, through the same reading.
 
@@ -1304,7 +1327,7 @@ def test_the_agent_digest_carries_the_running_build_at_its_own_column() -> None:
     assert build_line.index("0.61.12") == 11, build_line
 
     stale = dict(payload, relay_generation_stale=True)
-    target = "build:     0.61.12 — behind install 0.67.4; `lop network restart`"
+    target = "build:     0.61.12 — behind install 0.67.4; restart the relay"
     assert any(line == target for line in net_tool._render("status", stale)), stale
 
     # And an UNPROVEN comparison NAMES the readable build with its limit (F10

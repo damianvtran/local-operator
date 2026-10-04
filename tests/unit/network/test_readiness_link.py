@@ -508,6 +508,10 @@ def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
     assert "its link is live" in reading
     assert "not identified" not in reading
     assert "link_address" not in live_row["observed"]
+    # THE WHY LIVES IN ``detail`` (design round 1, D5): the reading stays in the
+    # family's register while the address fact that explains it is one field
+    # over.
+    assert "not one the peer declares" in live_row["detail"]
     dead_row = rows["127.0.0.1:1"]
     assert dead_row["ok"] is False
     assert "its link is live" in dead_row["remedies"][0]
@@ -753,10 +757,10 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     assert "ask Local Operator to set up" in " ".join(operator_row["remedies"])
     git_row = _capability(payload, readiness.CAPABILITY_GIT)
     assert (git_row["ok"], git_row["code"]) == (False, readiness.CODE_NO_GIT_IDENTITY)
-    assert "git config --global user.name" in " ".join(git_row["remedies"])
+    assert "set its git author name and email" in " ".join(git_row["remedies"])
     mcp_row = _capability(payload, readiness.CAPABILITY_MCP_SERVERS)
     assert (mcp_row["ok"], mcp_row["code"]) == (False, readiness.CODE_NO_MCP_SERVERS)
-    assert "/mcp add" in " ".join(mcp_row["remedies"])
+    assert "push the MCP server definitions" in " ".join(mcp_row["remedies"])
     model_row = _capability(payload, readiness.CAPABILITY_MODEL_CREDENTIAL)
     assert (model_row["ok"], model_row["code"]) == (False, readiness.CODE_NOT_CONFIGURED)
     assert "/model default" in " ".join(model_row["remedies"])
