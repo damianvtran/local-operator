@@ -781,7 +781,10 @@ NUL/FS/GS class is undiscoverable. `ctrl+k` is the only candidate with no
 second in-app meaning; scoped to the list it fires where nothing else used it,
 and with the composer focused it stays TextArea's kill-to-end, byte-identical
 (measured). `f10` stays as compatibility — it also still works from the
-composer, which the scoped chord deliberately does not.
+composer (measured) — it also still works from the composer **with the pointer
+resting on a row**, which is where the hover-else-cursor resolution finds a
+target (UX round 1, U5: the bare "from the composer" read as unconditional),
+and which the scoped chord deliberately does not need.
 
 #### The `?` Keys legend (#1944)
 
@@ -796,6 +799,20 @@ construction). The card itself carries the rows `/help` structurally cannot:
 the sidebar-scoped chords above, under a section heading that makes the scope
 honest. It is deliberately NOT a keymap id, for the same reason f8/f9/f10 are
 not.
+
+The card's hint row names the routes back in with `/keys` first — it is the
+unconditional one — and marks `?` as "when not typing"; the scroll cue, where
+the card overflows, outlives both (the cue is the only in-card sign there is
+more below, and the narrow widths are where that matters).
+
+**Residual risk, recorded deliberately (design round 1, D5).** Nothing names
+the `?` key before the card opens, and every candidate surface is documented
+as full: `/help`'s key block sits at zero vertical headroom (its paste rows
+compose to exactly the 74-cell ceiling at 80 columns), the welcome table
+trades rows with the logo, and the footer carries no key hint. The taught
+route is the typed `/keys` — its row rides `/help`'s command table — and `?`
+remains the guessable shortcut. If a future edit buys a row on any of those
+surfaces, that row is this one's home.
 
 #### Why `f10` and not `ctrl+p`
 
