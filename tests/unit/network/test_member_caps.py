@@ -4,8 +4,9 @@ The default ``drive`` role cannot move, delete or borrow a login, so the move an
 credential slices are unusable between two ordinary members without this verb.
 What is pinned: the row write round-trips, it is audited, it takes effect on an
 ALREADY-OPEN link (the authoriser re-reads the row per frame), a non-admin cannot
-grant, ``admin`` cannot be granted, and both the relay path and the relay-down
-path say the same words.
+grant anything but the two onboarding scopes it decides for itself (F7: the
+``SELF_DECIDED_SCOPES`` block at the end), ``admin`` cannot be granted, and both
+the relay path and the relay-down path say the same words.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import pytest
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import identity, relay, store, types
+from local_operator.session.placement import read_stamp
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _init_network,
     _pair,
@@ -438,3 +440,232 @@ def test_a_peers_rotation_does_not_undo_a_local_grant() -> None:
     assert added is not None and sorted(added.capabilities) == sorted(
         types.ROLE_CAPABILITIES["read"]
     )
+
+
+# ---------------------------------------------------------------------------
+# F7 — the deciding device records its own decision (the onboarding scopes)
+# ---------------------------------------------------------------------------
+
+
+def test_the_self_decided_set_is_exactly_the_onboarding_scopes() -> None:
+    # The carve-out is by NAME, so it cannot silently grow into a role capability:
+    # both scopes are grantable-only, and the set is exactly the pair.
+    assert types.SELF_DECIDED_SCOPES == frozenset({"approve", "unattended"})
+    assert types.SELF_DECIDED_SCOPES <= types.GRANTABLE_CAPABILITIES
+
+
+@pytest.mark.parametrize("role", ["drive", "read"])
+def test_the_deciding_device_may_grant_and_revoke_the_onboarding_scopes(
+    root: Path, role: str
+) -> None:
+    """F7: ``approve``/``unattended`` are written by the device that decides.
+
+    The writer is a NON-admin member (``drive``, and ``read`` for symmetry) — the
+    caller the blanket gate refused — through the same primitive both writer paths
+    share. Pre-cleared first, so the cell can only pass on the WRITE, and audited
+    like every other change.
+    """
+    server = _server(root)
+    try:
+        record = _with_peer(server, role=role)
+        before = _caps(root, record.network_id)
+        assert "approve" not in before and "unattended" not in before
+
+        granted = server.control_dispatch(
+            "net_member_caps",
+            {
+                "req": 1,
+                "network": record.name,
+                "device_id": PEER,
+                "grant": ["approve", "unattended"],
+            },
+        )
+        assert granted["op"] == "ack", granted
+        assert granted["detail"]["added"] == ["approve", "unattended"]
+        assert {"approve", "unattended"} <= set(_caps(root, record.network_id))
+
+        revoked = server.control_dispatch(
+            "net_member_caps",
+            {"req": 2, "network": record.name, "device_id": PEER, "revoke": ["unattended"]},
+        )
+        assert revoked["op"] == "ack", revoked
+        assert revoked["detail"]["removed"] == ["unattended"]
+        caps = _caps(root, record.network_id)
+        assert "approve" in caps and "unattended" not in caps
+
+        records = _audit_records(root)
+        assert len(records) == 2, records
+        assert records[0]["subject"] == PEER
+        assert records[0]["actor"] == server.identity.device_id
+        assert records[0]["detail"]["added"] == ["approve", "unattended"]
+        assert records[1]["detail"]["removed"] == ["unattended"]
+    finally:
+        server.stop()
+
+
+def test_the_cli_records_the_onboarding_scopes_with_the_relay_down(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The relay-down writer path says the same words (F7)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = _server(root)
+    record = _with_peer(server, role="drive")
+    server.stop()
+    assert store.find_own_relay() is None
+
+    assert net_cli.main(_args("grant", record.name, "approve", "unattended")) == 0
+    out = capsys.readouterr().out
+    assert "laptop may now answer approval prompts for sessions here" in out
+    assert "start sessions here without approval prompts" in out
+    assert "(in home-net, on this device only)" in out
+    assert {"approve", "unattended"} <= set(_caps(root, record.network_id))
+    assert _audit_records(root)[-1]["detail"]["added"] == ["approve", "unattended"]
+
+
+def test_the_cli_records_the_onboarding_scopes_through_a_running_relay(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The relay writer path covers the same write (F7)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = _server(root)
+    try:
+        record = _with_peer(server, role="drive")
+        server.bind_control()
+        server.start()
+        assert net_cli.main(_args("grant", record.name, "unattended", json_out=True)) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["applied"] == "relay" and payload["added"] == ["unattended"]
+        assert "unattended" in _caps(root, record.network_id)
+        assert len(_audit_records(root)) == 1
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"grant": ["broker_credential"]},
+        {"grant": ["move"]},
+        {"grant": ["delete"]},
+        {"grant": ["list"]},
+        {"grant": ["admin"]},
+        {"revoke": ["move"]},
+        {"grant": ["approve", "move"]},
+        {"revoke": ["unattended", "move"]},  # the union arm is shared; mixed revoke too (NIT-2)
+    ],
+)
+def test_every_other_capability_still_needs_an_admin(root: Path, change: dict[str, Any]) -> None:
+    """F7's carve-out is exactly the onboarding scopes; nothing else widens.
+
+    ``broker_credential`` (never in a non-admin ROLE, and only an admin may hand
+    it out), the role caps, ``admin`` itself, and a MIXED set containing just one
+    non-carved capability all keep the admin gate — and a refused change leaves
+    the row and the audit untouched.
+    """
+    server = _server(root)
+    try:
+        record = _with_peer(server, role="drive")
+        before = _caps(root, record.network_id)
+        reply = server.control_dispatch(
+            "net_member_caps", {"req": 1, "network": record.name, "device_id": PEER, **change}
+        )
+        assert reply["op"] == "error" and reply["code"] == "not_admin", reply
+        assert _caps(root, record.network_id) == before
+        assert _audit_records(root) == []
+    finally:
+        server.stop()
+
+
+def test_a_drive_device_still_cannot_change_its_own_row(root: Path) -> None:
+    """The carve-out is about a PEER's row in the deciding device's own record.
+
+    A device changing ITSELF keeps the ``self_capabilities`` refusal, including
+    for the two onboarding scopes — so the carve-out cannot be read as "a device
+    may help itself".
+    """
+    server = _server(root)
+    try:
+        record = _with_peer(server, role="drive")
+        reply = server.control_dispatch(
+            "net_member_caps",
+            {
+                "req": 1,
+                "network": record.name,
+                "device_id": record.self_device_id,
+                "grant": ["approve", "unattended"],
+            },
+        )
+        assert reply["op"] == "error" and reply["code"] == "self_capabilities", reply
+    finally:
+        server.stop()
+
+
+def test_the_onboarding_grant_opens_a_full_auto_create_on_an_already_open_link(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F7 acceptance — the WRITE takes effect on a LIVE consumer, not just permitted.
+
+    Topology is the drill's: the RECEIVING device (server_a) is the one that
+    decides, and it joined as ``drive`` — so the blanket admin gate would refuse
+    the write, and this cell fails on it. Pre-cleared, its row for the sender
+    gains ``unattended``, and the SAME already-open link flips: a full-auto
+    (``yolo``) create the gate refused is now accepted, and the accepted authority
+    rides the stamp.
+    """
+    server_a, server_b, host, port = devices
+    record, _host, _port = _pair(devices, monkeypatch, role="drive")
+    # ``_pair`` seats the inviter as admin; the drill's node holds ``drive``, so
+    # re-seat this device's OWN row to the role the fix is about — with an admin
+    # row the cell would pass without the gate change and prove nothing.
+    with store.mutate(record.network_id, server_a.root) as fresh:
+        me = fresh.self_member()
+        assert me is not None and "admin" in me.capabilities
+        me.role = "drive"
+        me.capabilities = sorted(types.capabilities_for_role("drive"))
+        fresh.self_role = "drive"
+        fresh.self_capabilities = sorted(types.capabilities_for_role("drive"))
+        store.save(fresh, server_a.root)
+    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link is not None, reason
+    try:
+        frame = {"op": "net_session_create", "req": 71, "cwd": "", "yolo": True}
+        before = link.request(dict(frame))
+        assert before is not None and before["op"] == "error", before
+        message = str(before["message"])
+        assert "grants the requesting member 'unattended'" in message, before
+        # F7 design round 1 (D1): the remedy NAMES the deciding device. This
+        # sentence is relayed to the REQUESTING side, where "this device" would
+        # mean the READER's machine, not the node that refused.
+        assert "approve setup for device-a in the Mesh tab" in message, before
+        assert "this device" not in message, before
+        sender = server_b.identity.device_id
+        assert "unattended" not in _caps(server_a.root, record.network_id, sender)
+
+        granted = server_a.control_dispatch(
+            "net_member_caps",
+            {
+                "req": 1,
+                "network": record.network_id,
+                "device_id": sender,
+                "grant": ["unattended"],
+            },
+        )
+        assert granted["op"] == "ack", granted
+        assert granted["detail"]["added"] == ["unattended"]
+        assert "unattended" in _caps(server_a.root, record.network_id, sender)
+
+        def _no_warm(self: Any, *args: Any, **kwargs: Any) -> None:
+            # The accept path's warm-up side effect is not the assertion here;
+            # the ack and the stamp are (review round 1, NIT-1).
+            return None
+
+        monkeypatch.setattr(relay.RelayServer, "_warm_after_create", _no_warm)
+        after = link.request({**frame, "req": 72})
+        assert after is not None and after["op"] == "ack", after
+        session_id = str(after["detail"]["session_id"])
+        assert session_id
+        stamp = read_stamp(server_a.root, session_id)
+        assert stamp is not None and stamp.unattended is True, stamp
+    finally:
+        link.close("test")
