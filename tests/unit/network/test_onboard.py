@@ -1782,6 +1782,252 @@ def test_a_retry_reuses_the_record_with_a_new_run_id(
     assert "ap_aaaa1111" == record["approval_id"]
 
 
+# ---------------------------------------------------------------------------
+# The install step's refreshed resolve (drill finding F3, 2026-10-04)
+# ---------------------------------------------------------------------------
+
+#: The drill's node: a build present (v0.67.3), no updater script — the shape
+#: of the two failed receipts (s6/s7), which takes the uv-tool-reinstall arm.
+STALE_NODE_PRE_READ = PRE_READ_OK.replace("lop_version=v0.63.2", "lop_version=v0.67.3").replace(
+    "lop_update=yes", "lop_update=no"
+)
+
+#: uv's resolver-class text, wrapped the way a narrow terminal renders it (the
+#: drill's node receipt carried it as one line; the flattening must survive both).
+UV_INDEX_HIDDEN = (
+    "  × No solution found when resolving dependencies:\n"
+    "  ╰─▶ Because there is no version of local-operator==0.67.4 and you require\n"
+    "      local-operator==0.67.4, we can conclude that your requirements are\n"
+    "      unsatisfiable.\n"
+)
+
+
+def _install_step_outputs(
+    pre_read: str, refresh: dict[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """HAPPY_OUTPUTS, with this section's pre-read/install rows swapped in.
+
+    The first-match-wins fake gets the refresh row first: a resolve WITH the
+    refreshed index succeeds, while a resolve without it hits the stale-cache
+    failure the drill measured. Drop `--refresh` from the command and the cells
+    that use this helper fail.
+    """
+    overrides = [
+        ("uname", {"stdout": pre_read}),
+        ("--refresh", refresh),
+        ("tool install", {"rc": 1, "stderr": UV_INDEX_HIDDEN}),
+        ("lop --version", {"stdout": "v0.67.4\n"}),
+    ]
+    skip = {"uname", "lop-update", "lop --version"}
+    return [*overrides, *(row for row in HAPPY_OUTPUTS if row[0] not in skip)]
+
+
+def test_a_cached_index_cannot_hide_the_build_from_the_refreshed_resolve(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill finding F3: two runs failed at `install` — raw "no version of
+    local-operator==0.67.4 … unsatisfiable", 6 minutes and ~1 h after the
+    release was published — because the node's uv served a CACHED simple-index
+    response; the same node's curl showed the version present, and `--refresh`
+    cured it by hand.
+
+    The fake models exactly that boundary (see _install_step_outputs): the
+    refreshed resolve succeeds, the cached spelling fails — so this cell fails
+    if the install command loses `--refresh`.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(build="0.67.4")
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(
+        outputs=_install_step_outputs(STALE_NODE_PRE_READ, {"stdout": "installed\n"})
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    install = next(row for row in payload["steps"] if row["step"] == "install")
+    assert install["ok"] is True
+    assert install["data"]["method"] == "uv-tool-reinstall"
+    commands = [" ".join(call[1]) for call in transport.calls if call[0] == "run"]
+    assert any(
+        "uv tool install --force --refresh local-operator==0.67.4" in command
+        for command in commands
+    ), commands
+
+
+def test_a_fresh_machine_installs_with_the_index_refreshed_too(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The no-build arm carries the refresh as well — a machine that never ran
+    our tool can still hold a cached index response from other work — and there
+    is nothing to replace there, so no `--force`."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(build="0.67.4")
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    fresh_pre_read = (
+        PRE_READ_OK.replace("lop=yes", "lop=no")
+        .replace("lop_path=/usr/local/bin/lop\n", "")
+        .replace("lop_version=v0.63.2", "lop_version=")
+        .replace("lop_update=yes", "lop_update=no")
+    )
+    transport = FakeTransport(
+        outputs=_install_step_outputs(fresh_pre_read, {"stdout": "installed\n"})
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    commands = [" ".join(call[1]) for call in transport.calls if call[0] == "run"]
+    install_commands = [command for command in commands if "uv tool install" in command]
+    assert any(
+        "uv tool install --refresh local-operator==0.67.4" in command
+        for command in install_commands
+    ), install_commands
+    assert all("--force" not in command for command in install_commands), install_commands
+
+
+def test_the_install_refusal_names_the_cached_index_as_the_likely_cause(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill finding F3, the copy half: the drill read raw uv text as the WHOLE
+    failure — "no version … unsatisfiable" — with no cause and no remedy. The
+    resolver-class sentence now leads with the action, names the cached index as
+    the likely cause, hedges for genuine absence (so the reader can tell "retry
+    may cure" from "the version may not exist yet"), keeps one name for the
+    artefact, and leaves uv's words flattened and glyph-stripped at the end —
+    the retry runs exactly the command the drill cured by hand, without naming
+    a terminal command (§2.9).
+
+    The branch split is part of the pin: a non-resolver failure keeps its
+    original surface.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(build="0.67.4")
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+
+    resolver = FakeTransport(
+        outputs=[
+            ("uname", {"stdout": STALE_NODE_PRE_READ}),
+            ("tool install", {"rc": 1, "stderr": UV_INDEX_HIDDEN}),
+        ]
+    )
+    first = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=resolver,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert first["state"] == "failed"
+    failing = first["steps"][-1]
+    assert failing["step"] == "install" and failing["ok"] is False
+    detail = failing["detail"]
+    # D2: the action leads; a clipping surface keeps cause+remedy, not uv's words.
+    assert detail.startswith("the approved build could not be installed. Retry the install")
+    # D1: the cache is named as the likely cause and the escape keeps a genuine
+    # absence from turning the retry into a loop.
+    assert "a cached index is the likely cause" in detail
+    assert "it is not on the index" in detail
+    assert "ask Local Operator to file a fresh request with the corrected tag" in detail
+    # D4: the window matches the drill's own clock (6 minutes, then ~1 h).
+    assert "shortly before the run" in detail
+    assert "minutes earlier" not in detail
+    # D3: one name for the artefact ("the approved build <tag>") in the prose.
+    assert "The machine's uv could not see the approved build 0.67.4" in detail
+    # N1/N2: uv's words ride flattened and glyph-stripped, never with a doubled stop.
+    assert "Because there is no version of local-operator==0.67.4" in detail
+    assert "unsatisfiable" in detail
+    assert "\n" not in detail and "×" not in detail and "╰─▶" not in detail
+    assert ".)." not in detail
+    assert detail.endswith(".)")
+    assert failing["data"]["method"] == "uv-tool-reinstall"
+
+    generic = FakeTransport(
+        outputs=[
+            ("uname", {"stdout": STALE_NODE_PRE_READ}),
+            ("tool install", {"rc": 1, "stderr": "network down\n"}),
+        ]
+    )
+    second = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=generic,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+    assert second["steps"][-1]["detail"] == (
+        "the approved build could not be installed: network down"
+    )
+
+
+def test_a_long_resolver_message_keeps_the_head_and_drops_terminal_glyphs(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Design round 1 (N2/N3), pinned at the excerpt's own boundary: uv's
+    box-drawing furniture ("×", "╰─▶") is terminal-only and can render as tofu
+    in a UI sheet, and when the flattened words run long the excerpt keeps the
+    HEAD — "No solution found when resolving dependencies" is the part that
+    names the resolver — not the last 300 characters."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(build="0.67.4")
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    long_uv = (
+        "  × No solution found when resolving dependencies:\n"
+        "  ╰─▶ Because there is no version of local-operator==0.67.4 and you require\n"
+        "      local-operator==0.67.4, we can conclude that your requirements are\n"
+        + ("      adding solver context " * 20)
+        + "      unsatisfiable.\n"
+    )
+    transport = FakeTransport(
+        outputs=[
+            ("uname", {"stdout": STALE_NODE_PRE_READ}),
+            ("tool install", {"rc": 1, "stderr": long_uv}),
+        ]
+    )
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    detail = payload["steps"][-1]["detail"]
+    assert "No solution found when resolving dependencies" in detail  # head kept
+    assert "…" in detail  # the cut is marked
+    assert "unsatisfiable" not in detail  # the tail really was dropped
+    assert "×" not in detail and "╰─▶" not in detail
+    assert detail.endswith(".)")
+    assert ".)." not in detail
+
+
 def test_a_tampered_record_cannot_mint_an_invite_or_pre_answer_a_join(
     isolated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

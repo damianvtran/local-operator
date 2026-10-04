@@ -671,6 +671,11 @@ Diagnose in this order, and stop at the first answer that explains it:
      --json`:
      installs/updates the build on it, lands the operator's public anchor
      root-owned, joins the member, writes the grants and supervises the relay.
+     The card's install target is the version the **agent's own `lop`** is
+     running, unless the card names a build — so a node is only ever brought as
+     current as the agent driving the run. To move a node onto a new release,
+     the agent's `lop` must be on that release first — `lop-update` moves it
+     there.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
      `grants`, `relay`, `verify`. `join` is satisfied when the node is already
      an active member: no dial is made, and the step's detail reads "<node> is
