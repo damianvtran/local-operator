@@ -1971,6 +1971,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
     )
+    # A SECOND positional must PARSE rather than die inside argparse. Without
+    # this, `lop exec "Some Title" "do the work"` — the shape an agent reaches
+    # for when it mistakes the title for the first argument — exits 2 with
+    # argparse's bare "unrecognized arguments: do the work", which cannot name
+    # `--name` as the fix and reads like a broken install. This hidden catch-all
+    # turns that into a refusal we author (see the exec branch in `main`), whose
+    # message names the flag that actually titles the run. argparse.SUPPRESS
+    # keeps it out of `--help`: it exists to be refused, not used.
+    exec_parser.add_argument("extra", nargs="*", default=[], help=argparse.SUPPRESS)
     from local_operator.exec_startup import add_startup_arguments
 
     add_startup_arguments(exec_parser)
@@ -14192,6 +14201,30 @@ def main() -> int:
             print("usage: lop install {status, prune, migrate}", file=sys.stderr)
             return 1
         elif args.subcommand == "exec":
+            # Refuse a second positional BEFORE anything else in the branch. The
+            # trap is that a title reads as a second prompt, so
+            # `lop exec "Some Title" "do the work"` would otherwise silently
+            # treat the title as the prompt and run under the wrong brief.
+            # `--workstream` is the flag that publishes a run and takes no value,
+            # which is exactly why the title cannot be passed positionally.
+            # `args.command` is never None here: the catch-all `extra` only
+            # receives positionals that follow a first one.
+            extras = getattr(args, "extra", None) or []
+            if extras:
+                quoted = [repr(part) for part in (args.command, *extras)]
+                received = (
+                    ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
+                    if len(quoted) > 2
+                    else " and ".join(quoted)
+                )
+                parser.error(
+                    f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
+                    f"{received}.\n"
+                    "The first positional is the prompt, not a title. To name the run, "
+                    "pass the title via --name:\n"
+                    f"  lop exec --name {args.command!r} {extras[0]!r}\n"
+                    "(--workstream is a flag — it publishes the run and takes no value.)"
+                )
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.

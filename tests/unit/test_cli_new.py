@@ -1738,6 +1738,93 @@ def test_run_shaping_flags_still_parse_before_the_subcommand(
     assert args.run_in == "/tmp"
 
 
+def test_exec_second_positional_parses_so_the_refusal_can_name_the_flag(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """``lop exec "Some Title" "do the work"`` must reach OUR refusal, not argparse's.
+
+    A second positional is what an agent composes when it mistakes a title for
+    the first argument. Left to argparse it exits 2 with the bare
+    "unrecognized arguments: do the work" — a message that cannot name `--name`
+    as the fix and reads like a broken install. The hidden catch-all positional
+    lets the second one PARSE, so the refusal in ``main`` can name the flag; it
+    stays out of ``--help``.
+    """
+    args = parser.parse_args(["exec", "--workstream", "Some Title", "do the work"])
+    assert args.subcommand == "exec"
+    assert args.command == "Some Title"
+    assert args.extra == ["do the work"]
+    assert args.workstream is True, "the flag itself still parses as store_true"
+
+    # Hidden from the help surface: an escape hatch nobody can discover in
+    # `--help` is one nobody reaches for on purpose — it exists to be refused.
+    assert "extra" not in build_cli_parser().format_help()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["exec", "task"],
+        ["exec", "-", "--hosting", "anthropic", "--model", "x", "--run-in", "/tmp"],
+        ["exec", "--status", "JOB"],
+    ],
+)
+def test_exec_without_a_second_positional_still_parses_unchanged(
+    parser: argparse.ArgumentParser, argv: list[str]
+) -> None:
+    """The catch-all must not steal the ONE positional or shift any default."""
+    args = parser.parse_args(argv)
+    assert args.subcommand == "exec"
+    assert args.extra == []
+
+
+def test_main_refuses_a_second_exec_positional_and_names_name(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """The refusal the operator actually sees: exit 2, and NOT argparse's string.
+
+    Behavior-level through ``main()``: the parser test above proves the argv
+    reaches this branch; this proves what the message says.
+    """
+    monkeypatch.setattr(
+        sys, "argv", ["program", "exec", "--workstream", "Some Title", "do the work"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "got 2 positionals" in err
+    assert "'Some Title' and 'do the work'" in err
+    assert "--name" in err
+    assert "lop exec --name 'Some Title' 'do the work'" in err
+    assert "--workstream is a flag" in err
+    assert "unrecognized arguments" not in err
+
+
+def test_main_refuses_three_exec_positionals_and_counts_them_all(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """Three+ positionals get the same refusal, counting and quoting them all."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["program", "exec", "--workstream", "Some Title", "do the work", "and more"],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "got 3 positionals" in err
+    assert "'Some Title', 'do the work' and 'and more'" in err
+    assert "--name" in err
+
+
 def test_a_subcommand_does_not_clobber_a_root_run_shaping_flag(
     parser: argparse.ArgumentParser,
 ) -> None:
