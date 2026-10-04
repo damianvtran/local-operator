@@ -157,10 +157,12 @@ def _result(argv: tuple[str, ...], **fields: Any) -> onboard.CommandResult:
 class FakeTransport:
     """A scripted transport. ``outputs`` maps a substring to a canned result.
 
-    ONE command is not scripted: a node-side ``member grant`` is executed for real
-    against the ``isolated`` node rig (``_run_real_member_grant``). The
-    hand-written success this replaces is what hid F7 — a fake ``ok`` while the
-    real node refuses (see ``_build_drive_node``).
+    TWO commands resolve ahead of the script: a node-side ``member grant`` is
+    executed for real against the ``isolated`` node rig (``_run_real_member_grant``)
+    — the hand-written success it replaces is what hid F7, a fake ``ok`` while the
+    real node refuses (see ``_build_drive_node``) — and, in a cell that models the
+    node's relay (``_NODE_RELAY``, F7b), a ``network restart`` performs the relay's
+    move (``_run_modeled_relay_restart``).
     """
 
     def __init__(
@@ -209,6 +211,9 @@ class FakeTransport:
         command = " ".join(str(part) for part in argv)
         self.calls.append(("run", tuple(str(part) for part in argv)))
         executed = _run_real_member_grant(command)
+        if executed is not None:
+            return executed
+        executed = _run_modeled_relay_restart(command)
         if executed is not None:
             return executed
         for token, fields in self.outputs:
@@ -325,6 +330,12 @@ _REAL_LIST_NETWORKS = network_store.list_networks
 #: so it cannot leak into a cell that never built one.
 _NODE_ROOT: Path | None = None
 
+#: The node's relay a cell models across one run (F7b), or ``None`` — the default,
+#: where no relay answers the grants write and the node CLI takes its in-process
+#: fallback (what every older grants cell pins). A ``_ModeledNodeRelay`` where the
+#: relay's BUILD must matter across the run; ``isolated`` resets it per cell.
+_NODE_RELAY: Any = None
+
 
 def _build_drive_node(node: Path) -> Path:
     """A real node store for the grants step: the node as a ``drive`` member of ``n_1``.
@@ -384,6 +395,9 @@ def _run_real_member_grant(command: str) -> onboard.CommandResult | None:
     the same ``net_cli.main`` the node's ``lop`` runs — the CLI that produced the
     drill's refusal — so a canned reply can no longer disagree with the node's own
     code in the direction that matters (a fake ``ok`` while the real node refuses).
+    A cell that models the node's relay (``_NODE_RELAY``, F7b) has the command's two
+    relay calls — ``find_own_relay`` and ``control_request`` — answered by that
+    model (``_install_modeled_relay``) instead of whatever relay really runs.
     """
     if _NODE_ROOT is None or "member grant" not in command:
         return None
@@ -403,10 +417,117 @@ def _run_real_member_grant(command: str) -> onboard.CommandResult | None:
         patch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(_NODE_ROOT))
         # The real list, not ``isolated``'s pin: that pin answers for THIS device.
         patch.setattr(network_store, "list_networks", _REAL_LIST_NETWORKS)
+        # The relay this command meets is whatever the run has left on the node:
+        # the pre-run build until the restart step, the moved one after (F7b).
+        if _NODE_RELAY is not None:
+            _install_modeled_relay(patch, _NODE_RELAY)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = net_cli.main(args)
     return onboard.CommandResult(
         ("lop", "network", "member", "grant"), rc, out.getvalue(), err.getvalue(), at=0.0
+    )
+
+
+class _ModeledNodeRelay:
+    """The node's relay across one run, modeled where its BUILD is observable (F7b).
+
+    The pre-run relay is the previous build's PROCESS, and a unit test cannot load
+    another build's code — so ``"old"`` states the one reply from that build that
+    matters, at the exact boundary the node CLI reads: ``relay.control_request``
+    answers with the pre-F7 gate's ``not_admin`` error frame (byte-for-byte the
+    refusal the drill's node sent; relay.py raised it for every non-admin grant
+    before ``b22a4bd8b7``). ``moved()`` is what the run's own ``lop network
+    restart`` does on a real node — rolls the relay onto the build the install
+    step landed — after which the same call reaches THIS build's real relay-side
+    handler: a real ``RelayServer`` over its real control socket, so the write,
+    the member row and the audit row the runner reads back are the relay's own.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.build = "old"
+        self.server: Any = None
+
+    def moved(self) -> None:
+        self.build = "current"
+        if self.server is None:
+            from local_operator.network import identity, relay
+
+            self.server = relay.RelayServer(
+                root=self.root,
+                settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+                identity=identity.mint(self.root, name="cloud-node-1"),
+                audit=audit_mod.AuditLog(self.root),
+            )
+            self.server.bind_control()
+            self.server.start()
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
+
+
+def _install_modeled_relay(patch: Any, rig: _ModeledNodeRelay) -> None:
+    """Answer for the node's relay as ``rig`` models it, for one node command.
+
+    ``find_own_relay`` and ``control_request`` are the two calls a node-side
+    ``member grant`` makes to reach its relay (``_relay_call``); while the rig is
+    ``"old"`` they answer as the pre-run relay did, and once it is ``"current"``
+    they delegate to the real pair — which reaches the ``RelayServer`` ``moved()``
+    started, over the real control socket, so the op is executed by the relay half
+    rather than by the CLI's in-process fallback.
+    """
+    from local_operator.network import relay as relay_mod
+
+    real_find = network_store.find_own_relay
+    real_request = relay_mod.control_request
+
+    def find(root: Path | None = None) -> Any:
+        if rig.build == "old":
+            # A LIVE relay record for the still-running pre-run relay: its
+            # presence is what makes the CLI route the write to the relay instead
+            # of falling back locally. The reply below stands in for the process
+            # itself (its build cannot be loaded here).
+            return SimpleNamespace(control_port=1, control_key="k")
+        return real_find(root)
+
+    def request(record: Any, op: str, *, timeout: float = 5.0, **fields: Any) -> Any:
+        if rig.build == "old":
+            assert op == "net_member_caps", op
+            # THE PRE-F7 GATE'S ANSWER, byte for byte: same frame shape (the
+            # relay's own error envelope), same code, same sentence — relay.py
+            # before b22a4bd8b7 raised exactly this for a non-admin grant, and a
+            # refusal crosses this hop verbatim (cli.py re-raises it; no fallback).
+            return {
+                "op": "error",
+                "req": 1,
+                "code": "not_admin",
+                "message": (
+                    "only an admin device can change what a peer may do; this device "
+                    "is drive in damian-mesh"
+                ),
+            }
+        return real_request(record, op, timeout=timeout, **fields)
+
+    patch.setattr(network_store, "find_own_relay", find)
+    patch.setattr(relay_mod, "control_request", request)
+
+
+def _run_modeled_relay_restart(command: str) -> onboard.CommandResult | None:
+    """The node's ``network restart`` while a cell models its relay (F7b).
+
+    The restart IS the move: on a real node it rolls a running relay onto the
+    build the install step landed. A cell that models a pre-run relay must let
+    the run perform that move, or the simulation could not tell the fix from
+    the defect. ``None`` (the scripted answer stays) whenever no rig is set.
+    """
+    if _NODE_RELAY is None or "network restart" not in command:
+        return None
+    _NODE_RELAY.moved()
+    return _result(
+        ("lop", "network", "restart", "--json"),
+        stdout=json.dumps({"ok": True, "action": "restart"}),
     )
 
 
@@ -428,6 +549,10 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     # node-side ``member grant`` is answered by the node's own code. The patch form
     # restores this to ``None`` when the cell ends, so it cannot leak into a cell
     # that never built one.
+    #
+    # ``_NODE_RELAY`` (F7b) takes the same patch form: ``None`` unless a cell
+    # installs a modeled relay, undone when the cell ends.
+    monkeypatch.setattr(__name__ + "._NODE_RELAY", None)
     monkeypatch.setattr(__name__ + "._NODE_ROOT", _build_drive_node(tmp_path / "node"))
     return root
 
@@ -705,6 +830,113 @@ def test_the_grants_step_writes_the_scopes_through_the_real_node_command(
     ]
     assert len(audit_rows) == 1, audit_rows
     assert audit_rows[0]["detail"]["added"] == ["approve", "unattended"]
+
+
+def test_the_grants_write_executes_against_the_relay_the_run_moved_onto_the_new_build(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F7b acceptance — the write must meet the run's own relay move.
+
+    The node starts with a relay from the PREVIOUS build answering: the reply
+    the node CLI reads for the grant op is the pre-F7 blanket refusal
+    (``_ModeledNodeRelay``), and a relay refusal does not fall back — the CLI
+    re-raises it verbatim. So a run whose ``grants`` step executes FIRST records
+    the settled refusal (``applied:false``, ``reason:not_admin``) and the scopes
+    never land: the drill's defect, where a self-scoped gate shipped in the same
+    release could not be in effect in the still-running pre-run process. With
+    the order fixed, the run's own ``network restart`` moves the relay onto the
+    build the install step landed first, and the write then executes against
+    THAT relay — a real ``RelayServer`` over its real control socket, so the
+    write, the audit row and the member row are the relay's own.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    assert _NODE_ROOT is not None
+    rig = _ModeledNodeRelay(_NODE_ROOT)
+    monkeypatch.setattr(__name__ + "._NODE_RELAY", rig)
+    # The ``isolated`` fixture pins THIS DEVICE's ``list_networks`` for the
+    # runner's own lookups; the relay's threads are NODE-side readers
+    # (``declared_endpoints``/``peer_record``/``_flush_outboxes`` all read the
+    # records' own fields) and must see the node's real records. Keep the pin
+    # for every other caller; route by root for the node.
+    pinned_networks = network_store.list_networks
+
+    def list_networks_for(*args: Any, **kwargs: Any) -> Any:
+        root = kwargs.get("root")
+        if root is None and args:
+            root = args[0]
+        if root is not None and Path(root) == _NODE_ROOT:
+            return _REAL_LIST_NETWORKS(*args, **kwargs)
+        return pinned_networks(*args, **kwargs)
+
+    monkeypatch.setattr(network_store, "list_networks", list_networks_for)
+    before = network_store.load("n_1", _NODE_ROOT).member("d_mac")
+    assert before is not None and not ({"approve", "unattended"} & set(before.capabilities))
+    try:
+        payload = onboard.execute_approval(
+            "ap_aaaa1111",
+            transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+            resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+            local_cli=["lop"],
+            run_local=_happy_run_local(token),
+        )
+    finally:
+        rig.close()
+
+    assert payload["state"] == "connected", payload
+    grants = next(row for row in payload["steps"] if row["step"] == "grants")
+    assert grants["ok"] is True
+    # The write executed against a relay of the CURRENT build — the relay path
+    # ("relay"), not the CLI's in-process fallback — and the pre-run relay's
+    # refusal did NOT settle here: no reason field, no settled sentence.
+    assert grants["data"]["applied"] == "relay", grants["data"]
+    assert "reason" not in grants["data"], grants["data"]
+    assert "settled" not in grants["detail"], grants["detail"]
+    assert grants["detail"] == (
+        "granted to this device on damian-mesh: answer approval prompts for "
+        "sessions and start sessions without approval prompts"
+    )
+    # The ordering that the landing depends on, where the drill saw it: the
+    # move precedes the write.
+    order = [row["step"] for row in payload["steps"]]
+    assert order.index("relay") < order.index("grants"), order
+    after = network_store.load("n_1", _NODE_ROOT).member("d_mac")
+    assert after is not None
+    assert {"approve", "unattended"} <= set(after.capabilities), after.capabilities
+    audit_rows = [
+        row
+        for row in audit_mod.AuditLog(_NODE_ROOT).tail(50)
+        if row.get("event") == "member_capabilities_changed"
+    ]
+    assert len(audit_rows) == 1, audit_rows
+    assert audit_rows[0]["detail"]["added"] == ["approve", "unattended"]
+
+
+def test_the_relay_step_runs_before_the_grants_step() -> None:
+    """F7b: the order the fix rests on, pinned at the constant.
+
+    The ``grants`` write is executed by the node's own relay whenever one
+    answers, and a refusal from that relay does not fall back — while only the
+    run's own ``network restart`` rolls a relay that is already running onto
+    the build the install step landed. With ``grants`` first (the pre-fix
+    order), the write meets the pre-run relay, the settled ``not_admin``
+    outcome records itself and nothing re-attempts the write after the move —
+    the drill's bug. The behaviour is covered end to end by
+    ``test_the_grants_write_executes_against_the_relay_the_run_moved_onto_the_new_build``;
+    this cell states the invariant itself, so a future reorder fails HERE, in
+    one line, naming the reason.
+    """
+    order = list(onboard.STEP_NAMES)
+    assert order.index("relay") < order.index("grants"), (
+        "the relay step must run before the grants step: only the relay step moves "
+        "a running relay onto the new build, and the grants write is executed by "
+        "the node's own relay when one answers — a pre-run relay's refusal does "
+        "not fall back (F7b)"
+    )
 
 
 def test_the_credential_temp_is_unlinked_and_its_value_never_lands_in_receipts(
