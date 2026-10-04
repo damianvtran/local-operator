@@ -55,7 +55,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
-from tests.unit.session.test_session import make_session
+from tests.unit.session.test_session import make_session, wait_for
 
 #: Longer than ``HEARTBEAT_TIMEOUT_S`` (45 s) with margin: see the module
 #: docstring for why a shorter one would not discriminate.
@@ -495,9 +495,11 @@ async def test_the_ask_ops_run_on_the_sessions_loop(
     exists.
 
     It carries a second reading for free: the answer goes over the wire FIRST
-    (``ask_respond``, which awaits its own reconcile), so the revision that
-    follows is refused — the delivery bound is on the row, and the answering op
-    has already put it there.
+    (``ask_respond``, which awaits its own reconcile), the delivery turn that
+    reconcile spawns then lands the row — awaited below so the refusal is
+    deterministic rather than scheduler-ordered — and the revision that follows
+    is refused. The consumption bound is on the row: the answering op STARTS the
+    delivery that writes it, and the window stays open until that append lands.
     """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     ran_on: list[tuple[str, Any]] = []
@@ -544,6 +546,12 @@ async def test_the_ask_ops_run_on_the_sessions_loop(
             {"op": "ask_respond", "req": 1, "ask_id": ask_id, "answers": {"q0": ["yes"]}},
         )
         assert answered.get("detail") == "answered", answered
+        # CONSUMPTION (amended 2026-10-04): the refusal below is about the
+        # DURABLE row. The answering op awaited its reconcile, which HANDS the
+        # row off and spawns the delivery turn; the row lands at that turn's
+        # append. Await the landing — the bound is the row, so the wait is the
+        # fix and the assertion stays.
+        await wait_for(lambda: store.response_row_id(ask_id) in queue.present_row_ids())
         revised = await asyncio.to_thread(
             _request,
             runtime.record,

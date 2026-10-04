@@ -31,13 +31,22 @@ class FakeTranscript:
 
 
 class FakeSession:
-    """The three things ``AskQueue`` asks of a session, and nothing else."""
+    """The three things ``AskQueue`` asks of a session, and nothing else.
 
-    def __init__(self) -> None:
+    ``persist_at_delivery`` models WHERE the durable write happens: the
+    default (True) is the collapsed shape most cells want — reconcile hands a
+    row and the row is durable immediately after — while the durability cells
+    hold the two halves apart (hand-off at reconcile, append later), which is
+    the real session's ordering (the append sites run in the delivery turn, not
+    in reconcile).
+    """
+
+    def __init__(self, *, persist_at_delivery: bool = True) -> None:
         self.transcript = FakeTranscript()
         self.batches: list[list[Any]] = []
         self.reach: list[str] = []
         self.spawned: list[asyncio.Task[Any]] = []
+        self.persist_at_delivery = persist_at_delivery
         #: The session's LIVE credential keys. Empty by default, which is also the
         #: honest answer for a double that stores nothing — and the reason the
         #: secret-lost tests have to say what is held rather than assume it.
@@ -55,11 +64,14 @@ class FakeSession:
         return task
 
     async def deliver_ask_messages(self, messages) -> None:
-        # The durable row IS the delivery marker, so the double marks it here —
-        # which is exactly what the session does by persisting the message.
+        # The HAND-OFF, not the consumption: the real session puts the message
+        # on a delivery path here and the row becomes durable when that path
+        # reaches its append (``persist_at_delivery`` collapses the two for the
+        # cells that do not test the gap itself).
         self.batches.append(list(messages))
-        for message in messages:
-            self.transcript.ids.add(message.id)
+        if self.persist_at_delivery:
+            for message in messages:
+                self.transcript.ids.add(message.id)
 
 
 def _questions(count: int = 1, *, secret: bool = False, text: str = "Which one?"):
@@ -810,16 +822,17 @@ def test_repro_the_two_question_revision_window_closes_at_delivery(tmp_path: Pat
     assert after is not None and after["answers"] == {"q0": ["yes"], "q1": ["maybe"]}
 
 
-def test_the_window_keys_on_the_response_row_not_the_sticky_delivered_hint(
+def test_delivered_and_the_window_key_on_the_response_row_not_the_timeout_notice(
     tmp_path: Path,
 ):
-    """THE DISTINCTION THE PR BODY ARGUES: ``delivered`` is STICKY.
+    """THE CONSUMPTION BOUND, at the queue's own fold (amended 2026-10-04).
 
-    ``store.delivered_hint`` counts the ``ask-timeout-`` row, because a deadline
-    notice is a delivery for the model too. A LATE answer is exactly where the two
-    disagree — the notice went out, the answer has not — and a revision there is
-    still free to make. Keying the window on the hint would refuse the one
-    revision that costs nothing and is exactly the mis-tap #1936 is about.
+    ``delivered`` is per-status now: for a LATE answer it counts the RESPONSE row
+    only — the deadline notice went out but does not deliver the answer — so the
+    flag reads False exactly while the revision window is open, and a revision
+    there is free to make. (The old sticky hint counted the notice, so the fold
+    disagreed with the window it was documented as the window.) After the response
+    row lands, the flag flips True and the window is shut for good.
     """
     session = FakeSession()
     queue = _queue(tmp_path, session)
@@ -832,7 +845,7 @@ def test_the_window_keys_on_the_response_row_not_the_sticky_delivered_hint(
     record = queue.find(ask_id)
     assert record is not None
     assert record["status"] == store.STATUS_LATE
-    assert record["delivered"] is True, "the hint counts the timeout row"
+    assert record["delivered"] is False, "the notice does not deliver the answer"
     assert store.response_row_id(ask_id) not in session.transcript.ids
 
     outcome = queue.revise(ask_id, {"q0": ["late but corrected"]})
@@ -841,6 +854,122 @@ def test_the_window_keys_on_the_response_row_not_the_sticky_delivered_hint(
     # what lands — and only ONE row does.
     assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
     assert session.batches[-1][0].details["answers"] == {"q0": ["late but corrected"]}
+
+    # The append is the close: the flag flips where the row lands, and the window
+    # is shut in the revision path's own sentence.
+    record = queue.find(ask_id)
+    assert record is not None and record["delivered"] is True
+    refused = queue.revise(ask_id, {"q0": ["no"]})
+    assert refused["ok"] is False and refused["error"] == DELIVERED_REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# the consumption bound: hand-off vs durable, the in-flight guard, retries
+# (amended 2026-10-04 — the window is the row's DURABLE append)
+# ---------------------------------------------------------------------------
+
+
+def test_handoff_alone_leaves_the_window_open_until_the_row_is_durable(tmp_path: Path):
+    """HAND-OFF IS NOT CONSUMPTION: with the append not yet run, the flag is
+    False, a revision is accepted, and the append re-resolves the row it lands.
+
+    ``persist_at_delivery=False`` is the real session's ordering held apart: the
+    reconcile hands the message to the delivery path (``_handed`` set, nothing
+    durable), and the append happens later. The stale handed message is then
+    refreshed from the fold — the carry mechanism — and only the durable append
+    closes the window.
+    """
+    session = FakeSession(persist_at_delivery=False)
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]}, by="terminal")["ok"] is True
+    row_id = store.response_row_id(ask_id)
+    assert _run(queue.reconcile()) == [row_id]
+
+    record = queue.find(ask_id)
+    assert record is not None
+    assert record["delivered"] is False, "hand-off is not consumption"
+    accepted = queue.revise(ask_id, {"q0": ["yes"]})
+    assert accepted["ok"] is True and accepted["revised"] is True
+
+    # The deliver path re-resolves content AT the append: the preview built by
+    # reconcile carries the old map, the refreshed rebuild carries the revision.
+    preview = session.batches[-1][0]
+    assert preview.details["answers"] == {"q0": ["no"]}
+    refreshed = queue.refresh_delivery_message(preview)
+    assert refreshed.id == preview.id, "one response row per ask, ever"
+    assert refreshed.details["answers"] == {"q0": ["yes"]}
+
+    # The append lands: durable, published, and the window shuts.
+    queue.begin_row_commit(row_id)
+    session.transcript.ids.add(row_id)
+    queue.finish_row_commit(row_id, durable=True)
+    record = queue.find(ask_id)
+    assert record is not None and record["delivered"] is True
+    refused = queue.revise(ask_id, {"q0": ["maybe"]})
+    assert refused["ok"] is False and refused["error"] == DELIVERED_REFUSAL
+
+
+def test_a_revision_while_the_append_is_in_flight_is_refused(tmp_path: Path):
+    """THE COMMIT GUARD: refresh at T0, append awaiting, revision at T1>T0.
+
+    The append has snapshotted content already, so accepting the revision would
+    be accepted-and-then-dropped — the interleaving §10 forbids by name. It is
+    refused in the delivered sentence (sub-ms, conservative), and the guard
+    releases on EITHER append outcome: a failed append accepts the same revision
+    on retry, a successful one refuses it for good.
+    """
+    session = FakeSession(persist_at_delivery=False)
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]})["ok"] is True
+    row_id = store.response_row_id(ask_id)
+
+    queue.begin_row_commit(row_id)
+    refused = queue.revise(ask_id, {"q0": ["yes"]})
+    assert refused["ok"] is False and refused["error"] == DELIVERED_REFUSAL
+
+    # The append FAILED: the guard releases and the same revision is accepted.
+    queue.finish_row_commit(row_id, durable=False)
+    accepted = queue.revise(ask_id, {"q0": ["yes"]})
+    assert accepted["ok"] is True and accepted["revised"] is True
+
+    # A successful append refuses again, permanently.
+    queue.begin_row_commit(row_id)
+    session.transcript.ids.add(row_id)
+    queue.finish_row_commit(row_id, durable=True)
+    refused = queue.revise(ask_id, {"q0": ["no"]})
+    assert refused["ok"] is False and refused["error"] == DELIVERED_REFUSAL
+
+
+def test_a_failed_append_releases_the_handoff_so_the_next_reconcile_retries(
+    tmp_path: Path,
+):
+    """THE LIFECYCLE: ``_handed`` is scheduling, and it does not outlive its append.
+
+    The pre-existing hole (it is fixed here rather than preserved): the set was
+    sticky, so a FAILED append was never re-handed — the row a human was waiting
+    for stayed undelivered with no further attempt. Now a failed append drops the
+    entry, the next reconcile re-plans the row, and an interleaved revision is
+    what the retry carries.
+    """
+    session = FakeSession(persist_at_delivery=False)
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["no"]})["ok"] is True
+    row_id = store.response_row_id(ask_id)
+    assert _run(queue.reconcile()) == [row_id]
+    # The dedupe holds the gap closed while the hand-off is in flight.
+    assert _run(queue.reconcile()) == []
+
+    # The append fails...
+    queue.begin_row_commit(row_id)
+    queue.finish_row_commit(row_id, durable=False)
+    # ...a revision lands while nothing is durable...
+    assert queue.revise(ask_id, {"q0": ["yes"]})["ok"] is True
+    # ...and the retry re-hands, carrying the revision.
+    assert _run(queue.reconcile()) == [row_id]
+    assert session.batches[-1][0].details["answers"] == {"q0": ["yes"]}
 
 
 def test_a_revision_from_another_surface_supersedes_while_undelivered(tmp_path: Path):
