@@ -31,6 +31,7 @@ from typing import Any, Sequence
 
 import pytest
 
+from local_operator.network import audit as audit_mod
 from local_operator.network import onboard, onboard_approvals
 from local_operator.network import store as network_store
 from local_operator.network.types import MeshRefusal
@@ -647,6 +648,59 @@ def test_a_refusal_the_node_reserves_is_a_satisfied_state_not_a_failure(
     assert row is not None
     assert "broker_credential" not in row.capabilities
     assert "unattended" not in row.capabilities
+
+
+def test_the_grants_step_writes_the_scopes_through_the_real_node_command(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F7 slice 2 acceptance — the WRITE, end to end with both ends real.
+
+    The executed command is the REAL node-side CLI on a ``drive`` node (the
+    drill's topology), pre-cleared first, so this cell fails the moment the write
+    gate regresses to the blanket admin rule: the runner would then record the
+    satisfied refusal instead, and every assertion below goes red. The row that
+    changes is the NODE's own (rule 2 keeps this Mac's copy unchanged — read it on
+    the node side), and the change lands audited.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    assert _NODE_ROOT is not None
+    before = network_store.load("n_1", _NODE_ROOT).member("d_mac")
+    assert before is not None and not ({"approve", "unattended"} & set(before.capabilities))
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    grants = next(row for row in payload["steps"] if row["step"] == "grants")
+    assert grants["ok"] is True
+    assert grants["detail"] == (
+        "granted to this device on damian-mesh: answer approval prompts for "
+        "sessions and start sessions without approval prompts"
+    )
+    assert grants["data"]["applied"] == "locally (relay not running)"
+    # The payload carries the row's WHOLE set after the change (the CLI's own
+    # shape); the two scopes must be in it.
+    assert {"approve", "unattended"} <= set(grants["data"]["capabilities"])
+    after = network_store.load("n_1", _NODE_ROOT).member("d_mac")
+    assert after is not None
+    assert {"approve", "unattended"} <= set(after.capabilities), after.capabilities
+    audit_rows = [
+        row
+        for row in audit_mod.AuditLog(_NODE_ROOT).tail(50)
+        if row.get("event") == "member_capabilities_changed"
+    ]
+    assert len(audit_rows) == 1, audit_rows
+    assert audit_rows[0]["detail"]["added"] == ["approve", "unattended"]
 
 
 def test_the_credential_temp_is_unlinked_and_its_value_never_lands_in_receipts(

@@ -1641,17 +1641,30 @@ def set_member_capabilities(
     would burn the device id.
 
     THE REFUSALS, each named: only an ADMIN device may change another's authority
-    (the same test ``panic`` uses: this device's own row holds ``admin``); the
-    target must be an active member other than this device; a grant may not name
-    ``admin`` (that is a role granted by an invite and a human SAS step,
-    :data:`GRANTABLE_CAPABILITIES`); and an unknown name is refused rather than
-    stored, since a typo stored is an authority nobody decided. The CALLER holds
-    the record's write lock and saves; this function only mutates.
+    (the same test ``panic`` uses: this device's own row holds ``admin``), with ONE
+    carve-out — when every named capability is an onboarding scope
+    (:data:`SELF_DECIDED_SCOPES`), the deciding device writes its OWN record
+    without an admin row (F7: those scopes govern this device's own files and
+    sessions, their grant is deliberately receiver-side, and no wire op can write
+    another device's copy). The target must be an active member other than this
+    device; a grant may not name ``admin`` (that is a role granted by an invite and
+    a human SAS step, :data:`GRANTABLE_CAPABILITIES`); and an unknown name is
+    refused rather than stored, since a typo stored is an authority nobody decided.
+    The CALLER holds the record's write lock and saves; this function only mutates.
     """
-    from local_operator.network.types import CAPABILITIES
+    from local_operator.network.types import CAPABILITIES, SELF_DECIDED_SCOPES
 
     me = record.self_member()
-    if not (me and me.active and "admin" in me.capabilities):
+    is_admin = bool(me and me.active and "admin" in me.capabilities)
+    requested = {*grant, *revoke}
+    # THE DECIDING DEVICE RECORDS ITS OWN DECISION (F7): when EVERY named
+    # capability is an onboarding scope (:data:`SELF_DECIDED_SCOPES`), this
+    # device's own row decides it — those scopes govern THIS device's files and
+    # sessions, their grant is deliberately receiver-side, and no wire op can
+    # write another device's copy, so the blanket admin gate refused the very
+    # device the decision belongs to. Anything else keeps the admin gate.
+    self_decided = bool(me and me.active) and bool(requested) and requested <= SELF_DECIDED_SCOPES
+    if not (is_admin or self_decided):
         raise MeshRefusal(
             "not_admin",
             f"only an admin device can change what a peer may do; this device is "
@@ -6384,9 +6397,10 @@ class RelayServer:
             raise MeshRefusal(
                 "not_permitted",
                 "a session created on another device can start unattended (yolo) only when "
-                "this device grants the requesting member 'unattended' — ask an admin "
-                "device in this network for that grant. Until then, create it here or "
-                "start it on your own device with yolo.",
+                "this device grants the requesting member 'unattended'. The grant is made "
+                "on this device by its operator — approve setup for this device in the "
+                "Mesh tab. Until then, create it here or start it on your own device "
+                "with yolo.",
             )
         from local_operator.fork import new_session_id
         from local_operator.network import definitions

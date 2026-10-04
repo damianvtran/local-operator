@@ -425,6 +425,10 @@ MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"
 #: what ``credential share`` writes on the owner (§2.2) — but only by a device
 #: whose own row holds ``admin``, which is the "stays admin-only" rule: the
 #: capability is never in a non-admin ROLE, and only an admin may hand it out.
+#: The ONE carve-out is the write-authorization set beside this table
+#: (:data:`SELF_DECIDED_SCOPES`): the two onboarding scopes are what the
+#: deciding device records on its own record, so it needs no admin row for
+#: exactly those.
 #:
 #: ``approve`` and ``unattended`` are grantable and, like ``broker_credential``,
 #: are in no ROLE: they are the onboarding scopes the operator ticks on the
@@ -447,6 +451,22 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
         "unattended",
     }
 )
+
+#: The capability names the DECIDING device writes about a peer on its OWN record
+#: without an admin row (F7). ``approve`` and ``unattended`` are the onboarding
+#: scopes: trust decisions about THIS device's own files and sessions ("may the
+#: laptop start sessions on THIS box"), and every consumer resolves them from this
+#: device's own member row per use (``relay.PeerLink.role_capabilities`` → the
+#: authoriser chokepoint, the ``yolo`` create gate, the forwarded approval
+#: challenge, the carried-auto engage). The design makes the receiver-side grant
+#: the whole mechanism ("one node-side grant is sufficient",
+#: ``mesh-remote-onboarding.md`` §2.8) and no wire op can write another device's
+#: copy — so the blanket admin requirement in
+#: :func:`relay.set_member_capabilities` left the deciding device itself unable to
+#: record a decision it had already made with its operator (§3.3 step 8 runs the
+#: grant on the node). Every capability outside this set keeps the admin-only
+#: write rule; ``broker_credential`` and the role caps explicitly.
+SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended"})
 
 #: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
 #: human output. A capability name alone ("broker_credential") does not tell the

@@ -79,9 +79,12 @@ def test_a_yolo_create_without_the_grant_is_refused_and_names_it(root: Path) -> 
     assert refused.value.code == "not_permitted", refused.value
     message = str(refused.value)
     assert "unattended" in message, message
-    # The sentence names the grant AND that an admin hands it out; it does NOT name
-    # a terminal command (§2.9: a remedy names a product action).
-    assert "ask an admin device in this network" in message, message
+    # The remedy is a PRODUCT action on the device that decides (F7): approving its
+    # setup in the Mesh tab is where the grant is given. It must NOT be the "ask an
+    # admin" dead end — no wire op writes another device's copy — and must not name
+    # a terminal command (§2.9).
+    assert "approve setup for this device in the Mesh tab" in message, message
+    assert "ask an admin" not in message, message
     assert not (root / "sessions").exists(), "a refused create left something on disk"
 
 
