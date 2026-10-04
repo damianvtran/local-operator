@@ -304,10 +304,11 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # daemon started from an older one keeps serving it. See
             # :func:`launchd.restart_if_build_moved`.
             #
-            # THE CONSEQUENCE CLAUSE IS THE TUNNEL'S ALONE (design review round 1,
-            # D4): this is the one restart of the four the operator can feel — the
-            # phone link drops for a moment — and the summary already teaches that
-            # shape elsewhere (`mobile daemon restarted — refresh the phone UI`).
+            # THE CONSEQUENCE CLAUSE IS FOR THE RESTARTS A PERSON FEELS (design
+            # review round 1, D4; the network relay joined it on 2026-10-04, F6):
+            # the phone link drops for a moment, the mesh blips, and the summary
+            # already teaches that shape elsewhere (`mobile daemon restarted —
+            # refresh the phone UI`).
             #
             # IT IS BOUNDED TO WHAT THE SUMMARY CAN SEE (round 2, D5). "remote access
             # reconnects by itself" was the first spelling and it promises an outcome

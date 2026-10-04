@@ -2452,7 +2452,15 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
         "checks": checks,
         "identity_present": not identity_missing,
         "identity_dir": str(store_mod.network_root(server.root)),
-        "relay": f"running, pid {os.getpid()}",
+        # AND THE BUILD THIS PROCESS RUNS (design round 1, D5): the drill's own
+        # shape is a relay that ANSWERS while a build beyond the running one is
+        # installed, and a bare "running, pid N" gave it a clean bill. Same
+        # reading and same words as `lop network status` — a relay answering
+        # this call is the one process that can read its own image path.
+        "relay": (
+            f"running, pid {os.getpid()}"
+            + relay_mod.generation_clause(relay_mod.generation_reading(os.getpid()))
+        ),
     }
 
 

@@ -1420,5 +1420,46 @@ def test_compose_on_a_fresh_root_creates_nothing(tmp_path: Path) -> None:
     assert payload["relay"].startswith("running, pid ")
 
 
+def test_compose_names_the_running_build_where_one_can_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5 (design round 1, F6): the answering path names its own build.
+
+    The drill's own shape is a relay that ANSWERS while a build behind — and this
+    row's plain ``running, pid N`` gave it a clean bill in ``doctor`` and
+    ``ready``. The reading is the shipped one (``relay.generation_reading``) with
+    the update probes and the version reader as the seams, so the clause cannot
+    keep passing against a row that stopped carrying it.
+    """
+    import os
+
+    from local_operator import update as update_mod
+    from local_operator.network import identity, relay
+
+    root = tmp_path / "root-build"
+    root.mkdir(parents=True)
+    ident = identity.mint(root, name="fresh-device")
+    server = relay.RelayServer(
+        identity=ident, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
+    generations = tmp_path / "generations"
+    monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
+    monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(
+        update_mod,
+        "generation_version",
+        lambda gen: {old: "0.61.12", new: "0.67.4"}.get(gen.name, ""),
+    )
+
+    payload = readiness.compose(server)
+
+    assert payload["relay"] == (
+        f"running, pid {os.getpid()}, build 0.61.12 — behind 0.67.4; " "run `lop network restart`"
+    ), payload["relay"]
+
+
 def test_wire_capability_is_the_constant(monkeypatch: pytest.MonkeyPatch) -> None:
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES

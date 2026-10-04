@@ -205,6 +205,7 @@ _DAEMON_PLIST_LABELS = (
     "com.local-operator.browser",
     "com.local-operator.tunnel",
     "com.local-operator.wakes",
+    "com.local-operator.network",
 )
 
 #: Whether this host's supervised daemons are launchd AGENTS, i.e. whether the
@@ -1758,6 +1759,25 @@ def _stamp_at(root: Path) -> BuildStamp | None:
     if found is None:
         return None
     return BuildStamp(version=found.version, source_ref=source_ref(root))
+
+
+def generation_version(generation: Path | None) -> str:
+    """The distribution version INSIDE one generation tree, or ``""``.
+
+    THE VERSION HALF OF "which build is this" (design review round 1, D3/D4):
+    the human surfaces name a build the way a person reads one — the version,
+    the same string ``lop --version`` prints — while the generation NAME stays
+    in ``--json`` as provenance. Read by name out of the tree's own
+    ``site-packages`` (:func:`_distribution_at`), never by importing, so it
+    answers for the generation the POINTER names and for the one a running
+    process was exec'd from alike, and ``""`` is the honest answer for a tree
+    that was pruned or never carried a distribution — callers then fall back
+    to the generation name, which is still true provenance.
+    """
+    if generation is None:
+        return ""
+    found = _distribution_at(_generation_install_root(generation))
+    return found.version if found is not None else ""
 
 
 def disk_build(root: str | Path | None = None) -> BuildStamp | None:
@@ -5612,8 +5632,15 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     exactly one owner — the mobile unit itself, which refreshes it and then
     bounces, so the rewrite and the bounce never split across actors — and a
     second writer here would race that owner's ``bootout``/``bootstrap`` pair.
-    ``_refresh_steps`` therefore carries the other three; the mobile half is
+    ``_refresh_steps`` therefore carries the other four; the mobile half is
     :func:`refresh_mobile_after_upgrade`'s child.
+
+    THE NETWORK RELAY JOINED THIS CHILD FOR THE GENERATION-LAYOUT GAP (2026-10-04,
+    F6), not the branding gap above: its plist is byte-identical across builds,
+    so a relay serving a superseded build is invisible to a rewrite-only repair
+    — its step asks the running process instead (``network/relay.py``'s
+    ``refresh_plist_if_stale``), which is what moves a relay that ``lop update``
+    would otherwise leave a generation behind.
 
     ``deadline`` is the concurrent stage's shared budget (see
     :func:`_bounded_timeout`); ``None`` — every other caller — keeps this
@@ -5784,14 +5811,14 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     """Every supervised daemon this build knows, refreshed with the NEW wheel.
 
     ONE STAGE, TWO CONCURRENT UNITS (2026-09-30 design): the services child
-    (browser bridge, tunnel and wakes plists) and the mobile unit (this daemon's
-    own plist, then its bounce) run AT THE SAME TIME, joined once under the
-    :data:`_STAGE_DEADLINE_S` budget. The serial order between the two units is
-    gone; what is kept is the per-daemon order that made that order
+    (browser bridge, tunnel, wakes and network relay plists) and the mobile unit
+    (this daemon's own plist, then its bounce) run AT THE SAME TIME, joined once
+    under the :data:`_STAGE_DEADLINE_S` budget. The serial order between the two
+    units is gone; what is kept is the per-daemon order that made that order
     load-bearing — every daemon's plist is current before that daemon is
     bounced — because each plist now has exactly ONE actor: the mobile unit
     refreshes its own plist before bouncing it, and the services child owns the
-    other three. No daemon's plist is ever touched by two processes.
+    other four. No daemon's plist is ever touched by two processes.
 
     "First" in the old sense is now "printed first": the list comes back
     ``[services, mobile, ...]`` whatever order the units finished in, so the
@@ -5937,8 +5964,13 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
     reader — :func:`_bound_fired_sentence`, which has to describe a daemon the
     process it describes is dead (see :data:`_PROGRESS_PREFIX`) — and they live
     here, beside the child that announces them, because the parent cannot know
-    which daemon a killed child had reached and must not enumerate what a fifth
+    which daemon a killed child had reached and must not enumerate what another
     daemon would make stale.
+
+    THE NETWORK RELAY JOINED THIS TABLE WITH THE DRILL'S FIX (2026-10-04, F6):
+    its plist does not change when a generation moves, so its step is the one
+    that asks the RUNNING PROCESS the second staleness question and restarts a
+    relay left a generation behind (``network/relay.refresh_plist_if_stale``).
 
     THE MOBILE DAEMON IS DELIBERATELY NOT HERE (2026-09-30 design). Its plist is
     owned END TO END by the mobile unit (:func:`refresh_mobile_after_upgrade` →
@@ -5966,6 +5998,7 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
     is still paid by every session that never refreshes anything.
     """
     from local_operator.browser_bridge import install as browser_install
+    from local_operator.network import relay as relay_install
     from local_operator.tunnels import install as tunnel_install
     from local_operator.wakes import install as wakes_install
 
@@ -5973,6 +6006,7 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
         ("browser bridge", "lop browser install", browser_install.refresh_plist_if_stale),
         ("tunnel", "lop tunnel install", tunnel_install.refresh_plist_if_stale),
         ("wakes supervisor", "lop wake install", wakes_install.refresh_plist_if_stale),
+        ("network relay", "lop network install", relay_install.refresh_plist_if_stale),
     )
 
 
@@ -6073,7 +6107,7 @@ def _bound_fired_sentence(*streams: object, bound: float | None = None) -> str:
     to touch anything.
 
     The recovery command is the child's, carried in the announcement, so these
-    sentences stay true when a fifth daemon exists. All of them name a command
+    sentences stay true when another daemon exists. All of them name a command
     rather than leaving the operator to find one: the whole point of the failure is
     that a daemon is STOPPED, and 0.61.4's own reload failure already names one.
     """
