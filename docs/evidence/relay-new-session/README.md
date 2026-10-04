@@ -69,7 +69,7 @@ sentence, which named neither cause (both render in-sheet, `role="alert"`).
 
 ## Numbers behind the frames
 
-- Chip: `~`-state `112.91 × 44` (v2, was `37.56 × 32`); deep-path state `420 × 44`
+- Chip: `~`-state `43.56 × 44` and `~/work/proj-b`-state `112.91 × 44` (v2; v1's `~`-state was `37.56 × 32`); deep-path state `420 × 44`
   inside a 424 px row (v2, was `499.17 × 32` overflowing); geometry via CDP computed styles.
 - Autofocus pinned by `src/session-start.navigation.test.tsx` ("one tap on the list
   starts a session with no cwd and focuses the composer"): the POST body is `{}` AND
