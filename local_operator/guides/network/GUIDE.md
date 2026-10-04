@@ -663,9 +663,12 @@ Diagnose in this order, and stop at the first answer that explains it:
      answer it (`lop network approvals approve <id>` signs with the operator
      key, Touch ID where the host offers it; never approve on their behalf, and
      `deny <id>` is ordinary — a request that should not have been filed is
-     withdrawn by its own filer, `lop network approvals withdraw <id>`:
-     self-settled, the operator is never asked), then run
-     `lop network approvals run <id> --json`:
+     withdrawn by its own requester, `lop network approvals withdraw <id>
+     [--session S]`: self-settled, the operator is never asked. The identity
+     keys are compared, so a request filed with `--session S` must be
+     withdrawn presenting that same `--session S` — a mismatch refuses and
+     names the filed session), then run `lop network approvals run <id>
+     --json`:
      installs/updates the build on it, lands the operator's public anchor
      root-owned, joins the member, writes the grants and supervises the relay.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
@@ -807,7 +810,7 @@ lop network approvals show <id> --json
 lop network approvals request --host <host> --user <user> --json
 lop network approvals approve <id> --json   # signs with the operator key (their gesture)
 lop network approvals deny <id> --json
-lop network approvals withdraw <id> --json  # the FILER settles its own unanswered request
+lop network approvals withdraw <id> [--session S] --json  # the requester settles its own unanswered request
 lop network approvals run <id> --json
 
 # operator authority (this machine)

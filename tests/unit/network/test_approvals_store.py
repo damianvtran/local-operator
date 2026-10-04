@@ -681,15 +681,16 @@ def _approved_device_record(root: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Withdrawal — the filer's own settle (self-settled, no operator involved)
+# Withdrawal — the requester's own settle (self-settled, no operator involved)
 # ---------------------------------------------------------------------------
 
 
 def test_a_requester_withdraws_its_own_unanswered_request(root: Path) -> None:
     """The drill's honest end-state for the redundant card: the REQUESTER settles
     its OWN un-actioned request. One write, no signature (no operator gesture
-    rode it), the record's own trail naming the filer as the withdrawer, and the
-    result is terminal — it can never run and never re-fold as expired."""
+    rode it), the record's own trail naming the requester as the withdrawer,
+    and the result is terminal — it can never run and never re-fold as
+    expired."""
     record = A.create_request(**_device_request(A.new_request_id()), root=root)
     withdrawn = A.withdraw(
         record["approval_id"], requested_by=dict(record["requested_by"]), root=root
@@ -697,8 +698,10 @@ def test_a_requester_withdraws_its_own_unanswered_request(root: Path) -> None:
 
     assert withdrawn["state"] == "withdrawn"
     assert A.is_terminal(withdrawn["state"])
-    # The trail reads "filed by X, withdrawn by X" without re-deriving the rule.
+    # The trail reads "filed by X, withdrawn by X" without re-deriving the rule —
+    # and the SHARED row carries it too (design review round 1, D2).
     assert withdrawn["withdrawn_by"] == record["requested_by"]
+    assert A.badge_row(withdrawn)["withdrawn_by"] == record["requested_by"]
     assert withdrawn["audit"] == ["onboard_requested", "onboard_withdrawn"]
     raw = A._load_raw(record["approval_id"], root)
     assert raw["signature"] is None, "no operator gesture rides a withdrawal"
@@ -725,6 +728,7 @@ def test_a_non_requester_cannot_withdraw(root: Path) -> None:
         )
     assert raised.value.code == "approval_requester_mismatch"
     assert "filed by cli s1" in raised.value.sentence
+    assert "did not supply that requester's identity" in raised.value.sentence
     assert "nothing was written" in raised.value.sentence
     raw = A._load_raw(record["approval_id"], root)
     assert raw["state"] == "requested"
@@ -757,7 +761,7 @@ def test_a_withdrawal_is_refused_once_answered_or_running(root: Path) -> None:
     with pytest.raises(MeshRefusal) as no_answer:
         A.deny(settled["approval_id"], root=root)
     assert no_answer.value.code == "approval_decision_conflict"
-    assert "withdrawn by the surface that filed it" in no_answer.value.sentence
+    assert "withdrawn by its requester" in no_answer.value.sentence
     assert "first decision wins" not in no_answer.value.sentence
 
 
@@ -770,6 +774,40 @@ def test_a_request_id_spent_on_a_withdrawal_returns_it_unchanged(root: Path) -> 
     again = A.create_request(**payload, root=root)
     assert again["approval_id"] == record["approval_id"]
     assert again["state"] == "withdrawn"
+
+
+def test_both_arrivals_of_an_expired_withdraw_answer_alike(root: Path) -> None:
+    """NIT-2 (review round 1): the two ways a withdraw can meet a lapsed window
+    — the fold this call materializes itself, and one a prior writer already
+    landed — answer ALIKE (``approval_expired``), exactly as deny's two
+    equivalents do. Neither arrival writes a withdrawal."""
+    # (a) The window lapses before the call: withdraw itself folds it.
+    lapsed = A.create_request(**_device_request(A.new_request_id()), root=root)
+    path = root / "network" / "approvals" / f"{lapsed['approval_id']}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["expires_at"] = time.time() - 10.0
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(MeshRefusal) as folded_here:
+        A.withdraw(lapsed["approval_id"], requested_by=dict(lapsed["requested_by"]), root=root)
+    assert folded_here.value.code == "approval_expired"
+    assert A._load_raw(lapsed["approval_id"], root)["state"] == "expired"
+
+    # (b) Born past its window: the filing sweep folded it already, so withdraw
+    # meets the materialized state instead of folding it.
+    born = A.create_request(
+        **_device_request(A.new_request_id(), created_at=1000.0, expires_at=1001.0),
+        root=root,
+    )
+    assert born["state"] == "expired"
+    with pytest.raises(MeshRefusal) as folded_then:
+        A.withdraw(born["approval_id"], requested_by=dict(born["requested_by"]), root=root)
+    assert folded_then.value.code == "approval_expired"
+    assert folded_then.value.sentence == folded_here.value.sentence
+
+    # Neither arrival wrote a withdrawal.
+    final = A._load_raw(born["approval_id"], root)
+    assert "withdrawn_by" not in final
+    assert final["audit"][-1] == "onboard_expired"
 
 
 # ---------------------------------------------------------------------------
@@ -801,8 +839,8 @@ def test_every_transition_lands_a_mesh_audit_event(root: Path) -> None:
     assert requested["detail"].get("kind") == A.KIND_DEVICE_ONBOARD, requested
     denied = next(event for event in events if event["event"] == "onboard_denied")
     assert denied["subject"] == record["approval_id"], denied
-    # A withdrawal lands its own row, and the filer's surface/session survive the
-    # whitelist — the drill's redundant card must leave a self-explaining trail.
+    # A withdrawal lands its own row, and the requester's surface/session survive
+    # the whitelist — the drill's redundant card must leave a self-explaining trail.
     second = A.create_request(**_device_request(A.new_request_id()), root=root)
     A.withdraw(second["approval_id"], requested_by=dict(second["requested_by"]), root=root)
     events = [

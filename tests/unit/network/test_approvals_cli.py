@@ -293,10 +293,10 @@ def test_deny_answers_the_frozen_shape_and_a_second_decision_refuses(
     assert refused["code"] == "approval_decision_conflict"
 
 
-def test_withdraw_settles_the_filers_own_request_without_the_operator(
+def test_withdraw_settles_the_requesters_own_request_without_the_operator(
     root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The honest primitive through the CLI: the filer withdraws, the frozen
+    """The honest primitive through the CLI: the requester withdraws, the frozen
     shape answers ``withdrawn``, and the human half reads self-settled — never
     as a decline (the operator was not asked) and never as a lapse."""
     _make_key(root)
@@ -327,8 +327,14 @@ def test_withdraw_settles_the_filers_own_request_without_the_operator(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert " — ✗ withdrawn" in out, out
-    assert "withdrawn by: cli s1" in out, out
-    assert "self-settled by the filer; the operator was not asked" in out, out
+    # One value column for the whole card (D3): `asked by` is padded to the
+    # widest label; the settle line carries the act's timestamp while the moot
+    # window line is dropped (D4).
+    assert "  asked by    : cli s1" in out, out
+    assert "  withdrawn by: cli s1" in out, out
+    assert "self-settled by the requester; the operator was not asked" in out, out
+    assert "settled     : 2" in out, out
+    assert "expires:" not in out, out
     assert "denied" not in out, out
     assert "declined" not in out, out
 

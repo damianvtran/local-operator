@@ -99,7 +99,7 @@ STATE_EXPIRED = "expired"
 #: "the operator said no" over a decision he never made, ``failed`` claims a run
 #: that never happened, and waiting the window out leaves a pending card in
 #: front of him). Requester-initiated, no operator involvement: categorically
-#: NOT ``denied``, and rendered as self-settled by its filer.
+#: NOT ``denied``, and rendered as self-settled by its requester.
 STATE_WITHDRAWN = "withdrawn"
 STATE_FAILED = "failed"
 STATES: tuple[str, ...] = (
@@ -114,7 +114,7 @@ STATES: tuple[str, ...] = (
 )
 
 #: Terminal states (§2.4): never re-openable, never re-runnable — ``withdrawn``
-#: joins them (the filer's settle is final, not a pause). ``failed`` is
+#: joins them (the requester's settle is final, not a pause). ``failed`` is
 #: deliberately NOT one — it is retry-eligible until the window closes.
 TERMINAL_STATES = frozenset({STATE_CONNECTED, STATE_DENIED, STATE_EXPIRED, STATE_WITHDRAWN})
 
@@ -123,7 +123,7 @@ TERMINAL_STATES = frozenset({STATE_CONNECTED, STATE_DENIED, STATE_EXPIRED, STATE
 #: receipts, expiry) and its own sentence; this table is only WHICH moves exist.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # create-if-absent, digest-bound (§2.2): the record IS the requested state.
-    # ``withdrawn`` rides this row: the filer's own settle, available ONLY while
+    # ``withdrawn`` rides this row: the requester's own settle, available ONLY while
     # the request is un-actioned (once answered, run or settled, the normal
     # paths own it).
     STATE_REQUESTED: frozenset({STATE_APPROVED, STATE_DENIED, STATE_EXPIRED, STATE_WITHDRAWN}),
@@ -432,6 +432,10 @@ def badge_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "state": record.get("state"),
         "what": record.get("what") or {},
         "requested_by": record.get("requested_by") or {},
+        # The requester's own settle, once one happened (design review round 1,
+        # D2 — decision: fix the shared row): a panel over this read must be
+        # able to name the withdrawer, or the card is the bare word `withdrawn`.
+        "withdrawn_by": record.get("withdrawn_by"),
         "expires_at": record.get("expires_at"),
     }
     row["machine" if "machine" in record else "device"] = (
@@ -972,13 +976,13 @@ def _record_decision(
                 )
             if state == STATE_WITHDRAWN:
                 # NOT "the first decision wins": no operator decision ever
-                # existed — the filer settled this one, and a refusal must not
-                # render a withdrawal as a declined request.
+                # existed — the requester settled this one, and a refusal must
+                # not render a withdrawal as a declined request.
                 raise MeshRefusal(
                     "approval_decision_conflict",
-                    "this request was withdrawn by the surface that filed it; the "
-                    "operator was never asked and there is nothing to answer — a "
-                    "renewed intent is a new request",
+                    "this request was withdrawn by its requester; the operator "
+                    "was never asked and there is nothing to answer — a renewed "
+                    "intent is a new request",
                 )
             if state == STATE_CONNECTED and decision == "deny":
                 raise MeshRefusal(
@@ -1193,7 +1197,7 @@ def withdraw(
     requested_by: Mapping[str, Any],
     root: Path | None = None,
 ) -> dict[str, Any]:
-    """``requested → withdrawn``: the filer settles its OWN un-actioned request.
+    """``requested → withdrawn``: the requester settles its OWN un-actioned request.
 
     THE HONEST PRIMITIVE (drill finding, 2026-10-04): a lane that files a
     redundant card has no truthful end-state in the older vocabulary — ``deny``
@@ -1201,27 +1205,32 @@ def withdraw(
     claims a run that never happened, and waiting the window out leaves the
     pending card in front of the operator for up to an hour. Withdrawal is the
     requester's own settle: no operator involvement, no signature, ONE write
-    under the record's flock, the record's own trail naming the filer as the
+    under the record's flock, the record's own trail naming the requester as the
     withdrawer ("filed by X, withdrawn by X"), and a mesh-audit row beside it.
 
     WRITE-ONCE AND NARROW: allowed only from ``requested`` — after any answer,
     run or settlement the normal paths own it (approve/deny, retry, expiry) —
-    and only from the surface that filed it: ``requested_by`` must present the
-    record's own identity keys, which is the whole of "the requester" this
-    device-local store can honestly check. A non-requester's withdrawal refuses
-    and writes nothing.
+    and only from the requester: ``requested_by`` must supply the record's own
+    identity keys, which is the whole of "the requester" this device-local
+    store can honestly check. A non-requester's withdrawal refuses and writes
+    nothing.
     """
     _require(isinstance(requested_by, Mapping), "requested_by must be an object")
     with _record_lock(approval_id, root):
         record = _load_raw(approval_id, root)
         moment = time.time()
-        if _materialize_expiry(record, moment, root):
+        # Both arrivals of a lapsed window answer ALIKE (review round 1, NIT-2):
+        # the fold this call materializes, and one a prior writer (the filing
+        # sweep, any later writer) already landed — exactly as deny's two
+        # equivalents do. Either way there is nothing left to withdraw.
+        _materialize_expiry(record, moment, root)
+        state = str(record.get("state"))
+        if state == STATE_EXPIRED:
             raise MeshRefusal(
                 "approval_expired",
                 "this approval's window has passed — it has expired on its own, and "
                 "there is nothing left to withdraw",
             )
-        state = str(record.get("state"))
         if state != STATE_REQUESTED:
             # Tailored so the refusal points at the path that DOES own the record
             # now rather than a bare "no": each state has exactly one.
@@ -1252,9 +1261,10 @@ def withdraw(
             )
             raise MeshRefusal(
                 "approval_requester_mismatch",
-                "only the surface that filed this request can withdraw it"
+                "only the requester can withdraw this request"
                 + (f" (filed by {who})" if who else "")
-                + "; this call did not present that requester, and nothing was written",
+                + "; this call did not supply that requester's identity, and nothing "
+                "was written",
             )
         _require_transition(record, STATE_WITHDRAWN)
         record["state"] = STATE_WITHDRAWN
