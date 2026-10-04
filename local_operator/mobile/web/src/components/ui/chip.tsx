@@ -1,7 +1,20 @@
 /**
- * Chip — the small tappable label (model chip, effort chip) in the session
- * header. 10px radius is panel scale; a control-scale 6 would disappear at
- * this size and full would read as a button, which it is not quite.
+ * Chip — a small, tappable label carrying ONE piece of state.
+ *
+ * A plain button on the system's control ground, held to the same 44 px floor
+ * as every other control on these surfaces (`min-h-11`) and rounded at the
+ * CONTROL scale (`rounded-sm`) so it reads as something you press rather than
+ * as a panel. (The note that used to stand here described usages that did not
+ * exist and argued for a radius the code does not apply; the chip had no
+ * consumer to contradict either. Design round 2, N4.)
+ *
+ * THE COMPOSER'S WORKING-DIRECTORY CHIP IS ITS FIRST CONSUMER
+ * (`components/directory-sheet.tsx`). It lives here rather than inline there
+ * because the alternative is a second chip-shaped control beside it, and the
+ * two would then drift.
+ *
+ * Callers supply their own glyph as a child; this file takes no icon
+ * dependency, which is why it imports nothing beyond React and `cn`.
  */
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "../../lib/cn";

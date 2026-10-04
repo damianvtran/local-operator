@@ -68,7 +68,8 @@ export function ModelSheet({
 
 	/* Order-PRESERVING: `Array.filter` keeps the server's ranking, so the best
 	   route for a query still leads. The predicate itself lives in
-	   `lib/model-filter` because `#/new` needs the identical one. */
+	   `lib/model-filter`, one implementation for every surface that filters the
+	   catalogue. */
 	const filtered = useMemo(
 		() => filterModels(models ?? [], filter),
 		[models, filter],

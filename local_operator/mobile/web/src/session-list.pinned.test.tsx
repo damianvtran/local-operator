@@ -102,7 +102,7 @@ function longPress(card: HTMLElement) {
 	   action click (measured: `applySessionPin` never called in
 	   "opens the pin action sheet on a long-press"). */
 	fireEvent.pointerUp(card);
-	fireEvent.click(screen.queryByRole("button", { name: "close" }) ?? card);
+	fireEvent.click(screen.queryByTestId("sheet-scrim") ?? card);
 }
 
 /* The same, but the finger travels before the hold elapses — a scroll. */
@@ -234,12 +234,12 @@ describe("the pin gesture", () => {
 		   point, which hit-tests to the sheet's scrim. That click has no
 		   pointerdown of its own since mount, so it must be swallowed. */
 		fireEvent.pointerUp(card);
-		fireEvent.click(screen.getByRole("button", { name: "close" }));
+		fireEvent.click(screen.getByTestId("sheet-scrim"));
 		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
 
 		/* A genuinely new press still dismisses: its own pointerdown legitimises
 		   the click that follows it. */
-		const scrim = screen.getByRole("button", { name: "close" });
+		const scrim = screen.getByTestId("sheet-scrim");
 		fireEvent.pointerDown(scrim);
 		fireEvent.pointerUp(scrim);
 		fireEvent.click(scrim);
@@ -275,7 +275,7 @@ describe("the pin gesture", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Alpha");
 		longPress(card);
-		const scrim = await screen.findByRole("button", { name: "close" });
+		const scrim = await screen.findByTestId("sheet-scrim");
 
 		/* The two-finger interleave the first guard ate (agent review round 1,
 		   MINOR 1): A held the row (its pointerdown predates the sheet), B

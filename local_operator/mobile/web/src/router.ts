@@ -1,21 +1,25 @@
 /**
- * Hash-based routing, hand-rolled. Routes: `#/`, `#/new`, `#/past`, `#/pair`,
+ * Hash-based routing, hand-rolled. Routes: `#/`, `#/past`, `#/pair`,
  * `#/s/:sessionId`, `#/s/:sessionId/a/:jobId`. A hash router is the right
  * shape here because the daemon
  * serves a single static bundle and no server-side route table exists.
+ *
+ * `#/new` USED TO BE A ROUTE and is not one any more: starting a session is a
+ * single tap on the list's own footer, which then lands on `#/s/<id>`. The old
+ * hash is deliberately NOT an error — a bookmark, an old notification or a
+ * stale in-app link must land somewhere sensible — so `/new` parses as the
+ * list, exactly like an unknown path.
  */
 import { useEffect, useState } from "react";
 
 export type Route =
 	| { name: "list" }
-	| { name: "new" }
 	| { name: "past" }
 	| { name: "pair" }
 	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
 	const path = hash.replace(/^#/, "") || "/";
-	if (path === "/new") return { name: "new" };
 	if (path === "/past") return { name: "past" };
 	/* Device pairing (stage D). A TOP-LEVEL route rather than a sheet, because the
 	   flow generates a key, claims a code and then waits for a human on ANOTHER
@@ -60,10 +64,39 @@ export function navigateUp(fallback: string): void {
 	navigate(fallback, { replace: true, hasInAppPredecessor: false });
 }
 
+/**
+ * Rewrite a hash that RESOLVED to the list but does not SPELL the list.
+ *
+ * ``#/new`` used to be a route and is one no longer, so ``parseHash`` sends it —
+ * and every other unrecognised path — to the list. Rendering the list while the
+ * address bar still reads ``#/new`` leaves a bookmark or a shared link naming a
+ * screen that does not exist, and the history entry misreporting where the
+ * reader is (UX round 1, U5). The list IS the right answer for those paths, so
+ * the URL is corrected to say so.
+ *
+ * A REPLACEMENT, never a push: canonicalising is not a navigation, and a reader
+ * pressing Back must not land on the stale spelling again. ``parseHash`` stays
+ * PURE — this belongs to the route effect, which is the only place that knows
+ * the current URL is also the current state.
+ */
+function canonicaliseListHash(): void {
+	if (parseHash(location.hash).name !== "list") return;
+	if (location.hash === "" || location.hash === "#/") return;
+	history.replaceState({ ...history.state, [ROUTE_STATE_KEY]: false }, "", "#/");
+}
+
 export function useRoute(): Route {
 	const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
 	useEffect(() => {
-		const onChange = () => setRoute(parseHash(location.hash));
+		/* The MOUNT pass canonicalises too: a deep link straight to `#/new` is
+		   the case a reader is most likely to arrive by. No `setRoute` here — the
+		   hash this call rewrites parses to the same route already in state, and
+		   the rewrite fires no event of its own. */
+		canonicaliseListHash();
+		const onChange = () => {
+			canonicaliseListHash();
+			setRoute(parseHash(location.hash));
+		};
 		window.addEventListener("hashchange", onChange);
 		window.addEventListener("popstate", onChange);
 		return () => {

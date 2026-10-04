@@ -28,10 +28,11 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getDirectories, setSessionPin } from "../api";
+import { getDirectories, setSessionPin, startSession } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
+import { markPendingFocus } from "../lib/pending-focus";
 import { navigate } from "../router";
 import {
 	applySessionPin,
@@ -876,6 +877,38 @@ export function SessionListScreen() {
 	   focus back to the control the reader pressed. */
 	const pinActionRef = useRef<HTMLButtonElement>(null);
 	const wasPinBusy = useRef(false);
+	/* THE ONE-TAP START (mobile new-session streamline). The footer control used
+	   to open a `#/new` screen that asked for a working directory; the operator's
+	   ask is that starting a session costs ONE tap and lands with the composer
+	   focused, and that the directory is resolved FOR the user rather than asked
+	   OF them. The daemon owns that resolution (`_default_start_cwd`), which is
+	   why this call posts no `cwd` at all; the directory stays changeable from the
+	   composer's own chip once the session is open.
+
+	   `starting` deliberately STAYS TRUE through the navigation: a second tap
+	   during the round trip would start a SECOND conversation, and this screen is
+	   about to unmount anyway. Only a failure re-enables the control. */
+	const [starting, setStarting] = useState(false);
+	const [startError, setStartError] = useState("");
+	const startNewSession = async () => {
+		if (starting) return;
+		setStarting(true);
+		setStartError("");
+		try {
+			const res = await startSession();
+			/* The focus intent travels OUT OF BAND (see lib/pending-focus): the
+			   composer that must take focus mounts one route later, once the
+			   session's projection arrives, and no prop can reach across that. */
+			markPendingFocus(res.session_id);
+			navigate(`/s/${encodeURIComponent(res.session_id)}`);
+		} catch (e) {
+			/* The daemon's own message, in the danger line beside the footer: a
+			   control that quietly re-enables says "tap me again" while telling the
+			   reader nothing about what went wrong. */
+			setStartError(String((e as Error).message ?? e));
+			setStarting(false);
+		}
+	};
 	const visible = rows.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
@@ -1249,13 +1282,24 @@ export function SessionListScreen() {
 					)}
 				</main>
 			</div>
+			{startError ? (
+				<p
+					role="alert"
+					aria-live="assertive"
+					className="px-3 pb-1 text-body-sm text-danger"
+				>
+					{startError}
+				</p>
+			) : null}
 			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
-					onClick={() => navigate("/new")}
-					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated"
+					onClick={() => void startNewSession()}
+					disabled={starting}
+					aria-busy={starting}
+					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
 				>
-					new session
+					{starting ? "starting…" : "new session"}
 				</button>
 				{/* U10 (mobile UX batch): the entry point the file's own contract
 				    describes. `#/past` — searchable, resumable history — was reachable
