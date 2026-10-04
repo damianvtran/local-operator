@@ -753,7 +753,7 @@ Whatever the scout recommends must satisfy all of:
    draft is unchanged — the measurement shape `app.py:1963-1976` already
    established for the aside chords.
 
-### E.4a Shipped: the sidebar's three chords
+### E.4a Shipped: the sidebar's chords and the `?` legend
 
 These are **implemented**, unlike the proposals above. They are plain
 `Binding`s with **no `keymap.*` id** — matching `ctrl+b` and `f9` — so they are
@@ -764,8 +764,55 @@ nobody asked to remap.
 | Chord | Scope | Action |
 |---|---|---|
 | `f10` | app (`OperatorApp.BINDINGS`) | pin/unpin the session under the pointer, else the focused list's cursor |
+| `ctrl+k` | **sidebar widget only** | the same pin, through the same app path (#1944) |
 | `ctrl+a` | **sidebar widget only** | toggle the ⌥ subagent layer for this session |
 | `ctrl+o` | **sidebar widget only** | jump the cursor to the first subagent row |
+
+#### Why `ctrl+k` for the non-F pin (#1944)
+
+Issue #1944 asked for a keyboard pin that is not an F-key. The on-list pick has
+to be a **sidebar-scoped composer-key reuse** because every genuinely free
+`ctrl+<letter>` slot is gone (§C.1) and the alternatives were audited one at a
+time against the real app: `ctrl+e`/`ctrl+u`/`ctrl+w` act in the pickers,
+`ctrl+x` is the documented leader example and cuts a whole line unprompted,
+`ctrl+v` is taught as paste on two surfaces, `ctrl+z` is universal undo, the
+`ctrl+shift` pair fails clause 4 (Terminal.app emission), and the
+NUL/FS/GS class is undiscoverable. `ctrl+k` is the only candidate with no
+second in-app meaning; scoped to the list it fires where nothing else used it,
+and with the composer focused it stays TextArea's kill-to-end, byte-identical
+(measured). `f10` stays as compatibility — it also still works from the
+composer (measured) — it also still works from the composer **with the pointer
+resting on a row**, which is where the hover-else-cursor resolution finds a
+target (UX round 1, U5: the bare "from the composer" read as unconditional),
+and which the scoped chord deliberately does not need.
+
+#### The `?` Keys legend (#1944)
+
+The legend is an app-level, **non-priority** `Binding("question_mark,question",
+"toggle_keys_legend", ...)` beside the f8/f9/f10 block, plus the typed `/keys`
+command opening the same card. Non-priority is the characters-first rule: a
+focused typist (the composer's `TextArea`, the sidebar's typing-home) keeps
+first refusal on the character, so `?` opens the card only where no typist can
+claim it — read-only/full-page states and gated modals — and otherwise still
+types. `/keys` covers the typing states (typed text is char-safe by
+construction). The card itself carries the rows `/help` structurally cannot:
+the sidebar-scoped chords above, under a section heading that makes the scope
+honest. It is deliberately NOT a keymap id, for the same reason f8/f9/f10 are
+not.
+
+The card's hint row names the routes back in with `/keys` first — it is the
+unconditional one — and marks `?` as "when not typing"; the scroll cue, where
+the card overflows, outlives both (the cue is the only in-card sign there is
+more below, and the narrow widths are where that matters).
+
+**Residual risk, recorded deliberately (design round 1, D5).** Nothing names
+the `?` key before the card opens, and every candidate surface is documented
+as full: `/help`'s key block sits at zero vertical headroom (its paste rows
+compose to exactly the 74-cell ceiling at 80 columns), the welcome table
+trades rows with the logo, and the footer carries no key hint. The taught
+route is the typed `/keys` — its row rides `/help`'s command table — and `?`
+remains the guessable shortcut. If a future edit buys a row on any of those
+surfaces, that row is this one's home.
 
 #### Why `f10` and not `ctrl+p`
 

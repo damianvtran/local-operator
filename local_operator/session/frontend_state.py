@@ -855,6 +855,12 @@ def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
 # than silently acquiring follower-local behavior.
 _FRONTEND_LOCAL_SLASHES = {
     "help",
+    # The legend describes THIS terminal's keyboard and is painted by THIS
+    # frontend: routed to a runtime it would describe a keyboard nobody is at,
+    # on a host with no terminal to draw it on. Same rule `/copy` and `/links`
+    # state for their own surfaces — and the one the registry's docstring for
+    # the command names at its `desktop_destination` omission.
+    "keys",
     "exit",
     "clear",
     # The terminal schedules source-bound iterations and owns sidebar focus;

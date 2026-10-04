@@ -638,15 +638,16 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         assert len(lines) <= sidebar.size.height
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         # Focused AND paginated, at the 29-cell floor: the footer keeps the exit
-        # hint, and it now keeps the pin teach beside it (issue #1357 slice 2a
-        # re-ranked the focused ladder). This assertion used to read
-        # `1–{page}/101 · esc return`; with `f10 pin` a candidate at this width
-        # the POSITION is the fact that yields — it is recoverable by scrolling,
-        # while `f10 pin` is taught nowhere else on the frame — and the exit
-        # must never be the fact that yields, whatever else is on the rung
-        # (design round D4: the counter may never be the reason the exit hint
-        # disappears; here the counter is the one that gave way).
-        assert lines[-1].strip() == "esc return · f10 pin", lines[-1]
+        # hint, and it keeps the pin teach beside it (issue #1357 slice 2a
+        # re-ranked the focused ladder; #1944 moved the pin onto `ctrl+k` and,
+        # with no chip on the frame, the rung is 23 cells). This assertion used
+        # to read `1–{page}/101 · esc return`; with `ctrl+k pin` a candidate at
+        # this width the POSITION is the fact that yields — it is recoverable by
+        # scrolling — and the exit must never be the fact that yields, whatever
+        # else is on the rung (design round D4: the counter may never be the
+        # reason the exit hint disappears; here the counter is the one that
+        # gave way).
+        assert lines[-1].strip() == "esc return · ctrl+k pin", lines[-1]
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         # Unfocused and paginated: the position plus the way INTO the keyboard
         # mode (U1). The counter used to leave a full list naming the entry
@@ -4429,25 +4430,47 @@ async def test_the_footer_ladder_keeps_an_exact_fit_at_the_29_cell_floor():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("size", "expected"),
-    [((30, 30), "esc return · ⌥1k+"), ((34, 30), "esc return · f10 pin · ⌥1k+")],
+    ("size", "total", "expected"),
+    [
+        # Below the rung's floor the chip outranks the pin, and #1944 moved
+        # that floor from 27 to 30 cells (`esc return · ctrl+k pin · ⌥1k+`).
+        # At 24 and 28 list cells the 30-cell rung does not fit...
+        ((30, 30), 1520, "esc return · ⌥1k+"),
+        ((34, 30), 1520, "esc return · ⌥1k+"),
+        # ...but the floor tracks the CHIP's width: with a two-cell `⌥4` the
+        # rung fits exactly at 28 (a 34-column terminal) —
+        # `esc return · ctrl+k pin · ⌥4` is 28 — which is the same
+        # candidate/floor arithmetic the old `f10` rung used, shifted by the
+        # chord's +3.
+        ((34, 30), 4, "esc return · ctrl+k pin · ⌥4"),
+        # With the four-cell `1k+` chip the rung's first width is 30 list
+        # cells — `esc return · ctrl+k pin · ⌥1k+` is exactly 30 — which the
+        # sidebar's comfort reserve first allows at a 116-column terminal (it
+        # holds 29 cells from ~35 up to 115 columns, then gains one cell per
+        # column past the reserve). At 100–115 columns with a `1k+` chip the
+        # pin therefore yields to the chip's own rung; the `?`/`/keys` legend
+        # (issue #1944) is where that width still finds the pin taught.
+        ((116, 30), 1520, "esc return · ctrl+k pin · ⌥1k+"),
+    ],
 )
 async def test_the_focused_pin_rung_has_a_floor_and_the_chip_outranks_it_below(
-    size, expected
+    size, total, expected
 ) -> None:
-    """The pin rung is 27 cells and yields to the chip under it (review MINOR 2).
+    """The pin rung yields to the chip under its floor (review MINOR 2, +3'd).
 
     Review round 1 measured what the comment denied: at 30 columns of
     terminal (24 of list width) the focused ladder is `esc return · ⌥1k+` —
-    no pin — and the pin rung first renders at 27 cells of list width (a
-    33-column terminal; review round 2 corrected this docstring's "28 / 34").
-    The chip outranks the pin below that because the chip counts a population
-    nothing else on the frame can see.
+    no pin — and the pin rung first renders at its own cell count (review
+    round 2 corrected this docstring's "28 / 34"; #1944 re-measured every
+    case for the `ctrl+k` rerank, moving the `1k+` floor from 27 to 30 and
+    recording the chip-dependent floors above). The chip outranks the pin
+    below the floor because the chip counts a population nothing else on the
+    frame can see.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=total)
         await _focus_settled(pilot, sidebar)
         assert sidebar.has_focus, "premise: the list holds the keyboard"
         footer = sidebar.render().plain.splitlines()[-1].strip()
@@ -4507,20 +4530,32 @@ async def test_the_focus_class_tints_the_panel_and_steps_the_cursor_row_up() -> 
 
 
 @pytest.mark.asyncio
-async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
-    """The position yields here; below it the pin yields at 27 and the chip at 17.
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        # At content 29 the `1k+`-chip pin rung (30 cells) joins the position
+        # as a fact that cannot fit, so the remainder is the chip's own rung...
+        ((100, 30), "esc return · ⌥1k+"),
+        # ...while one cell of width more shows the pin rung with the position
+        # still yielded: the position yields BEFORE the pin wherever both are
+        # candidates (#1944's +3 moved the pin's own floor to 30 cells; the
+        # `1k+` chip first fits it at a 116-column terminal).
+        ((116, 30), "esc return · ctrl+k pin · ⌥1k+"),
+    ],
+)
+async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip(size, expected) -> None:
+    """The position yields here; the pin yields too when its rung is over.
 
     On the last page of 152 entries the position is 11 cells, so every
-    position-carrying candidate is over 29 and the ladder must fall to
-    `{lead} · f10 pin · {chip}` (27 cells): the position yields BEFORE the pin —
-    recoverable by scrolling, while `f10 pin` is taught nowhere else on the
-    frame. What it must NOT do is crop: a fact drops whole or not at all
-    (design round 4, §R4.3; the pin rung was added by issue #1357 slice 2a, and
-    the floors below it are asserted by the width-parametrised test above —
-    review round 1, MINOR 2).
+    position-carrying candidate is over 29 and the ladder must fall past the
+    position — recoverable by scrolling, while pinning is taught nowhere else
+    on THIS frame. What it must NOT do is crop: a fact drops whole or not at
+    all (design round 4, §R4.3; the pin rung was added by issue #1357 slice
+    2a, moved to `ctrl+k` by #1944, and the floors below it are asserted by
+    the width-parametrised test above — review round 1, MINOR 2).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await pilot.pause()
         entries = [_plain(f"a{i}", active=True) for i in range(152)]
         sidebar = await _sidebar_with(pilot, app, entries, total=1520)
@@ -4534,33 +4569,44 @@ async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
         position = f"{sidebar._offset + 1}–{last}/{len(sidebar.entries)}"
         context = f"page_size={sidebar.page_size} position={position!r}"
         footer = sidebar.render().plain.splitlines()[-1]
-        assert footer.strip() == "esc return · f10 pin · ⌥1k+", f"{footer!r} ({context})"
+        assert footer.strip() == expected, f"{footer!r} ({context})"
         assert "…" not in footer, f"a fact was cropped instead of yielding: {footer!r}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("size", "expected"),
+    ("size", "total", "expected"),
     [
-        ((100, 30), "esc return · f10 pin · ⌥1k+"),
-        ((150, 40), "esc return · f10 pin · ctrl+a ⌥ · ⌥1k+"),
+        # No chip: the rung is 23 cells and shows at the 29-cell floor.
+        ((100, 30), 0, "esc return · ctrl+k pin"),
+        # The `1k+` chip costs four cells, so at 29 content cells the 30-cell
+        # rung is exactly one over and the chip's own rung remains (see the
+        # floor test above; #1944 moved the pin's first width from 27 to 30).
+        ((100, 30), 1520, "esc return · ⌥1k+"),
+        # At 150 columns the layer rung rides the same string intact —
+        # `ctrl+a ⌥` is a candidate that drops WHOLE below this width, never an
+        # append whose tail gets cropped (design round 4, §R4.3).
+        ((150, 40), 1520, "esc return · ctrl+k pin · ctrl+a ⌥ · ⌥1k+"),
     ],
 )
 async def test_the_focused_ladder_teaches_pin_at_the_floor_and_the_layer_when_it_fits(
-    size, expected
+    size, total, expected
 ):
     """Issue #1357 slice 2a's two rungs, at the widths that decide them.
 
     At the 29-cell floor the pin rung fits where the position does not, and it
-    is the keyboard's only in-product teacher for pinning. At 150 columns the
-    layer toggle rides the same string intact — `ctrl+a ⌥` is a candidate that
-    drops WHOLE below this width, never an append whose tail gets cropped
-    (design round 4, §R4.3).
+    is the keyboard's one in-product teacher for pinning — #1944 moved its
+    chord to `ctrl+k` and its cell count to 23 (no chip) / 28 (`⌥4`) / 30
+    (`⌥1k+`), which is why the `1k+` row above documents the one band (100–115
+    columns) where the rung is out of reach and the `?`/`/keys` legend is the
+    teacher instead. At 150 columns the layer toggle rides the same string
+    intact. The floors below the pin are asserted by the width-parametrised
+    test above (review round 1, MINOR 2; re-measured for #1944).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=total)
         assert len(sidebar.entries) <= sidebar.page_size, "premise: the list must not page"
         sidebar.focus()
         await pilot.pause()
@@ -4587,7 +4633,7 @@ async def test_the_focused_footer_teaches_the_pin_with_no_subagent_runs():
         await pilot.pause()
         assert sidebar.has_focus, "premise: the list holds the keyboard"
         footer = sidebar.render().plain.splitlines()[-1]
-        assert footer.strip() == "esc return · f10 pin", footer
+        assert footer.strip() == "esc return · ctrl+k pin", footer
 
 
 @pytest.mark.asyncio
@@ -4674,8 +4720,18 @@ async def test_a_press_on_footer_cells_outside_the_chip_is_inert():
         sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True), _sub("r1")], total=4)
         repolls: list[str] = []
         app._refresh_sidebar = lambda: repolls.append("refresh")  # type: ignore[method-assign]
-        first, end = _chip_span(sidebar)
-        for column in (first - 1, 0, end):
+        # Re-read the span before EVERY press, because a press on a non-chip
+        # footer cell MOVES THE KEYBOARD TO THE PANEL (click-to-focus, #1357):
+        # the footer then repaints in the FOCUSED ladder and the chip's cells
+        # move with it — a column computed from the resting frame lands inside
+        # the focused chip the moment the two ladders disagree about it. They
+        # do since #1944 (+3 for `ctrl+k pin`: the focused chip sits one cell
+        # further right than the resting one at this width), and they did at
+        # other widths at other times; the assertion is about "cells that are
+        # not the chip NOW", so it reads the chip NOW.
+        for pick in ("left", "start", "end"):
+            first, end = _chip_span(sidebar)
+            column = {"left": first - 1, "start": 0, "end": end}[pick]
             await _click_footer_cell(pilot, app, sidebar, column)
             await pilot.pause()
             assert sidebar.show_subagents is False, f"column {column} flipped the layer"

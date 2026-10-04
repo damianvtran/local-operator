@@ -396,8 +396,8 @@ async def test_space_types_and_never_pins() -> None:
 
     A Space-pin would fire on the space in "hello world" the moment the list is
     click-focused, which is the modal trap the issue exists to remove; the
-    clickable star cell, F10 and the focused footer's `f10 pin` cue are the
-    remaining routes.
+    clickable star cell, F10, the focused footer's `ctrl+k pin` cue (#1944), and
+    the `?`/`/keys` legend are the remaining routes.
     """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -446,6 +446,75 @@ async def test_ctrl_a_still_toggles_the_layer_and_never_reaches_the_composer() -
         assert sidebar.show_subagents is True, "ctrl+a no longer toggles the layer"
         assert editor.text == "draft", "ctrl+a reached the composer's line-start"
         assert sidebar.has_focus, "the chord handed the composer the keys"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_k_pins_the_cursor_row_and_never_reaches_the_composer() -> None:
+    """#1944: the non-F pin route is scoped like ctrl+a/ctrl+o, and delegates.
+
+    In F9 mode `ctrl+k` pins through the app's ONE pin path — the spy proves
+    the widget delegates rather than carrying a second hovered/cursor
+    resolution that could drift from `f10` — and with the composer focused the
+    same chord must stay TextArea's kill-to-end, byte-identical, neither eaten
+    by the sidebar nor eating the draft. Typing beside the chord is untouched.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        sidebar = await _open_list(pilot, app, "sess", "sess-b")
+        editor = app.query_one(Editor)
+        editor.text = "draft"
+        editor.cursor_location = (0, 5)
+        editor.focus()
+        await pilot.pause()
+
+        rows = _rows(app, sidebar)
+        await pilot.click(offset=(_row_body_x(sidebar), rows["sess"]))
+        for _ in range(4):
+            await pilot.pause()
+        assert sidebar.has_focus, "premise: the press focused the list"
+
+        calls: list[str] = []
+        original = app._toggle_pin
+        app._toggle_pin = lambda target: calls.append(target)  # type: ignore[method-assign]
+        try:
+            sidebar._hover_id = ""
+            sidebar.cursor_id = "sess-b"
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+        finally:
+            app._toggle_pin = original  # type: ignore[method-assign]
+
+        assert calls == ["sess-b"], f"ctrl+k did not pin the cursor row: {calls}"
+        assert editor.text == "draft", "ctrl+k reached the composer"
+        assert sidebar.has_focus, "the chord handed the composer the keys"
+
+        # Typing beside the chord is untouched: a printable still forwards to
+        # the composer (the T12/T14 typing-home contract).
+        await pilot.press("x")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text == "draftx", "typing-home broke beside ctrl+k"
+
+        # Composer-focused: the SAME chord is the TextArea's kill-to-end,
+        # byte-identical (the D2 pilot's measured pair), and no pin fires.
+        calls.clear()
+        editor.load_text("one two three")
+        editor.cursor_location = (0, 8)
+        editor.focus()
+        for _ in range(20):
+            await pilot.pause()
+            if editor.has_focus:
+                break
+        app._toggle_pin = lambda target: calls.append(target)  # type: ignore[method-assign]
+        try:
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+        finally:
+            app._toggle_pin = original  # type: ignore[method-assign]
+        assert editor.text == "one two ", "the composer's kill-to-end changed"
+        assert editor.cursor_location == (0, 8)
+        assert calls == [], "ctrl+k fired a pin while the composer had focus"
 
 
 # -- the composer's own routes stay open -----------------------------------------
@@ -653,9 +722,10 @@ async def test_a_pressed_panel_shows_the_focused_footer_rung(size: tuple[int, in
 
     Rung-for-rung at both decided sizes: resting teaches the way IN (`f9
     focus`), the pressed panel teaches the way OUT and the pin (`esc return ·
-    f10 pin`). The design round verified both render without clipping at a
-    29-cell and a 43-cell content width; this pins the strings themselves so a
-    ladder change cannot move them silently.
+    ctrl+k pin` — #1944 reranked the pin onto the non-F chord). The design
+    round verified both render without clipping at a 29-cell and a 43-cell
+    content width; this pins the strings themselves so a ladder change cannot
+    move them silently.
     """
     app = _app()
     async with app.run_test(size=size) as pilot:
@@ -675,7 +745,7 @@ async def test_a_pressed_panel_shows_the_focused_footer_rung(size: tuple[int, in
         assert sidebar.has_focus, "premise: the press focused the list"
 
         focused = sidebar.render().plain.splitlines()[-1]
-        assert focused.strip() == "esc return · f10 pin", focused
+        assert focused.strip() == "esc return · ctrl+k pin", focused
 
 
 # -- Esc and F9 keep their shipped meanings --------------------------------------

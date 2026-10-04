@@ -127,6 +127,35 @@ def test_danger_reads_on_its_own_tint(name: str) -> None:
     )
 
 
+def test_the_legend_card_reads_on_its_ground() -> None:
+    """The `? Keys` card's copy rides the `overlay` ground — AA there (D3), measured.
+
+    Design review round 1 of the legend: the descriptions were `dim` — 3.43:1
+    dark / 2.72:1 light on `overlay`, the exact rung the `warning` pin above
+    moved off — and the fix paints keys `fg` and descriptions `muted`. This
+    pins both pairs with their numbers, and the hierarchy claim that `dim`
+    stays below the copy rung, so a re-demotion fails here rather than in a
+    screenshot. The BRAND ramps only, like the `warning` and `[missing]` pins
+    above: `muted` is the ramp's own secondary ink, and re-flooring every
+    registered palette for one card's ground is the design stream's call, not
+    a coder's — the host-derived ramp sweep legitimately trades
+    `muted`-on-`overlay` below 4.5 while its own calibrated floors hold.
+    """
+    for name in ("light", "dark"):
+        tokens = theme.theme_spec(name).tokens
+        for token in ("muted", "fg"):
+            ratio = contrast(tokens[token], tokens["overlay"])
+            assert ratio >= 4.5, (
+                f"{name}: {token} {tokens[token]} on overlay {tokens['overlay']}: "
+                f"{ratio:.2f} < 4.5 — the legend card's copy must clear AA"
+            )
+        # The hierarchy claim, so `dim` cannot come back as a "subtle" choice:
+        # it must stay BELOW the copy rung on this ground.
+        assert contrast(tokens["dim"], tokens["overlay"]) < contrast(
+            tokens["muted"], tokens["overlay"]
+        ), f"{name}: dim reads at or above muted on overlay"
+
+
 @pytest.mark.parametrize("name", _ALL_THEMES)
 def test_faint_sits_below_dim(name: str) -> None:
     tokens = theme.theme_spec(name).tokens

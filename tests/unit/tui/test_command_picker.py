@@ -786,8 +786,9 @@ async def test_click_selects_and_completes_without_submitting() -> None:
         await pilot.press("slash")
         await pilot.pause()
         picker = app.editor.picker
-        # Row 2 is `/clear`. Offset x lands inside the name column.
-        await pilot.click(CommandPicker, offset=(4, 2))
+        # Row 3 is `/clear` (`/keys` took row 1 with #1944). Offset x lands
+        # inside the name column.
+        await pilot.click(CommandPicker, offset=(4, 3))
         await pilot.pause()
         assert app.editor.text == "/clear "
         assert app.submissions == []
@@ -821,7 +822,7 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         await pilot.press("slash")
         await pilot.pause()
         picker = app.editor.picker
-        # Row 8 is the `… 7 more` marker: a count, not a command.
+        # Row 8 is the `… N more` marker: a count, not a command.
         await pilot.click(CommandPicker, offset=(4, 8))
         await pilot.pause()
         assert app.editor.text == "/"  # no completion: the marker is a count
