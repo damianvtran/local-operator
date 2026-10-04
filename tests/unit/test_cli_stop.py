@@ -348,10 +348,18 @@ def test_resolver_is_the_send_resolver() -> None:
     rather than left to the resolver's default: a session that has not run a
     turn yet (a fresh ``/new`` in the composer) must still be stoppable — that
     is a session someone may need to end — while `lop send` keeps refusing it.
+
+    ``role_words`` is pinned too, because it is the vocabulary the resolver
+    refuses a team role word with. It is stubbed to ``{}`` (this machine's real
+    teams tree must never leak into the assertion) — disabled, exactly as the
+    resolver's own default is.
     """
     from local_operator.cli import _resolve_stop_target
 
-    with patch("local_operator.mobile.peer_send.resolve_peer_target") as resolve:
+    with (
+        patch("local_operator.mobile.peer_send.resolve_peer_target") as resolve,
+        patch("local_operator.cli._role_words", return_value={}),
+    ):
         resolve.return_value = (None, [], "x")
         _resolve_stop_target(_args(target="foo", pid=7, session="s"))
     resolve.assert_called_once_with(
@@ -360,6 +368,27 @@ def test_resolver_is_the_send_resolver() -> None:
         session="s",
         pid_hint="--pid",
         session_hint="--session",
+        role_words={},
         include_wedged=True,
         require_started=False,
     )
+
+
+def test_a_role_word_target_is_refused_with_exit_1_and_signals_nothing() -> None:
+    """``lop stop manager`` refuses; the escalation ladder is never reached.
+
+    The kill switch is the worst place to take a substring hit: asking to stop a
+    runaway and ending a healthy namesake is the defect this guards. The stub
+    vocabulary keeps the assertion hermetic; the resolver is real.
+    """
+    with (
+        patch("local_operator.cli._role_words", return_value={"manager": ("lopdev",)}),
+        patch("local_operator.cli._peer_red") as red,
+        patch("local_operator.session.runtime.control.stop_session") as stop,
+    ):
+        rc = stop_command(_args(target="manager"))
+    assert rc == 1
+    stop.assert_not_called()
+    message = red.call_args[0][0]
+    assert "is a team role (roles on: lopdev), not a session address" in message
+    assert "no live session matches" not in message

@@ -445,7 +445,15 @@ class Team(BaseModel):
         """
         parts: list[str] = [
             f"[team: {self.name}]",
-            f"You are {role} on this team. The manager is {self.manager}.",
+            # Names the CHANNEL, not an address. The brief used to read "The
+            # manager is {manager}.", which modelled the manager's ROLE NAME as
+            # something to address — and a sender reading a roster does exactly
+            # that, typing `target="manager"` into a resolver whose substring
+            # tier then lands on any session whose title contains the word. The
+            # channel is `hub`; the role word is a DELEGATION handle
+            # (`task(agent='<role>')`). This mirrors :func:`escalation_preamble`'s
+            # own "report to {reports_to}, through hub".
+            f"You are {role} on this team. You report to {self.manager}, through hub.",
             "Teammates:\n" + "\n".join(self.roster_lines()),
         ]
         collab = self.instructions.strip()
@@ -455,6 +463,52 @@ class Team(BaseModel):
         if project:
             parts.append("Project:\n" + project)
         return "\n\n".join(parts) + "\n\n"
+
+
+def role_word_set(registry: "TeamRegistry | None") -> dict[str, tuple[str, ...]]:
+    """Casefolded team-role vocabulary: role word -> the teams that define it.
+
+    This is the vocabulary the peer-address resolvers REFUSE before falling to
+    the substring tier: a bare role word (``manager``, ``reviewer``) is a
+    DELEGATION handle — see ``task(agent='<role>')`` — and never a session
+    address, but it is a tempting needle for a substring match, where it
+    silently lands on any session whose TITLE happens to contain it (the
+    wrong-recipient defect: nine digests misrouted to a session titled
+    ``…: manager``).
+
+    Recognition is by VOCABULARY, not by shape: a bare token is structurally
+    indistinguishable from a documented substring like ``release`` (which must
+    keep resolving), so only a word that a real team lists can be refused. The
+    source is the machine-wide UNION of every installed team's
+    :meth:`Team.member_names` (manager included), not the sender's own roster —
+    a human at a shell, or a session whose team was detached, has no roster to
+    derive one from, and the invariant ("a role word is never an address") has
+    to hold for every sender. Narrowing it to one team later is a one-line
+    change of source, which is why the two are separated behind this helper.
+
+    Returns a MAPPING rather than the design's bare ``frozenset`` because the
+    refusal sentence names the teams that define the role (``roles on: lopdev,
+    helpdesk``); the KEYS are exactly that union, so ``needle in
+    role_word_set(registry)`` is the recognition test and ``set(...)`` is the
+    union. Values are ``()`` when a caller wants recognition only.
+
+    Metadata only — :meth:`TeamRegistry.list_teams` reads ``team.yml`` and never
+    hydrates the 8k briefs — and NEVER raises: a missing or unreadable teams
+    tree answers ``{}`` (the same DISABLED state as passing no vocabulary), so
+    an unrelated registry problem can never refuse a legitimate send. A ``None``
+    registry (a reduced host) answers ``{}`` too.
+    """
+    if registry is None:
+        return {}
+    try:
+        teams = registry.list_teams()
+    except Exception:  # noqa: BLE001 — vocabulary is advisory, never refuses a send
+        return {}
+    out: dict[str, list[str]] = {}
+    for team in teams:
+        for role in team.member_names():
+            out.setdefault(role.casefold(), []).append(team.name)
+    return {word: tuple(names) for word, names in out.items()}
 
 
 def escalation_preamble(reports_to: str) -> str:

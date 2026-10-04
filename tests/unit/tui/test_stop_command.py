@@ -1654,3 +1654,59 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
         assert "session is still starting…" not in _notices(
             app
         ), "telling a user to wait while a remote bills is the failure this PR removes"
+
+
+@pytest.mark.asyncio
+async def test_stop_target_refuses_a_role_word_and_never_runs_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/stop manager`` paints the shared refusal and stops nothing.
+
+    The vocabulary itself is pinned in ``test_peer_send.py``/``test_teams.py``;
+    what THIS test pins is the worker's plumbing. It must hand the resolver a
+    ``role_words`` argument — without it a bare team role word takes a substring
+    hit and the ladder runs against a namesake session — and it must surface the
+    resolver's refusal instead of escalating. The kill-switch carve-out
+    (``require_started=False``) must survive the move off the loop.
+    """
+    from local_operator.mobile import peer_send as peer_send_mod
+
+    monkeypatch.setattr(
+        "local_operator.teams.role_word_set", lambda registry: {"manager": ("lopdev",)}
+    )
+    seen: list[dict[str, Any]] = []
+
+    def fake_resolve(**kwargs: Any):
+        seen.append(kwargs)
+        return (
+            None,
+            [],
+            peer_send_mod.role_refusal(
+                "manager", teams=("lopdev",), pid_hint="a pid", session_hint="a session id"
+            ),
+        )
+
+    ladder: list[Any] = []
+
+    async def fake_stop(record, **kwargs: Any):  # noqa: ANN001, ANN202
+        ladder.append(record)
+        return control.StopOutcome(
+            record.pid, record.session_id, "other agent", "socket", 'stopped "other agent"'
+        )
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", fake_resolve)
+    monkeypatch.setattr(control, "stop_session", fake_stop)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop manager")
+        for _ in range(20):
+            await pilot.pause()
+            if any("is a team role" in notice for notice in _notices(app)):
+                break
+        assert seen and seen[0]["target"] == "manager"
+        assert "role_words" in seen[0]
+        assert seen[0]["require_started"] is False
+        assert any("is a team role (roles on: lopdev)" in n for n in _notices(app))
+        assert ladder == []

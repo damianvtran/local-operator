@@ -12788,12 +12788,13 @@ class SendParams(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            "Peer to message: case-insensitive substring of the conversation "
-            "name, session id, or cwd basename (live only). Live sessions "
-            "match first, then stored ones (`lop sessions --all`); "
-            "disambiguate with pid=/session=. ALTERNATIVE to pid/session, "
-            "not a companion — passing target with either is refused as an "
-            "ambiguous recipient."
+            "Peer to message: an exact conversation name / session id / cwd "
+            "basename wins over any substring; else a case-insensitive "
+            "substring of those (live only). A team role word (`manager`) is "
+            "refused — pass pid=/session= instead. Live sessions match first, "
+            "then stored ones (`lop sessions --all`); disambiguate with "
+            "pid=/session=. ALTERNATIVE to pid/session, not a companion — "
+            "passing target with either is refused as an ambiguous recipient."
         ),
     )
     pid: int | None = Field(
@@ -13010,11 +13011,13 @@ async def _execute_send_model(
     if isinstance(parsed, str):
         return _error(tool_call_id, "send", parsed)
     provider, model_id = parsed
+    role_words = await asyncio.to_thread(_role_words, context)
     record, candidates, error = await asyncio.to_thread(
         resolve_switch_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
+        role_words=role_words,
     )
     if candidates:
         lines = [
@@ -13091,6 +13094,28 @@ def _peer_sender_conversation_name(context: ToolContext) -> str:
     return f"{parent}{_BROWSER_SUBAGENT_SEPARATOR}{label}" if parent else label
 
 
+def _role_words(context: "ToolContext | None") -> "dict[str, tuple[str, ...]]":
+    """The installed-team role vocabulary for this session's address resolvers.
+
+    Read from the session's own ``team_registry`` (the harness declares it on
+    :class:`ToolContext`, `session.py` populates it per turn). The union across
+    every installed team — not the sender's roster — is what the resolver's
+    role refusal wants; see :func:`local_operator.teams.role_word_set` for why.
+
+    NEVER raises and NEVER blocks the caller into refusing: a context with no
+    registry (a reduced host, a test double) answers ``{}``, which DISABLES the
+    refusal exactly as the resolver's own default does. The teams read is
+    filesystem I/O, so callers invoke this OFF the event loop — normally as the
+    target of its own ``asyncio.to_thread``. Deliberately NOT decorated with
+    ``@_guard``: the guard wraps the tool ENTRY POINTS, and a read-only
+    vocabulary lookup is not one.
+    """
+    from local_operator.teams import role_word_set
+
+    registry = getattr(context, "team_registry", None) if context is not None else None
+    return role_word_set(registry)
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -13145,6 +13170,7 @@ async def execute_send(
 
     from local_operator.mobile.peer_send import (
         candidate_lines,
+        exact_ignored_clause,
         live_scan_found_nothing,
         resolve_peer_target,
         session_id_unowned,
@@ -13161,12 +13187,24 @@ async def execute_send(
     # its needle was not delivered (design round 1, D1). The CLI appends the
     # same clause from the same helper, so a model and a human read one wording.
     skipped: list[Any] = []
+    # Substring matches the EXACT tier passed over, so the receipt can say how
+    # many. Mirrors ``skipped`` exactly (same helper-shape, same print site).
+    exact_ignored: list[Any] = []
+    # The RANK the exact tier matched (``name`` / ``session id`` / ``cwd
+    # basename``), so the receipt names that field rather than always "name".
+    exact_field: list[str] = []
+    # The role vocabulary is read OFF the loop (it walks the teams tree) and
+    # handed to the resolver, which refuses a team role word as an address.
+    role_words = await asyncio.to_thread(_role_words, context)
     record, candidates, error = await asyncio.to_thread(
         resolve_peer_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
         skipped=skipped,
+        role_words=role_words,
+        exact_ignored=exact_ignored,
+        exact_field=exact_field,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -13227,7 +13265,7 @@ async def execute_send(
         )
 
         stored_id, stored_candidates, stored_error = await asyncio.to_thread(
-            resolve_stored_target, params.target
+            resolve_stored_target, params.target, role_words=role_words
         )
         # ``stored_error`` is read here, unlike a plain no-match (which returns
         # "" by contract, because the refusal for THAT is composed below from
@@ -13370,6 +13408,7 @@ async def execute_send(
                 context, requested_ms=patience_ms, target_ref=target_ref
             )
         clause += skipped_clause(skipped)
+        clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
     return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
@@ -13510,7 +13549,10 @@ class SessionsParams(BaseModel):
     )
     target: str | None = Field(
         default=None,
-        description="info/resume/stop/peek: name/id/cwd substring; live, then stored.",
+        description=(
+            "info/resume/stop/peek: an exact name/id wins over a name/id/cwd "
+            "substring (live, then stored); a team role word is refused."
+        ),
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
     prompt: str | None = Field(
@@ -14207,7 +14249,9 @@ class _SessionsTarget(NamedTuple):
     error: str
 
 
-async def _sessions_target(params: SessionsParams) -> _SessionsTarget:
+async def _sessions_target(
+    params: SessionsParams, context: "ToolContext | None" = None
+) -> _SessionsTarget:
     """Resolve one address the way ``send`` resolves a recipient — the same
     resolver, the same predicates, and therefore the same disambiguation text
     a model already knows from that tool.
@@ -14220,10 +14264,13 @@ async def _sessions_target(params: SessionsParams) -> _SessionsTarget:
     kill switch — a session that is not answering is exactly the one a stop
     exists to reach. All the resolver's I/O runs off the loop: it walks and
     parses every registry record, and this tool runs inside the session's own
-    event loop.
+    event loop. ``context`` carries the team vocabulary that turns a bare team
+    role word into a refusal instead of a substring hit (see
+    :func:`_role_words`), read off the loop for the same reason.
     """
     from local_operator.mobile import peer_send
 
+    role_words = await asyncio.to_thread(_role_words, context)
     record, candidates, error = await asyncio.to_thread(
         peer_send.resolve_peer_target,
         target=params.target,
@@ -14231,6 +14278,7 @@ async def _sessions_target(params: SessionsParams) -> _SessionsTarget:
         session=params.session,
         include_wedged=True,
         require_started=False,
+        role_words=role_words,
     )
     if record is not None:
         return _SessionsTarget(record, record.session_id, [], False, "")
@@ -14242,7 +14290,7 @@ async def _sessions_target(params: SessionsParams) -> _SessionsTarget:
             return _SessionsTarget(None, cold, [], True, "")
     if params.target and peer_send.live_scan_found_nothing(error):
         stored_id, stored_candidates, stored_error = await asyncio.to_thread(
-            peer_send.resolve_stored_target, params.target
+            peer_send.resolve_stored_target, params.target, role_words=role_words
         )
         if stored_id:
             return _SessionsTarget(None, stored_id, [], True, "")
@@ -14574,7 +14622,7 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
 async def _sessions_info(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
-    target = await _sessions_target(params)
+    target = await _sessions_target(params, context)
     if target.candidates:
         return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
     if not target.session_id:
@@ -14634,7 +14682,9 @@ async def _sessions_info(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
-async def _sessions_stop(tool_call_id: str, params: SessionsParams) -> ToolResult:
+async def _sessions_stop(
+    tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
+) -> ToolResult:
     """End one running session via the existing kill-switch ladder.
 
     ``force=False``: v1 is the graceful ladder only — no SIGKILL from the
@@ -14644,7 +14694,7 @@ async def _sessions_stop(tool_call_id: str, params: SessionsParams) -> ToolResul
     """
     from local_operator.session.runtime import control
 
-    target = await _sessions_target(params)
+    target = await _sessions_target(params, context)
     if target.candidates:
         return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
     if target.record is None:
@@ -15296,7 +15346,7 @@ async def _sessions_peek(
     a worker thread, like every other op's I/O in this tool.
     """
 
-    target = await _sessions_target(params)
+    target = await _sessions_target(params, context)
     if target.candidates:
         return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
     if not target.session_id:
@@ -15776,7 +15826,7 @@ async def _sessions_open(
 
     resume_id = ""
     if params.op == "resume":
-        target = await _sessions_target(params)
+        target = await _sessions_target(params, context)
         if target.candidates:
             return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
         if not target.session_id:
@@ -16141,7 +16191,7 @@ async def execute_sessions(
     if params.op == "peek":
         return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
-        return await _sessions_stop(tool_call_id, params)
+        return await _sessions_stop(tool_call_id, params, context)
     if params.op == "resume" and (params.paused or params.failed or params.all):
         # The SET form: enumerate once and reopen each session as its own
         # bounded child (see ``_sessions_resume_batch``). Checked before the

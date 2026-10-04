@@ -3370,3 +3370,49 @@ def test_bounded_display_form_leaves_a_name_past_the_cap_whole() -> None:
     assert len(bounded) <= teams_module._TEAM_LISTING_CAP
     assert bounded.endswith(f" ({'q' * 40})")
     assert "…" in bounded
+
+
+# --- role vocabulary ---------------------------------------------------------
+
+
+def test_role_word_set_is_the_union_of_installed_team_role_names(tmp_path: Path) -> None:
+    """The vocabulary the address resolvers refuse, and its provenance.
+
+    The machine-wide UNION of every installed team's roster (manager included),
+    casefolded, mapping each role word to the teams that define it — the
+    ``(roles on: …)`` clause the refusal sentence reads. A nested-team SLOT
+    contributes the slot's own name, exactly as ``member_names`` reports it.
+    """
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(name="lopdev", manager="manager", members=[TeamMember(role="coder")])
+    )
+    registry.create_team(
+        TeamEditFields(
+            name="helpdesk",
+            manager="manager",
+            members=[TeamMember(role="coder"), TeamMember(role="pod", kind="team")],
+        )
+    )
+
+    words = teams_module.role_word_set(registry)
+
+    assert set(words) == {"manager", "coder", "pod"}
+    # Every team that defines the word is named, so a sender can see WHY the
+    # word is reserved (and where to look if a role was renamed).
+    assert set(words["manager"]) == {"lopdev", "helpdesk"}
+    assert set(words["coder"]) == {"lopdev", "helpdesk"}
+    assert words["pod"] == ("helpdesk",)
+    # Folded on the way in: the resolver tests a lowercased needle.
+    assert "Manager" not in words and "manager" in words
+
+
+def test_role_word_set_is_empty_without_a_registry_or_teams_tree(tmp_path: Path) -> None:
+    """DISABLED, never a refusal, when there is nothing to read.
+
+    A reduced host (``None`` registry) and an absent teams tree both answer
+    ``{}``. This is what makes the guard additive: an unrelated registry
+    problem can never stop a legitimate name from resolving.
+    """
+    assert teams_module.role_word_set(None) == {}
+    assert teams_module.role_word_set(TeamRegistry(tmp_path / "nonexistent")) == {}
