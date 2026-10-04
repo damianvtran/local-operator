@@ -11,6 +11,9 @@ without touching the record.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -479,6 +482,92 @@ def test_run_refuses_an_unapproved_record_with_its_own_sentence(
     refused = json.loads(out)
     assert refused["code"] == "approval_not_runnable"
     assert "requested" in refused["message"]
+
+
+def test_run_supersedes_a_connecting_card_whose_lease_is_stale(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drill finding, 2026-10-04 (F1): a runner killed mid-flight wedged the card
+    in ``connecting`` and ``run`` refused every retry. A lease naming a process
+    that is gone re-enters (the runner supersedes it below); a lease still alive
+    keeps refusing — pinned in the sibling cell — so a live runner can never be
+    double-entered."""
+    from local_operator.network import approvals as A
+
+    _make_key(root)
+    filed = _request(root, capsys)
+    net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="approve",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    capsys.readouterr()
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()  # the runner that died mid-flight, as a real reaped pid
+    A.begin_run(filed["approval_id"], run_id="run_dead", runner_pid=child.pid, root=root)
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_execute(approval_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen.append({"approval_id": approval_id, **kwargs})
+        return {"ok": True, "approval_id": approval_id, "state": "connected", "steps": []}
+
+    monkeypatch.setattr("local_operator.network.onboard.execute_approval", fake_execute)
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="run",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert seen and seen[0]["approval_id"] == filed["approval_id"]
+
+
+def test_run_refuses_a_connecting_card_with_a_live_lease(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard, through the verb: a run that is still reporting is never
+    overtaken — no runner call, one sentence naming the in-flight run."""
+    from local_operator.network import approvals as A
+
+    _make_key(root)
+    filed = _request(root, capsys)
+    net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="approve",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    capsys.readouterr()
+    A.begin_run(filed["approval_id"], run_id="run_live", runner_pid=os.getpid(), root=root)
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.network.onboard.execute_approval",
+        lambda approval_id, **kwargs: called.append(approval_id) or {"ok": True},
+    )
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="run",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    refused = json.loads(out)
+    assert refused["code"] == "approval_run_in_flight"
+    assert "in flight" in refused["message"]
+    assert called == [], "a live run must never be double-entered"
 
 
 def test_unknown_id_is_a_not_found_class_refusal_with_its_own_code(

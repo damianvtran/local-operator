@@ -63,6 +63,7 @@ import math
 import os
 import plistlib
 import queue
+import re
 import shutil  # noqa: F401 — kept: tests and siblings patch `relay.shutil.which`
 import signal
 import socket
@@ -10778,9 +10779,11 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     steps.append("loaded the LaunchAgent")
     deadline = time.time() + 20
     while time.time() < deadline:
-        probe = health(timeout=1.0)
-        if probe is not None:
-            steps.append("the relay answered its local control socket")
+        # THE UNIT MUST BE THE THING THAT ANSWERS (the drill's dead instrument):
+        # ``health()`` alone said "something answered" and a dying new unit plus
+        # a live hand-started relay passed as a successful install.
+        if _answers_as_service():
+            steps.append("the relay answered its local control socket as the unit's own process")
             return {"ok": True, "steps": steps}
         time.sleep(0.5)
     return {
@@ -10839,8 +10842,8 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     while time.time() < deadline:
         active = supervisors.systemctl_user("is-active", SYSTEMD_UNIT)
         last_state = (active.stdout or active.stderr or "").strip() or "unknown"
-        if last_state == "active" and health(timeout=1.0) is not None:
-            steps.append("the relay answered its local control socket")
+        if last_state == "active" and _answers_as_service():
+            steps.append("the relay answered its local control socket as the unit's own process")
             return {"ok": True, "steps": steps}
         if last_state == "failed":
             break
@@ -11071,6 +11074,628 @@ def _plist_is_addressable() -> bool:
     return launchd.is_own_plist(plist_path(), LABEL)
 
 
+# ---------------------------------------------------------------------------
+# Supervision honesty (drill finding, 2026-10-04)
+# ---------------------------------------------------------------------------
+#
+# WHAT WENT WRONG, and why these helpers exist. On an onboarded node a relay was
+# running UNSUPERVISED — a ``lop network serve`` started by hand in an earlier
+# drill — while the operator ran the onboarding flow's own remedy, ``lop network
+# restart``. The verb returned ``{"ok": true}`` and the listening PID did not
+# change (same process, etime 11:35:43 -> 11:35:56): the service half tried to
+# start a second relay, which failed to bind (the hand-started one held the
+# port), and the readiness check accepted the OLD process's control-socket
+# answer as proof the NEW one had come up. A dead instrument returning a reading
+# — and the remedy the join refusal printed could not clear the collision it
+# named.
+#
+# THE CONTRACT THESE HELPERS IMPLEMENT, one sentence per clause:
+#
+# * a service action never reports ``ok`` while the process it should manage did
+#   not (re)start: the check is the supervisor's OWN pid answering our control
+#   socket, not "something answered";
+# * a listener on the relay port that this install did not start under the
+#   service is DETECTED and NAMED — a hand-started relay of this install's is
+#   ADOPTED (stopped, so the supervised relay can bind and take over), anything
+#   else is refused with its pid/port/cmdline in the sentence, never silently
+#   half-done.
+
+
+#: How long a service action's post-condition is awaited before it is refused.
+#: A supervisor reports a pid as soon as it has forked; the relay needs a moment
+#: more to bind and re-publish its record, and launchd's ``print`` can show the
+#: old pid until the relaunch settles. A refusal waits this window out; a
+#: success returns the moment it is observed.
+SERVICE_VERIFY_WINDOW_S = 10.0
+
+
+def _service_port() -> int:
+    """The port the managed unit runs (or would run) the relay on.
+
+    Read from the unit itself when one exists — a ``serve --port`` install would
+    otherwise be probed at the default and every holder report would name the
+    wrong port — and from the default when none does, because that is the port
+    the arm is about to install for.
+    """
+    try:
+        if sys.platform == "darwin" and plist_path().exists():
+            from local_operator import launchd
+
+            return int(launchd.int_arg(launchd.load(plist_path()), "--port", DEFAULT_PORT))
+        if sys.platform.startswith("linux") and systemd_path().exists():
+            text = systemd_path().read_text(encoding="utf-8", errors="replace")
+            found = re.search(r"--port\s+(\d+)", text)
+            if found:
+                return int(found.group(1))
+    except Exception:  # noqa: BLE001 — a probe must never fail an action
+        pass
+    return DEFAULT_PORT
+
+
+def _supervision_unit_present() -> bool:
+    """Whether THIS platform's user supervisor has a relay unit at all.
+
+    THE ``installed`` fact of :func:`status`, and it must follow the platform:
+    reading the launchd plist unconditionally answered ``false`` on every Linux
+    host — including the ones where the systemd unit exists and owns the relay.
+    The join failure copy is the reader that needs the truth here (drill fix,
+    2026-10-04: it must tell a hand-started relay from the service's own, and
+    this is the fact that tells it).
+    """
+    if sys.platform == "darwin":
+        return plist_path().exists()
+    if sys.platform.startswith("linux"):
+        return systemd_path().exists()
+    return False
+
+
+def _serving_relay_kind(record_pid: int | None) -> str | None:
+    """What the SERVING relay verifiably is: ``"service"``, ``"manual"``, None.
+
+    Round-2 D6: unit-file presence (``installed``) is NOT a fact about the process
+    answering on the port, and the two come apart in the drill's own state —
+    ``_install_systemd`` leaves its unit file when a start fails on a bind
+    conflict, ``stop`` leaves it, and a hand-started ``lop network serve`` then
+    serves :4097 while ``installed`` reads true. So the kind is established from
+    the serving process itself (:func:`_supervision_unit_present` remains the
+    display/install fact), and anything unproven answers None — the caller then
+    prints only what is true of every relay:
+
+    * ``"service"`` — the supervisor reports THIS pid as its own process, the
+      same equality :func:`_answers_as_service` trusts;
+    * ``"manual"`` — the command line is the foreground ``serve`` shape, which no
+      unit of this product runs (the installer's units run
+      ``-m local_operator.network.relay``), so the service cannot be what started
+      it — the drill node's exact state;
+    * ``None`` — anything else: a module-form relay whose supervisor pid cannot
+      be read, or an unreadable command line. Nothing is claimed about the kind.
+    """
+    if not record_pid:
+        return None
+    managed = _managed_service_pid()
+    if managed is not None and managed == record_pid:
+        return "service"
+    cmdline = _pid_cmdline(record_pid)
+    if "network serve" in cmdline and "local_operator.network.relay" not in cmdline:
+        return "manual"
+    return None
+
+
+def _port_holder_pids(port: int) -> list[int]:
+    """PIDs LISTENING on ``port``, best-effort, through the platform's own tool.
+
+    ``[]`` means "no tool, or no answer" — never a claim that the port is free.
+    macOS asks ``lsof``; Linux asks ``ss`` (falling back to ``lsof`` where ss is
+    not installed). The caller merges this with the relay record, which is what
+    makes the check work even where neither tool exists.
+    """
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            pids = (result.stdout or "").splitlines()
+            return sorted({int(line[1:]) for line in pids if line.startswith("p")})
+        if sys.platform.startswith("linux"):
+            if shutil.which("ss"):
+                result = subprocess.run(
+                    ["ss", "-ltnpH", f"sport = :{port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                return sorted({int(m) for m in re.findall(r"pid=(\d+)", result.stdout or "")})
+            if shutil.which("lsof"):
+                result = subprocess.run(
+                    ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                lines = (result.stdout or "").splitlines()
+                return sorted({int(line[1:]) for line in lines if line.startswith("p")})
+    except Exception:  # noqa: BLE001 — a probe must never fail an action
+        pass
+    return []
+
+
+def _pid_cmdline(pid: int) -> str:
+    """The command line of ``pid``, bounded and best-effort (empty on failure)."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return (result.stdout or "").strip()[:300]
+    except Exception:  # noqa: BLE001 — a probe must never fail an action
+        return ""
+
+
+#: The command-line shapes a relay of THIS product runs under: the supervised
+#: unit spawns ``-m local_operator.network.relay``; a hand-started one is
+#: ``lop network serve`` through the installed tool (whose interpreter path
+#: carries ``local-operator``). Both markers must stay narrow — the consequence
+#: of a match is a SIGTERM (adoption), and a false positive would stop a program
+#: that is not ours.
+_RELAY_CMDLINE_MARKERS = ("local_operator.network.relay",)
+
+
+def _is_own_relay_command(cmdline: str) -> bool:
+    text = str(cmdline or "")
+    if any(marker in text for marker in _RELAY_CMDLINE_MARKERS):
+        return True
+    # ``.../bin/lop network serve`` — the tool's own shim path, or a bare ``lop``.
+    return "network serve" in text and re.search(r"(?:^|[/\s])lop(?:\s|$)", text) is not None
+
+
+def _managed_service_pid() -> int | None:
+    """The pid the user supervisor reports for the relay unit, or ``None``.
+
+    THE authority for "what the process it should manage" means: launchd's own
+    ``print`` pid, systemd's ``MainPID``. ``None`` covers "no unit loaded" and
+    "the tool did not answer" alike — callers treat both as "nothing managed".
+    """
+    try:
+        if sys.platform == "darwin":
+            result = _launchctl("print", f"{_domain()}/{LABEL}")
+            if result.returncode != 0:
+                return None
+            found = re.search(r"\bpid = (\d+)", result.stdout or "")
+            return int(found.group(1)) if found else None
+        result = supervisors.systemctl_user("show", SYSTEMD_UNIT, "-p", "MainPID", "--value")
+        if result.returncode:
+            return None
+        pid = int((result.stdout or "").strip() or 0)
+        return pid or None
+    except Exception:  # noqa: BLE001 — a probe must never fail an action
+        return None
+
+
+def _supervision_state(port: int) -> dict[str, Any]:
+    """Who is on the port, what the supervisor reports, what answers.
+
+    ``holders`` merges the OS probe with this install's relay record, and the
+    record ADDS REACH, NEVER IDENTITY: a pid is admitted as a holder only when
+    it LISTS on the port or when its command line carries this product's relay
+    markers. A stale record whose pid the OS has since reused says nothing
+    about who holds the port, and treating its number as evidence is exactly
+    how a kill path once reached an unrelated process (agent review round 1,
+    MAJOR-1: a pid is not an identity — ``relay`` True here means the COMMAND
+    LINE verified, never that a number matched).
+    """
+    record, _state = store.scan_own_relay()
+    record_pid = record.pid if record is not None else None
+    known = _managed_service_pid()
+    listening = _port_holder_pids(port)
+    candidates = list(listening)
+    if record_pid and record_pid not in candidates:
+        candidates.append(record_pid)
+    holders: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for pid in candidates:
+        if pid <= 1 or pid in seen:
+            continue
+        seen.add(pid)
+        cmdline = _pid_cmdline(pid)
+        ours = _is_own_relay_command(cmdline)
+        if not ours and pid not in listening:
+            # Neither a listener nor a verifiable relay: a reused pid behind a
+            # stale record. Not a holder at all — dropped, so it can neither
+            # be signalled nor named as something that is holding the port.
+            continue
+        holders.append(
+            {
+                "pid": pid,
+                "cmdline": cmdline,
+                "relay": ours,
+            }
+        )
+    return {
+        "port": port,
+        "managed_pid": known,
+        "record_pid": record_pid,
+        "holders": holders,
+        "answering": health(timeout=1.0) is not None,
+    }
+
+
+def _holder_ids(holder: Mapping[str, Any]) -> str:
+    """One holder as ``pid N ('cmdline')`` — the kind is named by the sentence.
+
+    Split from :func:`_holder_clause` because a sentence that already says
+    "the relay this device started by hand" must not say it a second time
+    inside the gloss (round-1 D2's stutter).
+    """
+    cmdline = str(holder.get("cmdline") or "command line unavailable")
+    return f"pid {holder.get('pid')} ({cmdline!r})"
+
+
+def _holder_clause(holder: Mapping[str, Any]) -> str:
+    """The refused-action sentence's view of one holder: pid, cmdline, kind."""
+    kind = (
+        "a relay this device started by hand"
+        if holder.get("relay")
+        else "a process this install does not manage"
+    )
+    return f"{_holder_ids(holder)} — {kind}"
+
+
+def _stop_manual_holder(holder: Mapping[str, Any], *, timeout: float = 8.0) -> str:
+    """SIGTERM a hand-started relay of ours and wait for it to exit.
+
+    Returns ``"stopped"`` (signalled, and the process is now gone — a zombie
+    counts, see below), ``"gone"`` (already dead before anything could be
+    sent), ``"unverified"`` (the identity could not be confirmed — REFUSED,
+    nothing signalled), ``"refused"`` (the kernel refused the signal), or
+    ``"stubborn"`` (signalled, still alive after ``timeout``).
+
+    IDENTITY IS A COMMAND LINE, NOT A NUMBER (agent review round 1, MAJOR-1):
+    the relay record outlives an unclean death, so its pid can be reused by
+    anything at all, and a SIGTERM aimed at "the number the record names" can
+    reach an unrelated process. BOTH the command line this install already
+    fetched and a FRESH re-read must carry this product's markers before the
+    signal is sent — the re-read is what shrinks the probe-to-signal window —
+    and anything else answers ``"unverified"`` so the caller refuses with the
+    holder named. Only the pid being gone counts as gone (MINOR-1): EPERM
+    means the process EXISTS and is not this user's to signal, which is not
+    adoptable.
+    """
+    pid = int(holder.get("pid") or 0)
+    if pid <= 1 or pid == os.getpid():
+        return "unverified"
+    from local_operator import procstate
+
+    # ALREADY GONE (or a zombie — exited, its parent's reap pending) is nothing
+    # to signal and nothing to verify: the caller may proceed past it. This is
+    # checked BEFORE the identity re-read so a relay that just exited cannot
+    # wedge the adoption on a command line that no longer exists to match.
+    if not procstate.pid_alive(pid) or procstate.is_zombie(pid):
+        return "gone"
+    if not _is_own_relay_command(str(holder.get("cmdline") or "")):
+        return "unverified"
+    if not _is_own_relay_command(_pid_cmdline(pid)):
+        return "unverified"
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return "gone"
+    except OSError:
+        return "refused"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # A ZOMBIE IS STOPPED for this purpose: the process has exited (its
+        # listener is closed) and only its parent's reap is pending — the pid
+        # probe alone would keep calling it alive for as long as that parent
+        # lives (procstate.is_zombie's own documented trap).
+        if not procstate.pid_alive(pid) or procstate.is_zombie(pid):
+            return "stopped"
+        time.sleep(0.2)
+    if not procstate.pid_alive(pid) or procstate.is_zombie(pid):
+        return "stopped"
+    return "stubborn"
+
+
+def _answers_as_service() -> bool:
+    """Whether the relay answering right now IS the supervisor's own process.
+
+    THE whole fix in one predicate: ``health()`` alone said "something answered"
+    and a dying new unit plus a live old process passed as a restart. This asks
+    the supervisor for its pid, the store for the pid that published the
+    answering relay, and requires them to be the SAME process.
+    """
+    managed = _managed_service_pid()
+    if managed is None:
+        return False
+    record, _state = store.scan_own_relay()
+    if record is None or record.pid != managed:
+        return False
+    return health(timeout=1.0) is not None
+
+
+def _supervised_action(
+    action: str,
+    arm: Callable[[str], dict[str, Any]],
+    *,
+    guard: Callable[[str], dict[str, Any] | None],
+) -> dict[str, Any]:
+    """One service action wrapped in the honesty contract (module note above).
+
+    Order, and each step's reason:
+    1. the platform guard runs FIRST — a redirected HOME must never reach a
+       probe or a signal against the real home's processes, so the
+       addressability refusal outranks everything below;
+    2. a hand-started relay of ours is ADOPTED: stopped here, so the supervised
+       arm can bind and the record can move to the unit's process. Ours means
+       VERIFIED — both the fetched and a fresh command line carry this
+       product's markers (round 1, MAJOR-1). A holder that is not ours is left
+       alone — it may be harmless (two programs can share a port on some
+       kernels), and if it is what stops the managed relay from coming up, the
+       verification below says so with its pid and cmdline;
+    3. the arm runs;
+    4. the result is VERIFIED: ``ok`` from the arm is not trusted for
+       start/restart until the supervisor's pid is the process that answers, and
+       a restart must have produced a DIFFERENT pid than before. Stop verifies
+       that nothing of ours answers any more.
+    """
+    refused = guard(action)
+    if refused is not None:
+        return refused
+    port = _service_port()
+    before = _supervision_state(port)
+    replaced: list[dict[str, Any]] = []
+    if action in ("start", "restart"):
+        for holder in before["holders"]:
+            if holder.get("pid") == before.get("managed_pid"):
+                continue
+            if not holder.get("relay"):
+                continue
+            if holder.get("pid") == os.getpid():
+                continue
+            outcome = _stop_manual_holder(holder)
+            if outcome not in ("stopped", "gone"):
+                return _adoption_refusal(action, port, holder, outcome, replaced)
+            replaced.append({**holder, "outcome": outcome})
+    result = arm(action)
+    if not result.get("ok"):
+        return _service_failure(action, port, result, replaced=replaced)
+    verdict = _verify_service_action(action, before)
+    if not verdict.get("ok"):
+        return _with_replaced_note(verdict, replaced)
+    final = dict(result)
+    if replaced:
+        steps = list(final.get("steps") or [])
+        for holder in replaced:
+            if holder.get("outcome") == "gone":
+                # NIT-2: nothing was signalled — say so, rather than "stopped".
+                steps.append(f"the hand-started relay (pid {holder['pid']}) was already gone")
+            else:
+                steps.append(
+                    f"stopped the hand-started relay (pid {holder['pid']}) so the service "
+                    f"owns :{port}"
+                )
+        final["steps"] = steps
+    return final
+
+
+def _adoption_refusal(
+    action: str,
+    port: int,
+    holder: Mapping[str, Any],
+    outcome: str,
+    replaced: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """The refusal for an adoption the flow would not complete.
+
+    Every branch says what was and was not done, and none repeats the holder's
+    kind inside its own gloss (round-1 D2): the id clause is ``pid N ('…')``
+    and the kind is named at most once, by the sentence itself. And a refusal
+    that follows an EARLIER adoption on the same pass says that relay was
+    stopped (round-2 MINOR-1): "nothing was changed" is only true when nothing
+    was. (:func:`_with_replaced_note`'s tail — "the service command that
+    followed did not complete" — is false on this path: the arm never ran.)
+    """
+    ids = _holder_ids(holder)
+    if replaced:
+        context = (
+            "The hand-started relay (pid "
+            + ", ".join(str(h.get("pid")) for h in replaced)
+            + ") was stopped first by this command."
+        )
+    else:
+        context = "Nothing was changed."
+    if outcome == "unverified":
+        error = (
+            f"`lop network {action}` did not take :{port}: {ids} could not be verified "
+            "as this install's relay — its command line did not match on a fresh read — "
+            f"and a pid is not an identity, so it was not signalled. {context} Check "
+            "`lop network status` and retry, or stop that process yourself."
+        )
+    elif outcome == "refused":
+        error = (
+            f"`lop network {action}` did not take :{port}: the relay on it is {ids}, and "
+            "the signal was refused — it is not this user's process to stop. "
+            f"{context} Stop it at the level that owns it, or leave it and retry."
+        )
+    else:  # stubborn
+        error = (
+            f"`lop network {action}` could not take :{port}: {ids} — a relay this device "
+            f"started by hand — was signalled and did not stop. {context} Stop that "
+            "process and retry, or run the relay in the foreground instead."
+        )
+    result: dict[str, Any] = {
+        "ok": False,
+        "action": action,
+        "reason": "port_held",
+        "holder": dict(holder),
+        "error": error,
+    }
+    if replaced:
+        result["stopped"] = [int(h.get("pid") or 0) for h in replaced]
+    return result
+
+
+def _stopped_note(replaced: Sequence[Mapping[str, Any]]) -> str:
+    """The sentence a failure carries when an adoption already stopped a relay.
+
+    Round-1 MINOR-2: ``replaced`` rode only into the success path, so an arm
+    that failed after the operator's hand-started relay was stopped told them
+    nothing about it — and "nothing of yours is serving :port now" is exactly
+    what they need to know before retrying. Round-2 NIT-2: a holder that was
+    ALREADY GONE when the loop reached it was not signalled, and is labelled
+    as such rather than folded into "was stopped first".
+    """
+    stopped = [str(h.get("pid")) for h in replaced if h.get("outcome") != "gone"]
+    gone = [str(h.get("pid")) for h in replaced if h.get("outcome") == "gone"]
+    fragments = []
+    if stopped:
+        fragments.append(
+            f"the hand-started relay (pid {', '.join(stopped)}) was stopped first and is "
+            "not serving any more"
+        )
+    if gone:
+        fragments.append(f"the hand-started relay (pid {', '.join(gone)}) was already gone")
+    return "; ".join(fragments) + "; the service command that followed did not complete"
+
+
+def _with_replaced_note(
+    verdict: dict[str, Any], replaced: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """A failed verdict, with the stopped-relay note appended when it applies."""
+    if not replaced:
+        return verdict
+    final = dict(verdict)
+    final["stopped"] = [int(h.get("pid") or 0) for h in replaced]
+    note = _stopped_note(replaced)
+    error = str(final.get("error") or "")
+    final["error"] = (error + " " + note).strip() if error else note
+    return final
+
+
+def _service_failure(
+    action: str,
+    port: int,
+    result: Mapping[str, Any],
+    *,
+    replaced: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """An arm failure, with a still-present holder added when one exists.
+
+    The arm's own sentence (an enable failure, a launchctl stderr line) stays the
+    ``error``; when the port is held by something that is not the managed
+    process, its pid and cmdline ride along so the reader is not sent after a
+    service problem that is really a port problem. And when an adoption already
+    stopped the operator's hand-started relay, the payload says so (MINOR-2).
+    """
+    final = _with_replaced_note(dict(result), replaced)
+    if str(result.get("reason") or "") == "isolated_home":
+        # The sandbox refusal is complete on its own, and a sandboxed run must
+        # not be enriched with readings from the real home's processes.
+        return final
+    after = _supervision_state(port)
+    holder = next((h for h in after["holders"] if h.get("pid") != after.get("managed_pid")), None)
+    if holder is None:
+        return final
+    final["holder"] = dict(holder)
+    detail = str(final.get("error") or "")
+    clause = _holder_clause(holder)
+    if clause not in detail:
+        final["error"] = (
+            (detail + " " if detail else f"`lop network {action}` did not take — ")
+            + f":{port} is still held by {clause}. Stop that process and retry."
+        ).strip()
+    return final
+
+
+def _verify_service_action(action: str, before: Mapping[str, Any]) -> dict[str, Any]:
+    """The post-condition check (see :func:`_supervised_action` step 4).
+
+    WAITED ON BRIEFLY, not sampled once: a supervisor reports a pid as soon as
+    it has forked, and the relay needs a moment more to bind and re-publish its
+    record (launchd's ``print`` can even show the old pid until the relaunch
+    settles). A success returns the moment it is observed; a REFUSAL waits the
+    window out first, so "did not take" means "still not true ten seconds
+    later" rather than "not true within the fork" — the failure direction the
+    drill paid for.
+    """
+    port = int(before.get("port") or DEFAULT_PORT)
+    deadline = time.time() + SERVICE_VERIFY_WINDOW_S
+    while True:
+        verdict = _verify_service_once(action, port, before)
+        if verdict["ok"] or time.time() >= deadline:
+            return verdict
+        time.sleep(0.5)
+
+
+def _verify_service_once(action: str, port: int, before: Mapping[str, Any]) -> dict[str, Any]:
+    """One reading of :func:`_verify_service_action`'s post-condition."""
+    after = _supervision_state(port)
+    managed = after.get("managed_pid")
+    if action == "stop":
+        if after.get("record_pid") is None and not after.get("answering"):
+            return {"ok": True}
+        holder = next(
+            (h for h in after["holders"] if h.get("pid") == after.get("record_pid")),
+            None,
+        )
+        reference = (
+            _holder_clause(holder) if holder is not None else f"pid {after.get('record_pid')}"
+        )
+        return {
+            "ok": False,
+            "action": action,
+            "reason": "not_stopped",
+            **({"holder": dict(holder)} if holder is not None else {}),
+            "error": (
+                f"the relay service stopped, but :{port} is still served by {reference}; "
+                "it was left running. Stop that process too if the port should be free."
+            ),
+        }
+    # start / restart: the supervisor's OWN process must be the one answering.
+    changed = managed is not None and managed != before.get("managed_pid")
+    if managed is None or not after.get("answering") or after.get("record_pid") != managed:
+        holder = next((h for h in after["holders"] if h.get("pid") != managed), None)
+        if holder is not None:
+            error = (
+                f"the relay {action} did not take: :{port} is still held by "
+                f"{_holder_clause(holder)}, and the process this service manages did not "
+                "come up to serve it. Stop that process and retry, or run the relay in "
+                "the foreground instead."
+            )
+        else:
+            error = (
+                f"the relay {action} did not take: the service left no running process "
+                f"answering on :{port}. See {log_path()}"
+            )
+        return {
+            "ok": False,
+            "action": action,
+            "reason": "not_restarted" if action == "restart" else "not_started",
+            **({"holder": dict(holder)} if holder is not None else {}),
+            "error": error,
+        }
+    if action == "restart" and not changed and before.get("managed_pid") is not None:
+        # The drill's exact shape: the command returned success while the same
+        # process kept serving. A restart that did not replace the process is
+        # not a restart, whatever the supervisor's exit code said.
+        return {
+            "ok": False,
+            "action": action,
+            "reason": "not_restarted",
+            "error": (
+                f"the relay restart did not take: pid {managed} is the same process that "
+                "was serving before the command. See "
+                f"{log_path()}"
+            ),
+        }
+    return {"ok": True}
+
+
 def service_action(action: str) -> dict[str, Any]:
     """start|stop|restart on THIS platform's user supervisor.
 
@@ -11082,11 +11707,18 @@ def service_action(action: str) -> dict[str, Any]:
     on Linux, where start/restart ALSO installs the unit when none is there —
     ``join`` never installed one (only ``init``'s autostart did), so "start the
     relay" on such a host can only mean "make it supervised and running".
+
+    THE HONESTY WRAPPER (drill finding, 2026-10-04, module note above): every
+    arm's result passes through :func:`_supervised_action`, which adopts a
+    hand-started relay of ours, verifies the supervisor's own process is what
+    answers afterwards, and refuses with the holder named when a listener it
+    did not start is what stands in the way. An ``ok`` from an arm is never
+    forwarded on its own authority.
     """
     if sys.platform == "darwin" and is_supported():
-        return _service_action_launchd(action)
+        return _supervised_action(action, _service_action_launchd, guard=_launchd_guard)
     if sys.platform.startswith("linux") and is_supported():
-        return _service_action_systemd(action)
+        return _supervised_action(action, _service_action_systemd, guard=_systemd_guard)
     return {
         "ok": False,
         "reason": "no_supervisor",
@@ -11102,18 +11734,42 @@ def service_action(action: str) -> dict[str, Any]:
     }
 
 
+def _launchd_guard(action: str) -> dict[str, Any] | None:
+    """The redirected-HOME guard, owned once (the arm and the wrapper share it)."""
+    if _plist_is_addressable():
+        return None
+    return {
+        "ok": False,
+        "reason": "isolated_home",
+        "error": (
+            f"`lop network {action}` drives launchd, and this run's HOME is not the "
+            "home launchd supervises, so there is no unit to drive. Run the relay in "
+            "the foreground with `lop network serve`, or run this from a normal login "
+            "where the real home's LaunchAgent exists."
+        ),
+    }
+
+
+def _systemd_guard(action: str) -> dict[str, Any] | None:
+    """The same guard for systemd --user."""
+    if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+        return None
+    return {
+        "ok": False,
+        "reason": "isolated_home",
+        "error": (
+            f"`lop network {action}` drives systemd --user, and this run's HOME is "
+            "not the home the user manager supervises, so there is no unit to "
+            "drive. The relay can run in the foreground instead, or this can be "
+            "run from a normal login where the unit exists."
+        ),
+    }
+
+
 def _service_action_launchd(action: str) -> dict[str, Any]:
-    if not _plist_is_addressable():
-        return {
-            "ok": False,
-            "reason": "isolated_home",
-            "error": (
-                f"`lop network {action}` drives launchd, and this run's HOME is not the "
-                "home launchd supervises, so there is no unit to drive. Run the relay in "
-                "the foreground with `lop network serve`, or run this from a normal login "
-                "where the real home's LaunchAgent exists."
-            ),
-        }
+    refused = _launchd_guard(action)
+    if refused is not None:
+        return refused
     if action in ("start", "restart") and plist_path().exists():
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:
@@ -11131,17 +11787,9 @@ def _service_action_launchd(action: str) -> dict[str, Any]:
 
 
 def _service_action_systemd(action: str) -> dict[str, Any]:
-    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
-        return {
-            "ok": False,
-            "reason": "isolated_home",
-            "error": (
-                f"`lop network {action}` drives systemd --user, and this run's HOME is "
-                "not the home the user manager supervises, so there is no unit to "
-                "drive. The relay can run in the foreground instead, or this can be "
-                "run from a normal login where the unit exists."
-            ),
-        }
+    refused = _systemd_guard(action)
+    if refused is not None:
+        return refused
     if action in ("start", "restart") and not systemd_path().exists():
         # THE MISSING-UNIT CASE INSTALLS (slice (b) of remote onboarding): a device
         # that JOINED a network has no unit, and `join`'s path never installed one.
@@ -11233,11 +11881,15 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
     live = health(timeout=MEMBERSHIP_READ_CLIENT_TIMEOUT_S, refresh=True) if refresh else health()
     running = live is not None or state in ("live", "wedged")
     return {
-        "installed": plist_path().exists(),
+        "installed": _supervision_unit_present(),
         "supported": is_supported(),
         "relay_running": running,
         "relay_answering": live is not None,
         "relay_state": state if running else "stopped",
+        # WHOSE PROCESS IS ANSWERING — verified from the process itself, never
+        # inferred from the unit file (round-2 D6; see _serving_relay_kind for
+        # the states and their proof).
+        "relay_served_by": _serving_relay_kind(record.pid if record is not None else None),
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,

@@ -133,6 +133,22 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 #: the pairing's limit; this is the approval's.
 DEFAULT_EXPIRY_S = 60 * 60.0
 
+#: How long a ``connecting`` record's run may stay silent before a NEW run may
+#: supersede it (drill finding, 2026-10-04: a runner killed mid-flight wedged a
+#: card in ``connecting`` with no recovery verb — the store refused every retry,
+#: and only the dying runner writes ``failed``).
+#:
+#: THE DERIVATION, precisely: a live runner appends a receipt at every step
+#: boundary, and the longest any single step may legally take is bounded by the
+#: runner's own step timeout (``onboard.STEP_TIMEOUTS``, whose largest value is
+#: 900 s for ``install``), so a live run can never leave a longer gap than that
+#: between two receipts. Silence past this bound therefore means no step is in
+#: flight: 900 + 300 s of slack for the appends themselves. Both facts are
+#: pinned by a test (``test_approvals_store`` asserts the bound exceeds the
+#: runner's largest step timeout) so the constant and the runner's timeouts
+#: cannot drift apart silently.
+STALE_RUN_AFTER_S = 1200.0
+
 #: Retention (§2.4): terminal records pruned after 30 days; the tombstone row
 #: (which guards the id) survives 180.
 TERMINAL_PRUNE_AGE_S = 30 * 24 * 60 * 60.0
@@ -1138,12 +1154,102 @@ def deny(
 # ---------------------------------------------------------------------------
 
 
-def begin_run(approval_id: str, *, run_id: str, root: Path | None = None) -> dict[str, Any]:
-    """``approved|failed → connecting``: the runner opens (or retries) a run.
+def _active_run(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The run block ``begin_run`` writes, or ``None`` on a pre-lease record.
+
+    Additive and mutable, like ``receipts``: the frozen immutable request is
+    what ``request_digest`` covers, so a record written by an older build loads
+    with no ``run`` block at all and :func:`run_is_stale` falls back to the
+    receipt-age bound for exactly those records.
+    """
+    run = record.get("run")
+    return dict(run) if isinstance(run, Mapping) else None
+
+
+def _newest_activity(record: Mapping[str, Any], run: Mapping[str, Any] | None) -> float:
+    """The latest moment this record's run can be shown to have been alive.
+
+    The lease's ``started_at`` or the newest receipt, whichever is later — so a
+    run that has begun but not yet appended its first receipt (the invite step
+    runs on ``begin_run``'s own edge) is still timed from its start, not from
+    the request's creation.
+    """
+    moments: list[float] = []
+    if run is not None:
+        started = run.get("started_at")
+        if isinstance(started, (int, float)):
+            moments.append(float(started))
+    receipts = record.get("receipts")
+    if isinstance(receipts, list) and receipts:
+        last = receipts[-1]
+        if isinstance(last, Mapping) and isinstance(last.get("at"), (int, float)):
+            moments.append(float(last["at"]))
+    return max(moments) if moments else 0.0
+
+
+def run_is_stale(record: Mapping[str, Any], *, now: float | None = None) -> bool:
+    """Whether a ``connecting`` record's run may be superseded by a NEW run.
+
+    THE SEMANTICS, pinned here because ``begin_run`` and the CLI's run gate both
+    must answer with one voice:
+
+    * a record that is not ``connecting`` is never "stale" — every other state
+      already refuses or re-enters on its own rules;
+    * a run whose lease names a pid that is STILL ALIVE is never stale. This is
+      the double-entry guard: a live runner cannot be overtaken, whatever the
+      clock says (``procstate.pid_alive`` fails closed — any doubt answers
+      alive — which is the direction this check wants);
+    * a run whose lease names a pid that is gone is stale NOW: the process that
+      owned it exited, so nothing it started can still be mid-flight;
+    * a RECORD WITH NO LEASE — written before the ``run`` block existed — falls
+      back to the receipt-age bound (:data:`STALE_RUN_AFTER_S`): a live runner
+      can never leave a longer gap than its own largest step timeout, so
+      silence past the bound means no step is in flight. That fallback is the
+      one place where liveness is inferred from silence instead of a pid, and
+      it is a FALLBACK by design: every record this build writes carries the
+      lease, so the inference only ever applies to pre-upgrade stragglers.
+    """
+    if str(record.get("state")) != STATE_CONNECTING:
+        return False
+    moment = time.time() if now is None else now
+    run = _active_run(record)
+    pid = run.get("pid") if run is not None else None
+    if isinstance(pid, int) and pid > 0:
+        from local_operator import procstate
+
+        return not procstate.pid_alive(pid)
+    newest = _newest_activity(record, run)
+    if newest <= 0.0:
+        # No lease AND no receipt: nothing dates the run at all, so nothing can
+        # prove it dead. Fail closed — the card stays put and its window still
+        # resolves it; guessing would risk double-running a live first step.
+        return False
+    return moment - newest > STALE_RUN_AFTER_S
+
+
+def begin_run(
+    approval_id: str, *, run_id: str, runner_pid: int | None = None, root: Path | None = None
+) -> dict[str, Any]:
+    """``approved|failed → connecting``, or supersede a run that stopped reporting.
 
     A retry is the SAME record with a NEW ``run_id`` (§2.4); the receipts of
     earlier runs stay, so the record reads as a history rather than a reset.
-    Refused with the record's own sentence for every other state.
+
+    A ``connecting`` record whose run lease is stale (drill finding,
+    2026-10-04; :func:`run_is_stale` owns the definition) is superseded FIRST,
+    through the matrix's own two edges — ``connecting → failed`` with a
+    ``step=superseded`` receipt that names the stopped run, then ``failed →
+    connecting`` for this one — and writes the record exactly ONCE, so no
+    reader ever observes the intermediate state. The supersede receipt states
+    the fact ("the run stopped reporting; superseded") and never invents a
+    step failure: nothing here knows which step, if any, the dead run was
+    running.
+
+    Every successful call writes the run LEASE — ``{run_id, pid, started_at}`` —
+    which is what makes the next staleness question answerable from a pid
+    rather than from silence. ``runner_pid`` is the calling runner's own pid;
+    ``None`` is legal (a store-level caller with no process identity) and falls
+    back to the receipt-age rule next time.
     """
     _require(bool(str(run_id)), "a run needs a run id")
     with _record_lock(approval_id, root):
@@ -1155,6 +1261,49 @@ def begin_run(approval_id: str, *, run_id: str, root: Path | None = None) -> dic
                 "this approval's window has passed and it cannot run; file a new request",
             )
         state = str(record.get("state"))
+        if state == STATE_CONNECTING:
+            if not run_is_stale(record, now=moment):
+                run = _active_run(record) or {}
+                holder = str(run.get("run_id") or "") or "an earlier run"
+                raise MeshRefusal(
+                    "approval_run_in_flight",
+                    f"this approval already has a run in flight ({holder}); a second "
+                    "runner would double-execute it. Wait for it to finish, or retry "
+                    "once it has stopped reporting.",
+                )
+            _require_transition(record, STATE_FAILED)
+            stopped = _active_run(record) or {}
+            record["state"] = STATE_FAILED
+            record.setdefault("receipts", []).append(
+                {
+                    "run_id": str(stopped.get("run_id") or ""),
+                    # NOT a step name: ``step``'s other values are the runner's
+                    # eight steps, and round 1 read "aborted" + ok=False at a
+                    # glance as one of them failing (D5). "superseded" cannot
+                    # be confused for a step and states what actually happened.
+                    "step": "superseded",
+                    "at": moment,
+                    "ok": False,
+                    "detail": (
+                        "the run was superseded: it stopped reporting and a new run "
+                        "replaced it; this receipt records the supersede itself — no "
+                        "step result is recorded here"
+                    ),
+                    "digest": "",
+                }
+            )
+            record["audit"].append("onboard_superseded")
+            _audit(
+                "onboard_superseded",
+                actor="self",
+                subject=approval_id,
+                root=root,
+                detail={
+                    "kind": str(record.get("kind")),
+                    "run_id": str(stopped.get("run_id") or ""),
+                },
+            )
+            state = STATE_FAILED
         if state not in (STATE_APPROVED, STATE_FAILED):
             raise MeshRefusal(
                 "approval_not_runnable",
@@ -1167,6 +1316,11 @@ def begin_run(approval_id: str, *, run_id: str, root: Path | None = None) -> dic
             )
         _require_transition(record, STATE_CONNECTING)
         record["state"] = STATE_CONNECTING
+        record["run"] = {
+            "run_id": str(run_id),
+            "pid": int(runner_pid) if isinstance(runner_pid, int) and runner_pid > 0 else None,
+            "started_at": moment,
+        }
         _write_record(record, root)
         return presented(record, moment)
 
