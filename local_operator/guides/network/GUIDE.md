@@ -558,6 +558,53 @@ token itself expires — to end it now, sign the account out at the provider. A
 shared static API key never expires, so a copy of one lives until the key is
 rotated at the provider; rotating it is the only way to end it.
 
+### GitHub push and PR-write (the `github` credential)
+
+Push and PR-write through the mesh ride a GitHub **App**, brokered like any
+other credential — and like every credential here, the DEVICE is the trust
+unit: while the share stands, **any process or session on the borrowing device
+(same user) can use it**, because there is no per-session secret on a node for
+the design to bound.
+
+On a node today: **public clones work and non-GitHub work is unaffected; push
+and PR-write are unavailable until a GitHub App exists** — one small step,
+below. That is the actual state: `lop network credentials` lists no `github`
+row until the App is configured, and a share attempt says exactly this instead
+of "not implemented" or "blocked".
+
+Once the App is configured the flow is: `lop network credential share github
+--with <device>` (device scope; session scope for this key is refused by name),
+and then any command on the borrowing device gets `GH_TOKEN`/`GITHUB_TOKEN` plus
+a git credential helper that serves `https://github.com` for the designated
+repositories and nothing else — no credential file is written on the borrower,
+and no other host's helpers see the token. Where a borrowed GitHub token differs
+from the paragraph above: it is the one credential that CAN be ended early — it
+is revoked at GitHub at its window end, and immediately when `credential
+revoke` runs (`DELETE /installation/token`; verified, idempotent). Only if no
+revoke can be delivered (neither device running at window end, or the call
+fails) does it fall back to its own 60-minute ceiling.
+
+**The one small step (GitHub App setup, once per owner):**
+
+1. github.com → Settings → Developer settings → **GitHub Apps** → New GitHub
+   App. Turn **Webhook → Active off** (none is needed). Repository permissions:
+   **Contents: Read and write** and **Pull requests: Read and write**.
+2. Install the App on the account that owns the scratch repos, and select
+   **only the designated repositories**. Note the **App ID** (App settings page)
+   and the **Installation ID** (the number in the installation's URL).
+3. Generate a **private key** (App settings → Generate a private key) — a `.pem`
+   download.
+4. Store the three values as ONE secret on the owner, `GITHUB_APP` — a single
+   JSON line whose `private_key` string keeps its `\n` escapes:
+   `lop secret set GITHUB_APP`, then paste
+   `{"app_id": "…", "installation_id": "…", "private_key": "-----BEGIN RSA PRIVATE KEY-----\n…\n-----END RSA PRIVATE KEY-----"}`
+5. Designate the repositories on **every node that borrows or serves** — the
+   `network.credentials.github.repositories` setting (search it in `/settings`),
+   `owner/repo` entries, e.g. `damianvtran/scratch`. Empty is a refusal at mint
+   time, never "no narrowing".
+6. On the owner: `lop network credential share github --with <device>`. The
+   borrower needs nothing else — the next command picks the share up.
+
 ## When something looks wrong
 
 Diagnose in this order, and stop at the first answer that explains it:
