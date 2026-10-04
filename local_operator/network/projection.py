@@ -76,7 +76,10 @@ from local_operator.session.placement import (
     local_placement,
     read_stamp,
 )
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime.types import (
+    OPERATOR_SIGNATURE_CAPABILITY,
+    SessionRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1144,6 +1147,22 @@ class RemoteSessionClient(AttachClient):
             INPUT_MODE_CAPABILITY in capabilities
         )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in capabilities
+        # THE SIGNATURE GATE — the mirror a remote dial needs on its own
+        # account, not for parity alone: a mesh viewer never holds the spawn
+        # capability (the peer's runtime was not started by this process), so
+        # an operator signature is the ONLY route an authority-increasing
+        # frame (``slash``, ``slash_result``, ``approval_answer``) has from
+        # here — and ``_present_operator_signature`` short-circuits BEFORE
+        # asking for a challenge unless this flag resolves True. Left at its
+        # False default, every remote allow went out silently unsigned while
+        # the surface still looked complete.
+        #
+        # The read is the OWNER's, exactly as at ``AttachClient.connect``: a
+        # runtime with no anchor still advertises, verifies and refuses, so
+        # absence means an OLDER owner — and re-resolving per dial is what
+        # makes a reconnect to a successor with a different build re-answer
+        # the question rather than inherit this dial's verdict.
+        self._operator_signature_supported = OPERATOR_SIGNATURE_CAPABILITY in capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", int(self._facts.control_port), limit=_READ_LIMIT_BYTES
