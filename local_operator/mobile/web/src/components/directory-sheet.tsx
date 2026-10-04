@@ -281,12 +281,12 @@ export function WorkingDirectoryChip({
 
 	return (
 		<div className="flex min-w-0 items-center">
-			{/* THE APP'S OWN CHIP, not a second chip-shaped control (design round 1,
-			    D3/D4): ``ui/chip.tsx`` already carries the resting ground, the
-			    control border and the 44 px floor the model and effort chips in
-			    the session header use, and this control is the only route into the
-			    change-directory flow -- so it must not be the one 32 px target on
-			    the surface. Its muted label look is kept.
+			{/* THE SYSTEM'S CHIP, not a second chip-shaped control (design round 1,
+			    D3/D4). ``ui/chip.tsx`` is a small label button carrying the system's
+			    control ground, its control border and the 44 px floor the surfaces
+			    around it hold -- and THIS control is its only consumer, because it
+			    is the sole route into the change-directory flow: it must not be the
+			    one 32 px target on the surface. Its muted label look is kept.
 			    ``min-w-0``/``max-w-full`` let the label truncate inside the
 			    composer's row instead of pushing the row wider than its column
 			    (design round 1, D1). */}
