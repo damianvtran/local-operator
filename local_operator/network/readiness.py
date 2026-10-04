@@ -64,6 +64,28 @@ CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
 
+#: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
+#: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
+#: ADMISSION rows are the mesh facts (identity, network/membership,
+#: reachability, build) and they hold the onboarding verdict
+#: (:func:`onboarding_failures`); EQUIPMENT rows describe what offloaded work
+#: would find there (operator authority, git identity, MCP surfaces, a served
+#: model), and a failed one belongs at its POINT OF USE — where the work that
+#: needs it actually runs.
+CLASS_ADMISSION = "admission"
+CLASS_EQUIPMENT = "equipment"
+
+#: The equipment rows that do NOT hold the onboarding verdict (F8 ruling):
+#: "every declared MCP server is signed in" is not "the device is onboarded".
+#: The sites that genuinely need an MCP login refuse at their own point of use
+#: (the share verb's ``no_local_credential`` refusal, the placement/borrow
+#: path, the interactive sign-in gate). Deliberately scoped to the MCP pair:
+#: operator/git/model are same-class candidates that keep gating by default
+#: until the operator decides — this set is a policy, never a per-call carve-out.
+NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
+    {CAPABILITY_MCP_CREDENTIAL, CAPABILITY_MCP_SERVERS}
+)
+
 #: The fixed set of peer-side checks that exist even when no answer arrived —
 #: the rows a ``peer_too_old`` / ``not_asked`` peer still gets, one per check,
 #: so a consumer's checklist does not lose its shape when a peer goes dark.
@@ -323,8 +345,18 @@ def mcp_login_remedy(url: str) -> str:
     the shareability ledger's ``no login here yet`` row — and a second copy is
     exactly how one of them starts sending the operator to sign in somewhere other
     than "here".
+
+    THE SENTENCE NAMES THE ACTION, NOT A COMMAND (§2.9's repave): the retired
+    shape instructed its reader to run ``'/mcp login …'`` — a terminal command
+    in a remedy — and this clause is now the product action alone. ``url`` stays
+    in the signature because the three callers name it in the sentence this
+    clause rides. The guides' canonical ``/mcp login`` route stays as
+    documentation (§2.9's own carve-out); the MCP surfaces' own FAILURE copy
+    (the login toasts, the broker's refusals in ``credentials/messages.py``) is
+    a SEPARATE SWEEP owed against §2.9 — that rule names failure and refusal
+    sentences outright, so those sites are debt, never an exemption.
     """
-    return f"run '/mcp login {url}' here first"
+    return "sign in here first"
 
 
 def mcp_servers_fact(root: Path) -> dict[str, Any]:
@@ -708,6 +740,13 @@ class ViewerFacts:
 # ---------------------------------------------------------------------------
 
 
+def _row_class(capability: str) -> str:
+    """The class a capability row carries (F8): build parity is an ADMISSION
+    fact — a peer on another build is not admitted to run this device's work —
+    and every other capability row is equipment about that peer."""
+    return CLASS_ADMISSION if capability == CAPABILITY_BUILD else CLASS_EQUIPMENT
+
+
 def _capability_row(
     *,
     device_id: str,
@@ -723,6 +762,7 @@ def _capability_row(
     row: dict[str, Any] = {
         "check": "readiness",
         "capability": capability,
+        "class": _row_class(capability),
         "device_id": device_id,
         "device_name": device_name,
         "ok": bool(ok),
@@ -1097,8 +1137,8 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             "author"
         ),
         remedies=[
-            f'on {peer_label} run `git config --global user.name "{suggested_name}"` and '
-            f'`git config --global user.email "{suggested_email}"`'
+            f"on {peer_label} set its git author name and email (this device suggests "
+            f"{suggested_name} <{suggested_email}>)"
         ],
         source=SOURCE_PEER,
     )
@@ -1160,10 +1200,9 @@ def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -
         code=CODE_NO_MCP_SERVERS,
         detail=detail,
         remedies=[
-            f"run `lop network mcp push --peer {peer_label}` from the device that has "
-            "the servers (MCP server definitions travel; secret values never do), or add "
-            f"the servers on {peer_label} itself (its own `/mcp add …`, or `lop mcp add` "
-            "from a shell there)"
+            f"push the MCP server definitions from the device that has them to "
+            f"{peer_label} (definitions travel; secret values never do), or add the "
+            f"servers on {peer_label} itself"
         ],
         source=SOURCE_PEER,
     )
@@ -1302,7 +1341,7 @@ def model_credential_row(
                     f"reachable. {observed_failure}"
                 ),
                 remedies=[
-                    f"re-check after the owner is reachable, or run `lop login {provider}` on "
+                    f"re-check after the owner is reachable, or sign in to {provider} on "
                     f"{peer_label}"
                 ],
                 source=SOURCE_PEER,
@@ -1344,7 +1383,7 @@ def model_credential_row(
                 f"the placement entry for {provider} names {peer_label} as its owner, but "
                 "no credential row was found there — the two do not agree yet"
             ),
-            remedies=[f"sign in on {peer_label} (`lop login {provider}` there) and re-check"],
+            remedies=[f"sign in to {provider} on {peer_label} and re-check"],
             source=SOURCE_PEER,
         )
     if owner and not peer_is_holder:
@@ -1360,8 +1399,7 @@ def model_credential_row(
             ),
             remedies=[
                 (
-                    f"share it: `lop network credential share {provider} --with "
-                    f"{peer_label}` (run here)"
+                    f"share it with {peer_label} (run here)"
                     if owner == viewer.device_id
                     else f"ask the device that owns {provider} to add {peer_label} as a holder"
                 )
@@ -1391,8 +1429,7 @@ def model_credential_row(
                     "has not pulled the placement yet: nothing would reach it until it does"
                 ),
                 remedies=[
-                    f"run `lop network credentials` on {peer_label} (it pulls the share), "
-                    "then re-check"
+                    f"pull the placement on {peer_label} (it pulls the share), then re-check"
                 ],
                 source=SOURCE_LOCAL,
             )
@@ -1406,10 +1443,7 @@ def model_credential_row(
                 f"this device is signed in to {provider} but does not share it with "
                 f"{peer_label}, so nothing would reach it"
             ),
-            remedies=[
-                f"share it: `lop network credential share {provider} --with {peer_label}` "
-                "(run here)"
-            ],
+            remedies=[f"share it with {peer_label} (run here)"],
             source=SOURCE_LOCAL,
         )
     if held is None or mine is None:
@@ -1437,7 +1471,7 @@ def model_credential_row(
             "offloaded work on that model cannot start"
         ),
         remedies=[
-            f"run `lop login {provider}` here and share it, or run it on {peer_label} "
+            f"sign in to {provider} here and share it, or sign in on {peer_label} "
             "to use its own account"
         ],
         source=SOURCE_LOCAL,
@@ -1490,7 +1524,6 @@ def _mcp_credential_row(
     peer_label: str,
 ) -> dict[str, Any]:
     has_row = server.get("has_row")
-    key = f"mcp:{url}"
     if has_row is True:
         return _capability_row(
             device_id=member.device_id,
@@ -1523,8 +1556,7 @@ def _mcp_credential_row(
                     "it until it does"
                 ),
                 remedies=[
-                    f"run `lop network credentials` on {peer_label} (it pulls the share), "
-                    "then re-check"
+                    f"pull the placement on {peer_label} (it pulls the share), then re-check"
                 ],
                 source=SOURCE_LOCAL,
                 observed={"server": name, "url": url},
@@ -1567,7 +1599,7 @@ def _mcp_credential_row(
             ),
             remedies=[
                 (
-                    f"share it: `lop network credential share {key} --with {peer_label}` (run here)"
+                    f"share it with {peer_label} (run here)"
                     if owner == viewer.device_id
                     else (
                         f"ask the device that owns the login for {name} to add "
@@ -1589,9 +1621,7 @@ def _mcp_credential_row(
                 f"this device holds a login for {name} but does not share it with "
                 f"{peer_label}, so nothing would reach it"
             ),
-            remedies=[
-                f"share it: `lop network credential share {key} --with {peer_label}` (run here)"
-            ],
+            remedies=[f"share it with {peer_label} (run here)"],
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
@@ -1618,10 +1648,7 @@ def _mcp_credential_row(
             ok=False,
             code=CODE_NO_CREDENTIAL,
             detail=f"this device has no MCP login for {url}; {mcp_login_remedy(url)}",
-            remedies=[
-                f"run '/mcp login {url}' here, then "
-                f"`lop network credential share {key} --with {peer_label}`"
-            ],
+            remedies=[f"{mcp_login_remedy(url)}, then share it with {peer_label}"],
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
@@ -1639,10 +1666,7 @@ def _mcp_credential_row(
             f"if the `{name}` server needs a sign-in, this device has no MCP login for {url} — "
             f"{mcp_login_remedy(url)}"
         ),
-        remedies=[
-            f"run '/mcp login {url}' here, then "
-            f"`lop network credential share {key} --with {peer_label}`"
-        ],
+        remedies=[f"{mcp_login_remedy(url)}, then share it with {peer_label}"],
         source=SOURCE_LOCAL,
         observed={"server": name, "url": url},
     )
@@ -1752,6 +1776,13 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     winner = str(observed.get("winner") or "")
     winner_verified = bool(observed.get("winner_verified"))
     link_address = str(observed.get("link_address") or "")
+    if observed.get("out_of_scope"):
+        # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9 ruling,
+        # 2026-10-04): the candidate was never askable from this device's
+        # network position, so its row must not read as a failure — and its raw
+        # failure cause must not ride along either. The shared clause IS the
+        # reading, one spelling for every reader.
+        return out_of_scope_clause(row)
     if observed.get("informational"):
         # REPORTED, NOT FAILED (drill finding, 2026-10-03; design round 1, D1):
         # this address did not lead to the peer from this device, but the peer
@@ -1773,8 +1804,18 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     if outcome == "connected_unpinned":
         # R2-1/Q-3: the accept is the observed fact; the peer claim rides the
         # live link this report cannot pin to an address — namable neither as a
-        # dialled host nor as a source socket — so none is named.
-        return "the peer is up (its link is live); this address accepted a TCP connection"
+        # dialled host nor as a source socket — so none is named. THE VERB IS
+        # ``something``, like ``connected_unverified`` (design round 1, D5): the
+        # accept at this address is un-identified, and "this address accepted"
+        # read as a self-contradiction beside a claim that the address cannot be
+        # attributed at all. THE WHY LIVES IN ``detail`` (D5): the link's
+        # recorded address is not among the peer's declared endpoints — an
+        # address fact, not a caveat on the mesh, and never a direction (the
+        # token names the condition).
+        return (
+            "the peer is up (its link is live); something accepted a TCP connection "
+            "at this address"
+        )
     if outcome == "connected_unverified":
         # THE D1 SENTENCE: something accepted a TCP connection, and nothing
         # identified it as the peer. The link's address is still a true fact and
@@ -1909,7 +1950,7 @@ def _reachability_remedies(
                 f"the peer is up (its link is live), so this address is stale — "
                 f"fix or drop it on {peer_label}"
             ]
-        return [f"start {peer_label}'s relay (`lop network start` there), then re-check"]
+        return [f"start {peer_label}'s relay, then re-check"]
     if outcome == "no_answer":
         admits = ""
         source = observed.get("source_address")
@@ -1921,8 +1962,8 @@ def _reachability_remedies(
         else:
             admits = "this device's address"
         return [
-            f"on {peer_label} check it is up (`lop network status --json` there), then "
-            f"check that any firewall or security group on the path admits {admits}"
+            f"on {peer_label} check it is up, then check that any firewall or security "
+            f"group on the path admits {admits}"
         ]
     if outcome == "no_answer_elsewhere":
         if where:
@@ -2033,6 +2074,22 @@ def informational_clause(row: Mapping[str, Any]) -> str:
     return f"not remote-usable from this device{note}; the peer is reachable at {usable}"
 
 
+def out_of_scope_clause(row: Mapping[str, Any]) -> str:
+    """The sentence an out-of-scope row reads in place of its raw failure.
+
+    ONE SPELLING FOR EVERY READER (F9 ruling, 2026-10-04; same pattern as
+    :func:`informational_clause`): ``ready``'s reading returns this string
+    verbatim. The raw failure is NOT parroted — "nothing answered this address"
+    points at a wrong action in the exact rows this rule exists for; the fact
+    that matters is that the question cannot be asked from here at all.
+    """
+    host, _port = _split_endpoint(str(row.get("endpoint") or ""))
+    return (
+        f"out of scope: {host} is a private (RFC1918) address of a network this "
+        "device is not on; the peer cannot be asked at it from here"
+    )
+
+
 def mark_informational(rows: list[dict[str, Any]]) -> None:
     """Mark "did not lead to the peer from here" rows informational, in place.
 
@@ -2065,6 +2122,142 @@ def mark_informational(rows: list[dict[str, Any]]) -> None:
         observed = row.setdefault("observed", {})
         observed["informational"] = True
         observed["usable_elsewhere"] = list(usable)
+        if "remedies" in row:
+            row["remedies"] = []
+
+
+#: The outcomes in which the candidate gave NO answer at all — the only ones a
+#: scope exclusion may cover. A refusal or a started handshake PROVES something
+#: at that address answered, which refutes "cannot route to it"; a connected row
+#: is a positive and is never touched. ``not_attempted`` is in: for a candidate
+#: off this device's networks the report's budget is not what made the question
+#: unanswerable.
+_SCOPE_OUTCOMES: frozenset[str] = frozenset(
+    {
+        "no_answer",
+        "no_answer_elsewhere",
+        "no_route",
+        "resolve_failed",
+        "bad_endpoint",
+        "not_attempted",
+    }
+)
+
+
+def _no_answer_row(row: Mapping[str, Any]) -> bool:
+    """Whether this reachability row recorded NO answer at all, in either dialect.
+
+    The readiness dialect rides ``observed.outcome`` (the ``_SCOPE_OUTCOMES``
+    set); the doctor dialect rides ``detail`` — the probe's own codes, read
+    through the PRODUCER's constants so a rename cannot drift this gate away
+    from the strings the probe writes (``_did_not_lead``'s own discipline).
+    Anything that DID answer — a refusal, a started handshake, a connect — is
+    not a scope candidate, and neither is a row whose answer cannot be read.
+    """
+    observed = row.get("observed")
+    outcome = str(observed.get("outcome") or "") if isinstance(observed, Mapping) else ""
+    if outcome:
+        return outcome in _SCOPE_OUTCOMES
+    detail = str(row.get("detail") or "")
+    if not detail:
+        return False
+    from local_operator.network import relay as relay_mod
+
+    if detail in (
+        relay_mod.DETAIL_NO_ANSWER,
+        relay_mod.DETAIL_BAD_ENDPOINT,
+        relay_mod.DETAIL_NOT_ATTEMPTED,
+    ):
+        return True
+    if detail.startswith(relay_mod.CONNECT_FAILED_PREFIX):
+        # A REFUSED connection is an answer — something is listening at that
+        # address; every other connect failure (a timeout, a resolution
+        # failure, a route the kernel could not find) is the no-answer family
+        # the scope rule covers.
+        return detail.split(":", 1)[1] != "ConnectionRefusedError"
+    return False
+
+
+def _private_block(host: str) -> tuple[int, int] | None:
+    """The candidate's private /16, when it is an RFC1918 address.
+
+    THE CLASS HALF of the scope rule (F9 ruling, 2026-10-04): 10/8, 172.16/12
+    and 192.168/16 are meaningful only on the networks that own them — a device
+    off those networks cannot reach them by construction. The /16 (the first two
+    octets) is the finest network boundary address math alone gives (netmasks
+    are not read here), and it is the CONSERVATIVE granularity: only a candidate
+    that shares NO /16 with any of this device's addresses is excluded, so an
+    address a routed private range could plausibly reach keeps its honest
+    negative.
+    """
+    try:
+        octets = socket.inet_aton(host)
+    except OSError:
+        return None
+    first, second = octets[0], octets[1]
+    if first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168):
+        return (first, second)
+    return None
+
+
+def _off_network(host: str, own_addresses: Sequence[str]) -> bool:
+    """Whether an RFC1918 candidate is off-network FOR THIS DEVICE (F9).
+
+    THE POSITION HALF: this device's own addresses are the observed answer to
+    "what networks is this device on", and holding none on the candidate's
+    private /16 means the candidate is unreachable from here by construction —
+    the dial is not a question this device can ask the peer, so it must not
+    count as a failure. A property of the address class AND the reading device's
+    position, stated generally — never a carve-out for one host or one pair —
+    and decided from the CANDIDATE set (which addresses are even askable from
+    here), not by re-grading a failed row's verdict after the fact.
+    """
+    block = _private_block(host)
+    if block is None:
+        return False
+    own_blocks = {item for item in (_private_block(addr) for addr in own_addresses) if item}
+    return block not in own_blocks
+
+
+def mark_out_of_scope(rows: list[dict[str, Any]], own_addresses: Sequence[str]) -> None:
+    """Mark never-askable candidates out of scope, in place (F9 ruling).
+
+    EXCLUDED FROM THE DECISION, VISIBLE IN THE READING: a candidate off this
+    device's networks does not participate in any verdict, while still being
+    REPORTED — a candidate list that silently omits an address is a different
+    lie from one that miscounts it. The row keeps every observed fact, gains
+    ``out_of_scope``, and its ``ok`` flips so no fold counts it; the reading
+    says "out of scope" in so many words, and remedies are cleared because
+    action items under a non-failing row misread (the informational flip's own
+    discipline).
+
+    ONE SEMANTICS, TWO PRODUCERS (design round 1, D3): ``ready``'s own rows and
+    ``doctor``'s endpoint rows are the two dialects that read the same address —
+    this flip, like :func:`mark_informational` beside it, reads both
+    (``_no_answer_row``), so the two surfaces cannot drift about a question that
+    cannot be asked from here.
+
+    ONLY ROWS THAT GOT NO ANSWER ARE CANDIDATES: a refusal or a started
+    handshake is an answer, and an answer refutes "cannot route to it". A
+    connected row is a positive and is never touched; the unverified-accept
+    rule is untouched either — an out-of-scope row carries no usable address
+    and never vouches for another row.
+    """
+    for row in rows:
+        if row["ok"]:
+            continue
+        if not _no_answer_row(row):
+            continue
+        host, _port = _split_endpoint(str(row.get("endpoint") or ""))
+        if not _off_network(host, own_addresses):
+            continue
+        # THE DEFAULT ARRIVES ON THE FLIP, not before the gate (agent review
+        # round 1, N1): a row this rule does not claim must not gain an empty
+        # ``observed`` on the way past — the sibling's own discipline.
+        row["ok"] = True
+        observed = row.setdefault("observed", {})
+        if isinstance(observed, dict):
+            observed["out_of_scope"] = True
         if "remedies" in row:
             row["remedies"] = []
 
@@ -2105,8 +2298,13 @@ def _reachability_rows(
     the peer is up; no address named), and the peer's own reachable address is
     not reddened merely because the link's address cannot be named.
     """
+    from local_operator.network import addresses as addresses_mod
     from local_operator.network import relay as relay_mod
 
+    # THE VIEWER'S OWN POSITION, read once for the scope rule below: this
+    # device's answer to "what networks am I on" (local reads plus one route
+    # lookup — no traffic).
+    own_addresses = addresses_mod.local_ipv4_addresses()
     peer_label = _label(member)
     link = server._link_for(member.device_id)  # noqa: SLF001 — the one link seam
     endpoints = list(member.endpoints)
@@ -2130,6 +2328,7 @@ def _reachability_rows(
         # vocabulary (the renderer is this verb's, see ``reachability_reading``).
         row = {
             "check": "reachability",
+            "class": CLASS_ADMISSION,
             "device_id": member.device_id,
             "device_name": peer_label,
             "endpoint": "",
@@ -2144,10 +2343,7 @@ def _reachability_rows(
                 "attempted": False,
                 "last_seen_at": member.last_seen_at,
             },
-            "remedies": [
-                f"have {peer_label} publish an address (its own `lop network init "
-                "--advertise-host` / `join --advertise-host`), then re-check"
-            ],
+            "remedies": [f"have {peer_label} publish an address for the relay, then re-check"],
         }
         return [row], link
     probe = relay_mod.probe_candidates(
@@ -2218,9 +2414,14 @@ def _reachability_rows(
             # the peer answered AT this address — but the live link proves the
             # PEER is up, and rendering the peer's own reachable address as
             # unverified merely because the link's address cannot be named would
-            # be a false red. The link fact is presented with no address at all.
+            # be a false red. The link fact is presented with no address at all,
+            # and THE WHY RIDES ``detail`` (design round 1, D5): the reading
+            # stays in the family's register while the address fact that
+            # explains it lives one field over.
             outcome = "connected_unpinned"
-            detail = "accepted_unpinned_link"
+            detail = (
+                "accepted_unpinned_link: the link's recorded address is not one the peer declares"
+            )
             ok = True
         elif is_winner and link is not None:
             # ACCEPTED, NEVER IDENTIFIED — the D1 state: a link existed, so the
@@ -2280,6 +2481,7 @@ def _reachability_rows(
         rows.append(
             {
                 "check": "reachability",
+                "class": CLASS_ADMISSION,
                 "device_id": member.device_id,
                 "device_name": peer_label,
                 "endpoint": attempt.endpoint,
@@ -2291,6 +2493,10 @@ def _reachability_rows(
                 ),
             }
         )
+    # Scope first: an out-of-scope candidate must not be re-dressed by the
+    # informational flip on the way out (that flip serves addresses that WERE
+    # askable and did not lead; the two rules must not both claim a row).
+    mark_out_of_scope(rows, own_addresses)
     mark_informational(rows)
     return rows, link
 
@@ -2409,7 +2615,14 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
     identity_missing = server.identity is None or not server.identity.device_id
     checks: list[dict[str, Any]] = []
     if identity_missing:
-        checks.append({"check": "identity", "ok": False, "detail": "identity_missing"})
+        checks.append(
+            {
+                "check": "identity",
+                "class": CLASS_ADMISSION,
+                "ok": False,
+                "detail": "identity_missing",
+            }
+        )
     viewer = ViewerFacts(
         server.root, device_id=server.identity.device_id if server.identity else ""
     )
@@ -2419,6 +2632,7 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
                 checks.append(
                     {
                         "check": "network",
+                        "class": CLASS_ADMISSION,
                         "network_id": record.network_id,
                         "ok": False,
                         "detail": record.stale,
@@ -2429,6 +2643,7 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
                 checks.append(
                     {
                         "check": "membership",
+                        "class": CLASS_ADMISSION,
                         "network_id": record.network_id,
                         "ok": False,
                         "code": standing["state"],
@@ -2464,12 +2679,104 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
     }
 
 
+def _non_gating_equipment(row: Mapping[str, Any]) -> bool:
+    """Whether this row is equipment that never holds the onboarding verdict."""
+    return (
+        str(row.get("class") or "") == CLASS_EQUIPMENT
+        and str(row.get("capability") or "") in NON_GATING_EQUIPMENT
+    )
+
+
+#: The clause a failed non-gating equipment row reads in place of a bare FAIL —
+#: ONE spelling (design round 1, D1): the verify receipt appends it and every
+#: renderer appends it, so the same state cannot read fatal on one surface and
+#: "not required" on another (the ``informational_clause`` pattern).
+NON_GATING_NOTE = "not required for onboarding"
+
+
+def non_gating_clause(row: Mapping[str, Any]) -> str:
+    """The clause a failed non-gating equipment row carries, for any reader.
+
+    Empty for rows that are ok or gating; the clause exists exactly so the
+    non-gating state is legible wherever the row would otherwise read as a bare
+    FAIL.
+    """
+    return "" if row.get("ok") or not _non_gating_equipment(row) else NON_GATING_NOTE
+
+
+def onboarding_failures(checks: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The rows that hold the ONBOARDING verdict (F8 ruling, 2026-10-04).
+
+    The flow's requirement is "the device is onboarded": admission rows plus
+    every equipment row EXCEPT the non-gating MCP pair. A failed MCP row is
+    still REPORTED — its own ``warn`` row in every renderer and the receipt's
+    named note (:func:`equipment_note`) — it just cannot fail an onboarding,
+    because its real dependency refuses at its own point of use: the share
+    verb's ``no_local_credential`` refusal, the placement/borrow path, and the
+    interactive sign-in gate — where the work that needs it actually runs.
+
+    Operator/git/model equipment rows keep gating by default (same-class
+    candidates for the operator to re-grade; see ``NON_GATING_EQUIPMENT``), so
+    this fold is NOT "admission only" in the strict sense — it is admission
+    plus the equipment still marked gating.
+
+    ITS SECOND READER IS ``ready``'S OWN VERDICT (design round 1, D1): the
+    report the operator is told to read must not call fatal the same state the
+    onboarding flow calls "not required for onboarding" — the row reads
+    ``warn … — not required for onboarding`` there too, and the two surfaces
+    cannot disagree about whether it gates.
+    """
+    return [row for row in checks if not row.get("ok") and not _non_gating_equipment(row)]
+
+
+def equipment_note(checks: Iterable[Mapping[str, Any]]) -> str:
+    """One line naming failed non-gating equipment, for the verify receipt.
+
+    Shape (F8 ruling): ``mcp logins: slack — not required for onboarding``.
+    Empty when no non-gating row failed. The note names WHAT is not set up and
+    defers the state to the rows themselves (their details carry the branch —
+    no login, not shared, an unreadable store), so it cannot misdescribe a
+    branch it does not read — WHICH IS WHY THE SERVERS BRANCH READS THE CODE
+    (design round 1, D4): only the row that actually read the peer's own
+    declaration may say "none declared"; a check the peer's answer did not
+    carry is "unknown", never a claim about it.
+    """
+    logins: list[str] = []
+    no_servers = False
+    servers_unknown = False
+    for row in checks:
+        if row.get("ok") or not _non_gating_equipment(row):
+            continue
+        capability = str(row.get("capability") or "")
+        if capability == CAPABILITY_MCP_SERVERS:
+            if str(row.get("code") or "") == CODE_NO_MCP_SERVERS:
+                no_servers = True
+            else:
+                servers_unknown = True
+            continue
+        observed = row.get("observed")
+        observed = observed if isinstance(observed, Mapping) else {}
+        name = str(observed.get("server") or observed.get("url") or "").strip()
+        if name and name not in logins:
+            logins.append(name)
+    parts: list[str] = []
+    if logins:
+        parts.append(f"mcp logins: {', '.join(logins)}")
+    if no_servers:
+        parts.append("mcp servers: none declared")
+    if servers_unknown:
+        parts.append("mcp servers: unknown")
+    if not parts:
+        return ""
+    return "; ".join(parts) + f" — {NON_GATING_NOTE}"
+
+
 #: Appended when a report ran without a device identity. ONE string for the
 #: CLI register and the agent digest (agent review round 1, NIT-2: the two
 #: surfaces had already drifted — "no device identity (identity_missing)" on
 #: one, "no mesh identity" on the other).
 NO_IDENTITY_LINE = (
-    "this device has no device identity (identity_missing): run `lop network init`, or "
+    "this device has no device identity (identity_missing): create a network here, or "
     "re-pair with a new invite"
 )
 
@@ -2486,20 +2793,44 @@ def render_check_lines(checks: Iterable[Mapping[str, Any]]) -> list[str]:
     about one state. Reachability rows read through :func:`reachability_reading`
     (this verb's register; doctor's renderer conflates a refusal with silence),
     capability rows carry composed sentences, and every remedy indents under
-    its row the way the membership lines do.
+    its row the way the membership lines do. A failed non-gating equipment row
+    reads ``warn`` with its clause (design round 1, D1) instead of ``FAIL`` —
+    the state that must not read as a blocker on the very surface the operator
+    is sent to.
     """
     from local_operator.resume import doctor_detail_words
 
     lines: list[str] = []
     for check in checks:
-        state = "ok " if check.get("ok") else "FAIL"
+        observed = check.get("observed")
+        observed = observed if isinstance(observed, Mapping) else {}
+        if observed.get("out_of_scope"):
+            # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING: not a failure
+            # (nothing failed — the question cannot be asked from here) and not
+            # a verification either.
+            state = "n/a "
+        elif check.get("ok"):
+            state = "ok "
+        elif _non_gating_equipment(check):
+            # A FOURTH DISTINCTION BESIDE ok/FAIL/n-a (design round 1, D1):
+            # equipment that cannot hold the onboarding verdict reads as named
+            # and NOT fatal here — the same reading the verify receipt gives it
+            # — so the row the operator is sent to read cannot contradict the
+            # flow. The clause below says why in so many words.
+            state = "warn"
+        else:
+            state = "FAIL"
         kind = str(check.get("check") or "")
         label = str(check.get("device_name") or check.get("device_id") or "")
         if kind == "readiness":
-            lines.append(
+            line = (
                 f"{state} {kind} {check.get('capability', '')} {label}: "
                 f"{check.get('detail', '')}".rstrip()
             )
+            clause = non_gating_clause(check)
+            if clause:
+                line += f" — {clause}"
+            lines.append(line)
         elif kind == "reachability":
             lines.append(
                 f"{state} {kind} {label} {check.get('endpoint', '')}: "

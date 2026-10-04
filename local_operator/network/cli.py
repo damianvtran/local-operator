@@ -967,8 +967,7 @@ def _reported(detail: dict[str, Any], field: str, *, verb: str) -> Any:
         raise MeshRefusal(
             f"{verb}_unreported",
             f"this device's relay answered `{verb}` without reporting `{field}`, so whether "
-            "the peer acted is unknown; restart the relay with `lop network restart` and "
-            "ask again.",
+            "the peer acted is unknown; restart the relay and ask again.",
         )
     return detail[field]
 
@@ -980,15 +979,13 @@ def _resolve(target: str, root: Path | None = None) -> Any:
     # THE EMPTY CASE NAMES ITS REMEDY (UX round 1, U4). `name a network: this
     # device is in none` was measured on a device that had just been told to
     # invite and had nothing to invite to: it said what was missing and stopped,
-    # while every other refusal in this family ends with the command that gets the
-    # reader out (`no token was given … mint one on the other device with `lop
-    # network init`, bring the file across, then run …`). The sentence is composed
-    # here rather than appended by a front end because this is the one place that
-    # knows the list is EMPTY — with one network the name is optional, and with
-    # several the reader's problem is which one, not that none exists. The remedy
-    # is spelled in the CLI's own dialect; a composer reader gets this front end's
-    # spelling from ``tui_spelling``, which is what makes both readers able to
-    # paste it.
+    # while every other refusal in this family ends with the action that gets the
+    # reader out. The sentence is composed here rather than appended by a front
+    # end because this is the one place that knows the list is EMPTY — with one
+    # network the name is optional, and with several the reader's problem is
+    # which one, not that none exists. It NAMES THE PRODUCT ACTION (§2.9's
+    # repave, 2026-10-04): a network is created here — what a given front end
+    # calls that setup is front-end copy, not something this sentence may paste.
     records = store.list_networks(root)
     if not target:
         if len(records) == 1:
@@ -996,8 +993,8 @@ def _resolve(target: str, root: Path | None = None) -> Any:
         if not records:
             raise types.MeshRefusal(
                 "ambiguous_network",
-                "name a network: this device is in none — `lop network init <name>` "
-                "creates the first one",
+                "name a network: this device is in none — create a network here "
+                "to make the first one",
             )
         raise types.MeshRefusal(
             "ambiguous_network",
@@ -2721,8 +2718,7 @@ def _read_token(argument: str) -> str:
         raise types.MeshRefusal(
             "no_invite_token",
             "no token was given and this device has no invite file in its outbox. Mint "
-            "one on the other device with `lop network invite`, bring the file across, "
-            "then run `lop network join @<path>`.",
+            "one on the other device, bring the file across, then join with it.",
         )
     return files[-1].read_text(encoding="utf-8").strip()
 
@@ -6111,8 +6107,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
             "no_pending_pairing",
             "no device is waiting to pair with this one"
             + (f" under invite {wanted}" if wanted else "")
-            + ". Run `lop network confirm --list` to see the queue, or mint an invite "
-            "with `lop network invite`.",
+            + ". Check the pairing queue, or mint an invite.",
         )
 
     invite_id = str(chosen.get("invite_id") or "")
@@ -6229,7 +6224,7 @@ def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tupl
             raise types.MeshRefusal(
                 "test_seam_closed",
                 f"--sas-stdin is the test harness's seam and requires {TEST_MODE_ENV}=1. "
-                "Run `lop network confirm` at a terminal: the comparison is the human "
+                "Confirm at a terminal: the comparison is the human "
                 "check, and answering it from a script makes it a formality.",
             )
         typed = sys.stdin.readline().strip().lower()
@@ -6391,24 +6386,36 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     lines = []
     for check in checks:
-        state = "ok " if check.get("ok") else "FAIL"
-        # The shared clause hangs here with one separator spelling (design round
-        # 1, D3): the sentence itself lives in ``readiness``, so this line and
-        # the readiness reading cannot drift apart.
-        clause = readiness_mod.informational_clause(check)
+        observed = check.get("observed")
+        observed = observed if isinstance(observed, Mapping) else {}
+        scoped = bool(observed.get("out_of_scope"))
+        if scoped:
+            # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9; design
+            # round 1, D3): the same address reads the same way here as on
+            # ``ready`` — neither a failure nor a verification — and the raw
+            # dial result does not ride along.
+            state = "n/a "
+        else:
+            state = "ok " if check.get("ok") else "FAIL"
+        # The shared clause hangs here with one separator spelling: the
+        # sentences live in ``readiness``, so these lines and the readiness
+        # readings cannot drift apart (design round 1, D3).
+        if scoped:
+            clause = readiness_mod.out_of_scope_clause(check)
+            detail_words = ""
+        else:
+            clause = readiness_mod.informational_clause(check)
+            detail_words = doctor_detail_words(str(check.get("detail", "")))
         lines.append(
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {doctor_detail_words(str(check.get('detail', '')))}"
+            f"{check.get('endpoint', '')} {detail_words}".rstrip()
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
-        lines.append(
-            "this device has no device identity (identity_missing): run `lop network init`, or "
-            "re-pair with a new invite"
-        )
+        lines.append(readiness_mod.NO_IDENTITY_LINE)
     failures = [
         f"{check.get('check', '')}: {doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         for check in checks
@@ -6474,7 +6481,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
         lines.append(readiness_mod.NOTHING_TO_CHECK_LINE)
     if not payload.get("identity_present", True):
         lines.append(readiness_mod.NO_IDENTITY_LINE)
-    failures = [_ready_failure(check) for check in checks if not check.get("ok")]
+    # THE SAME FOLD THE VERIFY RECEIPT READS (design round 1, D1): a row that
+    # cannot hold the onboarding verdict must not redden this report either — it
+    # is named in its own ``warn`` line below and in the receipt's equipment
+    # note, never as the reason the whole report failed. The fold excludes
+    # nothing admission-shaped or still-gating.
+    failures = [_ready_failure(check) for check in readiness_mod.onboarding_failures(checks)]
     healthy = not failures and bool(payload.get("identity_present", True))
     answer: dict[str, Any] = {**payload, "ok": healthy}
     if not healthy:
@@ -6691,6 +6703,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
     checks.append(
         {
             "check": "identity",
+            "class": readiness_mod.CLASS_ADMISSION,
             "ok": identity_file.exists(),
             "detail": "present" if identity_file.exists() else "identity_missing",
         }
@@ -6699,6 +6712,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         checks.append(
             {
                 "check": "network",
+                "class": readiness_mod.CLASS_ADMISSION,
                 "ok": not record.stale,
                 "detail": record.stale or "ok",
                 "network_id": record.network_id,
@@ -6709,6 +6723,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
             checks.append(
                 {
                     "check": "membership",
+                    "class": readiness_mod.CLASS_ADMISSION,
                     "network_id": record.network_id,
                     "ok": False,
                     "code": standing["state"],
@@ -6724,6 +6739,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
             checks.append(
                 {
                     "check": "reachability",
+                    "class": readiness_mod.CLASS_ADMISSION,
                     "device_id": member.device_id,
                     "device_name": member.name,
                     "endpoint": (member.endpoints or [""])[0],
@@ -6767,10 +6783,10 @@ def _cmd_identity_show(args: argparse.Namespace) -> int:
             {
                 "ok": False,
                 "code": "identity_missing",
-                "message": "this device has no mesh identity yet; run `lop network init`",
+                "message": "this device has no mesh identity yet; create a network here",
                 "error": "identity_missing",
             },
-            ["this device has no mesh identity yet; run `lop network init`"],
+            ["this device has no mesh identity yet; create a network here"],
         )
     return _emit(
         args,

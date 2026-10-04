@@ -433,7 +433,7 @@ def test_no_token_anywhere_is_an_error(root: Path, monkeypatch: pytest.MonkeyPat
     with pytest.raises(types.MeshRefusal) as excinfo:
         net_cli._read_token("")  # noqa: SLF001
     assert excinfo.value.code == "no_invite_token"
-    assert "lop network invite" in excinfo.value.sentence
+    assert "Mint one on the other device" in excinfo.value.sentence
 
 
 def _save_network(root: Path, network_id: str, name: str) -> types.NetworkRecord:
@@ -1124,6 +1124,112 @@ def test_an_informational_address_does_not_red_the_report_and_a_real_failure_sti
     assert "172.31.22.23" not in machine["message"]
 
 
+def test_the_transport_only_pair_reads_complete_once_never_askable_addresses_are_scoped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drill finding, 2026-10-04 (F9): the Mac's ``172.20.x`` LAN addresses,
+    dialled from a node holding no address on that network, are questions that
+    cannot be asked from there.
+
+    The two rows are EXCLUDED FROM THE DECISION and still VISIBLE in the
+    reading (named out of scope, rendered ``n/a``), so nothing
+    reachability-shaped reddens the report. A failing MCP row cannot redden
+    ``ready`` EITHER (design round 1, D1 — the same fold the verify receipt
+    reads) while still being named: it renders ``warn … — not required for
+    onboarding``, never ``FAIL``.
+    """
+    checks: list[dict[str, Any]] = [
+        {"check": "identity", "ok": True, "detail": "present"},
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "127.0.0.1:4098",
+            "ok": True,
+            "detail": "ok",
+            "observed": {"outcome": "connected_unpinned", "attempted": True},
+            "remedies": [],
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "172.20.0.246:4097",
+            "ok": False,
+            "detail": "no_answer",
+            "observed": {"outcome": "no_answer", "attempted": True, "winner": "127.0.0.1:4098"},
+            "remedies": ["re-run the report"],
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "172.20.13.239:4097",
+            "ok": False,
+            "detail": "no_answer",
+            "observed": {
+                "outcome": "no_answer_elsewhere",
+                "attempted": True,
+                "winner": "127.0.0.1:4098",
+            },
+            "remedies": [],
+        },
+    ]
+    readiness.mark_out_of_scope(checks[2:], ["10.9.0.5"])  # the rule under test
+    payload: dict[str, Any] = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 0  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is True
+    scoped = [r for r in machine["checks"] if str(r.get("endpoint", "")).startswith("172.20")]
+    assert len(scoped) == 2
+    for row in scoped:
+        assert row["ok"] is True and row["observed"]["out_of_scope"] is True
+    assert scoped[0]["remedies"] == []  # an action item under a non-failing row misreads
+
+    # The human reading names them out of scope and renders them as neither
+    # a failure nor a verification.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=False, peer="")) == 0  # noqa: SLF001
+    human = capsys.readouterr().out
+    assert "n/a  reachability cloud-node-1 172.20.0.246:4097: out of scope: " in human
+    assert "FAIL reachability cloud-node-1 172.20" not in human
+
+    # AN MCP ROW CANNOT REDDEN `ready` (design round 1, D1): the same fold the
+    # verify receipt reads keeps it out of the verdict, while the row stays
+    # named — rendered ``warn … — not required for onboarding`` — so the
+    # surface the operator is sent to cannot call fatal what the flow calls
+    # not-required.
+    checks.append(
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "detail": (
+                "this device has no MCP login for https://mcp.slack.com/mcp; " "sign in here first"
+            ),
+            "remedies": [],
+        }
+    )
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 0  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is True
+    assert "code" not in machine and "message" not in machine
+    warned = [r for r in machine["checks"] if r.get("capability") == "mcp_credential"]
+    assert warned and warned[0]["ok"] is False
+
+    # ... and the human line reads the fourth state: named, not fatal.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=False, peer="")) == 0  # noqa: SLF001
+    human = capsys.readouterr().out
+    assert "warn readiness mcp_credential cloud-node-1: this device has no MCP login" in human
+    assert "— not required for onboarding" in human
+    assert "FAIL readiness mcp_credential" not in human
+
+
 def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_red(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1185,6 +1291,46 @@ def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_
     # included (design round 1, D3): the doctor reader gets the provenance too.
     assert "— not remote-usable from this device (the machine's own private address)" in human
     assert "the peer is reachable at 99.79.190.164:4097" in human
+
+
+def test_doctor_reads_a_never_askable_address_as_out_of_scope_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F9, doctor's half (design round 1, D3): the same address, one reading.
+
+    ``doctor``'s endpoint rows carry the probe's own dialect (``detail`` — the
+    underscore codes), not ``observed.outcome``; ``readiness.mark_out_of_scope``
+    reads both, so the Mac's ``172.20.x`` candidate is excluded from the
+    decision and named out of scope here too, exactly as on ``ready``. A refusal
+    is an answer and stays red, and a row the rule does not claim gains no
+    ``observed`` on the way past (agent review round 1, N1).
+    """
+    scoped: dict[str, Any] = {
+        "check": "reachability",
+        "device_id": "d_" + "b" * 32,
+        "endpoint": "172.20.0.246:4097",
+        "ok": False,
+        "detail": "no_answer",
+    }
+    refused: dict[str, Any] = {
+        "check": "reachability",
+        "device_id": "d_" + "b" * 32,
+        "endpoint": "99.79.190.164:4097",
+        "ok": False,
+        "detail": "connect_failed:ConnectionRefusedError",
+    }
+    readiness.mark_out_of_scope([scoped, refused], ["10.9.0.5"])
+    assert scoped["ok"] is True and scoped["observed"]["out_of_scope"] is True
+    assert refused["ok"] is False
+    assert "observed" not in refused  # the default arrives on the flip, never before
+
+    checks = [{"check": "identity", "ok": True, "detail": "present"}, scoped, refused]
+    payload: dict[str, Any] = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    human = capsys.readouterr().out
+    assert "n/a  reachability" in human and "172.20.0.246:4097 — out of scope: " in human
+    assert "FAIL reachability" in human  # the refused address keeps its honest red
 
 
 def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
@@ -1679,7 +1825,7 @@ def test_an_older_relays_build_is_flagged_with_the_restart_remedy(
     new = "20260924T103058Z-509c7450dbf6"
     payload = _generation_status(root, monkeypatch, running=old, installed=new)
     out = _render_status(monkeypatch, payload, capsys)
-    expected = "build:      0.61.12 — behind install 0.67.4; `lop network restart`"
+    expected = "build:      0.61.12 — behind install 0.67.4; restart the relay"
     assert expected in out, out
     line = next(line for line in out.splitlines() if line.startswith("build:"))
     assert len(line) <= 80, line
@@ -1715,7 +1861,7 @@ def test_a_reinstalled_same_build_names_the_install_not_itself(
         installed_build="0.67.6",
     )
     out = _render_status(monkeypatch, payload, capsys)
-    assert "build:      0.67.6 — behind the install; `lop network restart`" in out, out
+    assert "build:      0.67.6 — behind the install; restart the relay" in out, out
     assert "behind 0.67.6" not in out, out
 
 
@@ -1862,7 +2008,7 @@ def test_a_just_restarted_relay_reads_current_on_the_next_status(
         installed_build="0.67.6",
     )
     out = _render_status(monkeypatch, stale_payload, capsys)
-    assert "build:      0.61.12 — behind install 0.67.4; `lop network restart`" in out, out
+    assert "build:      0.61.12 — behind install 0.67.4; restart the relay" in out, out
 
     out = _render_status(monkeypatch, fresh_payload, capsys)
     assert "build:      0.67.6" in out, out
@@ -1895,7 +2041,7 @@ def test_the_doctor_fallback_names_the_running_build_where_it_can(
     line, up = net_cli._relay_state()  # noqa: SLF001
     assert up is True
     assert line == (
-        "running, pid 4711, build 0.61.12 — behind install 0.67.4; `lop network restart`"
+        "running, pid 4711, build 0.61.12 — behind install 0.67.4; restart the relay"
     ), line
     assert len(line) <= 80, line
 
@@ -1932,7 +2078,7 @@ def test_a_wedged_relays_build_is_its_own_sentence_after_the_detail(
     assert line == (
         "running (pid 4711), and its control socket did not answer this probe, and its "
         "heartbeat has gone stale as well, so its owner is not reporting either. "
-        "Build 0.61.12 — behind install 0.67.4; `lop network restart`."
+        "Build 0.61.12 — behind install 0.67.4; restart the relay."
     ), line
     # The clause this round owns is the second sentence: one row at 80, remedy
     # inside its own sentence (D6). The detail sentence predates this round
@@ -2220,7 +2366,7 @@ def test_credentials_lists_the_shareable_ledger_per_server(
         "transport": "http",
         "login_here": False,
         "shared_with": [],
-        "remedy": f"run '/mcp login {NOTION_URL}' here first",
+        "remedy": "sign in here first",
     }
     # The provider row: kind and label from the same classifier the share records
     # with, the held sentence's remedy, no share yet (nothing declares it).
@@ -2269,9 +2415,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     ), out
     assert "      organization account — share only to your own devices" in out, out
     assert "      signed in as owner@example.test" in out, out
-    assert (
-        f"  notion  http  no login here yet — run '/mcp login {NOTION_URL}' here first" in out
-    ), out
+    assert "  notion  http  no login here yet — sign in here first" in out, out
     assert "fs" not in out
 
 

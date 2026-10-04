@@ -105,7 +105,9 @@ def test_confirm_with_no_parked_pairing_names_the_next_step(
     with pytest.raises(types.MeshRefusal) as excinfo:
         net_cli._cmd_confirm(_args(list_pending=False))  # noqa: SLF001
     assert excinfo.value.code == "no_pending_pairing"
-    assert "lop network invite" in excinfo.value.sentence
+    # §2.9's repave (design round 1, D2): the sentence names the product actions
+    # — check the queue, mint an invite — and no longer pastes a command.
+    assert "Check the pairing queue, or mint an invite." in excinfo.value.sentence
     # And an unknown invite id says so instead of answering somebody else's pairing.
     _pending(root)
     with pytest.raises(types.MeshRefusal) as excinfo:

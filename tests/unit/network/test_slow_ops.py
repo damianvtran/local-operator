@@ -474,7 +474,9 @@ def test_an_unregistered_local_slice_verb_says_which_slice_owns_it(root: Path) -
         # action", and collapsing them would tell an operator with a typo to wait.
         unknown = server.control_dispatch("not_a_real_op", {"req": 5})
         assert unknown["code"] == "unknown_local_op", unknown
-        assert "lop network doctor" in unknown["message"]
+        # The sentence names the surface, never the spelling (§2.9's repave):
+        # the doctor is where this build's own answers are read.
+        assert "doctor" in unknown["message"]
     finally:
         server.stop()
 

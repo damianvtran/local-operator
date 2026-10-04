@@ -530,7 +530,7 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
                 "transport": "http",
                 "login_here": False,
                 "shared_with": [],
-                "remedy": "run '/mcp login https://n.example/mcp' here first",
+                "remedy": "sign in here first",
             },
             {
                 "provider": "radient",
@@ -547,7 +547,7 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
         "  slack  http  login held — share: lop network credential share mcp:https://h.example/mcp"
         " --with <device>",
         "      shared with cloud-node-1 (session)",
-        "  notion  http  no login here yet — run '/mcp login https://n.example/mcp' here first",
+        "  notion  http  no login here yet — sign in here first",
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>",
         "      organization account — share only to your own devices",
@@ -754,11 +754,10 @@ _UNHEALTHY_READY: dict[str, Any] = {
             "code": "no_credential",
             "detail": (
                 "if the `files` server needs a sign-in, this device has no MCP login for "
-                "https://mcp.example.test/files — run '/mcp login "
-                "https://mcp.example.test/files' here first"
+                "https://mcp.example.test/files — sign in here first"
             ),
             "remedies": [
-                "run '/mcp login https://mcp.example.test/files' here, then `lop network "
+                "sign in here first, then `lop network "
                 "credential share mcp:https://mcp.example.test/files --with cloud-node-1`"
             ],
             "source": "local",
@@ -801,7 +800,8 @@ def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
     text = _text(result)
     assert "FAIL readiness operator_authority cloud-node-1" in text
     assert "lop operator install" in text
-    assert "mcp login https://mcp.example.test/files" in text
+    assert "sign in here first, then" in text
+    assert "credential share mcp:https://mcp.example.test/files" in text
     assert _payload(result)["code"] == "unhealthy"
 
 
@@ -1157,6 +1157,29 @@ def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
     assert body.count("127.0.0.1:64994") == 1, body
 
 
+def test_the_agent_digest_of_a_scoped_address_reads_out_of_scope_too() -> None:
+    """F9 at the agent's surface (design round 1, D3): the same reading as the
+    CLI's doctor — excluded from the decision, named out of scope, and the raw
+    dial result does not ride along."""
+    from local_operator.network import readiness as readiness_mod
+
+    scoped: dict[str, Any] = {
+        "check": "reachability",
+        "ok": False,
+        "device_id": "d_" + "b" * 32,
+        "endpoint": "172.20.0.246:4097",
+        "detail": "no_answer",
+    }
+    readiness_mod.mark_out_of_scope([scoped], ["10.9.0.5"])
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "doctor", {"ok": True, "identity_present": True, "checks": [scoped]}
+    )
+    body = "\n".join(lines)
+    assert "n/a  reachability" in body
+    assert "172.20.0.246:4097 — out of scope: " in body
+    assert "no_answer" not in body and "FAIL" not in body
+
+
 def test_the_agent_digest_of_a_ready_run_keeps_refused_and_silent_apart() -> None:
     """The readiness digest reads like the CLI's, through the same reading.
 
@@ -1304,7 +1327,7 @@ def test_the_agent_digest_carries_the_running_build_at_its_own_column() -> None:
     assert build_line.index("0.61.12") == 11, build_line
 
     stale = dict(payload, relay_generation_stale=True)
-    target = "build:     0.61.12 — behind install 0.67.4; `lop network restart`"
+    target = "build:     0.61.12 — behind install 0.67.4; restart the relay"
     assert any(line == target for line in net_tool._render("status", stale)), stale
 
     # And an UNPROVEN comparison NAMES the readable build with its limit (F10
