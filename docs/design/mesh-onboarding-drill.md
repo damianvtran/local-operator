@@ -70,8 +70,10 @@ from memory; the note and the PRs are the references.
    - `lop --version` == the pinned tag; `ls -l /etc/local-operator/operators/`;
    - `systemctl --user status local-operator-network.service`;
    - `loginctl show-user ec2-user -p Linger --value`.
-5. Mac-side: `lop network show` member row carries `approve`/`unattended`; Mesh tab shows
-   the device.
+5. Row check is NODE-side (rule 2 keeps the Mac's own copy unchanged): on the NODE,
+   `lop network show` carries `approve`/`unattended` on the Mac's member row — or read
+   the grants step's `data` from `lop network approvals run <id> --json` (the same row,
+   written by the same command). Mac-side: the Mesh tab shows the device.
 6. Negative cells (M3): expiry mid-run refuses the next step (`expired` + receipts);
    a forged allow over the wire is refused at the node; replay of a consumed challenge
    is refused end-to-end. Record each refusal's audit line beside the positive cells.
