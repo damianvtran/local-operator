@@ -1975,6 +1975,31 @@ class OnboardRun:
         )
         result = self._remote_lop(command, timeout=self._step_timeout("grants"))
         payload = _json_from(result.stdout or "")
+        if isinstance(payload, dict) and payload.get("code") == "not_admin":
+            # A CORRECT REFUSAL IS NOT AN EXECUTION FAILURE (F7 slice 1). The node
+            # keeps this change to an admin device, so nothing was applied and
+            # nothing will be until the deciding device's own build can record it —
+            # folding that to `failed`/`next: grants` made the drill chase a retry
+            # that cannot succeed and a remedy no wire op can deliver. The
+            # satisfied shape (the #1967 join precedent) states only what is true:
+            # not applied, why, and that the scopes are not in effect; it claims no
+            # grant and promises no remedy.
+            where = str(self.view.device.get("name") or "").strip() or "that machine"
+            reason = " ".join(str(payload.get("message") or "").split())
+            if not reason:
+                reason = "only an admin device can change what a peer may do"
+            return _StepOutcome(
+                True,
+                f"the capability grant was not applied on {where}: {reason} — the "
+                "requested scopes are not in effect there and nothing was granted.",
+                {
+                    "device_id": mac.device_id,
+                    "network": network_name,
+                    "capabilities": caps,
+                    "applied": False,
+                    "reason": str(payload.get("code") or "not_admin"),
+                },
+            )
         if result.rc != 0 or not payload or not payload.get("ok"):
             tail = (result.stderr or result.stdout or "").strip().splitlines()
             return _StepOutcome(

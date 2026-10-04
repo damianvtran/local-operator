@@ -18,9 +18,13 @@ shape.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
+import shlex
 import stat
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
@@ -150,7 +154,13 @@ def _result(argv: tuple[str, ...], **fields: Any) -> onboard.CommandResult:
 
 
 class FakeTransport:
-    """A scripted transport. ``outputs`` maps a substring to a canned result."""
+    """A scripted transport. ``outputs`` maps a substring to a canned result.
+
+    ONE command is not scripted: a node-side ``member grant`` is executed for real
+    against the ``isolated`` node rig (``_run_real_member_grant``). The
+    hand-written success this replaces is what hid F7 — a fake ``ok`` while the
+    real node refuses (see ``_build_drive_node``).
+    """
 
     def __init__(
         self,
@@ -197,6 +207,9 @@ class FakeTransport:
     ) -> onboard.CommandResult:
         command = " ".join(str(part) for part in argv)
         self.calls.append(("run", tuple(str(part) for part in argv)))
+        executed = _run_real_member_grant(command)
+        if executed is not None:
+            return executed
         for token, fields in self.outputs:
             if token in command:
                 return _result(tuple(str(p) for p in argv), **fields)
@@ -296,6 +309,106 @@ def _record(**what_over: Any) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# F7 — the NODE rig the grants step is ACTUALLY executed against
+# ---------------------------------------------------------------------------
+
+
+#: ``store.list_networks`` as the module defines it, captured before any fixture
+#: patches it. ``isolated`` pins this DEVICE's own list for the runner's own
+#: lookups; the node's REAL list is what an executed node-side command must read.
+_REAL_LIST_NETWORKS = network_store.list_networks
+
+#: The node store ``isolated`` builds, or ``None`` outside it.
+#: ``_run_real_member_grant`` reads it; the fixture sets it through ``monkeypatch``,
+#: so it cannot leak into a cell that never built one.
+_NODE_ROOT: Path | None = None
+
+
+def _build_drive_node(node: Path) -> Path:
+    """A real node store for the grants step: the node as a ``drive`` member of ``n_1``.
+
+    WHY THIS EXISTS (F7). The grants step runs ``lop network member grant`` ON THE
+    NODE, and this file used to answer that command with a hand-written
+    ``{"ok": True}`` — which is how a runner whose grants step refuses on a real
+    ``drive`` node (drill ``run_00qwbn37``) could stay green: each suite built its
+    own end of the contract. This rig gives the executed command a real store to
+    edit, so the answer (the refusal, or the write plus its audit row) is the
+    node's OWN code's. ``d_mac`` is seated as the node's peer row for this device,
+    exactly as an onboarding admits it.
+    """
+    from local_operator.network import relay, types
+
+    node.mkdir(parents=True, exist_ok=True)
+    record = types.NetworkRecord(
+        network_id="n_1",
+        name="damian-mesh",
+        created_by="d_node",
+        self_device_id="d_node",
+        self_role="drive",
+        self_capabilities=sorted(types.capabilities_for_role("drive")),
+        epoch=1,
+    )
+    relay.admit(
+        record,
+        device_id="d_node",
+        public_key="k-node-1",
+        name="cloud-node-1",
+        role="drive",
+        added_by="d_node",
+        added_via="self",
+        capabilities=sorted(types.capabilities_for_role("drive")),
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id="d_mac",
+        public_key="k-mac-1",
+        name="this-mac",
+        role="drive",
+        added_by="d_node",
+        capabilities=sorted(types.capabilities_for_role("drive")),
+        persist=False,
+    )
+    network_store.save(record, node)
+    return node
+
+
+def _run_real_member_grant(command: str) -> onboard.CommandResult | None:
+    """Execute a node-side ``member grant`` through the REAL network CLI.
+
+    Returns ``None`` for anything that is not a member-grant command (or outside
+    the ``isolated`` fixture), so it composes with the scripted outputs. The call
+    runs in-process with the config root pointed at ``_NODE_ROOT`` and goes through
+    the same ``net_cli.main`` the node's ``lop`` runs — the CLI that produced the
+    drill's refusal — so a canned reply can no longer disagree with the node's own
+    code in the direction that matters (a fake ``ok`` while the real node refuses).
+    """
+    if _NODE_ROOT is None or "member grant" not in command:
+        return None
+    from local_operator.network import cli as net_cli
+
+    tail = shlex.split(command.split("member grant", 1)[1])
+    args = Namespace(
+        network_command="member",
+        member_command="grant",
+        network=tail[0],
+        device=tail[1],
+        capabilities=[token for token in tail[2:] if token != "--json"],
+        json=True,
+    )
+    out, err = io.StringIO(), io.StringIO()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(_NODE_ROOT))
+        # The real list, not ``isolated``'s pin: that pin answers for THIS device.
+        patch.setattr(network_store, "list_networks", _REAL_LIST_NETWORKS)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = net_cli.main(args)
+    return onboard.CommandResult(
+        ("lop", "network", "member", "grant"), rc, out.getvalue(), err.getvalue(), at=0.0
+    )
+
+
 @pytest.fixture()
 def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """The default config root the runner (and the store it writes) resolves to."""
@@ -310,6 +423,11 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         "local_operator.network.store.list_networks",
         lambda *a, **k: [SimpleNamespace(network_id="n_1", name="damian-mesh")],
     )
+    # The node rig the grants step is executed against (F7): a REAL store, so the
+    # node-side ``member grant`` is answered by the node's own code. The patch form
+    # restores this to ``None`` when the cell ends, so it cannot leak into a cell
+    # that never built one.
+    monkeypatch.setattr(__name__ + "._NODE_ROOT", _build_drive_node(tmp_path / "node"))
     return root
 
 
@@ -408,7 +526,10 @@ HAPPY_OUTPUTS = [
         {"stdout": "anchor installed at /etc/local-operator/operators/501.json\n"},
     ),
     ("operator trust", {"stdout": "trusted   : True\n"}),
-    ("member grant", {"stdout": json.dumps({"ok": True, "added": ["approve", "unattended"]})}),
+    # "member grant" is NOT scripted here: it is executed through the REAL
+    # node-side CLI against the ``isolated`` rig (``_run_real_member_grant``).
+    # The canned ``{"ok": True}`` that stood here is what let a runner whose
+    # grants step refuses on a real drive node pass this suite (F7).
     ("network restart", {"stdout": json.dumps({"ok": True, "action": "restart"})}),
     ("loginctl show-user", {"stdout": "yes\n"}),
     ("network doctor", {"stdout": json.dumps({"ok": True, "checks": []})}),
@@ -472,6 +593,60 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
     assert len(join_calls) == 1
     assert "--automated" in " ".join(join_calls[0][1])
+
+
+def test_a_refusal_the_node_reserves_is_a_satisfied_state_not_a_failure(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F7 slice 1 — the truthful interim, against a REAL refusal.
+
+    The card asks for a scope the node keeps admin-only on every build
+    (``broker_credential``), and the refusal the runner reads is produced by the
+    REAL node-side CLI — the hand-written fake that used to stand in for it is
+    gone. A correct refusal the runner cannot retry around is SETTLED, not
+    failed: the run completes, the receipt states only what is true (not applied,
+    why, not in effect), claims no grant, and prescribes no dead remedy — no
+    "ask an admin" (no wire op can write another device's copy) and no terminal
+    command (design §2.9).
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record(grant=["broker_credential"])
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    assert _NODE_ROOT is not None
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "connected", payload
+    grants = next(row for row in payload["steps"] if row["step"] == "grants")
+    assert grants["ok"] is True
+    detail = grants["detail"]
+    assert detail.startswith("the capability grant was not applied on cloud-node-1: "), detail
+    assert "only an admin device can change what a peer may do" in detail
+    assert "not in effect" in detail and "nothing was granted" in detail
+    assert "ask an admin" not in detail, "no wire op can deliver that remedy"
+    assert "`" not in detail, "§2.9: no terminal command in a refusal"
+    assert grants["data"] == {
+        "device_id": "d_mac",
+        "network": "damian-mesh",
+        "capabilities": ["broker_credential", "unattended"],
+        "applied": False,
+        "reason": "not_admin",
+    }
+    # Nothing was recorded on the node — the row the next run would read is the
+    # same one this run found — and the run did not fold to a failed retry loop.
+    row = network_store.load("n_1", _NODE_ROOT).member("d_mac")
+    assert row is not None
+    assert "broker_credential" not in row.capabilities
+    assert "unattended" not in row.capabilities
 
 
 def test_the_credential_temp_is_unlinked_and_its_value_never_lands_in_receipts(
