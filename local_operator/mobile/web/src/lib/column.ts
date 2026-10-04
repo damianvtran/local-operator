@@ -71,7 +71,7 @@ export function columnCap(fraction: number): { maxHeight: string } {
  * the column the same box by construction rather than by agreement.
  *
  * `0px`/`100dvh` is the fallback for a surface outside the session view — the
- * list, new-session and pair screens mount sheets too, publish no pin, and
+ * list and pair screens mount sheets too, publish no pin, and
  * their columns are `h-dvh` — and for a browser without `visualViewport`, where
  * the two viewports coincide anyway.
  *

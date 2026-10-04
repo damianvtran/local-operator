@@ -1,21 +1,25 @@
 /**
- * Hash-based routing, hand-rolled. Routes: `#/`, `#/new`, `#/past`, `#/pair`,
+ * Hash-based routing, hand-rolled. Routes: `#/`, `#/past`, `#/pair`,
  * `#/s/:sessionId`, `#/s/:sessionId/a/:jobId`. A hash router is the right
  * shape here because the daemon
  * serves a single static bundle and no server-side route table exists.
+ *
+ * `#/new` USED TO BE A ROUTE and is not one any more: starting a session is a
+ * single tap on the list's own footer, which then lands on `#/s/<id>`. The old
+ * hash is deliberately NOT an error — a bookmark, an old notification or a
+ * stale in-app link must land somewhere sensible — so `/new` parses as the
+ * list, exactly like an unknown path.
  */
 import { useEffect, useState } from "react";
 
 export type Route =
 	| { name: "list" }
-	| { name: "new" }
 	| { name: "past" }
 	| { name: "pair" }
 	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
 	const path = hash.replace(/^#/, "") || "/";
-	if (path === "/new") return { name: "new" };
 	if (path === "/past") return { name: "past" };
 	/* Device pairing (stage D). A TOP-LEVEL route rather than a sheet, because the
 	   flow generates a key, claims a code and then waits for a human on ANOTHER

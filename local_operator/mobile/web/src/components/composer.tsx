@@ -33,6 +33,7 @@ import {
 	withdrawPendingEcho,
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
+import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
 import { useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
@@ -387,6 +388,7 @@ export function Composer({
 	onOpenEffort,
 	effortOpen,
 	onCloseEffort,
+	autoFocus = false,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -395,6 +397,22 @@ export function Composer({
 	onOpenEffort: () => void;
 	effortOpen: boolean;
 	onCloseEffort: () => void;
+	/** Whether the textarea takes focus once this composer mounts.
+
+	    A MOUNT-TIME ONE-SHOT rather than the DOM ``autoFocus`` attribute, and the
+	    difference matters here: this composer mounts only AFTER the session's
+	    projection arrives (the screen renders a waiting state until then), so the
+	    caller's intent — "this conversation was just created FOR the user to type
+	    into" — has to survive the gap between the tap and the mount. It is a
+	    one-shot flag the caller consumes (see ``lib/pending-focus.ts``), so an
+	    ordinary navigation into an existing conversation never steals focus.
+
+	    BEST-EFFORT for the phone's keyboard, and accepted as such: on iOS the
+	    initial tap IS the gesture that raises the keyboard, and a programmatic
+	    ``focus()`` later in the same response may not raise it again. The
+	    alternative — forcing a keyboard open from script — fights the platform
+	    and is worse than a focused field with a closed keyboard. */
+	autoFocus?: boolean;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -425,6 +443,21 @@ export function Composer({
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	/* THE MOVE'S LOCAL BRIDGE (see ``directory-sheet.tsx``). The directory route
+	   answers only once the successor runtime is ready, and the successor's
+	   first projection lands a scan tick later; without this the chip would keep
+	   naming the OLD directory for that second, which reads as "the change did
+	   not take". It yields the moment the projection agrees, so what the chip
+	   shows is always either the session's real cwd or a directory the daemon
+	   has just confirmed. */
+	const [movedCwd, setMovedCwd] = useState("");
+	const shownCwd = movedCwd && movedCwd !== projection.cwd ? movedCwd : projection.cwd;
+
+	useEffect(() => {
+		if (!autoFocus) return;
+		textareaRef.current?.focus();
+	}, [autoFocus]);
 
 	/* ---- voice dictation (mobile STT) ------------------------------------ */
 
@@ -1175,6 +1208,18 @@ export function Composer({
 					)}
 				</div>
 			) : null}
+
+			{/* THE WORKING-DIRECTORY CHIP. It sits directly above the input cluster
+			    (rather than beside the send controls) so it never competes with them
+			    for width on a narrow phone, and so the row it opens is where a reader
+			    already looks when asking "where is this session working?". */}
+			<div className="flex items-center px-0.5">
+				<WorkingDirectoryChip
+					sessionId={pid}
+					cwd={shownCwd}
+					onMoved={setMovedCwd}
+				/>
+			</div>
 
 			<div
 				className="flex items-end gap-2"
