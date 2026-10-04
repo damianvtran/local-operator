@@ -620,12 +620,20 @@ def _parser() -> argparse.ArgumentParser:
 def test_the_credential_verbs_parse() -> None:
     parser = _parser()
     share = parser.parse_args(["network", "credential", "share", "openai", "--with", "peer-b"])
+    # ``None`` is deliberate since the github slice: the scope default is PER KIND
+    # and resolved in the handler ('device' for a GitHub App credential, 'session'
+    # for every provider) — a parse-time constant could not tell the two apart
+    # from an explicitly typed ``--scope``.
     assert (share.credential_command, share.key, share.device, share.scope) == (
         "share",
         "openai",
         "peer-b",
-        "session",
+        None,
     )
+    scoped = parser.parse_args(
+        ["network", "credential", "share", "github", "--with", "peer-b", "--scope", "device"]
+    )
+    assert scoped.scope == "device"
     revoke = parser.parse_args(
         ["network", "credential", "revoke", "mcp:https://x.test/mcp", "--from", "peer-b"]
     )

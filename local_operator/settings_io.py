@@ -1167,6 +1167,36 @@ def _bash_shell_help(windows: bool) -> str:
 _BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
 
 
+def _validate_github_repositories(value: object) -> object:
+    """Every entry is ``owner/repo`` (``.git`` tolerated) — the shape the helper compares.
+
+    The mint splits the owner off and sends the NAME to GitHub; the git helper
+    compares the full ``owner/repo`` against this same list. A bare repo name would
+    be ambiguous the moment the list spans owners, so the one shape is enforced
+    where a person types it — before a half-valid allow-list can reach either side.
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    for entry in value:
+        text = str(entry).strip()
+        owner, sep, repo = text.partition("/")
+        repo = repo.removesuffix(".git")
+        if (
+            not owner
+            or sep != "/"
+            or not repo
+            or "/" in repo
+            or owner in (".", "..")
+            or repo in (".", "..")
+            or any(ch.isspace() for ch in text)
+        ):
+            raise ValueError(
+                f"not an owner/repo pair: {text!r} — write each designated repository as "
+                "owner/repo, for example damianvtran/scratch"
+            )
+    return value
+
+
 def _validate_advertise_hosts(value: object) -> object:
     """Every entry is ``host:port`` — the shape this row's help already promises.
 
@@ -4021,6 +4051,23 @@ SETTINGS: tuple[Setting, ...] = (
             "asking again, and so how long a revoked or offline owner's login keeps "
             "working elsewhere. Never longer than the token itself."
         ),
+    ),
+    # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
+    # key is read by the owner — the mint narrows to it and REFUSES when empty —
+    # and by the borrower's git helper as its use-time backstop). Empty is a
+    # refusal at mint time, never "no narrowing": a mint without ``repositories``
+    # would cover everything the App installation was granted.
+    Setting(
+        key="network.credentials.github.repositories",
+        path=("network", "credentials", "github", "repositories"),
+        section="network",
+        label="GitHub repositories",
+        kind=Kind.LIST,
+        default=[],
+        help="owner/repo entries a brokered GitHub App token may touch (empty: none)",
+        placeholder="damianvtran/scratch, damianvtran/sandbox",
+        empty_unsets=True,
+        validate_value=_validate_github_repositories,
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module

@@ -73,6 +73,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
@@ -88,6 +89,7 @@ from local_operator.network.credentials.types import (
     is_mcp_key,
     mcp_url_from_key,
     peer_int,
+    synthetic_credential_id,
 )
 
 #: How long a second asker joins an in-flight resolve for the same key. Short on
@@ -216,6 +218,7 @@ class MeshCredentialBroker:
         auth_store: Any = None,
         client: MeshCredentialClient | None = None,
         identity: Any = None,
+        github_minter: Any = None,
     ) -> None:
         # NO ``placement`` ATTRIBUTE, on purpose (F2): a document held here is a copy
         # that a revoke in the CLI process never reaches. See :meth:`_document`.
@@ -227,6 +230,11 @@ class MeshCredentialBroker:
         self.identity = identity
         self._auth_store = auth_store
         self._client = client
+        #: The github adapter's minter seam (a test injects a fake transport here)
+        #: and its one lender, built on the first mint — a relay that never lends
+        #: github pays nothing (see :meth:`_lender`).
+        self._github_minter = github_minter
+        self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
         self._inflight: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
@@ -253,23 +261,18 @@ class MeshCredentialBroker:
         behaviour is unchanged. The broker (and its one event loop) is built the first
         time the answer is yes, and kept.
         """
-        import threading
-
         from local_operator.network.relay import not_implemented_peer_op
 
         refuse = not_implemented_peer_op("net_broker")
-        built: list[MeshCredentialBroker] = []
-        guard = threading.Lock()
 
         def _handle(link: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-            with guard:
-                if not built:
-                    broker = cls.for_relay(server)
-                    if broker is not None:
-                        built.append(broker)
-            if not built:
+            # ONE broker per relay, shared with the ``credential_revoke`` local op:
+            # the revoke op must reach the same mint registry this handler mints
+            # into (``broker_for_relay``).
+            broker = broker_for_relay(server)
+            if broker is None:
                 return refuse(link, frame)
-            return built[0].on_broker(link, frame)
+            return broker.on_broker(link, frame)
 
         return _handle
 
@@ -416,6 +419,21 @@ class MeshCredentialBroker:
                 "a forced credential refresh may only be asked for by an admin device",
             )
 
+        # 2b. GITHUB IS DEVICE-SCOPED BY CONSTRUCTION (design F3). A row that says
+        #     ``session`` for this key enforces nothing (the borrower has no
+        #     rail-authenticated session identity) and would read as a bound that
+        #     does not exist — so it is refused BY NAME before any mint work,
+        #     whatever wrote it. The share verb refuses to write such a row at all.
+        if github_app.is_github_key(key) and (holder is None or holder.scope != "device"):
+            return self._refuse(
+                link,
+                key,
+                provider,
+                by,
+                github_app.CODE_DEVICE_SCOPE,
+                "this device lends GitHub to the DEVICE, not to a session; nothing was lent",
+            )
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -520,6 +538,14 @@ class MeshCredentialBroker:
         by: str,
     ) -> Any:
         """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal."""
+        if github_app.is_github_key(key):
+            return await self._resolve_github(
+                key=key,
+                provider=provider,
+                for_session=for_session,
+                holder_scope=holder_scope,
+                by=by,
+            )
         if is_mcp_key(key):
             return await self._resolve_mcp(
                 key=key,
@@ -799,6 +825,166 @@ class MeshCredentialBroker:
             identity=identity,
             grant_id=f"g_{os.urandom(8).hex()}",
         )
+
+    # -- github: App installation tokens ------------------------------------
+
+    def _lender(self) -> github_app.GithubLender:
+        """The broker's ONE github lender (minter + revoke registry), built lazily.
+
+        Built on the first mint so a relay that never lends github pays nothing;
+        the event loop it is handed is the broker's own — the revoker schedules
+        there and its DELETE calls run in the loop's executor, off the loop.
+        """
+        if self._github_lender is None:
+            minter = self._github_minter
+            if minter is None:
+                minter = github_app.GithubMinter()
+            self._github_lender = github_app.GithubLender(minter=minter)
+            self._github_lender.attach_loop(self._loop.loop())
+            self._github_lender.attach_audit(self._github_audit_sink)
+        return self._github_lender
+
+    def _github_audit_sink(
+        self, cause: str, key: str, holder: str, revoked: int, deferred: int
+    ) -> None:
+        """One ``credential.revoke`` row per revoke batch, act/sub included.
+
+        ``cause`` separates the three paths an incident reader must tell apart:
+        ``grant_expired`` (the scheduled window-end revoke), ``revoked`` (the
+        operator's immediate revoke), and the retry that follows a failed call.
+        """
+        self._audit(
+            "credential.revoke",
+            actor=self.self_device,
+            subject=holder,
+            detail={
+                "credential_key": key,
+                "act": self.self_device,
+                "sub": holder,
+                "cause": cause,
+                "revoked": revoked,
+                "deferred": deferred,
+            },
+        )
+
+    def revoke_outstanding(self, key: str, holder: str, *, cause: str = "revoked") -> int:
+        """DELETE every outstanding token for ``(key, holder)`` now (the revoke op).
+
+        Zero without a lender: nothing was ever minted on this relay, so there is
+        nothing to revoke. The lender bounds this call's own wait (``REVOKE_SYNC_MAX``)
+        and schedules the rest; a DELETE that fails is retried while the relay
+        lives, and the token's own hour is the hard bound underneath.
+        """
+        lender = self._github_lender
+        if lender is None or not github_app.is_github_key(key):
+            return 0
+        return lender.revoke_holder(holder, key=key, cause=cause)
+
+    async def _resolve_github(
+        self,
+        *,
+        key: str,
+        provider: str,
+        for_session: str,
+        holder_scope: str,
+        by: str,
+    ) -> Any:
+        """Mint one installation token from the owner's GitHub App (§D3/D4).
+
+        Unlike every provider path this touches no ``auth.db`` row: the bearer
+        is minted on the wire, and it is registered with the revoker BEFORE it
+        is returned, so a token whose reply never reaches the borrower is still
+        revoked at its window end. The mint is blocking HTTP and runs off this
+        loop through the broker's executor — a stuck GitHub must not stall the
+        relay (the same reason the MCP refresh leaves the loop for its lock).
+        """
+        common: dict[str, Any] = {
+            "key": key,
+            "owner_device": self.self_device,
+            "owner_device_name": self.self_device_name,
+        }
+        if holder_scope != "device":
+            # ``grant()`` refuses this before any work; this is the resolver's own
+            # belt — nothing is minted for a row that claims a bound that exists.
+            return BrokerError(
+                code=github_app.CODE_DEVICE_SCOPE,
+                message="this key is device-scoped; the placement row that asked is not",
+                **common,
+            )
+        try:
+            app = github_app.read_app_key(self.root)
+        except github_app.GithubAppKeyError as exc:
+            if exc.kind == "absent":
+                return BrokerError(
+                    code="no_local_credential",
+                    message=(
+                        "no GitHub App credential is configured on this device yet, so "
+                        "nothing can be minted for github (the network guide has the "
+                        "one-time setup; public clones and non-GitHub work are unaffected)"
+                    ),
+                    **common,
+                )
+            return BrokerError(code=github_app.CODE_APP_UNUSABLE, message=str(exc), **common)
+        repositories = github_app.repositories_for(self.root)
+        if not repositories:
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_UNSET,
+                message=(
+                    "no repositories are designated for GitHub brokering on this device; "
+                    "set network.credentials.github.repositories (see the network "
+                    "guide) — nothing was lent"
+                ),
+                **common,
+            )
+        lender = self._lender()
+        try:
+            minted = await asyncio.get_running_loop().run_in_executor(
+                None, lender.mint, app, repositories
+            )
+        except github_app.GithubApiError as exc:
+            if exc.kind == "auth":
+                return BrokerError(code=github_app.CODE_APP_UNUSABLE, message=str(exc), **common)
+            if exc.kind == "coverage":
+                return BrokerError(code=github_app.CODE_REPO_REFUSED, message=str(exc), **common)
+            return BrokerError(
+                code="refresh_failed", retry_after_ms=30_000, message=str(exc), **common
+            )
+        now_ms = int(time.time() * 1000)
+        ttl_ms = int(_grant_ttl_s(self.root) * 1000)
+        ceiling = now_ms + ttl_ms
+        grant_exp = min(minted.expires_at_ms, ceiling) if minted.expires_at_ms else ceiling
+        grant = Grant(
+            access_token=minted.token,
+            kind="bearer",
+            token_expires_at_ms=minted.expires_at_ms,
+            grant_expires_at_ms=grant_exp,
+            credential_ref=CredentialRef(
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+                provider=provider or github_app.GITHUB_KEY,
+                # The wire kind the revocation receipt and the borrower branch on.
+                kind=github_app.GITHUB_KIND,
+                # No row anywhere, so the credential's id is the synthetic one the
+                # borrower path already uses for "not a local row".
+                credential_id=synthetic_credential_id(key, self.self_device),
+            ),
+            served_by=self.self_device,
+            # Minted during THIS request by construction — the flag is an
+            # observation on the provider paths and a fact here.
+            refreshed=True,
+            scope=GrantScope(kind="device", session_id=""),
+            identity={},
+            grant_id=f"g_{os.urandom(8).hex()}",
+        )
+        lender.register(
+            key=key,
+            holder=by,
+            grant_id=grant.grant_id,
+            token=minted.token,
+            grant_exp_ms=grant_exp,
+            token_exp_ms=minted.expires_at_ms,
+        )
+        return grant
 
     # -- report -------------------------------------------------------------
 
@@ -1283,7 +1469,48 @@ class MeshCredentialBroker:
 
     def close(self) -> None:
         """Stop the broker's loop. For tests and for a relay shutting down."""
+        if self._github_lender is not None:
+            self._github_lender.close()
         self._loop.close()
+
+
+#: The private attribute a relay server carries its one broker under.
+#:
+#: A STASH ON THE SERVER, not a side table: a ``WeakKeyDictionary`` cannot key
+#: every object a caller hands in (a test's ``SimpleNamespace`` is not weakly
+#: referenceable, and the per-relay keeper is part of the tested behaviour), and
+#: an ``id()``-keyed table can alias after a freed server's id is reused — a
+#: stale broker served for a different relay. The server object IS the identity;
+#: the broker lives on it and dies with it. Built under a lock because the
+#: relay's peer handler and the ``credential_revoke`` local op can race for the
+#: first build on two different threads.
+_BROKER_ATTR = "_mesh_credential_broker"
+_BROKER_LOCK = threading.Lock()
+
+
+def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
+    """The broker for ``server``, built on first need and kept — or ``None``.
+
+    ONE accessor for BOTH callers (the ``net_broker`` peer handler and the
+    ``credential_revoke`` local op) because there must be exactly one broker per
+    relay: the revoke op must reach the same in-memory mint registry the peer
+    handler mints into, and a second broker object would revoke nothing.
+    ``None`` is deliberately NOT cached — a share that arrives after the relay
+    started must be served without a restart (``for_relay``'s docstring).
+    """
+    with _BROKER_LOCK:
+        broker = getattr(server, _BROKER_ATTR, None)
+        if broker is not None:
+            return broker
+        broker = MeshCredentialBroker.for_relay(server)
+        if broker is not None:
+            try:
+                setattr(server, _BROKER_ATTR, broker)
+            except Exception:  # noqa: BLE001 — a server that refuses attributes
+                # keeps no keeper; it pays a rebuild per request rather than
+                # growing a module-level table that outlives it.
+                pass
+        return broker
 
 
 def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:

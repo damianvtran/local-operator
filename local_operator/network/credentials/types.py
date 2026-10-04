@@ -50,6 +50,12 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     "credential_grant",
     "credential_report",
     "credential_placement",
+    # The revoke half of the mint-revoke contract (github adapter, F4): the CLI
+    # asks THIS device's relay to DELETE the outstanding GitHub tokens for one
+    # ``(key, holder)`` immediately. A local op for the usual reason — the
+    # broker (and its in-memory mint registry) lives in the relay process, and
+    # the CLI that ran ``credential revoke`` is a different process.
+    "credential_revoke",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
@@ -262,6 +268,17 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
+    # The GitHub App adapter's four codes. `device_scope_required` is a DOCUMENT
+    # problem (a session-scoped row for a device-scoped key), so a re-share on
+    # the owner fixes it and the TTL sits beside `not_a_holder`. The other three
+    # are states on the OWNER — no usable App key, no repositories designated,
+    # GitHub refused a repository — which no retry from here can change; cache
+    # them long so the refusal is not re-asked per command while the operator
+    # repairs the owner. An empty `repositories` never widens: see the refusal.
+    "device_scope_required": 60_000,
+    "github_app_unusable": 300_000,
+    "github_repositories_unset": 300_000,
+    "github_repo_refused": 0,
     # The frame named a sender other than the device the transport authenticated
     # (review round 1, F1). An honest client never produces it, so it is cached like
     # an authorisation refusal rather than retried.
@@ -338,7 +355,7 @@ class CredentialRef:
     owner_device: str
     owner_device_name: str
     provider: str
-    kind: str  # 'oauth' | 'api_key' | 'mcp-oauth'
+    kind: str  # 'oauth' | 'api_key' | 'mcp-oauth' | 'github-app'
     credential_id: int
 
 

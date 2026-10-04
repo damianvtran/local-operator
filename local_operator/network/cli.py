@@ -682,8 +682,16 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     cred_share.add_argument(
         "--scope",
         choices=("session", "device"),
-        default="session",
-        help="'session' bounds the grant to the session that asks (the default)",
+        # NOT a static default: None is resolved PER KIND in the handler so the
+        # GitHub App credential — device-scoped by construction — defaults to
+        # 'device' (its only possible scope) while every provider keeps
+        # 'session'. An explicitly typed value reaches the document's own refusal.
+        default=None,
+        help=(
+            "'session' bounds the grant to the session that asks (the default, "
+            "except GitHub credentials, which are device-scoped and default to "
+            "'device')"
+        ),
     )
     # ``--network`` ON BOTH VERBS, because the handler resolves one (QA round 1, Q1):
     # it read ``args.network`` and the parser never defined it, so every share and
@@ -1617,11 +1625,20 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
 
+    rows: list[dict[str, Any]] = []
+    from local_operator.network.credentials import github as github_mod
+
+    if github_mod.app_secret_present(_config_dir()):
+        # The App key lives in the SECRET store, not ``auth.db`` — so it is the one
+        # row that can exist on a device with no credential store yet, and it is
+        # assembled BEFORE the store guard below can return early.
+        rows.append(_github_shareable_row(self_device))
+
     store = offers.open_store(_config_dir())
     if store is None:
-        # No store at all: nothing to enumerate, and creating one to say so would
-        # make the ledger a writer (the read-only promise above).
-        return []
+        # No store at all: nothing else to enumerate, and creating one to say so
+        # would make the ledger a writer (the read-only promise above).
+        return rows
     try:
         credentials = list(store.list_credentials(None))
     except Exception:  # noqa: BLE001 — an unreadable store has no provider logins to show
@@ -1636,7 +1653,6 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
             continue
         by_provider.setdefault(provider, []).append(credential)
 
-    rows: list[dict[str, Any]] = []
     for provider in sorted(by_provider):
         kind, _name, label = offers.shape_from_rows(provider, by_provider[provider])
         shared_with: list[dict[str, str]] = []
@@ -1668,6 +1684,103 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _github_revocation_payload(revoked_now: int | None, ttl_s: int) -> dict[str, Any]:
+    """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``."""
+    return {
+        "new_grants": "refused now",
+        "lent_grant_max_s": ttl_s,
+        "minted_tokens_revoked": revoked_now,
+        "copied_bearer": (
+            "revoked at GitHub at the grant's window end — and immediately when "
+            "this revoke ran — via DELETE /installation/token (204; idempotent); "
+            "only if no revoke can be delivered does the token fall back to its "
+            "own 60-minute ceiling"
+        ),
+    }
+
+
+def _github_revoke_lines(name: str, revoked_now: int | None) -> list[str]:
+    """The receipt's operator-visible lines, mint-revoke wording (M1, restated).
+
+    Line 1 holds the CONDITIONAL inside it — "and on this revoke's DELETE when it
+    can be delivered" — so it is true whether or not this relay could run the
+    call; line 2 says which branch actually happened. The ``--json`` payload
+    carries the same conditional in ``copied_bearer``.
+    """
+    if revoked_now is None:
+        delivered = (
+            "no immediate DELETE could be delivered (this device's relay is not "
+            "running): the token dies at GitHub at its own 60-minute ceiling unless "
+            "the borrowing device's window-end self-revoke lands first"
+        )
+    else:
+        delivered = (
+            f"the immediate DELETE ran: {revoked_now} outstanding token(s) revoked at "
+            "GitHub just now (a retry closes anything the call missed; the window-end "
+            "revoke still stands)"
+        )
+    return [
+        (
+            f"new borrows by {name}: refused now; the outstanding GitHub token is "
+            "revoked at GitHub at its window end, and on this revoke's DELETE when it "
+            "can be delivered — via `DELETE /installation/token` (204; idempotent)"
+        ),
+        delivered,
+    ]
+
+
+def _github_share_disclosure(name: str) -> str:
+    """T7(b), MANDATED: what device scoping MEANS, in one line on the receipt.
+
+    The share receipt carries this at share time (the network guide carries it
+    once): while the share stands, any process or session on the borrowing
+    device — same user — can use the credential, because the DEVICE is the
+    trust unit on a node, not the session id. Nothing in this design claims
+    intra-uid separation, and no surface may say the loan is bound to a
+    session.
+    """
+    return (
+        f"note: this loan is authorised by the DEVICE, not a session — while the "
+        f"share stands, any process or session on {name} (same user) can use it"
+    )
+
+
+def _github_shareable_row(self_device: str) -> dict[str, Any]:
+    """The GitHub App ledger row: shareable when the secret exists (§D4).
+
+    Mirrors the provider rows' shape so ``readiness.shareable_lines`` renders it
+    unchanged — holders nested, and the remedy spell the device scope the key
+    requires so the operator types it right the first time.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.credentials import placement as placement_mod
+
+    shared_with: list[dict[str, str]] = []
+    found = placement_mod.placement_entries_for(provider=github_mod.GITHUB_KEY, root=_config_dir())
+    if found is not None:
+        network_id, entry = found
+        record = _record_for(network_id)
+        for holder in entry.holders:
+            if holder.device in (self_device, entry.owner_device):
+                continue
+            shared_with.append(
+                {
+                    "device": holder.device,
+                    "name": _member_name(record, holder.device) if record is not None else "",
+                    "scope": holder.scope,
+                }
+            )
+    return {
+        "provider": github_mod.GITHUB_KEY,
+        "kind": github_mod.GITHUB_KIND,
+        "identity_label": "",
+        "shared_with": shared_with,
+        "remedy": (
+            f"lop network credential share {github_mod.GITHUB_KEY} --with <device> --scope device"
+        ),
+    }
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -1679,6 +1792,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     capability rather than the share — so the two are written in one command and the
     payload reports both.
     """
+    from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.identity import load as load_identity
@@ -1709,6 +1823,16 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     else:
         kind, provider, label = "", "", ""
 
+    # THE SHARE SCOPE'S PER-KIND DEFAULT (github adapter, F3). An operator typing
+    # the bare verb gets the scope the key can actually honour: 'session' where a
+    # session bound means something, 'device' for the GitHub App credential. The
+    # document refuses session scope for that key by NAME, so an explicitly
+    # typed `--scope session` still reaches the refusal instead of being
+    # silently overridden here.
+    scope = str(getattr(args, "scope", "") or "")
+    if verb == "share" and not scope:
+        scope = "device" if github_mod.is_github_key(key) else "session"
+
     with placement_mod.mutate(record.network_id, self_device=identity.device_id) as document:
         entry = document.entry(key)
         if verb == "share":
@@ -1725,7 +1849,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                     identity_label=label,
                     by=identity.device_id,
                 )
-            entry = document.grant(key, device, scope=str(args.scope), by=identity.device_id)
+            entry = document.grant(key, device, scope=scope, by=identity.device_id)
             action = "sharing"
         else:
             entry = document.revoke(key, device, by=identity.device_id)
@@ -1754,7 +1878,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         "network": record.name,
         "device": device,
         "device_name": _member_name(record, device),
-        "scope": str(getattr(args, "scope", "") or ""),
+        "scope": scope,
         "holders": holders,
         "capability_applied": capability,
         "owner_device": entry_json.get("owner_device", ""),
@@ -1765,6 +1889,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    if verb == "share" and github_mod.is_github_key(key):
+        lines.append(_github_share_disclosure(name))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -1776,12 +1902,40 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         from local_operator.network.credentials import grant_ttl_s
 
         ttl_s = int(grant_ttl_s())
+        # THE MINT-REVOKE CONTRACT'S IMMEDIATE HALF (github adapter, F4): the
+        # GitHub adapter's tokens ARE revocable at the provider, and the registry
+        # that minted them lives in THIS device's relay — so the CLI asks it to
+        # DELETE them now. Best effort: a relay that is not running holds no
+        # registry, and the copy below says exactly what remains in that case
+        # (the borrowing device's own window-end self-revoke, then the token's
+        # 60-minute ceiling).
+        revoked_now: int | None = None
+        if github_mod.is_github_key(key):
+            detail = _relay_call(
+                "credential_revoke",
+                credential_key=key,
+                holder=device,
+                allow_no_answer=True,
+                # 4 sync DELETEs x 10 s HTTP timeout + margin (github.REVOKE_SYNC_MAX).
+                timeout=45.0,
+            )
+            if isinstance(detail, dict):
+                revoked_now = int(detail.get("revoked") or 0)
+                payload["minted_tokens_revoked"] = revoked_now
         # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
         # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
         # so "until the token expires" was a bound that does not exist — false in
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
+        if github_mod.is_github_key(key):
+            # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
+            # window end + on this revoke; the 60-minute figure is the fallback).
+            # Both halves live in helpers so the copy has ONE home (the tests
+            # assert against the same strings the receipt prints).
+            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s)
+            lines.extend(_github_revoke_lines(name, revoked_now))
+            return _emit(args, payload, lines)
         copied = (
             "valid at the provider until the key is rotated there (a static key never expires)"
             if static
@@ -1829,6 +1983,23 @@ def _require_local_credential(key: str, provider: str) -> None:
 
     if offers.credential_here(key, _config_dir()):
         return
+    from local_operator.network.credentials import github as github_mod
+
+    if github_mod.is_github_key(key):
+        # THE INTERIM STATE, IN THE READER'S TERMS (desk call, 2026-10-03): the
+        # GitHub adapter is present and its mint is real, but an App has not been
+        # created, so a share today has nothing to lend — and that is what this
+        # sentence says, followed by the one-time setup remedy. Not "implemented",
+        # not "blocked": push and PR-write through the mesh are unavailable until
+        # the App exists, everything else already works.
+        raise MeshRefusal(
+            "no_local_credential",
+            "this device has no GitHub App credential yet, so there is nothing to "
+            "share: push and PR-write through the mesh are unavailable until a "
+            "GitHub App is configured here (a short one-time setup — the network "
+            "guide has the checklist). Public clones and non-GitHub work are "
+            "unaffected.",
+        )
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         raise MeshRefusal(

@@ -1298,3 +1298,59 @@ or the keychain.
    not touch credential handling: the holder-set check is independent of the
    transport secret (§3.6c), which is why a removed device's borrowed tokens stop
    working on their own `grant_ttl_s` bound even before the rotation.
+
+---
+
+## 14. As-built — the `github` App adapter (`github-broker-1`)
+
+Status: implemented; live E2E is delayed only by step 0 below. The design is
+§D1–§D6 of the folded remediation note (`github-broker-1`, rounds 1–2); this
+section is the durable record of what shipped and of what is deliberately NOT
+covered.
+
+**What it is.** The owner's device holds a GitHub **App** key in its secret
+store (`GITHUB_APP`: `{app_id, installation_id, private_key}`) and mints
+**installation tokens** (1 h) per borrow, narrowed on the wire to
+`network.credentials.github.repositories` (`repositories`) and
+`{contents: write, pull_requests: write}` (`permissions`) — empty is a REFUSAL
+at mint time, never "no narrowing". Grants are **device-authorised only**
+(F3): `for_session` is attribution, never authority, the share verb refuses
+`--scope session` for this key BY NAME, and the owner refuses such a row even if
+hand-written. The borrower injects, per command, `GH_TOKEN`/`GITHUB_TOKEN` plus
+the **F1 helper close**: a github.com-scoped helper-list reset pair in
+`GIT_CONFIG_*` followed by ONE brokered git credential helper — so a persisting
+`store` helper (or any other) never receives the value, while other hosts keep
+their own helpers. **Mint-revoke** makes the window real: the owner DELETEs
+`/installation/token` at the grant's window end and immediately on
+`credential revoke` (verified 204; idempotent); the borrower self-revokes on a
+best-effort belt; the token's own 60-minute ceiling is the floor under both.
+
+**Step 0 — the App does not exist yet (desk decision, 2026-10-03).** On a
+node today: **public clones work and non-GitHub work is unaffected; push and
+PR-write are unavailable until a GitHub App exists** — a short one-time
+setup, documented as a follow-up; the network guide carries the complete checklist
+(what to create, permissions, where the key goes, the command to load it). A
+share attempt in this state refuses with `no_local_credential` and that
+sentence — the actual state, not "implemented" and not "blocked". The unit
+suite stands an RFC-shaped loopback App endpoint in its place (the mint path is
+real; the endpoint is the stub the brief allows).
+
+**Coverage — precisely.** T1–T5 and T8 live in
+`tests/unit/network/test_credentials_github.py`, including the real-git cells
+(a CONNECT+TLS loopback github.com in front of `git http-backend`, so a real
+`git push` runs through OUR helper offline) and the **F1 negative control**
+(drop the empty reset entry ⇒ the store helper receives and writes the token —
+the instrument can catch the bug it exists to catch).
+
+**T6 — allow-list enforcement — ACCEPTED — NOT TESTED.** Enforcement is
+external: GitHub-side mint narrowing (`repositories` + `permissions`) and the
+helper's path allow-list (exact `owner/repo`, `.git` tolerated; absent or
+not-listed path refuses). This design does not gate it and claims no coverage.
+
+**T7 — device-scope consequences & disclosure — ACCEPTED — NOT TESTED.** While
+the share stands, **any process or session on that device (same user) can
+borrow this credential** — the device, not the session, is the trust unit on a
+node; that is the accepted cost of device scoping and no claim of intra-uid
+separation is made. The T7(b) disclosure ships in two places: the share receipt
+and the network guide. No coverage is claimed for the enforcement of either
+record.

@@ -393,6 +393,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "credential_grant",
     "credential_report",
     "credential_placement",
+    # The mint-revoke contract's operator half (github adapter, F4): the CLI's
+    # ``credential revoke`` tells THIS device's relay to DELETE the outstanding
+    # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
+    # boundary as the three leg-1 verbs, a different direction of travel.
+    "credential_revoke",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's
