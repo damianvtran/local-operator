@@ -533,7 +533,7 @@ classes (ask answers are ordinary `prompt` acts; allows are authority-increasing
     (`network/cli.py:259-266`) and included in the onboarding scopes (§2.1). It gates who may
     ATTEMPT; the SIGNATURE gates admission.
 - **Direction is pinned (N3):** the capability is checked receiver-side against the SENDER's
-  member row — one node-side grant (`member grant … approve`, §3.3 step 8) is sufficient;
+  member row — one node-side grant (`member grant … approve`, §3.3 step 9) is sufficient;
   nothing reciprocal is needed. The challenge reply rides the existing `ack` frame shape
   (`approval-authority.md` §2.3's protocol requirement) — never a novel reply op.
 - The runtime side is unchanged: challenges are single-use (popped before verification), the
@@ -665,15 +665,20 @@ operator's own signing surfaces (this Mac's own anchor), not a step of a remote 
    (refusing `approval_anchor_mismatch` on any difference — F4b) and copies exactly the
    bytes whose `statement_digest` matches the record; the receipt carries
    `{key_id, spki_fp, statement_digest}`.
-8. **grants:** on the NODE, `lop network member grant damian-mesh <mac-device-id> approve
-   unattended` (per scopes 5-6). Receipt records the resulting member row.
-9. **relay supervision:** install + start the relay as a service using the EXISTING
+8. **relay supervision:** install + start the relay as a service using the EXISTING
    three-platform abstraction (`local_operator/supervisors.py`; systemd `--user` arm already
    used by `mobile/install.py:10-12`, `:1637+` and `wakes/install.py` whose docstring names
    "a systemd --user service on Linux"). The network group currently drives launchd only
-   (`network/cli.py:3290-3330`); slice (b) wires it to the same abstraction. Note for
+   (`network/cli.py:3290-3330`); slice (b) wires it to the same abstraction. It also rolls a
+   relay that is ALREADY RUNNING onto the build the install step landed — and it runs BEFORE
+   the grants step (F7b): with a relay answering on the node, the grant write is executed by
+   the node's own relay, and a relay still on the previous build refuses it without falling
+   back, so the move must precede the write. Note for
    headless: `systemd --user` needs `loginctl enable-linger` — the check lands in the
    credentialed pre-read (step 4) and the step is recorded there (OQ11).
+9. **grants:** on the NODE, `lop network member grant damian-mesh <mac-device-id> approve
+   unattended` (per scopes 5-6). Receipt records the resulting member row. Runs after the
+   relay step, so the write meets the run's relay rather than a pre-run one (F7b).
 10. **verify + receipts:** `lop network doctor` (link), `lop network ready --peer cloud-node-1`
     (the acceptance surface — build row `equal`, authority rows updated per §8 OQ6),
     `lop network peers`; the record folds to `connected`; the Mesh UI flips the card.
@@ -716,7 +721,7 @@ existing verbs; everything is additive.
 - **Join failures** burn or release the invite per the existing state machine (transport
   §5.4); nothing half-joined exists (admission is a single member-row write).
 - **Relay supervision failure** leaves the tree installed but the relay unfenced; the record
-  is FAILED with receipts, the badge offers "retry step 9".
+  is FAILED with receipts, the badge offers "retry step 8".
 - **Nothing on the Mac rolls back the node**; the reverse path is `lop network uninstall
   [--purge]` on the node (exists; §6 CLI table of the spine) plus the member `rm` rotation.
 

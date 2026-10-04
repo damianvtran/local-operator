@@ -464,7 +464,7 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
 #: ``mesh-remote-onboarding.md`` §2.8) and no wire op can write another device's
 #: copy — so the blanket admin requirement in
 #: :func:`relay.set_member_capabilities` left the deciding device itself unable to
-#: record a decision it had already made with its operator (§3.3 step 8 runs the
+#: record a decision it had already made with its operator (§3.3 step 9 runs the
 #: grant on the node). Every capability outside this set keeps the admin-only
 #: write rule; ``broker_credential`` and the role caps explicitly.
 SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended"})

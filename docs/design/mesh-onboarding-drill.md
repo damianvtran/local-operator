@@ -47,7 +47,7 @@ from memory; the note and the PRs are the references.
 2. File the request (slice (a)): `lop network approvals request --host 99.79.190.164 --json`
    → card appears; operator approves (Touch ID).
 3. Execute: `lop network approvals run <approval_id> --json` (or the desktop's Run).
-   Expected receipts, in order: `invite, pre_read, install, join, anchor, grants, relay, verify`.
+   Expected receipts, in order: `invite, pre_read, install, join, anchor, relay, grants, verify`.
    - `pre_read` = step zero: OS/arch, lop version, uv, systemctl, linger, sudo, anchor path.
      A contradiction HALTS: record `failed`, fresh card — do not proceed on the wrong facts.
    - `install`: `lop-update <tag>` (build present) or `uv tool install local-operator==<tag>`.
@@ -61,9 +61,11 @@ from memory; the note and the PRs are the references.
      The human run block shows only the card's state. Test the join mechanism against a
      genuinely non-member target.
    - `anchor`: F4b trio re-derived locally; `install --from` lands the EXACT approved bytes.
-   - `grants`: node-side `member grant <net> <mac-id> approve unattended` per the card's ticks.
    - `relay`: install/start the systemd `--user` unit + linger; linger missing = caveat,
-     not a failure (OQ11).
+     not a failure (OQ11). Runs BEFORE `grants`: the restart also rolls a running relay
+     onto the new build, and the node's own relay executes the grant when one answers (a
+     pre-run relay's refusal does not fall back — F7b).
+   - `grants`: node-side `member grant <net> <mac-id> approve unattended` per the card's ticks.
    - `verify`: Mac-side `lop network ready --peer cloud-node-1 --json` is the acceptance
      surface; `doctor`/`peers` ride the same receipt. Only all-green folds to `connected`.
 4. Node-side spot checks (commands + outputs into the matrix):
