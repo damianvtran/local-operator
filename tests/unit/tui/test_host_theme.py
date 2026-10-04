@@ -35,6 +35,14 @@ _NOT_PER_PALETTE_CHECKS = frozenset(
         # palette's quiet chip for this ground is the design stream's call.
         # The `[live]` chip pin DOES take a theme (its ink is derived per ramp).
         "test_the_missing_chip_ink_clears_aa_on_the_card_ground",
+        # The legend pin (D3 of #1944's design round) is the same brand-ramps
+        # shape: it loops `dark`/`light` itself, because the card's copy claim
+        # was measured on the brand ramps and a host-derived ramp is free to
+        # trade `muted`-on-`overlay` below the floor while its own calibrated
+        # per-ramp floors still hold (measured: 13 asserts, CI shard 0 on
+        # #1984). Re-flooring derived ramps for one card's ground is the
+        # design stream's call, not a coder's.
+        "test_the_legend_card_reads_on_its_ground",
     }
 )
 _PALETTE_CHECKS = [
