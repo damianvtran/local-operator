@@ -13190,6 +13190,9 @@ async def execute_send(
     # Substring matches the EXACT tier passed over, so the receipt can say how
     # many. Mirrors ``skipped`` exactly (same helper-shape, same print site).
     exact_ignored: list[Any] = []
+    # The RANK the exact tier matched (``name`` / ``session id`` / ``cwd
+    # basename``), so the receipt names that field rather than always "name".
+    exact_field: list[str] = []
     # The role vocabulary is read OFF the loop (it walks the teams tree) and
     # handed to the resolver, which refuses a team role word as an address.
     role_words = await asyncio.to_thread(_role_words, context)
@@ -13201,6 +13204,7 @@ async def execute_send(
         skipped=skipped,
         role_words=role_words,
         exact_ignored=exact_ignored,
+        exact_field=exact_field,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -13404,7 +13408,7 @@ async def execute_send(
                 context, requested_ms=patience_ms, target_ref=target_ref
             )
         clause += skipped_clause(skipped)
-        clause += exact_ignored_clause(len(exact_ignored))
+        clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
     return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)

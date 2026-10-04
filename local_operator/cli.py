@@ -4016,6 +4016,7 @@ def _resolve_peer_target(
     *,
     skipped: "list[Any] | None" = None,
     exact_ignored: "list[Any] | None" = None,
+    exact_field: "list[str] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a ``lop send`` target to one live SessionRecord.
 
@@ -4037,7 +4038,8 @@ def _resolve_peer_target(
     reports how many name-matches were held back for being unengaged, and no
     other caller (the stop path) has a receipt to qualify. ``exact_ignored``
     rides the same out-parameter channel for the substring matches the exact
-    tier passed over.
+    tier passed over, and ``exact_field`` names the rank it matched so the
+    receipt does not always claim "name".
     """
     from local_operator.mobile.peer_send import resolve_peer_target
 
@@ -4052,6 +4054,7 @@ def _resolve_peer_target(
         skipped=skipped,
         role_words=_role_words(),
         exact_ignored=exact_ignored,
+        exact_field=exact_field,
     )
 
 
@@ -4142,8 +4145,11 @@ def send_command(args: argparse.Namespace) -> int:
     # matched it exactly, so the rows that merely contained it must not vanish
     # silently. Always empty for the exact and stop paths.
     exact_ignored: list[Any] = []
+    # The RANK the exact tier matched, so the receipt names the field (``name``
+    # / ``session id`` / ``cwd basename``) instead of always "name".
+    exact_field: list[str] = []
     record, candidates, error = _resolve_peer_target(
-        args, target, skipped=skipped, exact_ignored=exact_ignored
+        args, target, skipped=skipped, exact_ignored=exact_ignored, exact_field=exact_field
     )
     if candidates:
         # "REPLACE the target with", not "add --pid": appending the flag to the
@@ -4221,7 +4227,12 @@ def send_command(args: argparse.Namespace) -> int:
         )
 
         stored_id, stored_candidates, stored_error = resolve_stored_target(
-            target, role_words=_role_words()
+            target,
+            role_words=_role_words(),
+            # The CLI's own retype grammar, so a stored role refusal says
+            # ``--pid``/``--session`` like the live one (review round 1, NIT-1).
+            pid_hint="--pid",
+            session_hint="--session",
         )
         # ``stored_error`` is read here, unlike a plain no-match (which returns
         # "" by contract): a row that ANSWERED to the name but was withheld for
@@ -4325,7 +4336,7 @@ def send_command(args: argparse.Namespace) -> int:
     else:
         target = f"{cold_session_id} (not running)"
     clause = skipped_clause(skipped)
-    clause += exact_ignored_clause(len(exact_ignored))
+    clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.state == DELIVERY_MAILBOX:
         # EACH STREAM CARRIES ITS OWN HALF (UX round 1 N1, corrected in round 2:
         # printing the WHOLE receipt on stdout and the advisory on stderr still
