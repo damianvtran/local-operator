@@ -1467,6 +1467,67 @@ def test_a_failed_non_gating_row_reads_warn_named_and_not_fatal() -> None:
     assert readiness.non_gating_clause({**mcp, "ok": True}) == ""
 
 
+def test_the_row_state_register_is_one_cell_for_scanners_and_readers() -> None:
+    """F8 residual: the row carries its own state, on every surface.
+
+    ``ready --json`` is the drill's acceptance surface and a reader there scans
+    ROWS, not the aggregate — so the non-gating classification must be visible
+    ON the row: one cell, the same register the human column prints, so a
+    row-scanner can tell ``warn`` from ``FAIL`` without re-reading the fold.
+    The counter-probe: the classification forced away reddens the same cell.
+    """
+    ok_row = {
+        "check": "readiness",
+        "capability": "git_identity",
+        "class": "equipment",
+        "ok": True,
+    }
+    scoped = _reach_row("172.20.0.246:4097", "no_answer", ok=False, detail="no_answer")
+    readiness.mark_out_of_scope([scoped], ["10.9.0.5"])
+    mcp = {
+        "check": "readiness",
+        "capability": "mcp_credential",
+        "class": "equipment",
+        "device_name": "slack",
+        "ok": False,
+        "detail": "this device has no MCP login for https://mcp.slack.com/mcp; sign in here first",
+    }
+    gating = {
+        "check": "readiness",
+        "capability": "operator_authority",
+        "class": "equipment",
+        "device_name": "cloud-node-1",
+        "ok": False,
+        "detail": "no operator authority is installed on cloud-node-1",
+    }
+    admission = {
+        "check": "reachability",
+        "class": "admission",
+        "ok": False,
+        "detail": "no_answer",
+    }
+    for row, state in (
+        (ok_row, readiness.ROW_STATE_OK),
+        (scoped, readiness.ROW_STATE_NOT_APPLICABLE),
+        (mcp, readiness.ROW_STATE_WARN),
+        (gating, readiness.ROW_STATE_FAIL),
+        (admission, readiness.ROW_STATE_FAIL),
+    ):
+        assert readiness.row_state(row) == state
+        # ONE register: the human column and the machine cell are the same
+        # token (the renderer pads ``ok``/``n/a`` for its column, nothing more).
+        column = readiness.render_check_lines([row])[0].split(" ", 1)[0]
+        assert column == state
+
+    # COUNTER-PROBE: force the row back to failure-shaped — with the non-gating
+    # classification gone, the SAME facts must redden.
+    forced = {**mcp, "class": ""}
+    assert readiness.row_state(forced) == readiness.ROW_STATE_FAIL
+    assert readiness.render_check_lines([forced])[0].startswith("FAIL readiness mcp_credential")
+    # The reading never rewrites the facts it reads.
+    assert mcp["ok"] is False and "state" not in mcp
+
+
 def test_the_scope_rule_reads_the_doctors_dialect_too() -> None:
     """Design round 1, D3: ONE semantics, TWO producers.
 
