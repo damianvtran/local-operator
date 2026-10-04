@@ -270,7 +270,7 @@ def begin_run(approval_id: str, *, now: float | None = None, root: Any = None) -
     one even if a rebase moves the writer.
 
     A ``connecting`` record goes through slice (a)'s reassessment: a run that
-    stopped reporting is superseded (new run id, an ``aborted`` receipt naming
+    stopped reporting is superseded (new run id, a ``superseded`` receipt naming
     the stopped run), a run that is still in flight refuses
     (``approval_run_in_flight``). The runner's own pid rides into the record's
     run LEASE, which is what the next staleness question is answered from —

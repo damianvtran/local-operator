@@ -11149,6 +11149,38 @@ def _supervision_unit_present() -> bool:
     return False
 
 
+def _serving_relay_kind(record_pid: int | None) -> str | None:
+    """What the SERVING relay verifiably is: ``"service"``, ``"manual"``, None.
+
+    Round-2 D6: unit-file presence (``installed``) is NOT a fact about the process
+    answering on the port, and the two come apart in the drill's own state —
+    ``_install_systemd`` leaves its unit file when a start fails on a bind
+    conflict, ``stop`` leaves it, and a hand-started ``lop network serve`` then
+    serves :4097 while ``installed`` reads true. So the kind is established from
+    the serving process itself (:func:`_supervision_unit_present` remains the
+    display/install fact), and anything unproven answers None — the caller then
+    prints only what is true of every relay:
+
+    * ``"service"`` — the supervisor reports THIS pid as its own process, the
+      same equality :func:`_answers_as_service` trusts;
+    * ``"manual"`` — the command line is the foreground ``serve`` shape, which no
+      unit of this product runs (the installer's units run
+      ``-m local_operator.network.relay``), so the service cannot be what started
+      it — the drill node's exact state;
+    * ``None`` — anything else: a module-form relay whose supervisor pid cannot
+      be read, or an unreadable command line. Nothing is claimed about the kind.
+    """
+    if not record_pid:
+        return None
+    managed = _managed_service_pid()
+    if managed is not None and managed == record_pid:
+        return "service"
+    cmdline = _pid_cmdline(record_pid)
+    if "network serve" in cmdline and "local_operator.network.relay" not in cmdline:
+        return "manual"
+    return None
+
+
 def _port_holder_pids(port: int) -> list[int]:
     """PIDs LISTENING on ``port``, best-effort, through the platform's own tool.
 
@@ -11427,8 +11459,8 @@ def _supervised_action(
                 continue
             outcome = _stop_manual_holder(holder)
             if outcome not in ("stopped", "gone"):
-                return _adoption_refusal(action, port, holder, outcome)
-            replaced.append(holder)
+                return _adoption_refusal(action, port, holder, outcome, replaced)
+            replaced.append({**holder, "outcome": outcome})
     result = arm(action)
     if not result.get("ok"):
         return _service_failure(action, port, result, replaced=replaced)
@@ -11437,51 +11469,75 @@ def _supervised_action(
         return _with_replaced_note(verdict, replaced)
     final = dict(result)
     if replaced:
-        final.setdefault("steps", [])
+        steps = list(final.get("steps") or [])
         for holder in replaced:
-            final["steps"] = [
-                *final.get("steps", []),
-                f"stopped the hand-started relay (pid {holder['pid']}) so the service owns :{port}",
-            ]
+            if holder.get("outcome") == "gone":
+                # NIT-2: nothing was signalled — say so, rather than "stopped".
+                steps.append(f"the hand-started relay (pid {holder['pid']}) was already gone")
+            else:
+                steps.append(
+                    f"stopped the hand-started relay (pid {holder['pid']}) so the service "
+                    f"owns :{port}"
+                )
+        final["steps"] = steps
     return final
 
 
 def _adoption_refusal(
-    action: str, port: int, holder: Mapping[str, Any], outcome: str
+    action: str,
+    port: int,
+    holder: Mapping[str, Any],
+    outcome: str,
+    replaced: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """The refusal for an adoption the flow would not complete.
 
     Every branch says what was and was not done, and none repeats the holder's
     kind inside its own gloss (round-1 D2): the id clause is ``pid N ('…')``
-    and the kind is named at most once, by the sentence itself.
+    and the kind is named at most once, by the sentence itself. And a refusal
+    that follows an EARLIER adoption on the same pass says that relay was
+    stopped (round-2 MINOR-1): "nothing was changed" is only true when nothing
+    was. (:func:`_with_replaced_note`'s tail — "the service command that
+    followed did not complete" — is false on this path: the arm never ran.)
     """
     ids = _holder_ids(holder)
+    if replaced:
+        context = (
+            "The hand-started relay (pid "
+            + ", ".join(str(h.get("pid")) for h in replaced)
+            + ") was stopped first by this command."
+        )
+    else:
+        context = "Nothing was changed."
     if outcome == "unverified":
         error = (
             f"`lop network {action}` did not take :{port}: {ids} could not be verified "
             "as this install's relay — its command line did not match on a fresh read — "
-            "and a pid is not an identity, so it was not signalled. Nothing was changed: "
-            "check `lop network status` and retry, or stop that process yourself."
+            f"and a pid is not an identity, so it was not signalled. {context} Check "
+            "`lop network status` and retry, or stop that process yourself."
         )
     elif outcome == "refused":
         error = (
             f"`lop network {action}` did not take :{port}: the relay on it is {ids}, and "
-            "the signal was refused — it is not this user's process to stop. Nothing was "
-            "changed; stop it at the level that owns it, or leave it and retry."
+            "the signal was refused — it is not this user's process to stop. "
+            f"{context} Stop it at the level that owns it, or leave it and retry."
         )
     else:  # stubborn
         error = (
             f"`lop network {action}` could not take :{port}: {ids} — a relay this device "
-            "started by hand — was signalled and did not stop; nothing else was changed. "
-            "Stop that process and retry, or run the relay in the foreground instead."
+            f"started by hand — was signalled and did not stop. {context} Stop that "
+            "process and retry, or run the relay in the foreground instead."
         )
-    return {
+    result: dict[str, Any] = {
         "ok": False,
         "action": action,
         "reason": "port_held",
         "holder": dict(holder),
         "error": error,
     }
+    if replaced:
+        result["stopped"] = [int(h.get("pid") or 0) for h in replaced]
+    return result
 
 
 def _stopped_note(replaced: Sequence[Mapping[str, Any]]) -> str:
@@ -11490,13 +11546,21 @@ def _stopped_note(replaced: Sequence[Mapping[str, Any]]) -> str:
     Round-1 MINOR-2: ``replaced`` rode only into the success path, so an arm
     that failed after the operator's hand-started relay was stopped told them
     nothing about it — and "nothing of yours is serving :port now" is exactly
-    what they need to know before retrying.
+    what they need to know before retrying. Round-2 NIT-2: a holder that was
+    ALREADY GONE when the loop reached it was not signalled, and is labelled
+    as such rather than folded into "was stopped first".
     """
-    pids = ", ".join(str(h.get("pid")) for h in replaced)
-    return (
-        f"the hand-started relay (pid {pids}) was stopped first and is not serving any "
-        "more; the service command that followed did not complete"
-    )
+    stopped = [str(h.get("pid")) for h in replaced if h.get("outcome") != "gone"]
+    gone = [str(h.get("pid")) for h in replaced if h.get("outcome") == "gone"]
+    fragments = []
+    if stopped:
+        fragments.append(
+            f"the hand-started relay (pid {', '.join(stopped)}) was stopped first and is "
+            "not serving any more"
+        )
+    if gone:
+        fragments.append(f"the hand-started relay (pid {', '.join(gone)}) was already gone")
+    return "; ".join(fragments) + "; the service command that followed did not complete"
 
 
 def _with_replaced_note(
@@ -11822,6 +11886,10 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
         "relay_running": running,
         "relay_answering": live is not None,
         "relay_state": state if running else "stopped",
+        # WHOSE PROCESS IS ANSWERING — verified from the process itself, never
+        # inferred from the unit file (round-2 D6; see _serving_relay_kind for
+        # the states and their proof).
+        "relay_served_by": _serving_relay_kind(record.pid if record is not None else None),
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,

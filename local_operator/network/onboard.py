@@ -800,18 +800,25 @@ def _relay_kind_note(status: dict[str, Any]) -> str:
     for ANY relay, but a supervised one restarts back onto the same served set —
     the relay serves ``store.list_networks()``, and a failed handshake never
     writes the join target's membership — so nothing about a restart clears the
-    join failure in EITHER case. This note therefore says what is true per
-    kind and never promises the restart fixes the join. The kind signal is the
-    presence of this platform's supervisor unit (``status['installed']``,
-    platform-aware since the same round: it used to be the launchd plist
-    unconditionally, which read ``false`` on every Linux host).
+    join failure in EITHER case. This note says what is true per kind and never
+    promises the restart fixes the join.
+
+    Round-2 D6: the kind reads ``status['relay_served_by']`` — the probe's
+    VERIFIED reading of the serving process (:func:`relay._serving_relay_kind`:
+    the supervisor's own pid, or the foreground ``serve`` shape that no unit of
+    this product runs) — and NEVER unit-file presence: a unit file can exist
+    while a hand-started relay serves the port (the drill node's exact state —
+    the arm's failed install left the file, ``stop`` leaves it), and calling
+    that process "the service's own" was the round-1 copy's one unverified
+    claim. The second clause — a restart cannot change what the relay serves —
+    is true in every case and is always printed; an unproven kind gets only it.
     """
-    installed = status.get("installed")
-    if installed is True:
+    kind = status.get("relay_served_by")
+    if kind == "service":
         return (
             "That relay is the service's own, and restarting it would not change what " "it serves."
         )
-    if installed is False:
+    if kind == "manual":
         return (
             "That relay was started by hand, not by the service — `lop network restart` "
             "replaces it with the service's own relay — and neither changes what the "
@@ -1418,16 +1425,20 @@ class OnboardRun:
                     #
                     # WHAT THE SERVING RELAY SERVES DECIDES THE SENTENCE (drill
                     # decision, 2026-10-04 — "join ADOPTS a relay already serving
-                    # the SAME network; a DIFFERENT one refuses with cause"), AND
-                    # ROUND 1 SHARPENED EVERY BRANCH TO SAY ONLY WHAT IS TRUE
-                    # (D1/D3/D4/Q-1): a relay serves a network only once a join
-                    # completes — membership is written by a successful pairing —
-                    # so a restart never clears a join failure in ANY branch. The
-                    # same-network branch must not imply the relay is a problem;
-                    # the other two must not prescribe a restart as the fix; and
-                    # with no usable target the probe must not claim a
-                    # comparison it could not make. Each branch ends on the next
-                    # move instead: retry once the cause the node reported is
+                    # the SAME network; a DIFFERENT one refuses with cause").
+                    # Round 1 sharpened every branch to say only what is true
+                    # (D1/D3/D4/Q-1): a restart never clears a join failure in
+                    # ANY branch, no branch prescribes it as the fix, and with no
+                    # usable target the probe claims no comparison. Round 2
+                    # closed the three claims left in these same sentences: the
+                    # EMPTY served list is its own branch (D7 — an answering
+                    # relay that lists nothing TOLD the probe that, it is the
+                    # ordinary fresh-device shape), the "once a join completes"
+                    # claim is scoped to the join target (D8 — `lop network init`
+                    # puts a network in the store with no join at all), and the
+                    # kind note reads the probe's verified `relay_served_by`,
+                    # never unit-file presence (D6). Each branch still ends on
+                    # the next move: retry once the cause the node reported is
                     # cleared.
                     same_network = bool(target) and any(
                         (target[0] and row["network_id"] == target[0])
@@ -1460,8 +1471,23 @@ class OnboardRun:
                         names = names or "a different network"
                         detail = (
                             f"a relay is already serving :{live_port} on {where}, but it does "
-                            f"not serve {label} — it serves {names} instead; a relay serves a "
-                            f"network only once a join completes, so it is not the cause of "
+                            f"not serve {label} — it serves {names} instead; the network this "
+                            f"join is for can appear there only after a completed join, so the "
+                            f"relay is not the cause of this failure ({embedded}). "
+                            f"{_relay_kind_note(status)} Retry the join once the cause in the "
+                            "node's message is cleared"
+                        )
+                        data["relay_serving"] = True
+                        data["relay_port"] = live_port
+                        data["relay_serves_target"] = False
+                    elif target is not None and status.get("networks") == []:
+                        # D7: the probe DID tell here — the relay answered and
+                        # lists no network at all (the ordinary fresh-device
+                        # shape). It certainly does not serve the target.
+                        detail = (
+                            f"a relay is already serving :{live_port} on {where}, and it serves "
+                            f"no network yet; the network this join is for can appear there "
+                            f"only after a completed join, so the relay is not the cause of "
                             f"this failure ({embedded}). {_relay_kind_note(status)} Retry the "
                             "join once the cause in the node's message is cleared"
                         )
@@ -1472,16 +1498,18 @@ class OnboardRun:
                         # Q-1: with NO usable target (no payload ids, undecodable
                         # token) the probe cannot compare anything — it must not
                         # render the different-network sentence or claim a
-                        # ``relay_serves_target`` it never determined. "Cannot
-                        # tell" stays "cannot tell", the fallback the token's own
-                        # contract promises.
+                        # ``relay_serves_target`` it never determined. It says it
+                        # could not MATCH the relay to the join's network (D7's
+                        # wording: the honest failure of the comparison, not an
+                        # overclaim in either direction), and writes no target
+                        # field.
                         detail = (
                             f"a relay is already serving :{live_port} on {where} (its own "
                             "listener — a different address from any endpoint the join's "
-                            "refusal names), and this probe could not tell whether it serves "
-                            f"the network this join is for, so it cannot be cleared as the "
-                            f"cause ({embedded}). {_relay_kind_note(status)} Retry the join "
-                            "once the cause in the node's message is cleared"
+                            "refusal names), and this probe could not match it to the network "
+                            f"this join is for, so it cannot be cleared as the cause "
+                            f"({embedded}). {_relay_kind_note(status)} Retry the join once the "
+                            "cause in the node's message is cleared"
                         )
                         data["relay_serving"] = True
                         data["relay_port"] = live_port

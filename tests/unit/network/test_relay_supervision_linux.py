@@ -150,7 +150,7 @@ def _pin_supervision(
     record: Any = None,
     answering: bool = True,
     cmdline: Any = None,
-    stop_outcome: str = "stopped",
+    stop_outcome: str | list[str] = "stopped",
     stop_stub: bool = True,
     stop_calls: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -182,6 +182,8 @@ def _pin_supervision(
     def _fake_stop(holder: dict[str, Any], timeout: float = 8.0) -> str:
         if stop_calls is not None:
             stop_calls.append(dict(holder))
+        if isinstance(stop_outcome, list):
+            return stop_outcome.pop(0) if stop_outcome else "stubborn"
         return stop_outcome
 
     monkeypatch.setattr(relay, "_stop_manual_holder", _fake_stop)
@@ -602,3 +604,120 @@ def test_a_failed_arm_says_the_hand_started_relay_was_already_stopped(
     assert "was stopped first" in result["error"], result["error"]
     assert "pid 333612" in result["error"]
     assert result.get("stopped") == [333612], result
+
+
+def test_a_refusal_after_an_earlier_adoption_reports_the_stop(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 MINOR-1: holder A is adopted (stopped), holder B then fails —
+    the refusal must say A was stopped and carry ``stopped``; "Nothing was
+    changed" is only true when nothing was."""
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _no_systemctl(monkeypatch)
+    _pin_supervision(
+        monkeypatch,
+        managed=None,
+        holder_pids=(111, 222),
+        record=None,
+        stop_outcome=["stopped", "stubborn"],
+    )
+
+    result = relay.service_action("restart")
+
+    assert result["ok"] is False, result
+    assert result["reason"] == "port_held"
+    assert "Nothing was changed" not in result["error"], result["error"]
+    assert "was stopped first by this command" in result["error"]
+    assert "did not stop" in result["error"]
+    assert "pid 111" in result["error"]
+    assert "pid 222" in result["error"]
+    assert result.get("stopped") == [111], result
+
+
+def test_a_gone_holder_is_labelled_gone_not_stopped(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 NIT-2: a holder that had already exited when the loop reached it
+    was not signalled — the report says "already gone", not "stopped"."""
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+
+    def _fake_install(port: int, *, dry_run: bool = False) -> dict[str, Any]:
+        return {"ok": True, "steps": ["installed"]}
+
+    monkeypatch.setattr(relay, "_install_systemd", _fake_install)
+    _no_systemctl(monkeypatch)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(None, 9001),
+        holder_pids=(333612,),
+        record=_RelayRecordScript(333612, 9001),
+        stop_outcome="gone",
+    )
+
+    result = relay.service_action("restart")
+
+    assert result["ok"] is True, result
+    assert any("was already gone" in step for step in result.get("steps", [])), result
+    assert not any(
+        "stopped the hand-started relay" in step for step in result.get("steps", [])
+    ), result
+
+
+def test_status_installed_and_served_by_follow_the_facts(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 MINOR-2 + D6: ``status()`` reports ``installed`` from THIS
+    platform's unit file (a revert to launchd-only would read false under the
+    linux fixture), and ``relay_served_by`` from the SERVING PROCESS — the drill
+    node's exact state is a unit file that EXISTS while a hand-started
+    ``lop network serve`` holds :4097, and the file must not be what names the
+    kind. A module-form relay whose supervisor pid cannot be read stays None."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(relay, "is_supported", lambda: True)
+    record = SimpleNamespace(pid=9001, to_json=lambda: {"pid": 9001})
+
+    def _pin_status_record() -> None:
+        monkeypatch.setattr(relay.store, "scan_own_relay", lambda root=None: (record, "live"))
+
+    # The unit file half: written → installed true; removed → false.
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    _pin_supervision(monkeypatch, managed=None, cmdline=lambda pid: "/srv/lop network serve")
+    _pin_status_record()
+    first = relay.status()
+    assert first["installed"] is True, first
+    # THE NODE'S STATE: the file exists AND the kind is the process's — the
+    # foreground serve shape no unit of this product runs.
+    assert first["relay_served_by"] == "manual", first
+
+    unit.unlink()
+    assert relay.status()["installed"] is False
+
+    # The verified service case: the supervisor reports THIS pid as its own.
+    _pin_supervision(
+        monkeypatch,
+        managed=9001,
+        cmdline=lambda pid: "/usr/bin/python -m local_operator.network.relay --port 4097",
+    )
+    _pin_status_record()
+    assert relay.status()["relay_served_by"] == "service"
+
+    # A module-form relay whose supervisor pid cannot be read: no claim.
+    _pin_supervision(
+        monkeypatch,
+        managed=None,
+        cmdline=lambda pid: "/usr/bin/python -m local_operator.network.relay --port 4097",
+    )
+    _pin_status_record()
+    assert relay.status()["relay_served_by"] is None
+
+    # The darwin branch of the same fact, read from ITS unit path.
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    plist = relay.plist_path()
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text("(plist)\n", encoding="utf-8")
+    assert relay.status()["installed"] is True
+    plist.unlink()
+    assert relay.status()["installed"] is False
