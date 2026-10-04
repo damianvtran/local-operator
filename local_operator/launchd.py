@@ -223,8 +223,9 @@ class PlistRefresh:
     each uses the one that belongs to it.
 
     ``consequence`` is the one clause a daemon's repair site adds about what the
-    operator may NOTICE, and only the tunnel has one to give: its restart is the
-    only one of the four a person can feel (remote access). It rides on the outcome
+    operator may NOTICE, and only the tunnel and the network relay have one to
+    give: theirs are the restarts a person can feel (remote access; the mesh —
+    the relay joined the roll on 2026-10-04, design round 1, D1). It rides on the outcome
     rather than in the shared sentence because it is per-daemon knowledge — the
     repair site knows it and the shared template cannot — and it is deliberately
     absent for a restart that could not be confirmed
@@ -278,14 +279,14 @@ class PlistRefresh:
         the stop was invisible (2026-09-27: ~12 hours down, five upgrades, no
         line). It carries the same discipline as ``restarted``: the confirmation
         proves a new PROCESS came up, never that everything is well, and the
-        clause is the caller's. 78 columns with the tunnel's clause, so it is
-        still one row at 80.
+        clause is the caller's. 78 columns with the tunnel's clause and 77 with
+        the relay's, so each is still one row at 80.
 
         THE CONSEQUENCE CLAUSE DISPLACES THE GENERATION ID (round 2 ruling), rather
         than following it: following it put this line at 119 columns, which re-opened
         the width D2 had just closed, and the id is the one span a reader who has not
         read this module cannot decode — whether it is even actionable is the ruling's
-        business, not this function's. The three daemons with no clause keep the tail,
+        business, not this function's. The daemons with no clause keep the tail,
         so a block in which one of them moved still carries provenance on screen.
         """
         if self.kind == "repaired":

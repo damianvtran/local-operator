@@ -1761,6 +1761,25 @@ def _stamp_at(root: Path) -> BuildStamp | None:
     return BuildStamp(version=found.version, source_ref=source_ref(root))
 
 
+def generation_version(generation: Path | None) -> str:
+    """The distribution version INSIDE one generation tree, or ``""``.
+
+    THE VERSION HALF OF "which build is this" (design review round 1, D3/D4):
+    the human surfaces name a build the way a person reads one — the version,
+    the same string ``lop --version`` prints — while the generation NAME stays
+    in ``--json`` as provenance. Read by name out of the tree's own
+    ``site-packages`` (:func:`_distribution_at`), never by importing, so it
+    answers for the generation the POINTER names and for the one a running
+    process was exec'd from alike, and ``""`` is the honest answer for a tree
+    that was pruned or never carried a distribution — callers then fall back
+    to the generation name, which is still true provenance.
+    """
+    if generation is None:
+        return ""
+    found = _distribution_at(_generation_install_root(generation))
+    return found.version if found is not None else ""
+
+
 def disk_build(root: str | Path | None = None) -> BuildStamp | None:
     """The build a FRESH ``lop`` would load, or ``None`` when there is none.
 

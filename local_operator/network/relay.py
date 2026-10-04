@@ -10155,7 +10155,13 @@ class RelayServer:
             # local fallback reports the same key with the same three states, and
             # it used to hardcode "not running" next to a machine whose relay was
             # demonstrably up (QA round 2, Q-R2-6).
-            "relay": f"running, pid {os.getpid()}",
+            # AND IT NAMES THE BUILD IT RUNS (design round 1, D5): the drill's
+            # answering-but-stale shape must not get a clean bill here either, so
+            # the sentence carries the same clause the CLI's fallback does, read
+            # from this process's own image path.
+            "relay": (
+                f"running, pid {os.getpid()}" + generation_clause(generation_reading(os.getpid()))
+            ),
             "epochs": {row.network_id: row.epoch for row in store.list_networks(self.root)},
         }
 
@@ -10828,12 +10834,17 @@ def refresh_plist_if_stale() -> Any:
             # shim, so its content is byte-identical across generations while a
             # relay started from an older one keeps serving it. See
             # :func:`launchd.restart_if_build_moved`.
+            # THE MESH BLIP REACHES THE OPERATOR (design round 1, D1): the roll
+            # moves a process people can feel — a peer's link drops for a
+            # moment — and the update's own summary is where they learn why.
+            # One row at 77 columns with this clause.
             return launchd.restart_if_build_moved(
                 name=name,
                 label=LABEL,
                 path=path,
                 recovery="lop network install",
                 run=_launchctl,
+                consequence="expect a brief mesh blip",
             )
         if outcome.kind != "repaired":
             return outcome
@@ -12010,7 +12021,7 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
     including the old ones the drill found — a relay cannot be asked to report a
     field it was never built to send, and this needs no cooperation.
 
-    THREE FACTS, from the two shipped readers, so this surface and the repair
+    THE FACTS, from the two shipped readers, so this surface and the repair
     cannot drift about what "older" means:
 
     * ``relay_generation`` — the generation NAME the process was exec'd from.
@@ -12023,7 +12034,12 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
       running build is not the installed one. The direction rule holds here as
       it does at the repair (a missed flag leaves a relay where it is, while a
       wrong one sends an operator to restart a healthy relay), so an unreadable
-      probe answers False and never True.
+      probe answers False and never True;
+    * ``relay_build`` / ``installed_build`` — the VERSION inside each tree
+      (:func:`local_operator.update.generation_version`), which the human
+      surfaces read in place of the ids (design round 1, D3/D4). ``None`` when
+      a tree was pruned or never carried a distribution; the renderer then
+      keeps the generation name, which is still true provenance.
 
     Never raises, and never spends a probe on a machine without the layout —
     this decorates a diagnostic, and a pip/pipx install (no pointer, no
@@ -12033,6 +12049,8 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
         "relay_generation": None,
         "installed_generation": None,
         "relay_generation_stale": False,
+        "relay_build": None,
+        "installed_build": None,
     }
     try:
         from local_operator import update
@@ -12040,16 +12058,63 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
         current = update.current_generation()
         if current is not None:
             reading["installed_generation"] = current.name
+            reading["installed_build"] = update.generation_version(current) or None
             if isinstance(pid, int):
                 running = update.generation_of_process(pid)
                 if running is not None:
                     reading["relay_generation"] = running.name
+                    reading["relay_build"] = update.generation_version(running) or None
                 reading["relay_generation_stale"] = (
                     update.stale_generation_of_process(pid) is not None
                 )
     except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
         pass
     return reading
+
+
+def generation_words(facts: Mapping[str, Any]) -> str:
+    """The build words every surface renders — ONE spelling (design round 1, D2).
+
+    THE REGISTER IS THE FAMILY'S (design round 1, D3/D4): the word "build", a
+    version for the value (the generation id reads as noise outside this module
+    and rides ``--json`` as provenance), and the ``behind X`` + ``run Y`` shape
+    :func:`local_operator.network.readiness.build_suffix` already prints. The id
+    is also the fallback for the one corner a version cannot be read out of — a
+    pruned tree whose process still runs, which is the drill's own incident —
+    because dropping it there would leave the row saying nothing.
+
+    ``""`` when there is no generation layout (the question cannot exist),
+    ``"not reported"`` where one exists and the running build could not be read
+    (silence would read as healthy), the bare version when current, and the
+    flagged form when the reading proves the move. The same-build-into-a-newer-
+    generation case reads "behind the install" rather than a version pair that
+    says nothing against itself (the flag is still true — the tree moved).
+
+    WIDTHS: every rendered form is ≤80 columns with the sentence-shaped
+    ``running, pid N, `` prefix included, so the remedy never wraps.
+    """
+    name = facts.get("relay_generation")
+    installed = facts.get("installed_generation")
+    if not isinstance(name, str) or not name:
+        return "not reported" if installed else ""
+    running = facts.get("relay_build") or name
+    own = facts.get("installed_build") or installed or ""
+    if not facts.get("relay_generation_stale"):
+        return str(running)
+    where = f"behind {own}" if (own and own != running) else "behind the install"
+    return f"{running} — {where}; run `lop network restart`"
+
+
+def generation_clause(facts: Mapping[str, Any]) -> str:
+    """The words above as a sentence clause — ``, build …`` — or ``""``.
+
+    The fragment-shaped sibling (doctor, ready, the relay's own doctor): their
+    sentences print ``running, pid N``, and this appends the same words
+    :func:`generation_words` gives the row, so no surface can describe a relay
+    a build behind without saying so (design round 1, D2/D5).
+    """
+    words = generation_words(facts)
+    return f", build {words}" if words else ""
 
 
 def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]:

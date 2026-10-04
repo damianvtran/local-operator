@@ -1558,14 +1558,17 @@ def _generation_status(
     installed: str | None,
     stale: bool,
     pid: int = 4711,
+    running_build: str = "0.61.12",
+    installed_build: str = "0.67.4",
 ) -> dict[str, Any]:
     """``relay.status()``'s payload, through the REAL reader and the real merge.
 
-    The three ``relay_generation*`` facts are produced by
-    ``relay.generation_reading`` inside a real ``relay.status()`` call, with the
-    update probes as the injected seam (``test_daemon_build_probe`` owns their
-    own reading), so these cells cannot keep passing against a payload that
-    stopped carrying the facts — the thing a hand-typed fixture would let happen.
+    The ``relay_generation*`` facts and their ``*_build`` versions are produced
+    by ``relay.generation_reading`` inside a real ``relay.status()`` call, with
+    the update probes and the version reader as the injected seams
+    (``test_daemon_build_probe`` owns their own readings), so these cells cannot
+    keep passing against a payload that stopped carrying the facts — the thing a
+    hand-typed fixture would let happen.
     """
     generations = root / "generations"
     monkeypatch.setattr(
@@ -1583,6 +1586,12 @@ def _generation_status(
         "stale_generation_of_process",
         (lambda _pid: generations / running) if (stale and running) else (lambda _pid: None),
     )
+    builds = {}
+    if installed:
+        builds[installed] = installed_build
+    if running:
+        builds[running] = running_build
+    monkeypatch.setattr(update_mod, "generation_version", lambda gen: builds.get(gen.name, ""))
     monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": pid})
     monkeypatch.setattr(store, "scan_own_relay", lambda *a, **k: (None, "stopped"))
     return relay.status(refresh=True)
@@ -1597,47 +1606,59 @@ def _render_status(
     return capsys.readouterr().out
 
 
-def test_the_status_block_names_the_running_relays_generation_when_it_matches(
+def test_the_status_block_names_the_running_relays_build_when_it_matches(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """F6, the matching cell: the row names the build, at the block's own column.
 
     The drill's first shape — the relay runs the generation ``current`` names —
-    is the state an operator should be able to READ and move on from: one
-    generation id, no flag. Off the diff this row does not exist, which is
-    exactly the defect: the block said ``running, pid N`` about a process nobody
-    could place.
+    is the state an operator should be able to READ and move on from: one build,
+    no flag. The value is the VERSION (design round 1, D3/D4: the generation id
+    rides ``--json``; human lines speak the family's register). Off the diff this
+    row does not exist, which is exactly the defect: the block said
+    ``running, pid N`` about a process nobody could place.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     gen = "20260924T103058Z-509c7450dbf6"
-    payload = _generation_status(root, monkeypatch, running=gen, installed=gen, stale=False)
+    payload = _generation_status(
+        root,
+        monkeypatch,
+        running=gen,
+        installed=gen,
+        stale=False,
+        running_build="0.67.6",
+        installed_build="0.67.6",
+    )
     out = _render_status(monkeypatch, payload, capsys)
-    assert f"generation: {gen}" in out, out
-    line = next(line for line in out.splitlines() if line.startswith("generation:"))
+    assert "build:      0.67.6" in out, out
+    line = next(line for line in out.splitlines() if line.startswith("build:"))
     # The same register as the rows above it: every value starts at cell 12.
-    assert line.index(gen) == 12, line
-    assert "older than" not in out, out
+    assert line.index("0.67.6") == 12, line
+    assert "behind" not in out, out
     assert "not reported" not in out, out
 
 
-def test_an_older_relays_generation_is_flagged_with_the_restart_remedy(
+def test_an_older_relays_build_is_flagged_with_the_restart_remedy(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F6, the cell the drill exists for: a relay a generation behind says so.
+    """F6, the cell the drill exists for: a relay a build behind says so.
 
     ``lop update`` leaves the relay on the generation it was started from when
     nothing moves it; the whole finding was that nothing said so. The flag and
-    the one-line remedy are pinned together, and the ``--json`` payload carries
-    the same three facts so an agent does not have to parse the sentence.
+    the one-line remedy are pinned together, the counterpart is NAMED (design
+    round 1, D4: only the generation-id form could not do both), the rendered
+    row is ≤80 columns, and the ``--json`` payload carries the same facts — ids
+    AND versions — so an agent does not have to parse the sentence.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     old = "20260921T125352Z-0.61.12"
     new = "20260924T103058Z-509c7450dbf6"
     payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
     out = _render_status(monkeypatch, payload, capsys)
-    assert (
-        f"generation: {old} — older than the installed generation; run `lop network restart`"
-    ) in out, out
+    expected = "build:      0.61.12 — behind 0.67.4; run `lop network restart`"
+    assert expected in out, out
+    line = next(line for line in out.splitlines() if line.startswith("build:"))
+    assert len(line) <= 80, line
 
     monkeypatch.setattr(relay, "status", lambda *a, **k: payload)
     assert net_cli._cmd_status(Namespace(json=True)) == 0  # noqa: SLF001
@@ -1645,6 +1666,34 @@ def test_an_older_relays_generation_is_flagged_with_the_restart_remedy(
     assert printed["relay_generation"] == old
     assert printed["installed_generation"] == new
     assert printed["relay_generation_stale"] is True
+    assert printed["relay_build"] == "0.61.12"
+    assert printed["installed_build"] == "0.67.4"
+
+
+def test_a_reinstalled_same_build_names_the_install_not_itself(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Design round 1, D3/D4's corner: same version, newer generation.
+
+    The flag is true (the tree moved — pruning can delete it under the running
+    process) while the version pair says nothing, so this form names the install
+    instead. It must not render the version against itself.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
+    payload = _generation_status(
+        root,
+        monkeypatch,
+        running=old,
+        installed=new,
+        stale=True,
+        running_build="0.67.6",
+        installed_build="0.67.6",
+    )
+    out = _render_status(monkeypatch, payload, capsys)
+    assert "build:      0.67.6 — behind the install; run `lop network restart`" in out, out
+    assert "behind 0.67.6" not in out, out
 
 
 def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exists(
@@ -1653,8 +1702,8 @@ def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exist
     """F6, the unknown cell: silence would read as healthy, so it must speak.
 
     Two different facts must not render the same. On a machine WITH a generation
-    layout whose running build cannot be read (an argv that names no generation,
-    a pointer being moved), the row says ``not reported``; on a machine with no
+    layout whose running build cannot be read (an argv that names no
+    generation), the row says ``not reported``; on a machine with no
     layout at all — a pip/pipx install, where the question cannot exist — there
     is no row, pinned by its own cell. Neither claims a move: the flag comes
     only from the shipped comparison, never from an absence.
@@ -1664,8 +1713,8 @@ def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exist
         root, monkeypatch, running=None, installed="20260924T103058Z-509c7450dbf6", stale=False
     )
     out = _render_status(monkeypatch, payload, capsys)
-    assert "generation: not reported" in out, out
-    assert "older than" not in out, out
+    assert "build:      not reported" in out, out
+    assert "behind" not in out, out
 
 
 def test_a_machine_without_generations_gets_no_generation_row(
@@ -1680,7 +1729,7 @@ def test_a_machine_without_generations_gets_no_generation_row(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     payload = _generation_status(root, monkeypatch, running=None, installed=None, stale=False)
     out = _render_status(monkeypatch, payload, capsys)
-    assert "generation:" not in out, out
+    assert "build:" not in out, out
     assert "relay:      running, pid 4711" in out, out
 
 
@@ -1703,13 +1752,21 @@ def test_a_just_restarted_relay_reads_current_on_the_next_status(
     # ``relay.status`` to one payload, and the second build has to go through the
     # real function for this to be the readback it claims to be.
     stale_payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
-    fresh_payload = _generation_status(root, monkeypatch, running=new, installed=new, stale=False)
+    fresh_payload = _generation_status(
+        root,
+        monkeypatch,
+        running=new,
+        installed=new,
+        stale=False,
+        running_build="0.67.6",
+        installed_build="0.67.6",
+    )
     out = _render_status(monkeypatch, stale_payload, capsys)
-    assert "older than the installed generation" in out, out
+    assert "build:      0.61.12 — behind 0.67.4; run `lop network restart`" in out, out
 
     out = _render_status(monkeypatch, fresh_payload, capsys)
-    assert f"generation: {new}" in out, out
-    assert "older than" not in out, out
+    assert "build:      0.67.6" in out, out
+    assert "behind" not in out, out
     assert "not reported" not in out, out
 
 
@@ -1724,19 +1781,64 @@ def test_the_doctor_fallback_names_the_running_build_where_it_can(
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
     generations = root / "generations"
     monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": 4711})
-    monkeypatch.setattr(
-        update_mod, "current_generation", lambda: generations / "20260924T103058Z-509c7450dbf6"
-    )
+    monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
     monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
     monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(
+        update_mod,
+        "generation_version",
+        lambda gen: {old: "0.61.12", new: "0.67.4"}.get(gen.name, ""),
+    )
     line, up = net_cli._relay_state()  # noqa: SLF001
     assert up is True
     assert line == (
-        f"running, pid 4711, generation {old} — older than the installed generation; "
-        "run `lop network restart`"
+        "running, pid 4711, build 0.61.12 — behind 0.67.4; run `lop network restart`"
     ), line
+    assert len(line) <= 80, line
+
+
+def test_a_wedged_relays_build_is_its_own_sentence_after_the_detail(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 1, D6: the wedged arm's remedy is not stranded mid-clause.
+
+    The composed sentence used to run the flag into the detail's tail ("…; run
+    `lop network restart`, and its control socket…"), so the remedy read as a
+    second thing to do. Detail first, the reading second, in its own sentence.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
+    generations = root / "generations"
+    monkeypatch.setattr(relay, "health", lambda *a, **k: None)
+    monkeypatch.setattr(
+        store, "scan_own_relay", lambda *a, **k: (SimpleNamespace(pid=4711), "wedged")
+    )
+    monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
+    monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(
+        update_mod,
+        "generation_version",
+        lambda gen: {old: "0.61.12", new: "0.67.4"}.get(gen.name, ""),
+    )
+    line, up = net_cli._relay_state()  # noqa: SLF001
+    assert up is True
+    assert line == (
+        "running (pid 4711), and its control socket did not answer this probe, and its "
+        "heartbeat has gone stale as well, so its owner is not reporting either. "
+        "Build 0.61.12 — behind 0.67.4; run `lop network restart`."
+    ), line
+    # The clause this round owns is the second sentence: one row at 80, remedy
+    # inside its own sentence (D6). The detail sentence predates this round
+    # (Q-R3-4) and is unchanged.
+    remedy_sentence = line.split(". ", 1)[1]
+    assert len(remedy_sentence) <= 80, remedy_sentence
 
 
 def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:

@@ -792,9 +792,13 @@ def test_the_network_relay_a_generation_behind_is_restarted_onto_the_new_build(
     assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
-        "network relay daemon: restarted onto the new build " "(was on 20260921T125352Z-0.61.12)"
-    ], captured.out
+    (line,) = [entry for entry in captured.out.splitlines() if "daemon:" in entry]
+    assert line == (
+        "network relay daemon: restarted onto the new build — expect a brief mesh blip"
+    ), captured.out
+    # The clause displaced the id (round 2 ruling) and the line is one row at 80:
+    # the operator watching the update is where the mesh blip must land (D1).
+    assert len(line) <= 80, line
 
 
 def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(

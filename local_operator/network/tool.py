@@ -676,7 +676,7 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
     silently the whole command output.
     """
     if action == "status":
-        from local_operator.network.relay import audit_status_words
+        from local_operator.network.relay import audit_status_words, generation_words
 
         relay = payload.get("relay") or {}
         # THE SAME THREE CASES THE CLI'S BLOCK HAS, from the same fields (Q-R3-4):
@@ -703,6 +703,15 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             f"identity:  {'present' if payload.get('identity_present') else 'missing'}",
             f"relay:     {relay_line}",
         ]
+        # THE RUNNING RELAY'S BUILD, at this register's own column (design round 1,
+        # D2): the CLI block's row in the same words (``relay.generation_words``).
+        # It matters MOST here: the digest is where "why is my session stuck"
+        # arrives, the parsed fields ride ``details`` (which never reaches a
+        # provider), and a relay a build behind that the model is never told
+        # about is the same silent-state defect one surface out.
+        build_words = generation_words(payload) if payload.get("relay_running") else ""
+        if build_words:
+            lines.append(f"build:     {build_words}")
         # THE SAME WORDS THE CLI AND THE PANEL PRINT, through the one renderer (design
         # round 3, D40), at this register's own column: every value here starts at cell
         # 11 (`installed: `, `identity:  `, `log:       `). It matters more here than on

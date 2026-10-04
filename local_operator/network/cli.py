@@ -5610,37 +5610,33 @@ def _status_membership_lines(row: dict[str, Any]) -> list[str]:
 
 
 def _generation_line(payload: Mapping[str, Any]) -> str:
-    """The ``generation:`` row for `status`, or ``""`` when there is nothing to say.
+    """The ``build:`` row for `status`, or ``""`` when there is nothing to say.
 
     THE HONESTY HALF OF THE DRILL'S FIX (2026-10-04, F6). An update moves the
     install onto a new generation and the relay keeps serving the build it was
     started from until something restarts it — three were found in one night,
     one 14 hours stale, and the relay is the one process whose protocol must
     match its peer's. Nothing on any surface said so; this row does, from the
-    same three ``relay_generation*`` facts ``--json`` carries.
+    same facts ``--json`` carries.
 
-    A MISSING READING IS TWO DIFFERENT THINGS, and they render differently: a
+    THE WORDS ARE THE FAMILY'S (design round 1, D3/D4): ``build``, a version for
+    the value (the generation id reads as noise outside this module and rides
+    ``--json`` as provenance), and the ``behind X`` + remedy shape
+    ``readiness.build_suffix`` already prints — every rendered form ≤80 columns
+    so the remedy never wraps. One missing reading is two different things: a
     machine with no generation layout at all (a pip/pipx install) cannot have
     this problem, so there is no row; a machine WITH a layout whose running
     build cannot be read says ``not reported`` rather than staying silent,
-    because silence here would read as a healthy relay. And the flag is never
-    guessed — ``relay_generation_stale`` is only True when the shipped probe
-    proves the build moved (see ``relay.generation_reading``), so this row can
-    send an operator to restart a relay only when the restart is warranted.
+    because silence would read as healthy. The flag is never guessed —
+    ``relay_generation_stale`` is only True when the shipped probe proves the
+    move — so the remedy appears only when the restart is warranted.
     """
+    from local_operator.network.relay import generation_words
+
     if not payload.get("relay_running"):
         return ""
-    name = payload.get("relay_generation")
-    if isinstance(name, str) and name:
-        if payload.get("relay_generation_stale"):
-            return (
-                f"generation: {name} — older than the installed generation; "
-                "run `lop network restart`"
-            )
-        return f"generation: {name}"
-    if payload.get("installed_generation"):
-        return "generation: not reported"
-    return ""
+    words = generation_words(payload)
+    return f"build:      {words}" if words else ""
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -5673,7 +5669,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         f"relay:      {relay_line}",
     ]
     # THE RUNNING RELAY'S BUILD (drill 2026-10-04, F6): the row the three stale
-    # relays were invisible without. Derived from the payload's three
+    # relays were invisible without. Derived from the payload's ``relay_build``/
     # ``relay_generation*`` facts, so this block and ``--json`` cannot disagree;
     # omitted only where the machine has no generation layout (the question
     # cannot exist there), and "not reported" where one exists but the running
@@ -5683,7 +5679,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         lines.append(generation_line)
     # THE AUDIT LINE, IN THE SAME BLOCK AND AT THE SAME COLUMN as the rows above
     # (every value here starts at cell 12: `installed:`+2, `identity:`+3,
-    # `relay:`+6, `generation:`+1, `audit:`+6). The counters existed on this command's
+    # `relay:`+6, `build:`+6, `audit:`+6). The counters existed on this command's
     # ``--json`` for two releases
     # while the human block said nothing about them, which made a lagging writer and a
     # healthy one the same picture to the reader the numbers are for (design round 3,
@@ -6500,28 +6496,6 @@ def _unprobed_detail(has_endpoint: bool, relay_up: bool) -> str:
     return "not probed: no relay is running on this device, so nothing here can dial"
 
 
-def _generation_clause(facts: Mapping[str, Any]) -> str:
-    """``, generation <name>`` for a running-relay sentence, or ``""``.
-
-    The sentence-shaped sibling of :func:`_generation_line`: doctor and ready
-    print the running relay as a fragment (``running, pid N``), and this is that
-    fragment's generation clause, from the same reading
-    (:func:`local_operator.network.relay.generation_reading`) — so the fallback
-    path these two commands use cannot report a relay state that is silent about
-    a build a generation behind. The flag and the remedy are
-    ``_generation_line``'s, word for word.
-    """
-    name = facts.get("relay_generation")
-    if not isinstance(name, str) or not name:
-        return ", generation not reported" if facts.get("installed_generation") else ""
-    if facts.get("relay_generation_stale"):
-        return (
-            f", generation {name} — older than the installed generation; "
-            "run `lop network restart`"
-        )
-    return f", generation {name}"
-
-
 def _relay_state() -> tuple[str, bool]:
     """What THIS MACHINE says the relay is doing: ``(the line, is it up)``.
 
@@ -6547,7 +6521,7 @@ def _relay_state() -> tuple[str, bool]:
     the same reading `lop network status` names, so the fallback path this
     function feeds (doctor, ready) cannot describe a relay a generation behind
     without saying so. What it cannot read, it never dresses as current: an
-    unreadable build adds the ``not reported`` clause only where a generation
+    unreadable build adds the ``not reported`` words only where a generation
     layout exists, and a machine without one keeps this sentence byte-for-byte.
     """
     from local_operator.network import relay as relay_mod
@@ -6555,7 +6529,7 @@ def _relay_state() -> tuple[str, bool]:
 
     live = relay_mod.health()
     if live is not None:
-        clause = _generation_clause(relay_mod.generation_reading(live.get("pid")))
+        clause = relay_mod.generation_clause(relay_mod.generation_reading(live.get("pid")))
         return f"running, pid {live.get('pid')}{clause}", True
     record, state = store.scan_own_relay()
     if record is not None:
@@ -6565,8 +6539,14 @@ def _relay_state() -> tuple[str, bool]:
             if state == "wedged"
             else "its control socket did not answer this probe"
         )
-        clause = _generation_clause(relay_mod.generation_reading(record.pid))
-        return f"running (pid {record.pid}){clause}, and {detail}", True
+        # THE BUILD IS ITS OWN SENTENCE, AFTER THE DETAIL (design round 1, D6):
+        # run into one clause it read as a second thing to do — "…; run `lop
+        # network restart`, and its control socket…" — with the remedy stranded
+        # mid-clause. Detail first; the reading (and its remedy, when the
+        # reading proves the move) second. No reading: no second sentence.
+        words = relay_mod.generation_words(relay_mod.generation_reading(record.pid))
+        tail = f". Build {words}." if words else ""
+        return f"running (pid {record.pid}), and {detail}{tail}", True
     return "not running", False
 
 
