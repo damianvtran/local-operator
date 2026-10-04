@@ -122,12 +122,17 @@ describe("session creation routes", () => {
 });
 
 describe("the retired new-session route", () => {
-	it("resolves #/new to the session list", async () => {
+	it("resolves #/new to the session list and canonicalises the hash", async () => {
 		history.replaceState(null, "", "#/new");
 		render(<App />);
 		// The list's own control, not a directory picker: the hash is kept
 		// working for bookmarks and stale links, and it lands somewhere sensible.
 		expect(await screen.findByRole("button", { name: "new session" })).toBeTruthy();
 		expect(screen.queryByPlaceholderText("or type another path…")).toBeNull();
+		// AND THE ADDRESS BAR AGREES (UX round 1, U5). Rendering the list under a
+		// hash that names a screen we no longer have leaves a bookmark — and a
+		// history entry — misreporting where the reader is, so the route effect
+		// replaces it with the list's own spelling instead of tolerating it.
+		await waitFor(() => expect(location.hash).toBe("#/"));
 	});
 });
