@@ -989,6 +989,19 @@ def run_project_slash_op(
 SLASH_COMMANDS: list[SlashCommand] = [
     # The help table is the receipt.
     SlashCommand("help", "List all commands", desktop_destination="commands"),
+    # The `?`/`/keys` keyboard legend (issue #1944). Deliberately NO
+    # `desktop_destination`, like `/links` and for a plainer version of its
+    # reason: the card teaches THIS terminal's keyboard to the person sitting
+    # at it, and the desktop has no surface the legend would describe —
+    # `test_desktop_controls.py` pins the withheld set as a literal, so the
+    # omission is a stated decision rather than a row silently missing from
+    # the desktop. NOT an echo: the card IS the receipt, the rule `/usage`
+    # and `/goal` follow — a trailing argument is REFUSED with a notice
+    # (`_cmd_keys`), so no user row ever precedes a card that never opened.
+    #
+    # It lands beside `/help` because the two are the reading pair of the
+    # command table: "what can I type" and "what can I press".
+    SlashCommand("keys", "Show the keyboard legend"),
     # The app is gone; there is no ledger left to read.
     SlashCommand("exit", "Quit the app", aliases=("quit",), desktop_destination="window.close"),
     # Empties the surface the echo would land on — it was wiped a line later.

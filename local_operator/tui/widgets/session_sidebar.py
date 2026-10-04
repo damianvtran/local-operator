@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from rich.segment import Segment
 from rich.style import Style
@@ -43,6 +43,11 @@ from local_operator.tui.widgets.session_picker import (
     row_state_mark,
 )
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+if TYPE_CHECKING:
+    # Type-only: the app's concrete class imports THIS module (it assembles
+    # the widget layer), so the reverse import at runtime would be the cycle.
+    from local_operator.tui.app import OperatorApp
 
 SIDEBAR_WIDTH = 30
 
@@ -443,6 +448,25 @@ class SessionSidebar(Widget, can_focus=True):
         # promote them.
         Binding("ctrl+a", "toggle_subagents", show=False),
         Binding("ctrl+o", "jump_to_subagents", show=False),
+        # `ctrl+k` — the non-F pin route (issue #1944), the THIRD chord of the
+        # same sidebar-scoped family as the pair above. It is safe HERE for
+        # their measured reason: in F9 mode the sidebar owns the focus chain and
+        # the composer is not in it. `ctrl+k` is TextArea's kill-to-end
+        # (`keymap.COMPOSER_KEYS`), so at app level, non-priority, it would
+        # silently lose to the focused composer; at priority it would take the
+        # editing gesture away. Scoped here it does what the list means by it
+        # and leaves the composer's meaning byte-identical when the composer
+        # holds focus (measured, issue #1944's design pilots: `one two |three`
+        # -> `one two `, cursor (0, 8) — exactly the TextArea path).
+        #
+        # Chosen over the other free-in-f9 candidates (ctrl+e/w/u/x/y/z/v, the
+        # ctrl+shift pair, the NUL/FS/GS class) because it is the only one with
+        # NO second in-app meaning: ctrl+x cuts a whole line unprompted, ctrl+v
+        # is taught as paste on two surfaces, ctrl+z is universal undo, and
+        # ctrl+e/w/u already act in the pickers. It taught no chord before
+        # this, so nothing it displaces becomes stale — and the footer ladder
+        # reranks it as the primary pin route (`f10` stays as compatibility).
+        Binding("ctrl+k", "toggle_pin", show=False),
     ]
 
     class Selected(Message):
@@ -1728,6 +1752,22 @@ class SessionSidebar(Widget, can_focus=True):
         # the one a delegated run first appears in.
         self._pending_jump_until = time.monotonic() + PENDING_SUBAGENT_JUMP_S if revealed else 0.0
 
+    def action_toggle_pin(self) -> None:
+        """`ctrl+k` — pin/unpin through the app's ONE pin path.
+
+        The chord, `f10` and the pin cell all end in `OperatorApp._toggle_pin`:
+        hovered-else-cursor resolution, the pushed-modal guard and the store
+        write are the app's, so the three routes cannot drift from one another
+        (a widget-local re-implementation would need its own copy of the
+        hover resolution — the exact second-decision defect class this repo
+        has paid for before). Delegating also keeps the pin's worker and its
+        `read_pins` refresh in one place.
+        """
+        # `self.app` types as `App[Unknown]` from inside a widget; the cast is
+        # the typing half of the delegation — OperatorApp owns the action, this
+        # widget only forwards to it.
+        cast("OperatorApp", self.app).action_toggle_pin()
+
     def _land_pending_jump(self, ordered: Sequence[CatalogEntry]) -> None:
         """Land a `ctrl+o` jump armed before its rows existed.
 
@@ -2527,45 +2567,49 @@ class SessionSidebar(Widget, can_focus=True):
         if self._subagent_total > 0:
             chip = f"⌥{'1k+' if self._subagent_total > 999 else self._subagent_total}"
         tail = f" · {chip}" if chip else ""
-        # THE FOCUSED LADDER (issue #1357 slice 2a). When the list holds the
-        # keyboard its footer teaches the action set the keyboard now owns:
-        # `f10 pin` from 27 cells of list width up — pinning was
+        # THE FOCUSED LADDER (issue #1357 slice 2a; reranked by #1944). When the
+        # list holds the keyboard its footer teaches the action set the keyboard
+        # now owns: `ctrl+k pin` from 30 cells of list width up — pinning was
         # documentation-only before this slice, and this is its one in-product
         # teacher (the pin cell's `☆` only appears under the pointer) — and
         # `ctrl+a ⌥`, the layer toggle, which has NO other in-product teacher:
-        # `/help` deliberately excludes the two sidebar-scoped chords (they
-        # would be lies outside f9 mode). Both are candidates, never appends,
-        # and drop whole: ctrl+a needs the chip's rung, since the count it
-        # flips is what it acts on (`⌥N`; nothing hidden, nothing said — same
-        # rule the chip itself follows).
+        # `/help` deliberately excludes the sidebar-scoped chords (they
+        # would be lies outside f9 mode). Issue #1944 put the non-F key on this
+        # rung (`f10` remains a working compatibility route, taught by the
+        # `?`/`/keys` legend and `/help`); the rung cell cost grew by 3 with
+        # it, and every floor below moved by the same 3. Both are candidates,
+        # never appends, and drop whole: ctrl+a needs the chip's rung, since the
+        # count it flips is what it acts on (`⌥N`; nothing hidden, nothing said
+        # — same rule the chip itself follows).
         #
         # THE MEASURED FLOORS, because "rides every rung" was an overstatement
-        # (review round 1, MINOR 2). Reading down the widths, what yields is:
-        # the paged four-fact form, then the position form, then the pin,
-        # then the chip, never the lead (main's D4/U1). With a chip, the pin
-        # rung (`esc return · f10 pin · ⌥1k+`) is 27 cells and renders at
-        # >= 27; between 17 and 26 the chip outranks it (`esc return · ⌥1k+` —
-        # a 30-column terminal lands exactly here, and NO pin is taught);
-        # below 17 only the lead remains. `ctrl+a ⌥` needs the chip and 38
-        # cells — `esc return · f10 pin · ctrl+a ⌥ · ⌥1k+` is 38 and is tried
-        # AFTER the position form, so it renders exactly where that form does
-        # not fit: unpaged, every width >= 38; paged, the band from 38 up to
-        # one cell under `{position} · esc return · f10 pin · ⌥1k+`, which is
-        # EMPTY for a position string of <= 8 cells (`1–18/21`: that form is
-        # 38 and wins at 38) and OPENS for longer ones — a 152-entry list on
-        # a deep page (`128–152/152`, its form 41) shows the layer rung at
-        # content 38–40 and the position form returns from 41 (review round
-        # 2 measured exactly this; round 1's "a paged list never shows it"
-        # was false). Every width here moves with the position string AND
-        # the chip — the paged four-fact form is 48/49/52 at 7/8/11 position
-        # cells, and a two-digit chip shifts the whole band two cells down —
-        # so the fit test, not this comment, is the authority (design round
-        # 1, D1). `ctrl+o` is deliberately absent: no spelling of it fits a
-        # real content width beside the chip and the pin, and a bare chord
-        # would break this footer's key-and-what-it-does contract — recorded
-        # on the PR rather than smuggled in as an append.
+        # (review round 1, MINOR 2; the +3 shift re-measured for #1944).
+        # Reading down the widths, what yields is: the paged four-fact form,
+        # then the position form, then the pin, then the chip, never the lead
+        # (main's D4/U1). With a chip, the pin rung (`esc return · ctrl+k pin ·
+        # ⌥1k+`) is 30 cells and renders at >= 30; between 17 and 29 the chip
+        # outranks it (`esc return · ⌥1k+` — a 30-column terminal's 24 content
+        # cells land exactly here, and NO pin is taught); below 17 only the
+        # lead remains. `ctrl+a ⌥` needs the chip and 41 cells — `esc return ·
+        # ctrl+k pin · ctrl+a ⌥ · ⌥1k+` is 41 and is tried AFTER the position
+        # form, so it renders exactly where that form does not fit: unpaged,
+        # every width >= 41; paged, the band from 41 up to one cell under
+        # `{position} · esc return · ctrl+k pin · ⌥1k+`, which is EMPTY for a
+        # position string of <= 8 cells (`1–18/21`, whose form is 40 and wins
+        # at 40) and OPENS for longer ones — a 152-entry list on a deep page
+        # (`128–152/152`, its form 44) shows the layer rung at content 41–43
+        # and the position form returns from 44 (review round 2 measured
+        # exactly this; round 1's "a paged list never shows it" was false).
+        # Every width here moves with the position string AND the chip — the
+        # paged four-fact form is 51/52/55 at 7/8/11 position cells, and a
+        # two-digit chip shifts the whole band two cells down — so the fit
+        # test, not this comment, is the authority (design round 1, D1).
+        # `ctrl+o` is deliberately absent: no spelling of it fits a real
+        # content width beside the chip and the pin, and a bare chord would
+        # break this footer's key-and-what-it-does contract — recorded on the
+        # PR rather than smuggled in as an append.
         if self.has_focus:
-            pin = f"{lead} · f10 pin"
+            pin = f"{lead} · ctrl+k pin"
             layer = " · ctrl+a ⌥" if chip else ""
             candidates: list[str] = []
             if len(self.entries) > self.page_size:

@@ -42,6 +42,11 @@ from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _
 #: entry in ``SLASH_COMMANDS``.
 ECHO_POLICY = {
     "help": False,
+    # The card IS the receipt — `/usage`'s rule, one noun over from `/help`
+    # beside it (this one is the key reference rather than the command list).
+    # Nothing here is words the model is told, and a trailing argument is
+    # refused by the handler rather than run, so no user row is ever owed.
+    "keys": False,
     "mobile": False,  # infrastructure status is its own receipt, never model input
     # Same rule, one noun over: the listing or the receipt IS the answer, and the
     # family's output goes to a block (a multi-line receipt) or a notice (one
@@ -177,6 +182,9 @@ PROMPT_POLICY = {
     # mid-draft must not reassemble the draft into it.
     "network": False,
     "help": False,
+    # The listing/painting IS the receipt; the argument (none exists — the
+    # handler refuses one) never becomes a prompt.
+    "keys": False,
     "exit": False,
     "clear": False,
     # Takes no argument at all: WHICH message is chosen in the picker the

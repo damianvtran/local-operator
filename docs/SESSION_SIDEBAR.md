@@ -4,6 +4,11 @@ The sidebar is an opt-in terminal view over existing session runtimes, not anoth
 runtime or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
+`Ctrl+K` pins or unpins the cursor row while the list holds the keyboard — the
+non-F route added by issue #1944; `F10` does the same from anywhere and stays as
+compatibility. `?` (where no typist can claim the character) and the typed
+`/keys` command open a `? Keys` legend of the list's chords, including the
+sidebar-scoped ones `/help` deliberately omits.
 A pointer press on the panel enters the list too (the `⌥` chip's own cells
 are the one exception — they run the chip's action); typed text lands in the
 composer while no hard claimant holds the keyboard — see "Click-to-focus and
@@ -25,9 +30,9 @@ to the pressed row — and the pin cell still pins without opening. A press on t
 header, the `+N more pinned` line, the dead space below the rows or the footer
 takes the keyboard without acting on any row — with ONE exception: the `⌥`
 chip's own cells, a control with its own action, run the layer flip and leave
-the keyboard where it is (see "The ⌥ subagent layer"). Pinning keeps its cell
-and `F10`; there is no plain-key mnemonic for it, so `Space` types like every
-other printable key.
+the keyboard where it is (see "The ⌥ subagent layer"). Pinning keeps its cell,
+`Ctrl+K` and `F10`; there is no plain-key mnemonic for it, so `Space` types
+like every other printable key.
 
 The list never keeps the keyboard *for text*: any printable character, or a
 bracketed paste, delivered to it is handed to the composer and the composer takes
@@ -68,9 +73,11 @@ single keystroke, because the first one is typed rather than discarded.
 Key meanings follow the keyboard, structurally. With the list focused: `enter`
 opens the cursor row, `esc` dismisses the panel and returns the keyboard to where
 it was before the panel opened (else to the composer), `f9` toggles the list's
-keyboard mode without closing it, `f10` pins, `up`/`down`/`PageUp`/`PageDown`/
+keyboard mode without closing it, `ctrl+k` pins (the non-F route; `f10` does the
+same and keeps working), `up`/`down`/`PageUp`/`PageDown`/
 `Home`/`End` move the list's cursor window, and `ctrl+b` hides the panel. With the
-composer focused they keep their composer meanings unchanged.
+composer focused they keep their composer meanings unchanged (`ctrl+k` included:
+there it stays the editor's kill-to-end).
 
 ## Sections, pins and the subagent layer
 
@@ -115,8 +122,19 @@ on screen.
 
 ### Pins
 
-`F10` pins or unpins the session under the pointer; with no pointer on the list
-and the list focused, it acts on the cursor row. Hover wins over the cursor
+`Ctrl+K` pins or unpins the session under the pointer; with no pointer on the
+list and the list focused, it acts on the cursor row. `F10` does the same and
+remains as the compatibility route; both end in the app's ONE pin path, so the
+chord, the function key and the pin cell cannot drift from one another. The
+non-F chord is **sidebar-scoped** (fire only while the list owns the focus
+chain, F9 mode), the same scope-for-scope trade `Ctrl+A` and `Ctrl+O` already
+ship: `ctrl+k` is the composer's kill-to-end, so at app level it would lose to
+the focused composer, and scoped to the list it displaces nothing — the
+composer's meaning is byte-identical whenever the composer holds the focus
+(issue #1944; the choice over the other audited candidates is recorded on the
+binding in `session_sidebar.py`).
+
+Hover wins over the cursor
 because the pointer resting on a row says which session is meant, while the
 cursor persists invisibly when the list is unfocused. A pinned row leaves
 whatever section it ranked into and appears under ★ Pinned wearing `★` in its
@@ -148,7 +166,10 @@ needs to know nothing about pins.
 `F10` is a function key rather than `Ctrl+P` because Textual's `App` binds
 `Ctrl+P` to its command palette at `priority`, so an app-level binding there
 never fires. It also continues the series `F8` (aside) and `F9` (focus
-sessions) for app-level gestures that must survive a focused composer.
+sessions) for app-level gestures that must survive a focused composer — and
+since #1944 it is no longer the only keyboard pin: `Ctrl+K` on the list is the
+non-F route, and `F10` stays as compatibility, exactly the split the docs'
+keymap decision table (§E.4a) records.
 
 ### The ⌥ subagent layer
 
@@ -201,24 +222,26 @@ The `⌥N` chip never yields either: the position is recoverable by scrolling (t
 cursor row is painted), but the hidden population is recoverable from nowhere
 else on the frame. `/help` still lists `ctrl+b`.
 
-When the list holds the keyboard the ladder re-ranks: `f10 pin` rides it from
-27 cells of list width up (the pin cell's `☆` is invisible until hovered, so
-the footer is its one standing teacher; between 17 and 26 the chip outranks it,
-and a 30-column terminal lands there), and `ctrl+a ⌥` renders exactly where the
-position form does not fit — on an unpaged list at 38 cells or more, and on a
-paged one in the band from 38 up to one cell under `{position} · esc return ·
-f10 pin · ⌥N`. That band is empty for a position string of 8 cells or fewer
-(`1–18/21`, whose form is 38 and wins at 38) and opens for longer ones: a
-152-entry list on a deep page (`128–152/152`, its form 41) shows
-`esc return · f10 pin · ctrl+a ⌥ · ⌥N` at content 38–40 and the position form
-returns from 41. Every width here moves with the position string and the chip,
+When the list holds the keyboard the ladder re-ranks: `ctrl+k pin` rides it from
+30 cells of list width up (the pin cell's `☆` is invisible until hovered, so
+the footer is its one standing teacher; between 17 and 29 the chip outranks it,
+and a 30-column terminal lands there; with the four-cell `1k+` chip the rung's
+floor is 30, so on 100–115-column terminals the `?`/`/keys` legend is the
+teacher instead, issue #1944), and `ctrl+a ⌥` renders exactly where the
+position form does not fit — on an unpaged list at 41 cells or more, and on a
+paged one in the band from 41 up to one cell under `{position} · esc return ·
+ctrl+k pin · ⌥N`. That band is empty for a position string of 8 cells or fewer
+(`1–18/21`, whose form is 40 and wins at 40) and opens for longer ones: a
+152-entry list on a deep page (`128–152/152`, its form 44) shows
+`esc return · ctrl+k pin · ctrl+a ⌥ · ⌥N` at content 41–43 and the position form
+returns from 44. Every width here moves with the position string and the chip,
 so the code's fit test is the authority, not a quoted figure (design round 1
-D1, corrected by review round 2). The position yields BEFORE the pin —
-recoverable by scrolling, while `f10 pin` is not taught anywhere else on the
-frame — so the focused rungs are `esc return · f10 pin [· ctrl+a ⌥]{ · ⌥N}`
-above the floor fallbacks. `ctrl+o` has no spelling that fits a real content
-width beside the chip and the pin, so it stays a documented chord rather than
-an invisible candidate.
+D1, corrected by review round 2; the +3 shift for `ctrl+k` re-measured by
+#1944). The position yields BEFORE the pin —
+recoverable by scrolling — so the focused rungs are `esc return · ctrl+k pin
+[· ctrl+a ⌥]{ · ⌥N}` above the floor fallbacks. `ctrl+o` has no spelling that
+fits a real content width beside the chip and the pin, so it stays a documented
+chord rather than an invisible candidate.
 
 The layer is capped at 40 rows and does not page. A sub row is labelled by what
 it was delegated to do (`label · role`, degrading to whichever half exists),

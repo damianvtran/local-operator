@@ -389,6 +389,7 @@ from local_operator.tui.widgets.goal_panel import (
     GoalPanel,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
@@ -4419,6 +4420,23 @@ class OperatorApp(App[None]):
         # `ctrl+<letter>` is claimed. Non-priority, so a focused picker keeps
         # first refusal.
         Binding("f10", "toggle_pin", "Pin session", show=False),
+        # The `? Keys` legend (issue #1944). NON-PRIORITY, and that is the
+        # design: a focused typist keeps first refusal on the character — the
+        # composer's TextArea stops every printable before any non-priority
+        # binding resolves, and the sidebar's typing-home hands printables to
+        # the composer for the same reason — so `?` opens the card only where
+        # no typist can claim it (read-only/full-page states, gated modals)
+        # and otherwise still TYPES the character, unchanged. The typed
+        # `/keys` command covers every state `?` cannot (it is char-safe by
+        # construction — it is typed text), and the card's own footer names
+        # both routes.
+        #
+        # `question_mark,question` — both spellings Textual can deliver for
+        # the shifted character on real terminals; the org chart binds the
+        # identical pair for its own glyph legend. `show=False` like its
+        # neighbours, and no `keymap.*` id (matching f8/f9/f10): not
+        # remappable, so a legend costs no identity migration.
+        Binding("question_mark,question", "toggle_keys_legend", "Keys", show=False),
         # Chosen after auditing the table: `up`/`down`, `pageup`/`pagedown`,
         # `home`/`end` and `shift+up`/`shift+down` are TextArea cursor or
         # selection keys, `ctrl+u`/`ctrl+d` are destructive in the composer,
@@ -5050,6 +5068,10 @@ class OperatorApp(App[None]):
         #: What had focus when the goal overlay opened, so Esc puts it back —
         #: the same restore the usage card keeps for the same reason.
         self._goal_focus_restore: Any | None = None
+        #: What had focus when the `?` Keys legend opened, so its dismissal
+        #: returns the user to the surface they were on — the same discipline
+        #: the two overlay cards above keep.
+        self._keys_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         #: What the working line says when nothing narrower is running. Set by
         #: the events that describe the whole turn rather than one row of it
@@ -10726,6 +10748,60 @@ class OperatorApp(App[None]):
 
         self.run_worker(pin(), group="sidebar-pin")
 
+    def action_toggle_keys_legend(self) -> None:
+        """Open or close the `? Keys` legend — the `?` binding and `/keys`.
+
+        ONE renderer, two routes: both end here, so the card cannot answer to
+        one of them and not the other.
+        """
+        if (
+            self.screen is not self.screen_stack[0]
+            or self._live_prompt() is not None
+            or self._aside_is_open()
+        ):
+            # A live gate owns the keyboard: a pushed screen (the /resume
+            # picker, a settings sheet) — the same refusal `action_toggle_pin`
+            # and `action_switch_session` carry — plus the two claimants the
+            # screen-stack check does NOT catch: an unanswered approval or ask
+            # card and the open aside, which this app mounts OVER the frame
+            # rather than pushing (measured, issue #1944's design pilots: with
+            # the ask picker live, `app.screen` is still TranscriptScreen and
+            # the stack is unary, so a screen-stack-only gate — the design
+            # note's first shape — lets the non-priority `?` binding fire
+            # straight through, and the legend opens over a question the user
+            # must answer). `_live_prompt` is the app's ONE definition of
+            # "a prompt awaiting an answer", called rather than re-worded so
+            # the two cannot drift.
+            return
+        panel = self._keys_legend()
+        if panel is None:
+            return
+        if panel.is_open:
+            self._dismiss_keys_legend()
+            return
+        self._keys_focus_restore = self.focused
+        panel.open()
+        panel.focus()
+
+    def _dismiss_keys_legend(self) -> None:
+        """Close the card and give focus back to whatever had it."""
+        panel = self._keys_legend()
+        if panel is not None:
+            panel.close()
+        restore = self._keys_focus_restore
+        self._keys_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
+
+    def _keys_legend(self) -> KeysLegend | None:
+        """The mounted card, or None before compose (or in a stripped harness)."""
+        try:
+            return self.query_one(KeysLegend)
+        except Exception:  # noqa: BLE001 — the card is optional chrome
+            return None
+
     def action_toggle_sidebar(self) -> None:
         if not self._session_sidebar.display:
             self._close_subagent_view()
@@ -11233,6 +11309,12 @@ class OperatorApp(App[None]):
         # keystroke and must not take a row from the conversation it describes.
         with Container(id="goal-host"):
             yield GoalPanel()
+        # The `?` Keys legend — same layer, same host rule, same mount-once
+        # reason as the three cards above: it opens on a keystroke (`?`) that
+        # offers no mount window, and taking rows from the transcript to show
+        # it would scroll away the work the user opened it to reason about.
+        with Container(id="keys-host"):
+            yield KeysLegend()
         # The aside card, on the same layer and mounted once for the same
         # reasons — with one of its own. `/btw` can be typed while the agent is
         # mid-turn, which is when the question is most likely ("what are you
@@ -37300,6 +37382,8 @@ class OperatorApp(App[None]):
             self._cmd_notifications(arg, notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
+        elif command == "/keys":
+            self._cmd_keys(arg, notice)
         elif command == "/analytics":
             self._cmd_analytics(arg, notice)
         elif command == "/session":
@@ -41371,6 +41455,11 @@ class OperatorApp(App[None]):
             self._system_notice(receipt)
         self._refresh_goal_panel()
 
+    def on_keys_legend_dismissed(self, message: KeysLegendDismissed) -> None:
+        """Esc or `?` inside the card — close it and return the keyboard."""
+        message.stop()
+        self._dismiss_keys_legend()
+
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop --stop`` cancels.
 
@@ -43442,6 +43531,23 @@ class OperatorApp(App[None]):
             # takes their session down (review round 1, B1).
             exit_on_error=False,
         )
+
+    def _cmd_keys(self, arg: str, notice: NoticeFn) -> None:
+        """``/keys`` — open the `? Keys` legend (the typed, char-safe route).
+
+        The card IS the receipt: no echo, no transcript row — the rule
+        `/usage` and `/goal` follow. The command exists because `?` is
+        characters-first: every state where a typist can claim the character
+        (a focused composer, the list's typing-home) keeps typing it, so the
+        typed route is the one that reaches the legend from exactly those
+        states. A trailing argument is refused through ``_system_notice`` —
+        nothing ran, so the boot composition must survive it, the shape
+        `/sidebar` and `_cmd_usage` use for their own refusals.
+        """
+        if arg.strip():
+            self._system_notice("Use /keys", "warning")
+            return
+        self.action_toggle_keys_legend()
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
@@ -47938,19 +48044,23 @@ class OperatorApp(App[None]):
         # the keys, i.e. exactly when the question is asked — and a full list's
         # footer is further squeezed by the page counter (U1). One row now
         # carries the list's whole keyboard story: in with `f9`, pin with
-        # `f10`, back out with `esc`. `f10` folds in here rather than taking
-        # its own row because this frame has zero vertical headroom — any
-        # added row scrolls the topmost asserted key off the 44-row frame the
-        # paste-key test renders at — and the block's convention is one gesture
-        # per row with a partner chord in the description (cf. `ctrl+pageup`).
-        # The two sidebar-SCOPED chords (ctrl+a, ctrl+o) still get no row:
-        # /help lists app-wide keys, and a row for a chord that only fires in
-        # f9 mode would be a lie — the docs carry them, not the footer chip
-        # (which carries only the count). Lowercase `f9` to match the copy the
-        # panel paints, not the `F8` spelling of the row above. MEASURED: 45
-        # description cells (65 composed), inside the 74-cell ceiling this
-        # block documents and below the ~55 the description column wraps past.
-        lines.append(_key_row("f9", "keys the sessions list; f10 pins; esc returns"))
+        # `ctrl+k` (the non-F route #1944 added; `f10` still works and is
+        # named beside it), back out with `esc`. `f10` folds in here rather
+        # than taking its own row because this frame has zero vertical
+        # headroom — any added row scrolls the topmost asserted key off the
+        # 44-row frame the paste-key test renders at — and the block's
+        # convention is one gesture per row with a partner chord in the
+        # description (cf. `ctrl+pageup`). The two sidebar-SCOPED chords
+        # (ctrl+a, ctrl+o) still get no row: /help lists app-wide keys, and a
+        # row for a chord that only fires in f9 mode would be a lie — the
+        # docs carry them, and since #1944 the `?`/`/keys` legend carries them
+        # under a section heading that makes the scope honest — not the
+        # footer chip (which carries only the count). Lowercase `f9` to match
+        # the copy the panel paints, not the `F8` spelling of the row above.
+        # MEASURED: 54 description cells (74 composed) — EXACTLY at the
+        # 74-cell ceiling this block documents, the same zero-headroom class
+        # as the `cmd+v` row below; one more character wraps it.
+        lines.append(_key_row("f9", "keys the sessions list; ctrl+k or f10 pin; esc returns"))
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).
