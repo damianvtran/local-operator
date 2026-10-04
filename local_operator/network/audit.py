@@ -161,9 +161,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "disconnect_initiated",
         "audit_rotated",
         "audit_pruned",
-        # The credential broker (mesh-credentials.md; build plan §2.3). Five events,
-        # because a lent bearer is a DELEGATION and an incident review has to be able
-        # to reconstruct who could spend what, on whose account, from where.
+        # The credential broker (mesh-credentials.md; build plan §2.3). The events a
+        # lent bearer's life produces, because that life is a DELEGATION and an
+        # incident review has to be able to reconstruct who could spend what, on
+        # whose account, from where.
         #
         # `act` is the owning device (the broker), `sub` is the borrowing device that
         # received the delegation; both are device ids, which is the RFC 8693
@@ -183,6 +184,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # A membership-class event: who may borrow what changed here. "How could that
         # device spend my OpenAI account" is answered by exactly this record.
         "credential.placement",
+        # The mint-revoke half of the credential broker (github adapter): one row per
+        # revoke batch the owner's lender performed — the scheduled window-end DELETE,
+        # the operator's immediate revoke, and the retry after a failed call.
+        "credential.revoke",
         # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). Six lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or
@@ -359,6 +364,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
     "credential.placement": frozenset(
         {"credential_key", "act", "sub", "owner_device", "holders", "skipped"}
+    ),
+    # The mint-revoke contract's other half (github adapter, F4): one row per
+    # revoke batch — the scheduled window-end DELETE, the operator's immediate
+    # revoke, and the retry after a failed call. `cause` tells the three apart,
+    # `revoked`/`deferred` are counts (tokens, never material), and the act/sub
+    # delegation markers ride here exactly as they do on `credential.grant`.
+    "credential.revoke": frozenset(
+        {"credential_key", "act", "sub", "cause", "revoked", "deferred"}
     ),
     # -- the remote onboarding approval -------------------------------------------
     #

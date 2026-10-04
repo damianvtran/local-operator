@@ -444,6 +444,7 @@ class PlacementDocument:
         by: str = "",
     ) -> CredentialPlacementEntry:
         """Add ``device`` to ``key``'s holders. OWNER-DEVICE-ONLY."""
+        from local_operator.network.credentials import github
         from local_operator.network.types import MeshRefusal
 
         entry = self.entries.get(key)
@@ -461,6 +462,20 @@ class PlacementDocument:
         refuse_device_bound(key, entry.provider)
         if scope not in ("session", "device"):
             raise MeshRefusal("bad_request", f"scope must be 'session' or 'device', not {scope!r}")
+        # GITHUB IS DEVICE-SCOPED BY CONSTRUCTION (design F3, github adapter): the
+        # borrower side has no rail-authenticated session identity — a same-uid
+        # process can claim any session id — so a session-scoped row would enforce
+        # nothing while reading as a bound. The refusal lives HERE, in the
+        # document, so an older CLI or a hand-written file cannot write the claim
+        # either; the owner refuses to serve such a row as well (fail-closed).
+        if github.is_github_key(key) and scope == "session":
+            raise MeshRefusal(
+                github.CODE_DEVICE_SCOPE,
+                "a GitHub App credential is lent to the DEVICE, not to a session: the "
+                "loan is authorised by the device (any process on the borrower may use "
+                "it while the share stands), and a session-scoped row would claim a "
+                "bound that does not exist. Share it again with --scope device.",
+            )
         existing = entry.holder(device)
         if existing is None:
             entry.holders.append(

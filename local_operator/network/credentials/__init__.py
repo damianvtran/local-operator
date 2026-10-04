@@ -3,7 +3,9 @@
 The package's public surface, and the P0 seam it fills in: :func:`install`
 registers ``net_broker`` SLOW — a grant can sit through a provider refresh
 (bounded at ``providers.auth_store.PROVIDER_REFRESH_TOTAL_BUDGET_S``) — plus the
-three LEG-1 control ops, whose names P0 declared in ``types.LOCAL_OPS``.
+control ops, whose names P0 declared in ``types.LOCAL_OPS``: the three LEG-1
+verbs and the operator's ``credential_revoke`` (the mint-revoke contract's
+immediate half, F4).
 
 ``broker_credential`` stays ADMIN-ONLY: it is in no role but ``admin``
 (``types.ROLE_CAPABILITIES``), and only an admin device may grant it to a peer's
@@ -139,6 +141,27 @@ class _LocalOps:
             retry_after_ms=peer_int(frame.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS),
         )
 
+    def revoke(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a ``credential_revoke``: DELETE the outstanding GitHub tokens NOW.
+
+        The operator half of mint-revoke (design F4): ``lop network credential
+        revoke`` runs in a different process than this relay, so it asks through
+        the same control socket the other four ops use. Only the github adapter
+        keeps lender-side tokens — for any other key there is nothing this relay
+        could un-issue, and ``revoked: 0`` is the honest answer either way.
+        """
+        from local_operator.network.credentials import github as github_mod
+        from local_operator.network.credentials import owner as owner_mod
+
+        key = str(frame.get("credential_key") or "")
+        holder = str(frame.get("holder") or "")
+        if not github_mod.is_github_key(key):
+            return {"kind": "ack", "key": key, "revoked": 0}
+        broker = owner_mod.broker_for_relay(self._server)
+        if broker is None:
+            return {"kind": "ack", "key": key, "revoked": 0}
+        return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
+
     def placement(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Pull the placement document from each owner this device knows of.
 
@@ -188,6 +211,7 @@ def install(server: RelayServer) -> None:
             "credential_grant": ops.grant,
             "credential_report": ops.report,
             "credential_placement": ops.placement,
+            "credential_revoke": ops.revoke,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},
     )

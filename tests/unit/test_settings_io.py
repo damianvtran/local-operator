@@ -86,6 +86,7 @@ def _consumer_defaults() -> dict[str, object]:
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
     from local_operator.network.credentials import GRANT_TTL_S
+    from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
         DEFAULT_ADVERTISE_HOSTS,
         DEFAULT_LISTEN_ADDRESS,
@@ -235,6 +236,10 @@ def _consumer_defaults() -> dict[str, object]:
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
+        # The github adapter's allow-list default: empty, and empty is a REFUSAL
+        # at mint time — so the registry default and the reader's fallback must
+        # stay the same "none designated" answer.
+        "network.credentials.github.repositories": list(DEFAULT_REPOSITORIES),
         # The reader's own fallback, which is also what every unrecognised
         # shape resolves to — so the page cannot advertise a default the
         # delegating model's tier picker disagrees with.

@@ -342,6 +342,15 @@ _AMBIENT_VARS = (
     # the skip arm while looking like it tested the prime. Cells that want a
     # primed lineage set it explicitly (the helpers tests do).
     "LOCAL_OPERATOR_PATH_PRIMED",
+    # The brokered GitHub bearer's env names, read by the git credential helper
+    # (``network/credentials/github.py``) and written into every bash child by the
+    # session's injection (``tools/builtin.py``). They name a CREDENTIAL: an
+    # operator or a QA rig with either exported would hand every helper cell a
+    # live bearer, and the cells asserting "a device that borrows nothing gets no
+    # env" would read the shell's answer instead of the code's. Scrubbed rather
+    # than explained.
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real

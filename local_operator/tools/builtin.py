@@ -3765,6 +3765,38 @@ def _tail_chunks(chunks: list[bytes] | _BashOutput, budget: int) -> list[bytes]:
     return taken
 
 
+async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
+    """The borrowed-github injectables for ONE bash child, or ``{}``.
+
+    Fetch-on-use, off the event loop (the borrow dials this device's relay and
+    can sit through one bounded owner round trip), and never raising: a failed
+    borrow makes the child behave exactly as it did before brokering existed.
+    The token is registered in the session's redaction ledger BEFORE the env is
+    returned — an injected bearer the session cannot scrub is a plaintext
+    result waiting to happen (design §D5; the T8e ``printenv`` invariant).
+    """
+    if context is None:
+        return {}
+    store = getattr(context, "variables", None)
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        # No ledger, no injection: the masking control is what makes the env
+        # deliverable, so a host without it gets the pre-brokering behaviour.
+        return {}
+    try:
+        from local_operator.network.credentials import github
+
+        env, token = await asyncio.to_thread(
+            github.borrowed_git_env, session_id=context.session_id or ""
+        )
+    except Exception:  # noqa: BLE001 — a broker fault must not fail a command
+        return {}
+    if not env or not token:
+        return {}
+    register(token)
+    return env
+
+
 @_guard("bash")
 async def execute_bash(
     tool_call_id: str,
@@ -3858,6 +3890,16 @@ async def execute_bash(
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
 
+    # MESH-BORROWED GITHUB, fetch-on-use (network/credentials/github.py). When this
+    # device is a holder of a remote ``github`` credential, the env is rebuilt per
+    # command from the broker: a live grant is a dict lookup, an expired one is one
+    # bounded local borrow, a refused one is silence. The GIT_CONFIG reset pair is
+    # the F1 close — it scopes the github.com helper list to OUR helper so a
+    # persisting ``store`` helper can never receive the token — and the token
+    # itself rides GH_TOKEN/GITHUB_TOKEN for ``gh`` (which has no helper protocol).
+    # On a device that borrows nothing this is a file read and an empty answer.
+    github_env = await _github_git_injections(context)
+
     # Refuse a call in which a stored secret would be PRINTED, before any child
     # exists. The control this replaces is an output filter (the redaction
     # ledger's `str.replace`), and a filter decides after the decision to print
@@ -3902,6 +3944,8 @@ async def execute_bash(
     injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
+    if github_env:
+        injections.update(github_env)
 
     # Lever 2: a generated ripgrep config so an `rg` the guard did NOT block
     # (a scoped search, or one under an inline grant) still prunes vendor and
