@@ -905,6 +905,157 @@ def test_a_wedged_relay_failure_names_no_unverified_port_or_mechanism(
     assert failing["data"]["relay_state"] == "wedged"
 
 
+def test_a_join_failure_where_the_relay_already_serves_the_target_network_adopts_it(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drill decision, 2026-10-04: a relay already serving the SAME network is
+    not a collision — the join failure names it as correct and left in place,
+    and never prescribes a restart for it."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": (
+                            "could not join: the handshake at 127.0.0.1:4098 stopped "
+                            "(LinkCryptoError)"
+                        ),
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                        # The invite payload names n_1/damian-mesh; the relay
+                        # already serves exactly that.
+                        "networks": [{"network_id": "n_1", "name": "damian-mesh", "epoch": 1}],
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    failing = payload["steps"][-1]
+    detail = failing["detail"]
+    assert "already serving :4097 on cloud-node-1" in detail
+    assert "already serves damian-mesh" in detail
+    assert "left in place" in detail
+    assert "not the cause" in detail
+    assert "LinkCryptoError" in detail
+    # THE REMEDY COPY IS ALIGNED WITH ADOPT: a restart must not be prescribed
+    # for a relay that was never the problem.
+    assert "lop network restart" not in detail
+    assert failing["data"]["relay_serves_target"] is True
+    assert failing["data"]["relay_serving"] is True
+
+
+def test_a_join_failure_where_the_relay_serves_other_networks_keeps_the_true_remedy(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half: a relay serving a DIFFERENT network refuses with cause —
+    and the restart remedy it prints is the one ``lop network restart`` now
+    actually performs (replaces a hand-started relay with the supervised one)."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                        "networks": [{"network_id": "n_other", "name": "lab-mesh", "epoch": 3}],
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    failing = payload["steps"][-1]
+    detail = failing["detail"]
+    assert "a relay is already serving :4097 on cloud-node-1" in detail
+    assert "a different network (lab-mesh)" in detail
+    assert "not the one this join is for" in detail
+    # The remedy stays — and says what restart now does.
+    assert "lop network restart" in detail
+    assert "replaces a relay started by hand with the supervised one" in detail
+    assert failing["data"]["relay_serves_target"] is False
+    assert failing["data"]["relay_serving"] is True
+
+
 def test_a_retry_reuses_the_record_with_a_new_run_id(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
