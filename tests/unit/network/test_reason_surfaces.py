@@ -72,6 +72,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the install receipt's machine reason, assigned to the payload's key",
     ),
+    # The supervision honesty wrapper's one raw read (drill finding, 2026-10-04):
+    # the guarded arm's machine reason, compared — never printed — to decide
+    # whether a failed action may be enriched with live probe readings at all.
+    # ``isolated_home`` must stay exactly as the arm wrote it (a sandboxed run is
+    # not told about the real home's processes), so the comparison precedes the
+    # enrichment; the sentence a reader sees is always ``error``.
+    ("local_operator/network/relay.py", "_service_failure", "reason"): (
+        1,
+        "the arm's machine reason, compared to gate enrichment — never printed",
+    ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
     # (never a peer's wire value), and this read is the field re-shape itself —

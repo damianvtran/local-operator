@@ -764,6 +764,97 @@ def _json_from(text: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def _invite_network_label(
+    token_path: Any, *, network_id: str = "", network_name: str = ""
+) -> tuple[str, str] | None:
+    """``(network_id, name)`` of the network an invite token joins, or ``None``.
+
+    THE MINT'S OWN PAYLOAD is the first source (``step_invite`` records it the
+    moment the token is minted), because the copy must still be network-aware
+    when the token file has served its purpose and is gone. The token FILE is
+    the fallback — the authority for what is being joined, so the copy can
+    compare the network the join was FOR against what a device's relay already
+    serves (drill decision, 2026-10-04: "join ADOPTS a relay already serving the
+    SAME network; a DIFFERENT one refuses with cause"). Best-effort by
+    contract: neither source available — a hand-made fixture, a file whose bytes
+    are already consumed — answers ``None``, and the caller falls back to the
+    generic sentence, because "cannot tell" must never be dressed up as
+    "serves nothing".
+    """
+    if network_id or network_name:
+        return str(network_id), str(network_name)
+    try:
+        from local_operator.network import invite as invite_mod
+
+        token = Path(str(token_path)).read_text(encoding="utf-8").strip()
+        envelope = invite_mod.decode(token)
+        return str(envelope.network_id or ""), str(envelope.network_name or "")
+    except Exception:  # noqa: BLE001 — a copy probe must never fail a step
+        return None
+
+
+def _relay_kind_note(status: dict[str, Any]) -> str:
+    """What a restart would and would not do to the relay a status reported.
+
+    Round-1 D1: the old sentence stated the hand-started replacement mechanism
+    for ANY relay, but a supervised one restarts back onto the same served set —
+    the relay serves ``store.list_networks()``, and a failed handshake never
+    writes the join target's membership — so nothing about a restart clears the
+    join failure in EITHER case. This note says what is true per kind and never
+    promises the restart fixes the join.
+
+    Round-2 D6: the kind reads ``status['relay_served_by']`` — the probe's
+    VERIFIED reading of the serving process (:func:`relay._serving_relay_kind`:
+    the supervisor's own pid, or the foreground ``serve`` shape that no unit of
+    this product runs) — and NEVER unit-file presence: a unit file can exist
+    while a hand-started relay serves the port (the drill node's exact state —
+    the arm's failed install left the file, ``stop`` leaves it), and calling
+    that process "the service's own" was the round-1 copy's one unverified
+    claim. The second clause — a restart cannot change what the relay serves —
+    is true in every case and is always printed; an unproven kind gets only it.
+    """
+    kind = status.get("relay_served_by")
+    if kind == "service":
+        return (
+            "That relay is the service's own, and restarting it would not change what " "it serves."
+        )
+    if kind == "manual":
+        return (
+            "That relay was started by hand, not by the service — `lop network restart` "
+            "replaces it with the service's own relay — and neither changes what the "
+            "relay serves."
+        )
+    return "Restarting the relay would not change what it serves."
+
+
+def _served_networks(status: dict[str, Any]) -> list[dict[str, str]]:
+    """The networks a node's status says its relay SERVES, ``[]`` when unknown.
+
+    ONLY A LIVE REPLY COUNTS. ``status["networks"]`` is the answering relay's
+    own list when it answered and the LOCAL RECORDS when it did not — and a
+    record is not a serving relay, so a relay that is down must not be reported
+    as serving what its store remembers. Rows without both a ``network_id`` and
+    a ``name`` are kept with empty strings (the sentence handles them) rather
+    than dropped silently.
+    """
+    if not status.get("relay_answering"):
+        return []
+    rows = status.get("networks")
+    if not isinstance(rows, list):
+        return []
+    served: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        served.append(
+            {
+                "network_id": str(row.get("network_id") or ""),
+                "name": str(row.get("name") or ""),
+            }
+        )
+    return served
+
+
 def _facts_from(text: str) -> dict[str, str]:
     facts: dict[str, str] = {}
     for line in text.splitlines():
@@ -858,6 +949,12 @@ class OnboardRun:
         self.facts: dict[str, str] = {}
         self.invite_id = ""
         self.invite_path: Path | None = None
+        #: The network the invite joins, from the mint's own payload — carried
+        #: so the join-failure copy can compare it against what a serving relay
+        #: reports, even when the token file is already gone (drill finding,
+        #: 2026-10-04: "join ADOPTS a relay already serving the SAME network").
+        self.invite_network_id = ""
+        self.invite_network_name = ""
         self.credential: ResolvedCredential | None = None
         self._connected = False
 
@@ -913,6 +1010,8 @@ class OnboardRun:
             detail = (result.stderr or result.stdout or "the invite was not minted").strip()
             return _StepOutcome(False, f"the invite was not minted: {detail[:200]}")
         self.invite_id = str(payload["invite_id"])
+        self.invite_network_id = str(payload.get("network_id") or "")
+        self.invite_network_name = str(payload.get("network_name") or "")
         path = str(payload.get("path") or "")
         if not path or not Path(path).exists():
             return _StepOutcome(
@@ -1286,15 +1385,21 @@ class OnboardRun:
                     "node_refused": bool(refusal or message),
                 }
                 # WHAT THE NODE PROBE VERIFIED, IN ITS OWN WORDS (drill finding,
-                # 2026-10-03; design round 1, D4/D5). Four failed re-onboards ran
-                # while the node's own systemd relay held :4097 (its log:
-                # ``OSError: [Errno 98] Address already in use``). The probe is
-                # the one ``step_relay`` reads; the failure names what it SAW —
-                # never a mechanism this build cannot produce (this build's join
-                # starts no relay), never a port it did not verify, and never an
-                # alternative where only one action works: restart the relay
-                # there, then retry the join. FAILURE-PATH ONLY: a join that
-                # completes never probes, so the success semantics are untouched.
+                # 2026-10-03; design round 1, D4/D5; extended 2026-10-04). Four
+                # failed re-onboards ran while the node's own systemd relay held
+                # :4097 (its log: ``OSError: [Errno 98] Address already in use``).
+                # The probe is the one ``step_relay`` reads; the failure names what
+                # it SAW — never a mechanism this build cannot produce, never a port
+                # it did not verify. AND THE SENTENCE IS NETWORK-AWARE (drill
+                # decision, 2026-10-04): a relay that already serves the network
+                # this join was FOR is ADOPTED — named as correct, left in place,
+                # and the remedy never sends the reader to restart it; a relay
+                # serving other networks gets the restart remedy, which is true
+                # because ``lop network restart`` now replaces a hand-started relay
+                # with the supervised one (``relay._supervised_action``). The
+                # generic sentence stays for a status payload that cannot tell the
+                # two apart (no decoded token, no served list).
+                # FAILURE-PATH ONLY: a join that completes never probes.
                 status = self._node_json("lop network status", timeout=60.0)
                 where = str(self.view.device.get("name") or "").strip() or "that machine"
                 status = status if isinstance(status, dict) else {}
@@ -1305,21 +1410,109 @@ class OnboardRun:
                         live_port = int(listening.get("port") or 0) or None
                     except (TypeError, ValueError):
                         live_port = None
+                served = _served_networks(status)
+                target = _invite_network_label(
+                    self.invite_path,
+                    network_id=self.invite_network_id,
+                    network_name=self.invite_network_name,
+                )
                 if status.get("relay_answering") and live_port is not None:
                     # VERIFIED serving: the relay answered THIS probe AND named
                     # its port — the only state that may say "serving :<port>".
                     # The parenthetical prevents the one misread this sentence
                     # invites: the serving listener is the node's OWN port, not
                     # one of the addresses the join's refusal names.
-                    detail = (
-                        f"a relay is already serving :{live_port} on {where} (its own "
-                        "listener — a different address from any endpoint the join's "
-                        f"refusal names), and the join did not complete ({embedded}). "
-                        f"Restart the relay on {where} with `lop network restart`, then "
-                        "retry the join"
+                    #
+                    # WHAT THE SERVING RELAY SERVES DECIDES THE SENTENCE (drill
+                    # decision, 2026-10-04 — "join ADOPTS a relay already serving
+                    # the SAME network; a DIFFERENT one refuses with cause").
+                    # Round 1 sharpened every branch to say only what is true
+                    # (D1/D3/D4/Q-1): a restart never clears a join failure in
+                    # ANY branch, no branch prescribes it as the fix, and with no
+                    # usable target the probe claims no comparison. Round 2
+                    # closed the three claims left in these same sentences: the
+                    # EMPTY served list is its own branch (D7 — an answering
+                    # relay that lists nothing TOLD the probe that, it is the
+                    # ordinary fresh-device shape), the "once a join completes"
+                    # claim is scoped to the join target (D8 — `lop network init`
+                    # puts a network in the store with no join at all), and the
+                    # kind note reads the probe's verified `relay_served_by`,
+                    # never unit-file presence (D6). Each branch still ends on
+                    # the next move: retry once the cause the node reported is
+                    # cleared.
+                    same_network = bool(target) and any(
+                        (target[0] and row["network_id"] == target[0])
+                        or (target[1] and row["name"] == target[1])
+                        for row in served
                     )
-                    data["relay_serving"] = True
-                    data["relay_port"] = live_port
+                    label = ""
+                    if target is not None:
+                        label = target[1] or target[0] or "the network this join is for"
+                    if same_network:
+                        detail = (
+                            f"a relay is already serving :{live_port} on {where}, and it "
+                            f"serves {label} — that relay was left as it is and is not the "
+                            f"cause of this failure ({embedded}). Retry the join once the "
+                            "cause in the node's message is cleared; nothing about the relay "
+                            "needs restarting"
+                        )
+                        data["relay_serving"] = True
+                        data["relay_port"] = live_port
+                        data["relay_serves_target"] = True
+                    elif target is not None and served:
+                        # Empty display values are filtered BEFORE the join
+                        # (round-1 R-NIT-1): two all-empty rows used to render
+                        # "a different network (, )".
+                        names = ", ".join(
+                            value
+                            for value in (row["name"] or row["network_id"] for row in served)
+                            if value
+                        )
+                        names = names or "a different network"
+                        detail = (
+                            f"a relay is already serving :{live_port} on {where}, but it does "
+                            f"not serve {label} — it serves {names} instead; the network this "
+                            f"join is for can appear there only after a completed join, so the "
+                            f"relay is not the cause of this failure ({embedded}). "
+                            f"{_relay_kind_note(status)} Retry the join once the cause in the "
+                            "node's message is cleared"
+                        )
+                        data["relay_serving"] = True
+                        data["relay_port"] = live_port
+                        data["relay_serves_target"] = False
+                    elif target is not None and status.get("networks") == []:
+                        # D7: the probe DID tell here — the relay answered and
+                        # lists no network at all (the ordinary fresh-device
+                        # shape). It certainly does not serve the target.
+                        detail = (
+                            f"a relay is already serving :{live_port} on {where}, and it serves "
+                            f"no network yet; the network this join is for can appear there "
+                            f"only after a completed join, so the relay is not the cause of "
+                            f"this failure ({embedded}). {_relay_kind_note(status)} Retry the "
+                            "join once the cause in the node's message is cleared"
+                        )
+                        data["relay_serving"] = True
+                        data["relay_port"] = live_port
+                        data["relay_serves_target"] = False
+                    else:
+                        # Q-1: with NO usable target (no payload ids, undecodable
+                        # token) the probe cannot compare anything — it must not
+                        # render the different-network sentence or claim a
+                        # ``relay_serves_target`` it never determined. It says it
+                        # could not MATCH the relay to the join's network (D7's
+                        # wording: the honest failure of the comparison, not an
+                        # overclaim in either direction), and writes no target
+                        # field.
+                        detail = (
+                            f"a relay is already serving :{live_port} on {where} (its own "
+                            "listener — a different address from any endpoint the join's "
+                            "refusal names), and this probe could not match it to the network "
+                            f"this join is for, so it cannot be cleared as the cause "
+                            f"({embedded}). {_relay_kind_note(status)} Retry the join once the "
+                            "cause in the node's message is cleared"
+                        )
+                        data["relay_serving"] = True
+                        data["relay_port"] = live_port
                 elif status.get("relay_running"):
                     # RUNNING BUT UNCONFIRMED (review round 1, R-MINOR): the earlier
                     # shape fell back to the port it was ASKED about and asserted

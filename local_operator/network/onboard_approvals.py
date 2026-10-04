@@ -35,6 +35,7 @@ reference to the runner untouched.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,9 +49,12 @@ _CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz"
 #: The record states from which a run may START, as slice (a)'s ``begin_run``
 #: actually enforces them (the rebase reconciled this constant with the shipped
 #: store): ``approved`` opens a run and ``failed`` re-enters with a new run id
-#: (§2.4's retry). ``connecting`` deliberately cannot re-open — a crashed run's
-#: record resolves through its window, never a silent restart — so the
-#: pre-merge guess that included it is gone.
+#: (§2.4's retry). A ``connecting`` record may ALSO re-enter — but only through
+#: the store's staleness rule (drill finding, 2026-10-04: a runner killed
+#: mid-flight wedged a card in ``connecting`` and nothing could run it again):
+#: ``begin_run`` supersedes a run that stopped reporting (``run_is_stale``) and
+#: refuses a run that is still in flight, so the double-entry guard and the
+#: recovery path are the same, one owner.
 RUNNABLE_STATES = ("approved", "failed")
 
 
@@ -264,6 +268,13 @@ def begin_run(approval_id: str, *, now: float | None = None, root: Any = None) -
     The state transition and the id belong to slice (a)'s locked writer; the id
     VALUE is minted here so every receipt the runner appends carries the same
     one even if a rebase moves the writer.
+
+    A ``connecting`` record goes through slice (a)'s reassessment: a run that
+    stopped reporting is superseded (new run id, a ``superseded`` receipt naming
+    the stopped run), a run that is still in flight refuses
+    (``approval_run_in_flight``). The runner's own pid rides into the record's
+    run LEASE, which is what the next staleness question is answered from —
+    and it is this process's pid because this call IS the run opening.
     """
     moment = time.time() if now is None else now
     view = load(approval_id, root=root)
@@ -290,11 +301,18 @@ def begin_run(approval_id: str, *, now: float | None = None, root: Any = None) -
             f"onboarding request for {_who(view)}",
         )
     if view.state not in RUNNABLE_STATES:
-        # Reuse the per-step gate's refusals so "why can't this start" answers
-        # identically here and at step time.
-        require_step_allowed(approval_id, now=moment, root=root)
+        # ``connecting`` is the one state with a second answer: superseded when
+        # the previous run stopped reporting, refused in flight. The store owns
+        # that definition (``run_is_stale``); asking it here keeps ONE owner.
+        superseding = view.state == "connecting" and bool(
+            _call("run_is_stale", view.record, now=moment)
+        )
+        if not superseding:
+            # Reuse the per-step gate's refusals so "why can't this start" answers
+            # identically here and at step time.
+            require_step_allowed(approval_id, now=moment, root=root)
     run_id = new_run_id()
-    record = _call("begin_run", approval_id, run_id=run_id, root=root)
+    record = _call("begin_run", approval_id, run_id=run_id, runner_pid=os.getpid(), root=root)
     if record is None:
         record = view.record
     return _view(record, run_id=run_id)

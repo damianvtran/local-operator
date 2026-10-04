@@ -6322,12 +6322,33 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         return _emit(args, payload, _approval_lines(decided))
     # verb == "run" — the agent's execution path.
     record = approval_store.load_record(args.approval)
-    if record.get("state") not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
-        raise MeshRefusal(
-            "approval_not_runnable",
-            f"this approval is {record.get('state')} — only an approved (or "
-            "retry-eligible failed) record can run",
-        )
+    state = str(record.get("state") or "")
+    if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
+        # A ``connecting`` record has TWO answers (drill finding, 2026-10-04):
+        # a run that stopped reporting may be superseded — the store's own
+        # staleness rule decides, and the runner supersedes it below — while a
+        # run still in flight must never be double-entered, whatever the
+        # caller's clock says. One owner for that definition
+        # (``approval_store.run_is_stale``), so this gate and the runner's own
+        # ``begin_run`` cannot disagree.
+        if state == approval_store.STATE_CONNECTING and approval_store.run_is_stale(record):
+            pass
+        elif state == approval_store.STATE_CONNECTING:
+            raw_run = record.get("run")
+            run: dict[str, Any] = raw_run if isinstance(raw_run, dict) else {}
+            holder = str(run.get("run_id") or "") or "an earlier run"
+            raise MeshRefusal(
+                "approval_run_in_flight",
+                f"this approval already has a run in flight ({holder}); a second "
+                "runner would double-execute it. Wait for it to finish, or retry "
+                "once it has stopped reporting.",
+            )
+        else:
+            raise MeshRefusal(
+                "approval_not_runnable",
+                f"this approval is {state} — only an approved (or retry-eligible "
+                "failed) record can run",
+            )
     # F4: re-derive the digest AND re-verify the signature BEFORE every step;
     # the seam's runner calls this again per step, and calling it here means an
     # already-tampered record refuses before any work starts.

@@ -784,7 +784,12 @@ lop network uninstall --json        # --purge, whose real scope is below
 ```
 
 `serve` runs the relay in the foreground (supervision belongs to launchd or to
-that terminal); `start`/`stop`/`restart` drive the LaunchAgent. `log --export`
+that terminal); `start`/`stop`/`restart` drive the LaunchAgent. The supervised
+verbs are honest about what they find: a relay started by hand does not make
+`start`/`restart` a silent no-op — the hand-started process is stopped so the
+supervised relay can take the port — and a listener this install does not own is
+refused with its pid, port and command line rather than acted on. A verb reports
+success only once the process it manages is the one actually serving. `log --export`
 copies the audit log somewhere retention will not prune it — take that copy
 before an incident review, not after. `identity rotate` replaces the device key
 and announces the new device id to peers (the old id is stale from then on): it
