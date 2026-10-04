@@ -332,6 +332,29 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the record's own detail, projected into the receipt payload, not rendered",
     ),
+    # ``local_operator/tools/builtin.py`` became a mesh surface when the github
+    # adapter's import joined the file (the scanner's marker is the
+    # ``local_operator.network`` reference, and the base file held none). The reads
+    # below predate that and none is a mesh value: the browser file transfer's own
+    # intake/refusal rows carry locally composed reasons (``too_large``,
+    # ``max_depth``, per-file verdicts), and ``execute_bash`` prints the ABORT
+    # SIGNAL's own ``reason`` — authored in this process by the canceller for the
+    # tool result's abort line, never a peer's prose.
+    ("local_operator/tools/builtin.py", "_browser_download", "reason"): (
+        5,
+        "the browser transfer's own refusal reasons (locally composed rows), never a "
+        "mesh value; the module joined the scan with the github adapter's import",
+    ),
+    ("local_operator/tools/builtin.py", "_browser_upload", "reason"): (
+        1,
+        "the browser upload intake's own reason field — same family as "
+        "_browser_download, locally composed",
+    ),
+    ("local_operator/tools/builtin.py", "execute_bash", "reason"): (
+        2,
+        "``AbortSignal.reason``: the abort's own reason, authored in this process by "
+        "the canceller for the abort line of the tool result, never a peer's prose",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent

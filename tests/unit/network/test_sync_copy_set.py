@@ -437,6 +437,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
     ),
+    "local_operator/network/credentials/github.py": (
+        1,
+        "``APP_SECRET_NAME``: the secret-store NAME the owner's GitHub App key lives "
+        "under — the identifier-not-a-path case this file's docstring names (the "
+        "reply-channel/action-tool precedent), never a file in a session directory",
+    ),
     "local_operator/session/placement.py": (
         2,
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",
