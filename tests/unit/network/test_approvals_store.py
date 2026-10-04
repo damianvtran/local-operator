@@ -277,8 +277,10 @@ def test_run_re_entry_from_failed_uses_a_new_run_id(root: Path) -> None:
 # was the thing that died. These cells pin the resolution chosen by the drill
 # decision — ``begin_run`` supersedes a run whose lease is stale, refuses one
 # still in flight, and never invents a step failure (the truthful receipt is
-# ``step=aborted``). A live runner can never be double-entered: the pid in the
-# lease is the guard, and ``procstate.pid_alive`` fails closed toward "alive".
+# ``step=superseded``, a value that cannot be mistaken for one of the eight
+# step names — round-1 D5). A live runner can never be double-entered: the pid
+# in the lease is the guard, and ``procstate.pid_alive`` fails closed toward
+# "alive".
 
 
 def test_a_connecting_record_with_a_dead_lease_is_superseded_by_a_new_run(root: Path) -> None:
@@ -300,14 +302,16 @@ def test_a_connecting_record_with_a_dead_lease_is_superseded_by_a_new_run(root: 
     assert reopened["run"]["run_id"] == "run_new"
     assert reopened["run"]["pid"] == os.getpid()
     steps = [r["step"] for r in reopened["receipts"]]
-    assert steps == ["invite", "aborted"], reopened["receipts"]
-    aborted = reopened["receipts"][-1]
-    assert aborted["run_id"] == "run_dead"
-    assert aborted["ok"] is False
-    assert "stopped reporting" in aborted["detail"]
+    assert steps == ["invite", "superseded"], reopened["receipts"]
+    superseded = reopened["receipts"][-1]
+    assert superseded["run_id"] == "run_dead"
+    assert superseded["ok"] is False
+    assert "stopped reporting" in superseded["detail"]
+    # Round-1 D5: the receipt cannot be read at a glance as a step result.
+    assert "no step result is recorded here" in superseded["detail"]
     # The audit trail shows the gap between the approval that ran and the run
     # that replaced it.
-    assert reopened["audit"][-1] == "onboard_aborted"
+    assert reopened["audit"][-1] == "onboard_superseded"
 
 
 def test_a_live_runner_is_never_double_entered(root: Path) -> None:
@@ -337,7 +341,7 @@ def test_a_lease_less_record_falls_back_to_the_silence_bound(root: Path) -> None
     A._write_record(raw, root)
     reopened = A.begin_run(record["approval_id"], run_id="run_next", root=root)
     assert reopened["state"] == A.STATE_CONNECTING
-    assert [r["step"] for r in reopened["receipts"]] == ["install", "aborted"]
+    assert [r["step"] for r in reopened["receipts"]] == ["install", "superseded"]
 
     other = _approved_device_record(root)
     A.begin_run(other["approval_id"], run_id="run_old2", root=root)

@@ -793,6 +793,33 @@ def _invite_network_label(
         return None
 
 
+def _relay_kind_note(status: dict[str, Any]) -> str:
+    """What a restart would and would not do to the relay a status reported.
+
+    Round-1 D1: the old sentence stated the hand-started replacement mechanism
+    for ANY relay, but a supervised one restarts back onto the same served set —
+    the relay serves ``store.list_networks()``, and a failed handshake never
+    writes the join target's membership — so nothing about a restart clears the
+    join failure in EITHER case. This note therefore says what is true per
+    kind and never promises the restart fixes the join. The kind signal is the
+    presence of this platform's supervisor unit (``status['installed']``,
+    platform-aware since the same round: it used to be the launchd plist
+    unconditionally, which read ``false`` on every Linux host).
+    """
+    installed = status.get("installed")
+    if installed is True:
+        return (
+            "That relay is the service's own, and restarting it would not change what " "it serves."
+        )
+    if installed is False:
+        return (
+            "That relay was started by hand, not by the service — `lop network restart` "
+            "replaces it with the service's own relay — and neither changes what the "
+            "relay serves."
+        )
+    return "Restarting the relay would not change what it serves."
+
+
 def _served_networks(status: dict[str, Any]) -> list[dict[str, str]]:
     """The networks a node's status says its relay SERVES, ``[]`` when unknown.
 
@@ -1391,15 +1418,17 @@ class OnboardRun:
                     #
                     # WHAT THE SERVING RELAY SERVES DECIDES THE SENTENCE (drill
                     # decision, 2026-10-04 — "join ADOPTS a relay already serving
-                    # the SAME network; a DIFFERENT one refuses with cause"): a
-                    # relay that already serves the network being joined is not a
-                    # collision to clear — it is the correct state, the flow left
-                    # it in place, and the remedy must not send the reader to
-                    # restart something that was never the problem. Only a relay
-                    # that does NOT already serve this network gets the
-                    # restart remedy, and that remedy is now true because
-                    # ``lop network restart`` replaces a hand-started relay with
-                    # the supervised one (see relay._supervised_action).
+                    # the SAME network; a DIFFERENT one refuses with cause"), AND
+                    # ROUND 1 SHARPENED EVERY BRANCH TO SAY ONLY WHAT IS TRUE
+                    # (D1/D3/D4/Q-1): a relay serves a network only once a join
+                    # completes — membership is written by a successful pairing —
+                    # so a restart never clears a join failure in ANY branch. The
+                    # same-network branch must not imply the relay is a problem;
+                    # the other two must not prescribe a restart as the fix; and
+                    # with no usable target the probe must not claim a
+                    # comparison it could not make. Each branch ends on the next
+                    # move instead: retry once the cause the node reported is
+                    # cleared.
                     same_network = bool(target) and any(
                         (target[0] and row["network_id"] == target[0])
                         or (target[1] and row["name"] == target[1])
@@ -1407,36 +1436,52 @@ class OnboardRun:
                     )
                     label = ""
                     if target is not None:
-                        label = target[1] or target[0]
+                        label = target[1] or target[0] or "the network this join is for"
                     if same_network:
                         detail = (
-                            f"a relay is already serving :{live_port} on {where} and it already "
-                            f"serves {label} — that relay was left in place "
-                            f"and is not the cause, and the join did not complete ({embedded})"
+                            f"a relay is already serving :{live_port} on {where}, and it "
+                            f"serves {label} — that relay was left as it is and is not the "
+                            f"cause of this failure ({embedded}). Retry the join once the "
+                            "cause in the node's message is cleared; nothing about the relay "
+                            "needs restarting"
                         )
                         data["relay_serving"] = True
                         data["relay_port"] = live_port
                         data["relay_serves_target"] = True
-                    elif served:
-                        names = ", ".join(row["name"] or row["network_id"] for row in served)
+                    elif target is not None and served:
+                        # Empty display values are filtered BEFORE the join
+                        # (round-1 R-NIT-1): two all-empty rows used to render
+                        # "a different network (, )".
+                        names = ", ".join(
+                            value
+                            for value in (row["name"] or row["network_id"] for row in served)
+                            if value
+                        )
                         names = names or "a different network"
                         detail = (
-                            f"a relay is already serving :{live_port} on {where} but it serves "
-                            f"a different network ({names}), not the one this join is for, "
-                            f"and the join did not complete ({embedded}). Restart the relay on "
-                            f"{where} with `lop network restart` (it replaces a relay started by "
-                            "hand with the supervised one), then retry the join"
+                            f"a relay is already serving :{live_port} on {where}, but it does "
+                            f"not serve {label} — it serves {names} instead; a relay serves a "
+                            f"network only once a join completes, so it is not the cause of "
+                            f"this failure ({embedded}). {_relay_kind_note(status)} Retry the "
+                            "join once the cause in the node's message is cleared"
                         )
                         data["relay_serving"] = True
                         data["relay_port"] = live_port
                         data["relay_serves_target"] = False
                     else:
+                        # Q-1: with NO usable target (no payload ids, undecodable
+                        # token) the probe cannot compare anything — it must not
+                        # render the different-network sentence or claim a
+                        # ``relay_serves_target`` it never determined. "Cannot
+                        # tell" stays "cannot tell", the fallback the token's own
+                        # contract promises.
                         detail = (
                             f"a relay is already serving :{live_port} on {where} (its own "
                             "listener — a different address from any endpoint the join's "
-                            f"refusal names), and the join did not complete ({embedded}). "
-                            f"Restart the relay on {where} with `lop network restart`, then "
-                            "retry the join"
+                            "refusal names), and this probe could not tell whether it serves "
+                            f"the network this join is for, so it cannot be cleared as the "
+                            f"cause ({embedded}). {_relay_kind_note(status)} Retry the join "
+                            "once the cause in the node's message is cleared"
                         )
                         data["relay_serving"] = True
                         data["relay_port"] = live_port

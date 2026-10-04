@@ -315,8 +315,8 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch) -> OperatorAnchor:
     return anchor
 
 
-def _invite_payload(token: Path) -> dict[str, Any]:
-    return {
+def _invite_payload(token: Path, **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "ok": True,
         "invite_id": "inv_1",
         "path": str(token),
@@ -326,14 +326,16 @@ def _invite_payload(token: Path) -> dict[str, Any]:
         "network_id": "n_1",
         "network_name": "damian-mesh",
     }
+    payload.update(overrides)
+    return payload
 
 
-def _happy_run_local(token: Path):
+def _happy_run_local(token: Path, **invite_overrides: Any):
     def run_local(argv: list[str], *, timeout: float) -> onboard.CommandResult:
         joined = " ".join(argv)
         if "invite" in joined:
             return onboard.CommandResult(
-                tuple(argv), 0, json.dumps(_invite_payload(token)), "", at=0.0
+                tuple(argv), 0, json.dumps(_invite_payload(token, **invite_overrides)), "", at=0.0
             )
         if "ready" in joined:
             return onboard.CommandResult(
@@ -813,21 +815,25 @@ def test_a_join_failure_names_the_already_serving_relay_and_keeps_the_nodes_mess
     failing = payload["steps"][-1]
     assert failing["step"] == "join" and failing["ok"] is False
     detail = failing["detail"]
-    assert "did not complete" in detail
+    assert "cannot be cleared as the cause" in detail
     # The node's own SENTENCE rides (design round 1, D6): the code is a machine
     # field now, never part of the sentence.
     assert "could not join: nothing was listening at 192.168.0.155:4097" in detail
     assert "join_failed" not in detail
     assert failing["data"]["code"] == "join_failed"
-    # What the probe VERIFIED: the serving port, the named machine, ONE action —
-    # and no mechanism this build cannot produce.
+    # What the probe VERIFIED: the serving port, the named machine — and, since
+    # round 1 (D4/Q-1), the same form its siblings carry: the restart is not a
+    # remedy here either, and no target comparison it could not make.
     assert "a relay is already serving :4097 on cloud-node-1" in detail
-    assert "lop network restart" in detail
-    assert "retry the join" in detail
+    assert "could not tell whether it serves" in detail
+    assert "Restarting the relay would not change what it serves." in detail
+    assert "lop network restart" not in detail
+    assert "Retry the join once the cause in the node's message is cleared" in detail
     assert "relay step" not in detail
     assert "can hold the connection" not in detail
     assert failing["data"]["relay_serving"] is True
     assert failing["data"]["relay_port"] == 4097
+    assert "relay_serves_target" not in failing["data"]
     assert failing["data"]["node_refused"] is True
     # The runner stopped at the join, exactly as before.
     commands = " | ".join(" ".join(c[1]) for c in transport.calls if c[0] == "run")
@@ -973,23 +979,261 @@ def test_a_join_failure_where_the_relay_already_serves_the_target_network_adopts
     failing = payload["steps"][-1]
     detail = failing["detail"]
     assert "already serving :4097 on cloud-node-1" in detail
-    assert "already serves damian-mesh" in detail
-    assert "left in place" in detail
-    assert "not the cause" in detail
+    assert "it serves damian-mesh" in detail
+    assert "left as it is" in detail
+    assert "not the cause of this failure" in detail
     assert "LinkCryptoError" in detail
-    # THE REMEDY COPY IS ALIGNED WITH ADOPT: a restart must not be prescribed
-    # for a relay that was never the problem.
+    # Round-1 D3: a next move is named, the doubled "already" is gone, and no
+    # restart is prescribed for a relay that was never the problem.
+    assert detail.count("already") == 1, detail
+    assert "Retry the join once the cause in the node's message is cleared" in detail
+    assert "nothing about the relay needs restarting" in detail
     assert "lop network restart" not in detail
     assert failing["data"]["relay_serves_target"] is True
     assert failing["data"]["relay_serving"] is True
 
 
-def test_a_join_failure_where_the_relay_serves_other_networks_keeps_the_true_remedy(
+def test_a_join_failure_against_a_hand_started_relay_says_only_what_restart_does(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The other half: a relay serving a DIFFERENT network refuses with cause —
-    and the restart remedy it prints is the one ``lop network restart`` now
-    actually performs (replaces a hand-started relay with the supervised one)."""
+    """Round-1 D1, hand-started case: the relay serves other networks only — but
+    a relay serves a network only once a join completes, so the restart cannot
+    be the fix here either. The note states the one mechanism that IS true of a
+    hand-started relay (restart replaces it with the service's own) and keeps
+    the next move; the supervised register is absent."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "installed": False,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                        "networks": [{"network_id": "n_other", "name": "lab-mesh", "epoch": 3}],
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    failing = payload["steps"][-1]
+    detail = failing["detail"]
+    assert "a relay is already serving :4097 on cloud-node-1" in detail
+    assert "but it does not serve damian-mesh" in detail
+    assert "it serves lab-mesh instead" in detail
+    assert "a relay serves a network only once a join completes" in detail
+    assert "it is not the cause of this failure" in detail
+    assert "That relay was started by hand, not by the service" in detail
+    assert "`lop network restart` replaces it with the service's own relay" in detail
+    assert "neither changes what the relay serves" in detail
+    assert "Retry the join once the cause in the node's message is cleared" in detail
+    # The supervised register must NOT appear in this kind's sentence.
+    assert "the service's own, and restarting it would not change" not in detail
+    assert failing["data"]["relay_serves_target"] is False
+    assert failing["data"]["relay_serving"] is True
+
+
+def test_a_join_failure_against_the_supervised_relay_names_the_same_served_set(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 D1, supervised case: the unit restarts back onto the SAME served
+    set (it serves ``store.list_networks()``; a failed handshake never writes
+    the target), so prescribing a restart as the fix would be the same
+    remedy-that-cannot-act one branch over. The note says what is true: it is
+    the service's own, and a restart would not change what it serves."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        # The supervised unit serves the same set after any
+                        # restart — the fact this branch must not bury.
+                        "installed": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                        "networks": [{"network_id": "n_other", "name": "lab-mesh", "epoch": 3}],
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    failing = payload["steps"][-1]
+    detail = failing["detail"]
+    assert "a relay is already serving :4097 on cloud-node-1" in detail
+    assert "but it does not serve damian-mesh" in detail
+    assert "it serves lab-mesh instead" in detail
+    assert "it is not the cause of this failure" in detail
+    assert (
+        "That relay is the service's own, and restarting it would not change what it serves."
+        in detail
+    )
+    assert "Retry the join once the cause in the node's message is cleared" in detail
+    # No hand-start mechanism, and no bare restart command, in this kind's
+    # sentence.
+    assert "started by hand" not in detail
+    assert "lop network restart" not in detail
+    assert failing["data"]["relay_serves_target"] is False
+    assert failing["data"]["relay_serving"] is True
+
+
+def test_empty_served_rows_do_not_leak_a_broken_network_list(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 R-NIT-1: two all-empty served rows used to join into ", " and
+    render "a different network (, )"."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        (
+            "network join",
+            {
+                "rc": 1,
+                "stdout": json.dumps(
+                    {
+                        "ok": False,
+                        "code": "join_failed",
+                        "message": "could not join: nothing was listening at 192.168.0.155:4097",
+                    }
+                ),
+            },
+        ),
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "port": 4097,
+                        "listening": {"address": "0.0.0.0", "port": 4097},
+                        "networks": [
+                            {"network_id": "", "name": "", "epoch": 1},
+                            {"network_id": "", "name": "", "epoch": 2},
+                        ],
+                    }
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    detail = payload["steps"][-1]["detail"]
+    assert "(, )" not in detail
+    assert "it serves a different network instead" in detail
+    assert "Restarting the relay would not change what it serves." in detail
+    assert payload["steps"][-1]["data"]["relay_serves_target"] is False
+
+
+def test_an_undecodable_target_with_a_served_list_keeps_the_generic_sentence(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 Q-1: with NO usable target (the mint payload carries no ids and
+    the token bytes do not decode) and a served list present, the old shape
+    rendered the different-network sentence and claimed
+    ``relay_serves_target: false`` — a comparison the flow could not make. The
+    generic sentence stays, and the field is absent."""
     _install_fakes(monkeypatch)
     token = tmp_path / "invite.token"
     token.write_text("token-bytes", encoding="utf-8")
@@ -1041,19 +1285,19 @@ def test_a_join_failure_where_the_relay_serves_other_networks_keeps_the_true_rem
         transport=transport,
         resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
         local_cli=["lop"],
-        run_local=_happy_run_local(token),
+        # The mint payload carries no network ids; the token bytes do not decode.
+        run_local=_happy_run_local(token, network_id="", network_name=""),
     )
 
     failing = payload["steps"][-1]
     detail = failing["detail"]
-    assert "a relay is already serving :4097 on cloud-node-1" in detail
-    assert "a different network (lab-mesh)" in detail
-    assert "not the one this join is for" in detail
-    # The remedy stays — and says what restart now does.
-    assert "lop network restart" in detail
-    assert "replaces a relay started by hand with the supervised one" in detail
-    assert failing["data"]["relay_serves_target"] is False
+    assert "could not tell whether it serves the network this join is for" in detail
+    assert "does not serve" not in detail
+    assert "it serves lab-mesh instead" not in detail
+    assert "Retry the join once the cause in the node's message is cleared" in detail
     assert failing["data"]["relay_serving"] is True
+    assert failing["data"]["relay_port"] == 4097
+    assert "relay_serves_target" not in failing["data"]
 
 
 def test_a_retry_reuses_the_record_with_a_new_run_id(

@@ -1238,10 +1238,10 @@ def begin_run(
     A ``connecting`` record whose run lease is stale (drill finding,
     2026-10-04; :func:`run_is_stale` owns the definition) is superseded FIRST,
     through the matrix's own two edges — ``connecting → failed`` with a
-    ``step=aborted`` receipt that names the stopped run, then ``failed →
+    ``step=superseded`` receipt that names the stopped run, then ``failed →
     connecting`` for this one — and writes the record exactly ONCE, so no
-    reader ever observes the intermediate state. The aborted receipt states the
-    fact ("the previous run stopped reporting; superseded") and never invents a
+    reader ever observes the intermediate state. The supersede receipt states
+    the fact ("the run stopped reporting; superseded") and never invents a
     step failure: nothing here knows which step, if any, the dead run was
     running.
 
@@ -1277,19 +1277,24 @@ def begin_run(
             record.setdefault("receipts", []).append(
                 {
                     "run_id": str(stopped.get("run_id") or ""),
-                    "step": "aborted",
+                    # NOT a step name: ``step``'s other values are the runner's
+                    # eight steps, and round 1 read "aborted" + ok=False at a
+                    # glance as one of them failing (D5). "superseded" cannot
+                    # be confused for a step and states what actually happened.
+                    "step": "superseded",
                     "at": moment,
                     "ok": False,
                     "detail": (
-                        "the run stopped reporting and was superseded by a new run; "
-                        "nothing is known about its last step beyond what its receipts say"
+                        "the run was superseded: it stopped reporting and a new run "
+                        "replaced it; this receipt records the supersede itself — no "
+                        "step result is recorded here"
                     ),
                     "digest": "",
                 }
             )
-            record["audit"].append("onboard_aborted")
+            record["audit"].append("onboard_superseded")
             _audit(
-                "onboard_aborted",
+                "onboard_superseded",
                 actor="self",
                 subject=approval_id,
                 root=root,

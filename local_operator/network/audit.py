@@ -197,10 +197,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "onboard_connected",
         "onboard_failed",
         # A run that stopped reporting was superseded by a retry: the receipt that
-        # lands says ``step=aborted``, and this row is how the record's history
+        # lands says ``step=superseded``, and this row is how the record's history
         # shows the gap between an approval that ran and the run that replaced
         # it (drill finding, 2026-10-04).
-        "onboard_aborted",
+        "onboard_superseded",
     }
 )
 
@@ -374,7 +374,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "onboard_expired": frozenset({"kind"}),
     "onboard_connected": frozenset({"kind", "run_id"}),
     "onboard_failed": frozenset({"kind", "step", "run_id"}),
-    "onboard_aborted": frozenset({"kind", "run_id"}),
+    "onboard_superseded": frozenset({"kind", "run_id"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
