@@ -1139,7 +1139,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: tiers-configured machine reads 100,319 = ~36,086 on the shipped default, 212
 #: over this ceiling, which is the recorded config dependence rather than this
 #: change; CI remains the binding reading.
-BUDGET_BILLED_TOKENS = 35_874
+#:
+#: RAISED 35,874 -> 35,937 for the PEER-ADDRESS ROLE-WORD GUARD
+#: (``fix/role-word-recipient``). No tool, field or counter moves; the delta is
+#: the two ``target`` field descriptions the fix requires and nothing else.
+#: ``SendParams.target`` and ``SessionsParams.target`` now state the two rules
+#: the resolver applies — an EXACT conversation name / session id / cwd basename
+#: wins over any substring, and a team role word (``manager``) is refused — so a
+#: model reading the schema learns the guard exists. The guard itself lives in
+#: the resolver; the copy is not a gate, which is why the failure being fixed
+#: (a bare ``manager`` silently landing on a namesake TITLE) could not be
+#: prevented by wording alone — but a model that is never told still types it.
+#:
+#: Measured with THIS script, CLEAN arm (an isolated HOME and config dir, which
+#: is what CI renders — the config dependence the ``tool://`` entry above
+#: explains does not apply). The BASE reads 99,557 at BOTH this branch's
+#: merge-base (``cd3d03e9f``) and at ``origin/main`` (``e01d66d0d``) — the five
+#: main commits since are schema-neutral — so the delta below is entirely this
+#: branch's:
+#:
+#:   cd3d03e9f == origin/main   99,557 chars = ~35,812  (62 left)
+#:   head (this branch)         99,733 chars = ~35,875
+#:   delta                         176 chars =   ~63
+#:
+#: and it decomposes EXACTLY into the two edited fields:
+#:
+#:   +112 chars   ``SendParams.target``      (that schema's JSON 2,004 -> 2,116)
+#:   + 59 chars   ``SessionsParams.target``  (3,725 -> 3,784)
+#:   +  5 chars   the ONE extra em dash the new ``send`` copy adds — this block
+#:                counts the provider array, where ``json.dumps`` escapes a
+#:                non-ASCII char as ``\u2014`` (6 chars for 1)
+#:   = 176 chars  =  ~63 billed
+#:
+#: The ceiling is the measured head + 62, the same band main carried before this
+#: change. The tighten band (1,200) is nowhere near tripped.
+BUDGET_BILLED_TOKENS = 35_937
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

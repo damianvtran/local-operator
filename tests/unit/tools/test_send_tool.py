@@ -89,8 +89,14 @@ async def _start_peer(conversation_name: str = "peer-target"):
         raise
 
 
-def _context() -> ToolContext:
-    return ToolContext(cwd="/tmp", session_id="sender-session", session_name="sender session")
+def _context(**overrides: Any) -> ToolContext:
+    fields: dict[str, Any] = {
+        "cwd": "/tmp",
+        "session_id": "sender-session",
+        "session_name": "sender session",
+    }
+    fields.update(overrides)
+    return ToolContext(**fields)
 
 
 async def _last_peer_call(handle: _DetailHandle) -> dict[str, Any]:
@@ -892,5 +898,58 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
         assert result.details is not None
         assert result.details["delivery"]["state"] == "delivered"
         assert calls == []
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_role_word_target_is_refused_and_delivers_nothing(tmp_path: Path) -> None:
+    """A team role word is not an address on the tool surface either.
+
+    The alias record below is a LIVE substring hit on the name
+    "Article-search campaigns: manager", so ``target="manager"`` used to deliver
+    to it SILENTLY. Now it is refused with the shared sentence, and the refusal
+    must not read as a no-match — the tool enters the stored fallback on exactly
+    that predicate and would spool the note to a stored namesake.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    teams = TeamRegistry(tmp_path)
+    teams.create_team(TeamEditFields(name="lopdev", manager="manager"))
+    registrant, _alias, handle = await _start_peer("Article-search campaigns: manager")
+    try:
+        result = await execute_send(
+            "t-role",
+            {"target": "manager", "message": "digest"},
+            None,
+            None,
+            _context(team_registry=teams),
+        )
+        assert result.is_error
+        assert "is a team role (roles on: lopdev), not a session address" in result.text
+        assert "no live session matches" not in result.text
+        # Nothing was dialled: the wrong recipient is the whole defect.
+        assert handle.calls == []
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_the_role_guard_is_disabled_without_a_registry() -> None:
+    """A reduced host (``team_registry`` is None) keeps the old behaviour: a
+    substring send still resolves. The guard may never refuse a legitimate name
+    just because it could not read a teams tree."""
+    registrant, _alias, handle = await _start_peer("manager of ops")
+    try:
+        result = await execute_send(
+            "t-noreg",
+            {"target": "manager", "message": "still works"},
+            None,
+            None,
+            _context(),
+        )
+        assert result.is_error is False
+        call = await _last_peer_call(handle)
+        assert call["text"] == "still works"
     finally:
         registrant.close()

@@ -8,12 +8,13 @@ caught once for both callers.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import pytest
 
@@ -1882,3 +1883,453 @@ def test_probe_transcript_for_reads_a_bounded_tail(tmp_path: Path) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(("x" * 1024 + "\n") * (peer_send.PEER_SEND_PROBE_TAIL_BYTES // 1024 + 2))
     assert peer_send.probe_transcript_for("peer-" + "a" * 32, "s", root=tmp_path) is False
+
+
+# --- Role words are delegations, not addresses ------------------------------
+#
+# A bare team role word (``manager``, ``reviewer``) is a delegation handle —
+# ``task(agent='<role>')`` — and never a session address, but it is a tempting
+# needle for the substring tier, where it silently lands on any session whose
+# TITLE happens to contain it. Nine digests across four workstreams were routed
+# to a session titled ``Article-search campaigns: manager`` that way. These pin
+# the two-tier fix: an EXACT whole-value match wins over any substring match,
+# and a word in the installed-team vocabulary is refused ahead of the substring
+# tier and the stored fallback.
+
+
+def test_a_role_word_does_not_take_a_substring_hit(fake_scan) -> None:
+    """The incident in miniature.
+
+    One live record whose TITLE contains ``manager`` and no record NAMED
+    ``manager``: before the fix this returned that record with ``candidates ==
+    []`` and ``error == ""`` — a silent wrong recipient.
+    """
+    hit = _Record(10, conversation_name="Article-search campaigns: manager")
+    fake_scan([(hit, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(
+        target="manager", role_words={"manager"}
+    )
+    assert record is None
+    assert candidates == []
+    assert error.startswith("'manager' is a team role")
+    assert "not a session address" in error
+    assert "`lop sessions` lists the sessions whose names contain 'manager'" in error
+
+
+def test_a_role_refusal_names_the_defining_teams_and_near_misses(fake_scan) -> None:
+    """The vocabulary's rich form carries the team provenance and the count."""
+    hit = _Record(10, conversation_name="Article-search campaigns: manager")
+    fake_scan([(hit, "live")])
+    _r, _c, error = peer_send.resolve_peer_target(
+        target="manager",
+        role_words={"manager": ("lopdev", "helpdesk")},
+        pid_hint="--pid",
+        session_hint="--session",
+    )
+    assert "(roles on: lopdev, helpdesk)" in error
+    assert "pass --pid or --session instead" in error
+    # k > 0 because the scan DID find a name containing the needle: the sender
+    # learns the ambiguity was real rather than that nothing matched.
+    assert "1 running session name contains it" in error
+
+
+def test_the_near_miss_tail_agrees_with_its_count(fake_scan) -> None:
+    """QA round 1, Q-1: the noun AND the verb agree with the count.
+
+    The tail used to read "1 running session name contain it"; the singular and
+    the plural are both pinned so a future edit cannot fix one and break the
+    other.
+    """
+    one = _Record(10, conversation_name="Article-search campaigns: manager")
+    fake_scan([(one, "live")])
+    _r, _c, error = peer_send.resolve_peer_target(target="manager", role_words={"manager"})
+    assert "; 1 running session name contains it" in error
+
+    two = _Record(10, conversation_name="campaigns: manager")
+    three = _Record(20, conversation_name="the manager desk")
+    fake_scan([(two, "live"), (three, "live")])
+    _r, _c, error = peer_send.resolve_peer_target(target="manager", role_words={"manager"})
+    assert "; 2 running session names contain it" in error
+
+
+def test_a_role_refusal_never_opens_the_stored_fallback(monkeypatch, fake_scan) -> None:
+    """THE HARD REQUIREMENT.
+
+    ``live_scan_found_nothing`` is a substring test on ``no live session
+    matches``, and the send tool and the CLI enter the STORED fallback on
+    exactly that predicate. A role refusal phrased as a no-match would therefore
+    spool the note to a stored namesake the call never named.
+    """
+    stored_calls: list[Any] = []
+
+    def _spy(*args, **kwargs):
+        stored_calls.append(args)
+        return "abc123def456", [], ""
+
+    monkeypatch.setattr(peer_send, "resolve_stored_target", _spy)
+    hit = _Record(10, conversation_name="Article-search campaigns: manager")
+    fake_scan([(hit, "live")])
+    _r, _c, error = peer_send.resolve_peer_target(target="manager", role_words={"manager"})
+    assert error
+    assert "no live session matches" not in error, error
+    assert not peer_send.live_scan_found_nothing(error), error
+    assert stored_calls == []
+
+
+def test_role_words_match_the_whole_value_only(fake_scan) -> None:
+    """Recognition is a whole-value vocabulary test, not a shape rule.
+
+    ``manager of ops`` is not a role word (a short phrase, not a roster entry)
+    and keeps resolving by substring; the needle's own case is irrelevant
+    because the resolver lowercases it before the vocabulary test; and an empty
+    vocabulary is EXACTLY today's behaviour, which is what keeps the tier from
+    breaking a caller that has no team registry.
+    """
+    hit = _Record(10, conversation_name="manager of ops emporium")
+    fake_scan([(hit, "live")])
+    record, _c, error = peer_send.resolve_peer_target(target="manager of ops")
+    assert record is hit and error == ""
+    record, _c, error = peer_send.resolve_peer_target(target="Manager", role_words={"manager"})
+    assert record is None and "is a team role" in error
+    record, _c, error = peer_send.resolve_peer_target(target="manager", role_words=())
+    assert record is hit and error == ""
+
+
+def test_an_exact_name_beats_a_substring_hit(fake_scan) -> None:
+    """A sender who typed a session's FULL name reaches that session, not the
+    ambiguity list and not a namesake that merely contains the name."""
+    exact = _Record(10, conversation_name="release")
+    contains = _Record(20, conversation_name="release cutter")
+    fake_scan([(exact, "live"), (contains, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="release")
+    assert record is exact
+    assert candidates == []
+    assert error == ""
+
+
+def test_exact_precedence_is_name_then_id_then_cwd(fake_scan) -> None:
+    """Several records matching the needle EXACTLY are surfaced, never picked
+    silently; the list is ordered by the field that matched — conversation name,
+    then session id, then cwd basename — so the precedence is deterministic."""
+    by_name = _Record(10, conversation_name="needle", session_id="a1", cwd="/tmp/x")
+    by_id = _Record(20, conversation_name="other", session_id="needle", cwd="/tmp/y")
+    by_cwd = _Record(30, conversation_name="third", session_id="c3", cwd="/tmp/needle")
+    fake_scan([(by_cwd, "live"), (by_id, "live"), (by_name, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="needle")
+    assert record is None and error == ""
+    assert candidates == [by_name, by_id, by_cwd]
+
+
+def test_an_exact_match_reports_the_substring_matches_it_ignored(fake_scan) -> None:
+    """The exact tier does not DROP the substring matches it passed over.
+
+    Silent would be a small transparency regression: the sender typed a name and
+    one row matched it exactly, so the delivery receipt says how many others were
+    set aside (``exact_ignored`` mirrors the ``skipped`` out-parameter), and
+    ``exact_field`` names the rank that matched.
+    """
+    exact = _Record(10, conversation_name="release")
+    contains = _Record(20, conversation_name="release cutter")
+    fake_scan([(exact, "live"), (contains, "live")])
+    ignored: list[Any] = []
+    field: list[str] = []
+    record, _c, _e = peer_send.resolve_peer_target(
+        target="release", exact_ignored=ignored, exact_field=field
+    )
+    assert record is exact
+    assert ignored == [contains]
+    assert field == ["name"]
+    assert peer_send.exact_ignored_clause(len(ignored), *field) == (
+        "; 1 other match ignored (exact name matched)"
+    )
+    assert peer_send.exact_ignored_clause(0) == ""
+
+
+def test_the_exact_receipt_names_the_rank_that_matched(fake_scan) -> None:
+    """MINOR-1: the clause names the field, not always "name".
+
+    A session-id exact match used to report itself as an exact *name* match,
+    which misdescribes which address the sender typed.
+    """
+    by_id = _Record(10, conversation_name="other", session_id="needle")
+    contains = _Record(20, conversation_name="needle notes")
+    fake_scan([(by_id, "live"), (contains, "live")])
+    ignored: list[Any] = []
+    field: list[str] = []
+    record, _c, _e = peer_send.resolve_peer_target(
+        target="needle", exact_ignored=ignored, exact_field=field
+    )
+    assert record is by_id
+    assert ignored == [contains]
+    assert field == ["session id"]
+    assert peer_send.exact_ignored_clause(len(ignored), *field) == (
+        "; 1 other match ignored (exact session id matched)"
+    )
+
+
+def test_a_lone_cwd_exact_match_does_not_silently_win_over_a_namesake(fake_scan) -> None:
+    """MAJOR-1: a bare worktree token is not an address.
+
+    Before the fix the cwd-exact arm resolved SILENTLY to ``a`` with
+    ``candidates == []`` while ``b``'s NAME contained the needle — the same
+    silent-wrong-recipient class this tier removes, and on the shared grammar
+    ``/stop``/``sessions stop`` would have ended the namesake with nothing
+    disclosed. Now the ambiguity is surfaced, exactly as the base did.
+    """
+    a = _Record(10, conversation_name="unrelated work", cwd="/Users/x/local-operator")
+    b = _Record(20, conversation_name="Reviewing local-operator PR #1970", cwd="/Users/y/other")
+    fake_scan([(a, "live"), (b, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="local-operator")
+    assert record is None
+    assert error == ""
+    assert candidates == [a, b]
+
+
+def test_a_sole_cwd_exact_match_still_resolves(fake_scan) -> None:
+    """The stricter cwd rule keeps the documented sole-match case.
+
+    A cwd basename nothing else matches still resolves — the pinned ``ingest``
+    case, and the reason the cwd arm was not simply deleted from the tier.
+    """
+    only = _Record(20, conversation_name="other", cwd="/home/u/ingest")
+    fake_scan([(only, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="ingest")
+    assert record is only
+    assert candidates == [] and error == ""
+
+
+def test_an_ignored_substring_match_leaves_a_resolvable_needle(fake_scan) -> None:
+    """An exact hit on one record and a substring hit on another: the exact one
+    wins, and the OTHER stays addressable by its own full name afterwards."""
+    exact = _Record(10, conversation_name="release")
+    contains = _Record(20, conversation_name="release cutter")
+    fake_scan([(exact, "live"), (contains, "live")])
+    assert peer_send.resolve_peer_target(target="release")[0] is exact
+    assert peer_send.resolve_peer_target(target="release cutter")[0] is contains
+
+
+def test_the_stored_fallback_refuses_a_role_word_and_still_resolves_an_exact_one(
+    monkeypatch, tmp_path, fake_scan
+) -> None:
+    """The stored twin of both new rules, so a direct caller cannot bypass them.
+
+    A stored row NAMED exactly the role word still resolves (symmetric with the
+    live rule); a stored row that merely CONTAINS it does not.
+    """
+    fake_scan([])
+    _stored(
+        monkeypatch,
+        [
+            _StoredRow("abc123def456", "Article-search campaigns: manager"),
+            _StoredRow("ffff11112222", "manager"),
+        ],
+        root=tmp_path,
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target(
+        "manager", role_words={"manager"}
+    )
+    # The row literally NAMED ``manager`` is an exact match and resolves, which
+    # is why the exact tier is implemented in the stored resolver rather than
+    # left to the live short-circuit.
+    assert session_id == "ffff11112222"
+    assert candidates == [] and error == ""
+
+    # With only the substring namesake present, the role refusal fires.
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows",
+        lambda directory, limit=None: [_StoredRow("abc123def456", "Article-search: manager")],
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target(
+        "manager", role_words={"manager": ("lopdev",)}
+    )
+    assert session_id is None and candidates == []
+    assert "is a team role (roles on: lopdev)" in error
+
+
+def test_the_stored_role_refusal_speaks_the_callers_grammar(
+    monkeypatch, tmp_path, fake_scan
+) -> None:
+    """NIT-1: the stored refusal threads the caller's own retype grammar.
+
+    ``resolve_stored_target`` composes its role refusal with the passed
+    ``pid_hint``/``session_hint`` rather than the resolver's defaults, so a
+    direct caller (or a future one) does not mis-speak the flags to type.
+    """
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Article-search: manager")], root=tmp_path)
+    _sid, _c, error = peer_send.resolve_stored_target(
+        "manager",
+        role_words={"manager": ("lopdev",)},
+        pid_hint="--pid",
+        session_hint="--session",
+    )
+    assert "is a team role (roles on: lopdev)" in error
+    assert "pass --pid or --session instead" in error
+
+
+#: Call sites that DELIBERATELY pass a DISABLED role vocabulary, keyed by
+#: (path relative to ``local_operator/``, enclosing function). Each is an EXACT
+#: session-id selector the caller already resolved: the needle is a session id,
+#: so it cannot equal a team role word and the guard is provably irrelevant —
+#: while the teams read would add I/O for no benefit. A NEW entry here is a
+#: visible, reviewed edit (review round 1, MINOR-2).
+_DISABLED_ROLE_WORDS_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("server/request_update.py", "_deliver"),
+        ("tui/app.py", "_stop_unbound_worker"),
+        ("tui/app.py", "_quick_send_worker"),
+    }
+)
+
+#: The resolver entry points every production call site must address.
+_RESOLVER_NAMES = frozenset(
+    {"resolve_peer_target", "resolve_stored_target", "resolve_switch_target"}
+)
+
+
+def _role_words_disabled(value: ast.AST) -> bool:
+    """Whether a ``role_words=`` expression leaves the guard DISABLED.
+
+    ``None``/``()``/``{}``/``set()`` and friends all fold to disabled in
+    ``peer_send._normalize_role_words``, so the scan has to recognise the
+    SHAPES rather than only the presence of the keyword (review round 1,
+    MINOR-2).
+    """
+    if isinstance(value, ast.Constant):
+        return value.value in (None, "", (), frozenset())
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return not value.elts
+    if isinstance(value, ast.Dict):
+        return not value.keys
+    if isinstance(value, ast.Call):
+        callee = value.func
+        name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
+        return name in {"frozenset", "set", "dict", "tuple", "list"} and not value.args
+    return False
+
+
+def _role_word_scan_violations(sources: "Iterable[tuple[str, str]]") -> list[str]:
+    """One line of text per resolver call site that fails the guard rule.
+
+    A site fails when it does not name ``role_words`` at all, or names it with a
+    DISABLED value and is not on :data:`_DISABLED_ROLE_WORDS_ALLOWLIST`. The
+    walk is over ``ast`` rather than a text regex so an ``import``/``def``
+    reference (which is not a call) is not mistaken for one, and the
+    ``asyncio.to_thread(resolve_peer_target, ...)`` form — where the resolver is
+    an ARGUMENT, not the callee — is covered: the resolver name's innermost
+    enclosing Call is the ``to_thread`` call, whose keywords are the ones that
+    must carry the vocabulary.
+
+    Extracted from the test so a SYNTHETIC source can prove the scan fails
+    (AGENTS.md, "Prove the test can still fail").
+    """
+    offenders: list[str] = []
+    for label, source in sources:
+        tree = ast.parse(source, filename=label)
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            identifier = None
+            if isinstance(node, ast.Name):
+                identifier = node.id
+            elif isinstance(node, ast.Attribute):
+                identifier = node.attr
+            if identifier not in _RESOLVER_NAMES:
+                continue
+            call = node
+            while call is not None and not isinstance(call, ast.Call):
+                call = parents.get(call)
+            if call is None:
+                continue
+            # ``node`` is statically an ``ast.AST`` (the isinstance checks above
+            # narrow only ``identifier``), and location attributes live on the
+            # concrete expression node, so read the line defensively: it is
+            # diagnostic text, not part of the assertion.
+            lineno = getattr(node, "lineno", 0)
+            keyword = next((k for k in call.keywords if k.arg == "role_words"), None)
+            if keyword is None:
+                offenders.append(f"{label}:{lineno} {identifier}: no role_words")
+                continue
+            if not _role_words_disabled(keyword.value):
+                continue
+            scope = call
+            function = ""
+            while scope is not None:
+                if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    function = scope.name
+                    break
+                scope = parents.get(scope)
+            if (label, function) not in _DISABLED_ROLE_WORDS_ALLOWLIST:
+                offenders.append(
+                    f"{label}:{lineno} {identifier}: disabled vocabulary "
+                    f"({ast.unparse(keyword.value)}) in {function}()"
+                )
+    return offenders
+
+
+def test_every_production_caller_passes_a_live_role_vocabulary() -> None:
+    """A source scan, because only the CALL SITES can drop the guard.
+
+    The vocabulary is an opt-in keyword defaulting to disabled, so a future
+    caller that forgets it — or passes a falsy value — silently re-opens the
+    wrong-recipient path with no test noticing. This pins the GUARD, not the
+    presence of the keyword: every resolver call under ``local_operator/`` must
+    supply a live vocabulary, unless its site is on the explicit allowlist of
+    deliberate disables.
+    """
+    from pathlib import Path
+
+    root = Path(peer_send.__file__).resolve().parents[1]
+    sources = [
+        (str(path.relative_to(root)), path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob("*.py"))
+    ]
+    assert not _role_word_scan_violations(sources)
+
+
+def test_the_role_word_scan_flags_a_disabled_vocabulary() -> None:
+    """Prove the scan can FAIL — a green scan must mean something.
+
+    A live vocabulary passes; a forgotten keyword, an explicit ``None``, and a
+    ``to_thread(resolve_peer_target, role_words=None)`` form all fail; and the
+    allowlist is what admits a deliberate disable (review round 1, MINOR-2).
+    """
+    live = "def f(mod, vocab):\n    return mod.resolve_peer_target(target='x', role_words=vocab)\n"
+    missing = "def f(mod):\n    return mod.resolve_peer_target(target='x')\n"
+    disabled = "def f(mod):\n    return mod.resolve_peer_target(target='x', role_words=None)\n"
+    empty = "def f(mod):\n    return mod.resolve_peer_target(target='x', role_words=())\n"
+    threaded = (
+        "import asyncio\n"
+        "async def f(resolve_peer_target):\n"
+        "    return await asyncio.to_thread(resolve_peer_target, target='x', role_words=None)\n"
+    )
+    assert _role_word_scan_violations([("m.py", live)]) == []
+    assert _role_word_scan_violations([("m.py", missing)])
+    assert _role_word_scan_violations([("m.py", disabled)])
+    assert _role_word_scan_violations([("m.py", empty)])
+    assert _role_word_scan_violations([("m.py", threaded)])
+    # The allowlist is keyed by module path AND enclosing function, so the same
+    # disable outside an allowed site is still caught.
+    allowed = "def _deliver(mod):\n    return mod.resolve_peer_target(target='x', role_words=())\n"
+    assert _role_word_scan_violations([("server/request_update.py", allowed)]) == []
+    assert _role_word_scan_violations([("other.py", allowed)])
+
+
+def test_a_role_word_is_refused_on_the_model_switch_path(fake_scan) -> None:
+    """``resolve_switch_target`` forwards the vocabulary, so ``lop model
+    manager`` refuses instead of switching a namesake's model.
+
+    The switch resolves through the same function and the same tier order, so
+    the role refusal is the send path's own sentence — one vocabulary across the
+    surfaces a model already knows.
+    """
+    hit = _Record(10, conversation_name="Article-search campaigns: manager")
+    fake_scan([(hit, "live")])
+    record, candidates, error = peer_send.resolve_switch_target(
+        target="manager", pid=None, session=None, role_words={"manager": ("lopdev",)}
+    )
+    assert record is None
+    assert candidates == []
+    assert "is a team role (roles on: lopdev)" in error

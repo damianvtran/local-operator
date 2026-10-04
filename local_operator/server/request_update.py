@@ -260,7 +260,12 @@ async def _deliver(session_id: str, text: str, sender: dict[str, Any]) -> tuple[
         session_id_unowned,
     )
 
-    record, _candidates, error = await asyncio.to_thread(resolve_peer_target, session=session_id)
+    # An EXACT session-id selector (the batch names sessions by id), so the
+    # team-role vocabulary cannot change the answer; named explicitly so the
+    # "every caller passes role_words" source-scan invariant holds.
+    record, _candidates, error = await asyncio.to_thread(
+        resolve_peer_target, session=session_id, role_words=()
+    )
     cold_id = ""
     if record is None and error and session_id_unowned(error):
         # No live owner: an exact stored id may still be addressable (a closed

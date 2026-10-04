@@ -44,9 +44,11 @@ receive side's own detail string.
 
 Parameters:
 
-- `target` — case-insensitive substring of the conversation name, session id,
+- `target` — a case-insensitive substring of the conversation name, session id,
   or cwd basename (`sessions` lists what is running; `lop sessions` is the CLI
-  fallback).
+  fallback). A value that matches one of those fields EXACTLY wins over any
+  substring, and a team **role word** (`manager`, `reviewer`) is not an address
+  at all — it is refused, so pass `pid` or `session` instead.
 - `pid` — exact pid (unambiguous; the disambiguation error lists these).
 - `session` — exact session id.
 - `message` — the body; it lands in the peer's transcript as an inbound
@@ -58,9 +60,16 @@ Parameters:
 - `now` (default **false**) — steer the peer mid-turn instead of using the
   mailbox; opens a turn if the peer is idle.
 
-Addressing precedence is `pid`, then `session`, then the `target` substring —
+Addressing precedence is `pid`, then `session`, then an EXACT `target` match on
+the conversation name, session id or cwd basename, then the `target` substring —
 supply one. `pid` is the form to reach for when a substring could match more
 than one session.
+
+A `target` that is a team **role word** (`manager`, `reviewer`) is refused
+rather than matched. Those words name a delegation (`task(agent='<role>')`) or a
+`hub` peer — never a session — and taking a substring hit on one is how a digest
+once landed on a session whose *title* simply contained "manager". The refusal
+names the teams that define the role and asks for a `pid`/`session`.
 
 ### Worked examples
 
@@ -216,6 +225,9 @@ collapsed row shows it as `switched`, `no change` or `pending`):
   (lop update) or run /model in that session`.
 - `could not reach that session; nothing changed (…)` — the socket never
   opened.
+- `'manager' is a team role (roles on: …), not a session address — pass --pid
+  or --session instead` — the target was a team role word, which is refused
+  before any substring match (see "Choosing a target").
 - `no answer — the switch is unconfirmed and may still apply` / `check lop
   sessions before retrying` — the op was sent and the target then sent nothing
   for 15 s. That is an idle limit, not a total: a target that keeps sending
@@ -369,13 +381,19 @@ Priority order:
 
 1. `--pid N` — exact pid (the record filename is the pid; unambiguous).
 2. `--session ID` — exact session id.
-3. positional `TARGET` — a case-insensitive substring matched against the
-   conversation name, then the session id, then the cwd basename.
+3. positional `TARGET` — an exact whole-value match on the conversation name,
+   then the session id, then the cwd basename wins; otherwise a
+   case-insensitive substring of those three fields.
 
 Only `live` sessions are eligible. If a substring matches several live
 sessions, `lop send` prints the candidates and exits non-zero asking you to
 disambiguate with `--pid`. If the only match is `wedged`, it says so rather
 than hanging on a dial.
+
+A `TARGET` that is a team role word (`manager`, `reviewer`) is **refused**
+before the substring match, with a sentence naming the teams that define it:
+reserved words are delegation handles, not addresses. Address a session by
+`--pid`/`--session`, or by a distinctive fragment of its name.
 
 **A session that has not been engaged yet is not a recipient.** A fresh
 `/new` window is already listed (`live`, with its record published) while its

@@ -34789,6 +34789,11 @@ class OperatorApp(App[None]):
                 session=target.session_id,
                 pid_hint="a pid",
                 session_hint="a session id",
+                # An EXACT session-id selector (the card's picker resolved it),
+                # so the role vocabulary cannot change the answer; named
+                # explicitly to keep the "every caller passes role_words"
+                # invariant the source-scan test checks.
+                role_words=(),
                 # NO `include_wedged`: that flag is the KILL SWITCH's (the
                 # resolver's own doc: "a send never wants that"), and every
                 # other send path resolves live-only. A wedged row stays
@@ -37876,6 +37881,13 @@ class OperatorApp(App[None]):
             # Same kill-switch carve-out as `_stop_target_worker`: the watched
             # session may be a composer window, and stopping it is the point.
             require_started=False,
+            # An EXACT session-id selector only, so the role vocabulary is
+            # irrelevant here: the needle cannot equal a team role word, and
+            # reading the teams tree would add loop-bound I/O to a fallback
+            # whose whole job is to be cheap when the binding is lost. Passed
+            # explicitly (rather than omitted) so the source-scan test that
+            # pins the guard on every caller stays honest.
+            role_words=(),
         )
         if record is not None and record.pid != os.getpid():
             # The RESOLVED RECORD is handed straight to the ladder. Re-entering
@@ -37897,21 +37909,36 @@ class OperatorApp(App[None]):
         worker only surfaces them.
         """
         from local_operator.mobile.peer_send import resolve_peer_target
+        from local_operator.paths import config_dir
+        from local_operator.teams import TeamRegistry, role_word_set
 
-        record, candidates, error = resolve_peer_target(
-            target=target,
-            pid=None,
-            session=None,
-            pid_hint="a pid",
-            session_hint="a session id",
-            include_wedged=True,  # a wedged agent is the one a user most needs to stop
-            # A session that has not run a turn yet is STILL stoppable, and this
-            # is the one caller that wants it resolved: the kill switch names a
-            # target in order to end it, not to message it. A composer window
-            # someone needs to stop is exactly the fresh `/new` that `send`
-            # otherwise holds out of reach; `send` keeps the default True.
-            require_started=False,
-        )
+        # OFF THE EVENT LOOP, vocabulary included. The resolver walks and
+        # parses every registry record and ``role_word_set`` walks the teams
+        # tree; this worker runs on the Textual loop, so both belong in a
+        # thread — the same reason the quick-send worker threads its resolve.
+        # Without the vocabulary a bare team role word (`/stop manager`) would
+        # take a substring hit and could end an unrelated session; the role
+        # refusal stops it (see ``peer_send.role_refusal``).
+        def _resolve() -> "tuple[Any | None, list[Any], str]":
+            return resolve_peer_target(
+                target=target,
+                pid=None,
+                session=None,
+                pid_hint="a pid",
+                session_hint="a session id",
+                # A session that has not run a turn yet is STILL stoppable, and
+                # this is the one caller that wants it resolved: the kill
+                # switch names a target in order to end it, not to message it.
+                # A composer window someone needs to stop is exactly the fresh
+                # `/new` that `send` otherwise holds out of reach; `send` keeps
+                # the default True.
+                require_started=False,
+                # A wedged agent is the one a user most needs to stop.
+                include_wedged=True,
+                role_words=role_word_set(TeamRegistry(config_dir())),
+            )
+
+        record, candidates, error = await asyncio.to_thread(_resolve)
         if candidates:
             # Each candidate in the form that RESOLVES when retyped — the
             # pid, which the resolver now honours as a bare target — with
