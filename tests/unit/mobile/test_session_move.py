@@ -37,6 +37,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from starlette.testclient import TestClient
@@ -456,7 +457,12 @@ def test_phone_viewer_hands_back_only_a_connected_client() -> None:
     daemon = MobileDaemon(port=0, password="pw123")
     viewer = FakeViewer()
     viewer.connected = False
-    daemon._phone_attaches[SESSION] = viewer
+    # ``cast`` because the fake IS not an AttachClient -- it has no dial, no
+    # reader and no request map -- and only has to satisfy the ONE member the
+    # guard reads. The neighbouring suites do the same thing for the same
+    # reason (``test_attach_client.py``'s ``cast(Any, _NullWriter())``); the
+    # assertions below are unchanged by it.
+    daemon._phone_attaches[SESSION] = cast(Any, viewer)
 
     assert daemon.phone_viewer(SESSION) is None
     viewer.connected = True
