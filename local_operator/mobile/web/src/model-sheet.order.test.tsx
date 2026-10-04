@@ -29,7 +29,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ModelSheet } from "./components/model-sheet";
 import ranked from "./fixtures/models.ranked.json";
-import { NewSessionScreen } from "./screens/new-session";
 import type { ModelEntry, SessionProjection } from "./types";
 
 const models = ranked as ModelEntry[];
@@ -274,49 +273,5 @@ describe("the model row's text", () => {
 
 		expect(screen.getAllByText(aggregated.name).length).toBeGreaterThan(0);
 		expect(screen.queryByText(aggregated.selector)).toBeNull();
-	});
-});
-
-describe("the new-session model picker", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		document.body.innerHTML = "";
-	});
-
-	it("also lists the server's order rather than leading with the router", async () => {
-		render(<NewSessionScreen />);
-
-		// The picker lives behind the "default" model button.
-		fireEvent.click(await screen.findByText("default"));
-		await screen.findByPlaceholderText("filter models");
-
-		const order = renderedOrder();
-		expect(order).toEqual(models.map((m) => m.selector));
-		expect(AGGREGATORS.has(order[0].split("/")[0])).toBe(false);
-	});
-
-	it("uses the same provider-qualified matching as the sheet", async () => {
-		render(<NewSessionScreen />);
-		fireEvent.click(await screen.findByText("default"));
-
-		fireEvent.change(await screen.findByPlaceholderText("filter models"), {
-			target: { value: "xai grok" },
-		});
-
-		const order = renderedOrder();
-		expect(order.length).toBeGreaterThan(0);
-		expect(order[0].split("/")[0]).toBe("xai");
-	});
-
-	it("accounts for an empty result instead of rendering a bare default row", async () => {
-		render(<NewSessionScreen />);
-		fireEvent.click(await screen.findByText("default"));
-
-		fireEvent.change(await screen.findByPlaceholderText("filter models"), {
-			target: { value: "zzzznomatch" },
-		});
-
-		expect(renderedOrder()).toHaveLength(0);
-		expect(screen.getByText(/no matching models/)).toBeTruthy();
 	});
 });

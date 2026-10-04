@@ -34,6 +34,11 @@ const CATALOGUE: SlashCommand[] = [
 vi.mock("./api", () => ({
 	getCommands: vi.fn(async () => ({ commands: CATALOGUE })),
 	getModels: vi.fn(async () => ({ models: [] })),
+	// THE CHIP'S TWO CALLS (the composer's working-directory cluster). Stubbed
+	// like every other api function here rather than spread from the real module,
+	// which would hand the unlisted callers a live fetch.
+	getDirectories: vi.fn(async () => ({ home: "/Users/tester", recent: [], tmp: "" })),
+	changeDirectory: vi.fn(async () => ({ ok: true, pid: 1, session_id: "s1" })),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
 }));
 

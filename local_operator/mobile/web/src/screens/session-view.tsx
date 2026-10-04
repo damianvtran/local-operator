@@ -39,6 +39,7 @@ import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
 import { navigate } from "../router";
+import { consumePendingFocus } from "../lib/pending-focus";
 import { pinRefusalText } from "../lib/pin-refusal";
 import { resumeRefusalText } from "../lib/refusal";
 import { useCompletionView } from "../use-completion-view";
@@ -68,7 +69,7 @@ import type { SessionProjection } from "../types";
     box, back/★ included.
 
     The floor is now the PAINTED box: `min-h-11 min-w-11`, the same idiom the
-    new-session, past-sessions and agent headers already use. The strip grows
+    past-sessions and agent headers already use. The strip grows
     32 -> 44 (this header lands at ~52px, the height the agent screen's header
     states outright); that is the accepted cost of a target that measures what
     it is, and it unifies the back-button treatments D7 recorded (44 /
@@ -471,6 +472,13 @@ export function SessionScreen({
 	);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
+	/* THE ONE-SHOT FOCUS INTENT (see ``lib/pending-focus.ts``). Consumed at MOUNT
+	   so it cannot leak into a later mount of the same session, and consumed only
+	   for the conversation ROOT: the agent route renders no composer, and burning
+	   the flag there would lose the intent the tap expressed. */
+	const [autoFocusComposer] = useState(() =>
+		(jobId ? false : consumePendingFocus(sessionId)),
+	);
 	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
 	   state with no wire meaning, exactly as the design's §5.0 states. */
 	const [asksOpen, setAsksOpen] = useState(false);
@@ -836,6 +844,7 @@ export function SessionScreen({
 				onOpenEffort={() => setEffortOpen(true)}
 				effortOpen={effortOpen}
 				onCloseEffort={() => setEffortOpen(false)}
+				autoFocus={autoFocusComposer}
 			/>
 
 			<ModelSheet

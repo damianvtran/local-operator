@@ -151,15 +151,44 @@ export function resumeSession(
 	});
 }
 
-export function startSession(input: {
-	cwd: string;
-	provider?: string;
-	model_id?: string;
-}): Promise<{ ok: boolean; pid: number; session_id: string }> {
+/** Start a session, optionally in a named directory.
+
+    THE WORKING DIRECTORY IS OPTIONAL, and that is the feature: the list's
+    one-tap start posts no ``cwd`` at all, and the daemon resolves it
+    server-side (``GET /api/directories`` publishes the same answer as
+    ``default``).
+    A caller with a directory in hand passes ``cwd``; nothing else about the
+    request changes, so both callers share one route and one response shape. */
+export function startSession(
+	input: { cwd?: string; provider?: string; model_id?: string } = {},
+): Promise<{ ok: boolean; pid: number; session_id: string }> {
 	return request("/api/sessions/start", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(input),
+	});
+}
+
+/** Point a PRISTINE session at a different working directory.
+
+    The session's identity does not change: the daemon retires the unused
+    runtime and starts a successor in ``cwd`` under the SAME ``session_id``, so
+    the route stays put and the transcript, the stream and the conversation the
+    user is looking at are the same ones.
+
+    A refusal carries a user-facing sentence in ``error`` (rendered verbatim by
+    the phone) and a stable ``code`` the caller branches on — ``session_has_history``
+    (a conversation with messages can never move), ``session_busy`` (a turn is in
+    flight; retry when it lands) and ``move_unavailable`` (the fallback for
+    transport, capability and too-old-owner cases). */
+export function changeDirectory(
+	sessionId: string,
+	cwd: string,
+): Promise<{ ok: boolean; pid: number; session_id: string }> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/directory`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ cwd }),
 	});
 }
 

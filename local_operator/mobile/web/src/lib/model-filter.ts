@@ -1,10 +1,12 @@
 /**
  * The model pickers' shared filter predicate.
  *
- * ONE implementation for both surfaces — the in-session sheet
- * (`components/model-sheet.tsx`) and the `#/new` picker
- * (`screens/new-session.tsx`). They had the same predicate written out twice,
- * which is how they came to diverge from each other and from what users type.
+ * ONE implementation for every surface that filters the catalogue. It used to
+ * back both the in-session sheet (`components/model-sheet.tsx`) and the `#/new`
+ * screen's picker, which had the same predicate written out twice — which is how
+ * they came to diverge from each other and from what users type. The new-session
+ * screen is gone (one tap starts a session), so the sheet is the caller left,
+ * and the predicate stays shared for the next surface that filters models.
  */
 import type { ModelEntry } from "../types";
 
