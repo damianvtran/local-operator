@@ -26,6 +26,15 @@ WHAT IS PINNED HERE, and why each one is a decision rather than a formality:
   the two sides are spelled differently by construction (the shim's ``pwd -P``
   against ``~``-derived ``stable_root()``).
 
+And the probe now carries the OFF-GENERATION half of the same question (F10):
+a daemon on a plain ``uv tool``/pip tree names no generation, but its argv
+still names its own image, and the distribution beside that image records the
+build (``version_of_process`` / ``version_of_image``). The two halves are kept
+disjoint by construction — the version reader is consulted only after the
+generation reader found none — and both are pinned below, the version half by
+reading fabricated trees and by a live child whose argv[0] names a plain venv
+image.
+
 The repair that consumes this — one ``launchctl print``, one probe, at most one
 ``kickstart`` — is pinned in ``tests/unit/test_daemon_plist_refresh.py``.
 """
@@ -480,3 +489,160 @@ def test_a_chained_pointer_still_names_the_generation_it_reaches(
     assert update_mod.stale_generation_of_process(1234) == (
         root / "generations" / "20260101T000000Z-old"
     )
+
+
+# F10: the off-generation half of the running-build question ----------------
+
+
+def _dist(root: Path, version: str) -> None:
+    """A real distribution ``_distribution_at`` finds under ``root``'s site-packages."""
+    dist = root / "lib" / "python3.12" / "site-packages" / f"local_operator-{version}.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_version_is_read_from_the_tree_an_image_path_sits_in(
+    tmp_path: Path,
+) -> None:
+    """F10 slice B: one reader answers "which build is this image's tree" on every install shape.
+
+    A generation, a ``uv tool`` env and a pip venv all name an image inside
+    their tree, and the distribution beside it is the build. Nearest-first: the
+    branded ``bin/Local Operator`` and the ``bin/python3`` beside it read the
+    same tree, and a tree with no distribution of ours answers ``""`` rather
+    than reaching past it to an unrelated checkout.
+    """
+    tool = tmp_path / "uvtools" / "local-operator"
+    _dist(tool, "0.67.8")
+    assert update_mod.version_of_image(tool / "bin" / "python3") == "0.67.8"
+    assert update_mod.version_of_image(tool / "bin" / "Local Operator") == "0.67.8"
+
+    generation = tmp_path / "lop" / "generations" / "20260924T103058Z-509c7450dbf6"
+    _dist(generation / "tools" / "local-operator", "0.67.6")
+    assert (
+        update_mod.version_of_image(generation / "tools" / "local-operator" / "bin" / "python3")
+        == "0.67.6"
+    )
+
+    # NO ANSWER, NOT A GUESS: an interpreter with no install of ours, a bare
+    # image whose ancestors carry nothing, and a relative first field (whose
+    # ancestors would be the reader's own cwd).
+    assert update_mod.version_of_image(Path("/usr/bin/python3")) == ""
+    assert update_mod.version_of_image(tmp_path / "bare" / "bin" / "python3") == ""
+    assert update_mod.version_of_image(Path("python3")) == ""
+
+
+def test_a_real_process_reports_the_version_of_the_tree_it_runs_from(
+    tmp_path: Path,
+) -> None:
+    """END TO END through the real ``ps``: the off-generation half, as the flow node spells it.
+
+    The same shape as the generation live test above (a child that announces
+    its own exec, then is read through the shipped reader), with ``argv[0]``
+    naming a plain venv image instead of a generation — the mesh drill's
+    flow-installed node. The generation reader answers ``None`` for it, and the
+    version reader answers the distribution beside the image.
+    """
+    tool = tmp_path / "uvtools" / "local-operator"
+    _dist(tool, "0.67.8")
+    argv0 = str(tool / "bin" / "python3")
+
+    read_fd, write_fd = os.pipe()
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        code = f"import os, time; os.write({write_fd}, b'1'); time.sleep(60)"
+        child = subprocess.Popen(  # noqa: S603 — a fixed argv, and this test's own child
+            [argv0, "-c", code],
+            executable=sys.executable,
+            pass_fds=(write_fd,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        assert child is not None, "unreachable: Popen returns or raises"
+        readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
+        assert readable, "the child never announced that its exec landed"
+        assert os.read(read_fd, 1) == b"1"
+        raw = update_mod._process_argv(child.pid)
+        assert (
+            update_mod.version_of_process(child.pid) == "0.67.8"
+        ), f"argv0={argv0!r} ps said {raw!r}"
+        # The two halves are disjoint by construction: no generation was named,
+        # so the generation reader answers nothing and the version reader was
+        # the one consulted.
+        assert update_mod.generation_of_process(child.pid) is None
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+        if child is not None:
+            child.kill()
+            child.wait(timeout=10)
+
+
+def test_version_of_process_answers_nothing_for_an_unreadable_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unreadable shapes collapse to ``""`` — callers render "not reported".
+
+    ``0`` and ``-1`` are refused before the call (``ps -p 0`` means "this
+    process's group", the same guard ``generation_of_process`` documents); a pid
+    nothing runs under and a probe that answers nothing are the other two, and a
+    relative first field (a bare ``lop``, a launcher's name) cannot be placed to
+    a tree at all.
+    """
+    assert update_mod.version_of_process(0) == ""
+    assert update_mod.version_of_process(-1) == ""
+    assert update_mod.version_of_process(_UNUSED_PID) == ""
+    monkeypatch.setattr(update_mod, "_process_argv", lambda pid: None)
+    assert update_mod.version_of_process(1234) == ""
+    monkeypatch.setattr(update_mod, "_process_argv", lambda pid: "lop serve")
+    assert update_mod.version_of_process(1234) == ""
+
+
+def test_the_tri_state_keeps_cannot_compare_distinct_from_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10 slice A, the update half: a surface may not print a verdict it did not earn.
+
+    ``stale_generation_of_process`` folds "current" and "cannot compare" into
+    one ``None`` — right for the repair, which acts only on proof — and the
+    surface used to read that fold as ``false``. ``generation_staleness_of_process``
+    is the same comparison kept tri-state: True/False only when both sides were
+    read, ``None`` for every unproven shape (an unreadable argv, no pointer, a
+    dangling pointer), so ``relay_generation_stale`` can never be a boolean from
+    an unreadable probe.
+    """
+    root = _layout(tmp_path, monkeypatch, "20260101T000000Z-old", "20260202T000000Z-new")
+    (root / "current").symlink_to(root / "generations" / "20260202T000000Z-new")
+
+    reads = {"on_current": False}
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: _argv(
+            root,
+            "20260202T000000Z-new" if reads["on_current"] else "20260101T000000Z-old",
+            "-m",
+            "x",
+        ),
+    )
+    assert update_mod.generation_staleness_of_process(1234) is True
+    reads["on_current"] = True
+    assert update_mod.generation_staleness_of_process(1234) is False
+
+    # Unproven, in every shape: no readable argv, no pointer, a pointer
+    # mid-rename (dangling). The repair's fold stays for all three.
+    monkeypatch.setattr(update_mod, "_process_argv", lambda pid: None)
+    assert update_mod.generation_staleness_of_process(1234) is None
+    assert update_mod.stale_generation_of_process(1234) is None
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: _argv(root, "20260101T000000Z-old", "-m", "x"),
+    )
+    (root / "current").unlink()
+    assert update_mod.generation_staleness_of_process(1234) is None
+    (root / "current").symlink_to(root / "generations" / "20260101T000000Z-gone")
+    assert update_mod.generation_staleness_of_process(1234) is None

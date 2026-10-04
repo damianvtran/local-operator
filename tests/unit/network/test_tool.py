@@ -1307,6 +1307,13 @@ def test_the_agent_digest_carries_the_running_build_at_its_own_column() -> None:
     target = "build:     0.61.12 — behind 0.67.4; run `lop network restart`"
     assert any(line == target for line in net_tool._render("status", stale)), stale
 
+    # And an UNPROVEN comparison says the same words the unreadable build does
+    # (F10 slice A): the default is not a verdict, on the model's surface too.
+    unproven = dict(payload, relay_generation_stale=None)
+    assert any(
+        line == "build:     not reported" for line in net_tool._render("status", unproven)
+    ), unproven
+
     # The two absences the CLI block has: no layout (nothing to say) and not
     # running (nothing whose build it would be).
     plain = {

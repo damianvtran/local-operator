@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import plistlib
 import re
 import time
 from argparse import Namespace
@@ -12,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from local_operator import resume
+from local_operator import resume, supervisors
 from local_operator import update as update_mod
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
@@ -1556,7 +1557,7 @@ def _generation_status(
     *,
     running: str | None,
     installed: str | None,
-    stale: bool,
+    unit: Path | str | None = "shim",
     pid: int = 4711,
     running_build: str = "0.61.12",
     installed_build: str = "0.67.4",
@@ -1565,10 +1566,16 @@ def _generation_status(
 
     The ``relay_generation*`` facts and their ``*_build`` versions are produced
     by ``relay.generation_reading`` inside a real ``relay.status()`` call, with
-    the update probes and the version reader as the injected seams
-    (``test_daemon_build_probe`` owns their own readings), so these cells cannot
-    keep passing against a payload that stopped carrying the facts — the thing a
-    hand-typed fixture would let happen.
+    the update probes, the version reader and the unit a restart would execute
+    as the injected seams (``test_daemon_build_probe`` owns the readers' own
+    cells; the unit-file reader has its own cells below). The STALENESS FLAG is
+    NOT a seam: the reading's tri-state comes from the real comparison over the
+    injected probes, which is what lets a cell pin that an unproven comparison
+    renders ``not reported`` rather than a default.
+
+    ``unit``: ``"shim"`` (the unit names the stable shim — the generation
+    layout, where the pointer resolves), ``None`` (no unit and no shim), or an
+    image path (a flow-installed node's plain interpreter).
     """
     generations = root / "generations"
     monkeypatch.setattr(
@@ -1581,11 +1588,14 @@ def _generation_status(
         "generation_of_process",
         (lambda _pid: generations / running) if running else (lambda _pid: None),
     )
-    monkeypatch.setattr(
-        update_mod,
-        "stale_generation_of_process",
-        (lambda _pid: generations / running) if (stale and running) else (lambda _pid: None),
-    )
+    if unit is None:
+        monkeypatch.setattr(relay, "_unit_image", lambda: None)
+        # And no shim either, or a (re)install would still name a generation axis.
+        monkeypatch.setattr(update_mod, "daemon_image", lambda: None)
+    elif unit == "shim":
+        monkeypatch.setattr(relay, "_unit_image", lambda: update_mod.daemon_image_path())
+    else:
+        monkeypatch.setattr(relay, "_unit_image", lambda: Path(unit))
     builds = {}
     if installed:
         builds[installed] = installed_build
@@ -1595,6 +1605,21 @@ def _generation_status(
     monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": pid})
     monkeypatch.setattr(store, "scan_own_relay", lambda *a, **k: (None, "stopped"))
     return relay.status(refresh=True)
+
+
+def _fake_dist(root: Path, version: str) -> None:
+    """A minimal local-operator distribution in ``root``'s own ``site-packages``.
+
+    The two real readers this feeds (``update.version_of_process`` /
+    ``update.version_of_image``) find a tree only through its distribution, so
+    the uv-tool cell can build a tree whose version is a fact rather than a
+    stub — the same discipline ``test_daemon_build_probe`` uses.
+    """
+    dist = root / "lib" / "python3.12" / "site-packages" / f"local_operator-{version}.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n"
+    )
 
 
 def _render_status(
@@ -1625,7 +1650,6 @@ def test_the_status_block_names_the_running_relays_build_when_it_matches(
         monkeypatch,
         running=gen,
         installed=gen,
-        stale=False,
         running_build="0.67.6",
         installed_build="0.67.6",
     )
@@ -1653,7 +1677,7 @@ def test_an_older_relays_build_is_flagged_with_the_restart_remedy(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     old = "20260921T125352Z-0.61.12"
     new = "20260924T103058Z-509c7450dbf6"
-    payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
+    payload = _generation_status(root, monkeypatch, running=old, installed=new)
     out = _render_status(monkeypatch, payload, capsys)
     expected = "build:      0.61.12 — behind 0.67.4; run `lop network restart`"
     assert expected in out, out
@@ -1687,7 +1711,6 @@ def test_a_reinstalled_same_build_names_the_install_not_itself(
         monkeypatch,
         running=old,
         installed=new,
-        stale=True,
         running_build="0.67.6",
         installed_build="0.67.6",
     )
@@ -1705,13 +1728,15 @@ def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exist
     layout whose running build cannot be read (an argv that names no
     generation), the row says ``not reported``; on a machine with no
     layout at all — a pip/pipx install, where the question cannot exist — there
-    is no row, pinned by its own cell. Neither claims a move: the flag comes
-    only from the shipped comparison, never from an absence.
+    is no row, pinned by its own cell. Neither claims a move: the flag is
+    tri-state (F10) and this reading must be ``None`` here — unproven, never
+    ``false`` — and the row says the words rather than staying silent.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     payload = _generation_status(
-        root, monkeypatch, running=None, installed="20260924T103058Z-509c7450dbf6", stale=False
+        root, monkeypatch, running=None, installed="20260924T103058Z-509c7450dbf6"
     )
+    assert payload["relay_generation_stale"] is None, payload
     out = _render_status(monkeypatch, payload, capsys)
     assert "build:      not reported" in out, out
     assert "behind" not in out, out
@@ -1720,17 +1745,91 @@ def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exist
 def test_a_machine_without_generations_gets_no_generation_row(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No layout, no question: a pip/pipx machine keeps the block byte-for-byte.
+    """No layout, no unit, no shim: nothing can be named, so the block keeps its shape.
 
-    A relay under a pip install has no generation, so a row would be noise that
-    can never resolve — and the drill fix must not turn every non-uv machine's
-    status into a question it cannot answer.
+    Nothing on this machine can ask the question — no generation layout to
+    compare against, no unit to read a restart target from, no shim — so there is
+    no row: a machine with nothing to ask must not be turned into a question it
+    cannot answer. (A machine with ANY of those gets a row, even when the answer
+    is ``not reported``: see the cells around this one.)
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-    payload = _generation_status(root, monkeypatch, running=None, installed=None, stale=False)
+    payload = _generation_status(root, monkeypatch, running=None, installed=None, unit=None)
     out = _render_status(monkeypatch, payload, capsys)
     assert "build:" not in out, out
     assert "relay:      running, pid 4711" in out, out
+
+
+def test_an_unproven_comparison_says_not_reported_never_the_bare_version(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F10 slice A, the person-facing row: unproven is not a verdict.
+
+    ``relay_generation_stale`` is tri-state now; the row that kept reading it as
+    a boolean ("if not stale: print the version") would render the default as
+    health for a question that was never answered. Here the running build IS
+    readable — a generation-installed process whose supervision is gone (no
+    unit, no shim) — but nothing exists to compare it against, so the flag is
+    ``None`` and the row says ``not reported``: neither the bare version nor a
+    ``behind`` clause, because the bare version is the default wearing a verdict.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    gen = "20260921T125352Z-0.61.12"
+    payload = _generation_status(
+        root, monkeypatch, running=gen, installed=None, unit=None, running_build="0.61.12"
+    )
+    assert payload["relay_generation_stale"] is None, payload
+    assert payload["relay_build"] == "0.61.12", payload
+    out = _render_status(monkeypatch, payload, capsys)
+    assert "build:      not reported" in out, out
+    assert "0.61.12" not in out, out
+    assert "behind" not in out, out
+
+
+def test_a_flow_installed_node_names_the_real_builds_and_never_claims_health(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F10 slice B: on a ``uv tool`` node the reading names real builds, never the pointer's.
+
+    THE LIVE DEFECT, as a cell: the node's install step runs ``uv tool install``,
+    which writes ``~/.local/share/uv/tools/local-operator`` and never moves the
+    generation pointer; ``installed_build`` read the pointer and reported
+    ``0.67.2`` beside a 0.67.8 CLI. Here the pointer still names the old
+    generation whose tree carries 0.67.2, while the unit and the running process
+    name a plain interpreter whose tree carries 0.67.8 — both read for real, out
+    of the two trees' own dist-info, through the shipped readers.
+
+    And the comparison is UNPROVEN off the generation axis (the argv names no
+    generation; a mutable tree cannot prove what a started process loaded), so
+    the flag is ``None`` and the row says ``not reported`` — never the healthy
+    default, and never the pointer's stale version.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    tool = root / "uvtools" / "local-operator"
+    _fake_dist(tool, "0.67.8")
+    old_gen = root / "generations" / "20260921T125352Z-0.61.12"
+    _fake_dist(old_gen / "tools" / "local-operator", "0.67.2")
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda _pid: f"{tool / 'bin' / 'python3'} -m local_operator.network.relay",
+    )
+    monkeypatch.setattr(update_mod, "current_generation", lambda: old_gen)
+    monkeypatch.setattr(relay, "_unit_image", lambda: tool / "bin" / "python3")
+    monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": 4711})
+    monkeypatch.setattr(store, "scan_own_relay", lambda *a, **k: (None, "stopped"))
+
+    payload = relay.status(refresh=True)
+    assert payload["relay_generation"] is None, payload
+    assert payload["relay_build"] == "0.67.8", payload
+    assert payload["installed_generation"] is None, payload
+    assert payload["installed_build"] == "0.67.8", payload
+    assert payload["relay_generation_stale"] is None, payload
+
+    out = _render_status(monkeypatch, payload, capsys)
+    assert "build:      not reported" in out, out
+    assert "0.67.2" not in out, out
+    assert "behind" not in out, out
 
 
 def test_a_just_restarted_relay_reads_current_on_the_next_status(
@@ -1751,13 +1850,12 @@ def test_a_just_restarted_relay_reads_current_on_the_next_status(
     # BOTH payloads are built before either render: ``_render_status`` pins
     # ``relay.status`` to one payload, and the second build has to go through the
     # real function for this to be the readback it claims to be.
-    stale_payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
+    stale_payload = _generation_status(root, monkeypatch, running=old, installed=new)
     fresh_payload = _generation_status(
         root,
         monkeypatch,
         running=new,
         installed=new,
-        stale=False,
         running_build="0.67.6",
         installed_build="0.67.6",
     )
@@ -1786,7 +1884,7 @@ def test_the_doctor_fallback_names_the_running_build_where_it_can(
     monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": 4711})
     monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
     monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
-    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(relay, "_unit_image", lambda: update_mod.daemon_image_path())
     monkeypatch.setattr(
         update_mod,
         "generation_version",
@@ -1821,7 +1919,7 @@ def test_a_wedged_relays_build_is_its_own_sentence_after_the_detail(
     )
     monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
     monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
-    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(relay, "_unit_image", lambda: update_mod.daemon_image_path())
     monkeypatch.setattr(
         update_mod,
         "generation_version",
@@ -1839,6 +1937,56 @@ def test_a_wedged_relays_build_is_its_own_sentence_after_the_detail(
     # (Q-R3-4) and is unchanged.
     remedy_sentence = line.split(". ", 1)[1]
     assert len(remedy_sentence) <= 80, remedy_sentence
+
+
+def test_the_unit_image_is_read_from_the_plist_it_would_re_execute(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10: "what a restart would execute" is read from the unit FILE — launchd shape.
+
+    ``Program`` wins when present (the branded shape); without it launchd uses
+    ``ProgramArguments[0]`` as BOTH image and argv[0], so that element is a real
+    path and is read as one. An absent unit answers ``None`` — "no answer",
+    which every caller renders as ``not reported`` rather than as a move.
+    """
+    plist = root / "relay.plist"
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+
+    plist.write_bytes(plistlib.dumps({"Program": "/opt/lo/bin/python3"}))
+    assert relay._unit_image() == Path("/opt/lo/bin/python3")  # noqa: SLF001
+
+    plist.write_bytes(plistlib.dumps({"ProgramArguments": ["/opt/lo/bin/python3", "-m", "x"]}))
+    assert relay._unit_image() == Path("/opt/lo/bin/python3")  # noqa: SLF001
+
+    plist.unlink()
+    assert relay._unit_image() is None  # noqa: SLF001
+
+
+def test_the_unit_image_is_read_from_execstart_through_systemd_quoting(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10, the systemd shape: ``ExecStart``'s first token, unquoted and un-%%-ed.
+
+    ``supervisors.quoted`` writes the image double-quoted with backslashes
+    escaped and percent doubled (systemd expands specifiers inside quotes), so
+    the reader must reverse exactly that grammar rather than split on
+    whitespace: a store under a path with a space is the shape that made the
+    quoting non-optional there.
+    """
+    unit = root / "relay.service"
+    monkeypatch.setattr(relay, "systemd_path", lambda: unit)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    image = "/home/a b/percent%dir/.local/share/uv/tools/local-operator/bin/python3"
+    unit.write_text(
+        f"ExecStart={supervisors.quoted(image)} -m local_operator.network.relay\n",
+        encoding="utf-8",
+    )
+    assert relay._unit_image() == Path(image)  # noqa: SLF001
+
+    unit.unlink()
+    assert relay._unit_image() is None  # noqa: SLF001
 
 
 def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:

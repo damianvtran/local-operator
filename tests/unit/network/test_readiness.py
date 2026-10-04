@@ -1428,8 +1428,9 @@ def test_compose_names_the_running_build_where_one_can_be_read(
     The drill's own shape is a relay that ANSWERS while a build behind — and this
     row's plain ``running, pid N`` gave it a clean bill in ``doctor`` and
     ``ready``. The reading is the shipped one (``relay.generation_reading``) with
-    the update probes and the version reader as the seams, so the clause cannot
-    keep passing against a row that stopped carrying it.
+    the update probes, the version reader and the unit a restart would execute as
+    the seams, so the clause cannot keep passing against a row that stopped
+    carrying it.
     """
     import os
 
@@ -1447,7 +1448,7 @@ def test_compose_names_the_running_build_where_one_can_be_read(
     generations = tmp_path / "generations"
     monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
     monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
-    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(relay, "_unit_image", lambda: update_mod.daemon_image_path())
     monkeypatch.setattr(
         update_mod,
         "generation_version",
