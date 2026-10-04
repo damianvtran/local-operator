@@ -17,6 +17,15 @@ and a delivery that is about to happen are the same observation. That is what
 makes boot-after-SIGKILL, answer-then-kill, and a cold timeout all converge on
 exactly one row per (ask, kind).
 
+**CONSUMPTION, NOT HAND-OFF (amended 2026-10-04).** That row counts as the
+marker only once its append is DURABLE. Handing the message to a delivery path,
+scheduling the turn and the answering op's ACK close nothing, so the revision
+window (design §10) stays open until the model's conversation carries the
+answer — and every delivery path re-resolves the row from the fold at its
+append (``refresh_delivery_message``), so a revision accepted in between is
+what lands. The in-process sets beside that flag are scheduling (``_handed``)
+and the append-in-flight guard (``_committing``); neither is a reader's truth.
+
 **THE TWO-ROW CASE.** A ``late`` ask needs BOTH a timeout row and a response
 row, because the timeout genuinely fired before the answer arrived. When both
 are missing in the same batch — a cold boot after an answer that arrived past
@@ -81,12 +90,26 @@ class AskQueue:
         self._now = clock or _now_ms
         self._timer: asyncio.Task[None] | None = None
         self._disposed = False
-        #: Row ids handed to delivery by THIS process. The transcript row is the
-        #: cross-process, cross-restart marker; this set closes the window
-        #: between handing a message to the session and the turn that persists
-        #: it, inside which ``has_entry`` is still false and a re-entrant
-        #: reconcile would hand the same row twice.
+        #: Row ids handed to delivery by THIS process. SCHEDULING DEDUPE ONLY
+        #: (amended 2026-10-04): it closes the gap between handing a message to
+        #: the delivery path and the append that makes it durable, inside which
+        #: ``has_entry`` is still false and a re-entrant reconcile would hand the
+        #: same row twice. It is NOT the revision window and NOT the wire's
+        #: ``delivered`` — those read the DURABLE row (``_present_row_ids``).
+        #: Lifecycle: added at hand-off; dropped at the append outcome either
+        #: way — success (the durable row carries it) or failure (the next
+        #: reconcile re-hands, which is the retry the sticky form silently
+        #: skipped).
         self._handed: set[str] = set()
+        #: Row ids whose durable append is IN FLIGHT right now (set and cleared
+        #: synchronously on the session loop by the session's append helper).
+        #: The revision window is the durable row; this set closes the one true
+        #: race the refresh cannot: content re-resolved at T0, append awaiting,
+        #: a revision at T1>T0. Without the guard that revision would be
+        #: ACCEPTED and then dropped by the append that already snapshotted —
+        #: the interleaving §10 forbids by name — so a decision that sees the
+        #: row here refuses in the delivered sentence (sub-ms, conservative).
+        self._committing: set[str] = set()
         #: THE LEGACY DRAFT (design §4, A2 addendum): question id -> answer cell
         #: for an ask being answered ONE QUESTION AT A TIME by the old mirrored
         #: card. In-memory and per-runtime by design — it is not a durable fact
@@ -104,19 +127,24 @@ class AskQueue:
     # -- reading -----------------------------------------------------------
 
     def present_row_ids(self) -> set[str]:
-        """Row ids already durable in this session's transcript.
+        """Row ids already DURABLE in this session's transcript.
 
         Constant-time per CANDIDATE id (``transcript.has_entry``) rather than a
         scan of every entry: the deadline tick calls this on every reconcile, and
         a long conversation's transcript is not something a one-minute timer
         should walk.
+
+        DURABLE-ONLY, deliberately (amended 2026-10-04): ``_handed`` is the
+        scheduling dedupe and is NOT folded in here — the revision window, the
+        wire's ``delivered`` and every other reader mean CONSUMPTION, and only
+        ``reconcile``'s own missing-row planning unions the dedupe locally.
         """
         return self._present_row_ids(store.read_events(self.session_dir))
 
     def _present_row_ids(self, events: Sequence[Mapping[str, Any]]) -> set[str]:
         transcript = getattr(self._session, "transcript", None)
         has_entry = getattr(transcript, "has_entry", None)
-        seen: set[str] = set(self._handed)
+        seen: set[str] = set()
         if callable(has_entry):
             for ask_id in store.ask_ids(events):
                 for row_id in (store.response_row_id(ask_id), store.timeout_row_id(ask_id)):
@@ -317,25 +345,31 @@ class AskQueue:
         the single entry point that reads a second answer as a change of mind,
         and only while the change is still cheap.
 
-        **THE WINDOW IS THE RESPONSE ROW, not the folded ``delivered`` flag.**
-        ``delivered`` is ``store.delivered_hint``, which is deliberately STICKY:
-        it counts the ``ask-timeout-`` row too, because a timeout notice is a
-        delivery for the model as much as an answer is. A ``late`` answer is
-        exactly where the two disagree — the deadline notice went out, the answer
-        has not — and keying the window on the hint would refuse the one revision
-        that is still free to make. What actually pins what the model was told is
-        the single ``ask-response-<ask_id>`` row, so THAT is what closes the
-        window (design §10: "the row pins what the model was told").
+        **THE WINDOW IS THE ROW'S DURABLE APPEND — consumption, not handoff**
+        (amended 2026-10-04; it was the row's existence at hand-off, which the
+        answering ACK raced). The single ``ask-response-<ask_id>`` row pins what
+        the model reads, the transcript is append-only with one row and no
+        rewrite, so the append IS the freeze and the last instant a revision can
+        still change what the model will read (design §10). The wire's
+        ``delivered`` reads the same fact: for ``answered``/``declined``/
+        ``late`` it means exactly this row, so a durable deadline notice leaves
+        a ``late`` answer reading ``false`` — the notice does not deliver the
+        answer, and the window stays open exactly while it should. Handing the
+        message to a delivery path, scheduling the turn and the answering op's
+        ACK close nothing; a revision arriving while the append is in flight is
+        refused too (``_committing``), conservatively: its content was already
+        snapshotted, so accepting it would be accepted-and-then-dropped.
 
         ACCEPTED: the ask already carries an answer (``answered`` or ``late``)
-        with no response row yet, from ANY surface — a revision is not a race, so
-        the single-winner rule that governs two in-flight ``respond``s is not a
-        surface gate here. REFUSED once the response row exists, in
-        :data:`asks.render.REVISED_ALREADY_DELIVERED`'s words rather than the
-        state table's "already answered by <surface>": the user's next move is a
-        new message, not a different tap. ``declined``/``dismissed``/``expired``
-        keep their state-mapped sentences — a revision of an answer that was
-        never recorded is not what those states are.
+        whose response row is not yet DURABLE — and not being appended right now
+        — from ANY surface; a revision is not a race, so the single-winner rule
+        that governs two in-flight ``respond``s is not a surface gate here.
+        REFUSED once the response row is durable (or an append of it is in
+        flight), in :data:`asks.render.REVISED_ALREADY_DELIVERED`'s words rather
+        than the state table's "already answered by <surface>": the user's next
+        move is a new message, not a different tap. ``declined``/``dismissed``/
+        ``expired`` keep their state-mapped sentences — a revision of an answer
+        that was never recorded is not what those states are.
 
         BEFORE any answer is recorded (``open``/``timed_out``) the intent degrades
         to the plain first answer, with ``revised: False`` on the verdict: the
@@ -422,18 +456,22 @@ class AskQueue:
     def _revision_decision(self, ask_id: str, now_ms: int) -> tuple[dict[str, Any] | None, str]:
         """``(the folded record, the refusal sentence or "")`` for a revision.
 
-        THE ONE ADMISSIBILITY RULE (design §10): an ask that already carries an
-        answer (``answered``/``late``) with no ``ask-response-<ask_id>`` row yet
-        is admissible, from ANY surface — a revision is not a race, so the
-        single-winner rule is not a surface gate. A delivered one is refused in
+        THE ONE ADMISSIBILITY RULE (design §10, amended 2026-10-04): an ask that
+        already carries an answer (``answered``/``late``) whose
+        ``ask-response-<ask_id>`` row is not yet DURABLE — and not being appended
+        right now — is admissible, from ANY surface; a revision is not a race, so
+        the single-winner rule is not a surface gate. A CONSUMED one is refused in
         the revision path's own words; ``declined``/``dismissed``/``expired`` keep
         the state table's sentences; an ask with no answer yet (``open``/
         ``timed_out``) is admissible as a plain first answer.
 
-        The row check is the window term and NOT ``delivered``'s sticky hint —
-        see :meth:`revise` for why that is the honest bound — and it is the check
-        whose interleaving with :meth:`reconcile` the session-loop hop on the
-        serving handle exists to prevent.
+        THE WINDOW IS THE ROW'S DURABLE APPEND, and this check is exactly that
+        term: ``present`` is durable-only (`_present_row_ids`) plus the COMMIT
+        GUARD (``_committing``) for the append currently in flight — a revision
+        arriving while the append awaits cannot be carried afterwards (the
+        content was snapshotted) and must not be accepted-and-dropped, so it is
+        refused in the delivered sentence, conservatively and for milliseconds.
+        Hand-off, scheduling and the answering op's ACK close nothing.
         """
         records, present = self._fold_state(now_ms)
         record = next((item for item in records if item["ask_id"] == ask_id), None)
@@ -446,9 +484,13 @@ class AskQueue:
             # declined / dismissed / expired: the state table's own sentence,
             # byte-for-byte the one every other path gives for that state.
             return record, render.refusal_copy(record)
-        if store.response_row_id(ask_id) in present:
-            # The row IS the delivery marker (this module's docstring), so this is
-            # the one check that means "the agent has been handed the answer".
+        response_id = store.response_row_id(ask_id)
+        if response_id in present or response_id in self._committing:
+            # The row's durable append is the consumption point (this module's
+            # docstring; design §10), so this is the one check that means "the
+            # model's conversation carries the answer" — or is carrying it as we
+            # speak (the guard), which the no-accept-and-drop rule prices the
+            # same way.
             return record, render.REVISED_ALREADY_DELIVERED
         return record, ""
 
@@ -665,6 +707,13 @@ class AskQueue:
         # what keeps the live paths off the marker read entirely.
         marker = self._deliberate_stop_marker() if load_time else None
         records, present = self._fold_state(now)
+        # SCHEDULING PLANS WITH THE DEDUPE, EVERYONE ELSE DOES NOT (amended
+        # 2026-10-04): ``present`` is durable-only now, so the missing-row
+        # checks below union ``_handed`` LOCALLY. A row handed to a delivery
+        # path whose append has not run yet must not be re-planned — that is
+        # the double-hand this set exists to stop — while the window, the wire
+        # and every other reader keep meaning CONSUMPTION.
+        planned = present | self._handed
         # Before anything is delivered or published: this is the fold that can
         # show an ask CLOSED by its deadline, and a tap for it must not ride the
         # rows this reconcile goes on to publish (see
@@ -685,7 +734,7 @@ class AskQueue:
                 store.STATUS_LATE,
             )
             want_timeout = status in (store.STATUS_TIMED_OUT, store.STATUS_LATE)
-            response_missing = want_response and response_id not in present
+            response_missing = want_response and response_id not in planned
             # N8, AND IT IS PERMANENT RATHER THAN A ONE-BATCH DEFERRAL (review
             # round 1, MAJOR 2). A response row for this ask — present, or being
             # written in THIS batch — supersedes its deadline row for good. The
@@ -700,7 +749,7 @@ class AskQueue:
             # reconcile. A ``late`` ask therefore carries ONE row, the response,
             # whose lead already says the window had closed — see
             # :data:`asks.render.LATE_LEAD` and :func:`store.expected_row_ids`.
-            if want_timeout and timeout_id not in present and not want_response:
+            if want_timeout and timeout_id not in planned and not want_response:
                 timeouts.append(
                     (
                         int(record.get("expires_at") or 0),
@@ -732,6 +781,87 @@ class AskQueue:
         self._refresh(now)
         self.arm()
         return [m.id for m in messages]
+
+    # -- the append side (design §2.3 as amended 2026-10-04) -----------------
+    #
+    # THE WINDOW CLOSES AT THE ROW'S DURABLE APPEND, which happens in the
+    # SESSION (the four delivery paths call ``Session._append_injected_message``
+    # around it). These four methods are that append's queue-side contract, and
+    # nothing else in this module touches ``_committing`` or ``_handed``:
+
+    def begin_row_commit(self, row_id: str) -> None:
+        """Mark an ask row's durable append as IN FLIGHT (the commit guard).
+
+        Set SYNCHRONOUSLY on the session loop before the append awaits, from
+        the same loop that runs every other writer of the row — the discipline
+        the serving handle's ``@_on_session_loop`` hop makes load-bearing. From
+        here until :meth:`finish_row_commit`, a revision decision that sees
+        this id refuses in the delivered sentence: the append snapshotted
+        content already, so accepting one would be accepted-and-then-dropped.
+        """
+        self._committing.add(str(row_id))
+
+    def finish_row_commit(self, row_id: str, *, durable: bool) -> None:
+        """The append resolved: release the guard, settle the dedupe, publish.
+
+        ``_handed`` drops on BOTH outcomes, and that is the lifecycle rather
+        than an accident: success — the durable row now carries the id, so a
+        re-hand would be deduped by ``has_entry`` anyway; failure — nothing
+        carries it, and sticking would silently never retry a row a human is
+        waiting to see (the pre-existing hole the sticky set had). On success
+        the fold's ``delivered`` flag has just flipped — at the append, LATER
+        than any reconcile publish — so the index and the wire are rewritten
+        through :meth:`note_row_durable`.
+        """
+        row = str(row_id)
+        self._committing.discard(row)
+        self._handed.discard(row)
+        if durable:
+            self.note_row_durable(row)
+
+    def note_row_durable(self, row_id: str) -> None:
+        """The transcript now holds ask row ``row_id``: publish the new fold.
+
+        Called by the session's append helper on every successful ask-row
+        append. The ``delivered`` flag is CONSUMPTION-based now, so it flips at
+        the append — after the reconcile that handed the message published its
+        (still false) fold — and without this write the wire would keep
+        reporting ``delivered:false`` for a row the model can already read.
+        """
+        self._refresh()
+
+    def refresh_delivery_message(self, message: CustomMessage) -> CustomMessage:
+        """Rebuild an ask-RESPONSE row from the CURRENT fold, at the append.
+
+        THE MESSAGE RECONCILE BUILT IS A PREVIEW. The window closes at the
+        durable append, so a revision accepted between the reconcile that built
+        this message and the append that lands it must be what the append
+        carries — otherwise the window would have "accepted" a change and
+        delivered the stale map, the accepted-and-then-dropped interleaving §10
+        forbids by name. Delivery is the last reader; the fold is the truth it
+        re-derives from (latest ``answers``/``text``/``status``/``secret_lost``,
+        same id — one response row per ask, ever).
+
+        A record the fold no longer shows as an injectable response (the ask
+        moved to a state with no response row in the very milliseconds since
+        reconcile) is returned UNCHANGED: the reconcile that emitted this
+        message already decided the row is owed, and dropping it here would be
+        a silent loss — never accepted-and-then-dropped cuts both ways.
+        Timeout rows need no rebuild (nothing about them is revisable) and are
+        passed through by the caller.
+        """
+        details = getattr(message, "details", None)
+        ask_id = str((details or {}).get("ask_id") or "") if isinstance(details, dict) else ""
+        if not ask_id:
+            return message
+        record = self._find(ask_id, self._now())
+        if record is None or record.get("status") not in (
+            store.STATUS_ANSWERED,
+            store.STATUS_DECLINED,
+            store.STATUS_LATE,
+        ):
+            return message
+        return self._response_message(record)
 
     async def _emit_delivered(self, message: CustomMessage) -> None:
         """Emit the paint-ahead event BEFORE the turn it triggers (design §2.3)."""

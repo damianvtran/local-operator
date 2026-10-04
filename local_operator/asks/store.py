@@ -346,15 +346,35 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     return []
 
 
-def delivered_hint(ask_id: str, present_ids: Iterable[str]) -> bool:
-    """Whether any response/timeout row for ``ask_id`` exists.
+def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool:
+    """Whether the row(s) THIS status requires are DURABLE in the transcript.
 
-    STICKY by construction: rows are never deleted from a transcript, so this
-    cannot flip back to False when an answered ask folds to ``expired`` seven
-    days later. A `dismissed`/`expired` ask is therefore ``delivered`` only when
-    a row was written before (design §2.2/§4).
+    CONSUMPTION, not handoff (design §2.2/§4, amended 2026-10-04): a row is
+    present here only once its durable append resolved, and the flag flips at
+    that instant — handing a message to a delivery path, scheduling a turn or
+    returning from the answering op closes nothing. What is required is
+    per-status, straight off the §2.2 delivery table: ``answered``/``declined``/
+    ``late`` need the RESPONSE row (for `late` the deadline notice delivers
+    nothing — a timed-out ask answered late flips true→false until its row
+    lands), ``timed_out`` needs the deadline row, ``dismissed``/``expired`` are
+    true when any row was written before, and ``open`` owes nothing.
+
+    STICKY by construction otherwise: rows are never deleted from a transcript,
+    so once the required row is durable this cannot flip back — the one
+    sanctioned exception is the `timed_out`→`late` flip above.
     """
     present = set(present_ids)
+    if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
+        # The row that pins what the model was told. A LATE ask's deadline
+        # notice is NOT the delivery of its answer; the response is.
+        return response_row_id(ask_id) in present
+    if status == STATUS_TIMED_OUT:
+        return timeout_row_id(ask_id) in present
+    if status == STATUS_OPEN:
+        return False
+    # dismissed / expired (and any status a future fold adds): any row is the
+    # delivered fact — this is what keeps an answered ask from flipping back
+    # when it folds to `expired` seven days later.
     return response_row_id(ask_id) in present or timeout_row_id(ask_id) in present
 
 
@@ -454,7 +474,7 @@ def fold(
                 dict(q) for q in (queued.get("questions") or ()) if isinstance(q, Mapping)
             ],
             "status": status,
-            "delivered": delivered_hint(ask_id, present_ids),
+            "delivered": delivered_hint(ask_id, present_ids, status),
         }
         if answered is not None:
             answers = answered.get("answers")

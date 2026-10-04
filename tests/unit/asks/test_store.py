@@ -179,7 +179,7 @@ def test_unknown_event_kinds_and_torn_rows_do_not_break_the_fold():
 
 
 # ---------------------------------------------------------------------------
-# delivered: the sticky, per-(ask, kind) marker
+# delivered: the per-status CONSUMPTION flag (amended 2026-10-04)
 # ---------------------------------------------------------------------------
 
 
@@ -199,6 +199,35 @@ def test_delivered_needs_a_row_that_exists_not_a_status():
     assert store.fold(events, BASE + 120_000)[0]["delivered"] is False
     delivered = store.fold(events, BASE + 120_000, present_ids={store.timeout_row_id("a-1")})[0]
     assert delivered["delivered"] is True
+
+
+def test_delivered_is_per_status_the_late_answer_is_the_response_row_alone():
+    """CONSUMPTION, not row-existence (amended 2026-10-04).
+
+    A `late` ask's deadline notice is NOT its delivery: the flag stays false
+    while only the timeout row is durable — which is exactly where the revision
+    window is open (§10) — and the RESPONSE row is what flips it. Once flipped
+    it never flips back (the rows are append-only), which the `expired` arm of
+    the table carries for an answered-late ask seven days on.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _answered(at=BASE + 200_000)]
+    notice = {store.timeout_row_id("a-1")}
+    late = store.fold(events, BASE + 300_000, present_ids=notice)[0]
+    assert late["status"] == store.STATUS_LATE and late["delivered"] is False
+    landed = store.fold(
+        events, BASE + 300_000, present_ids=notice | {store.response_row_id("a-1")}
+    )[0]
+    assert landed["delivered"] is True
+    # `timed_out` is the mirror: the deadline row IS what its status requires,
+    # and the response row alone would not deliver a notice that has not landed.
+    timed_out = [_queued(at=BASE, timeout_s=120)]
+    assert store.fold(timed_out, BASE + 120_000)[0]["delivered"] is False
+    assert (
+        store.fold(timed_out, BASE + 120_000, present_ids={store.response_row_id("a-1")})[0][
+            "delivered"
+        ]
+        is False
+    )
 
 
 def _revised(ask_id: str = "a-1", *, at: int, answers: dict[str, list[str]] | None = None):
