@@ -3058,12 +3058,18 @@ the install step that had just placed the newer build wrote the other tree
 (`~/.local/share/uv/tools/…`) and never moves that pointer — a well-formed,
 plausible number about a directory the running build does not live in. And
 `relay_generation_stale: false` beside `relay_build: null` and
-`relay_generation: null`. The second is a **considered direction choice rather
-than an oversight** — `false` is the fail-safe answer for a machine consumer
-that must have a boolean, and the human-facing row already says "not
-reported" — which is exactly the distinction to keep: **a machine field may
-default safely, but a surface a person reads must name the thing or say "not
-reported"; never render the default as a verdict.** Both arrived in the fix for
+`relay_generation: null`. The second was then re-classified as the live defect
+and fixed (PR #1982): the staleness field is now **tri-state** — `true`/`false`
+only when the shipped comparison proves the move or the match, `null`
+whenever it could not be made — so a `null` beside the two build `null`s is
+the honest answer there, not a regression to "correct" back to `false`, and
+`installed_*` reads the tree a restart would execute rather than the leftover
+pointer. What the first shape taught still binds every surface: **a machine
+field may decline honestly, but a surface a person reads must name the thing it
+read, or say "not reported" when it could not read it at all; never render the
+default as a verdict** — the status row names a readable-but-unproven build
+(`0.67.8 — cannot confirm it is current`) and reserves `not reported` for a
+build it genuinely could not read. Both arrived in the fix for
 the previous instance of this class, which is the base rate rather than an
 irony — each instrument was written by someone who had just been bitten by the
 last one, so the guard has to be mechanical rather than attentional. And when

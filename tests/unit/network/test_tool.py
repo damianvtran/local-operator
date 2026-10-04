@@ -1304,8 +1304,17 @@ def test_the_agent_digest_carries_the_running_build_at_its_own_column() -> None:
     assert build_line.index("0.61.12") == 11, build_line
 
     stale = dict(payload, relay_generation_stale=True)
-    target = "build:     0.61.12 — behind 0.67.4; run `lop network restart`"
+    target = "build:     0.61.12 — behind install 0.67.4; `lop network restart`"
     assert any(line == target for line in net_tool._render("status", stale)), stale
+
+    # And an UNPROVEN comparison NAMES the readable build with its limit (F10
+    # slice A; design round 1 D1): the default is not a verdict, and the value
+    # the surface holds is not withheld, on the model's surface too.
+    unproven = dict(payload, relay_generation_stale=None)
+    assert any(
+        line == "build:     0.61.12 — cannot confirm it is current"
+        for line in net_tool._render("status", unproven)
+    ), unproven
 
     # The two absences the CLI block has: no layout (nothing to say) and not
     # running (nothing whose build it would be).

@@ -64,6 +64,7 @@ import os
 import plistlib
 import queue
 import re
+import shlex
 import shutil  # noqa: F401 — kept: tests and siblings patch `relay.shutil.which`
 import signal
 import socket
@@ -12035,8 +12036,99 @@ def health(timeout: float = 3.0, *, refresh: bool = False) -> dict[str, Any] | N
     return detail if isinstance(detail, dict) else None
 
 
+def _unit_image() -> Path | None:
+    """The image the installed relay unit would re-execute, or ``None``.
+
+    WHAT A RESTART WOULD EXECUTE, read from the unit FILE rather than recomputed
+    from this process (F10): ``lop network restart`` re-runs the plist/systemd
+    unit on disk, and a ``uv tool`` install writes a unit naming a plain
+    interpreter whose tree holds the newer build — while the generation pointer
+    still names the last generation install, which is how a 0.67.8 tool came to
+    report ``installed_build: 0.67.2``.
+
+    Best-effort, the same register as :func:`_service_port`: macOS reads the
+    plist's ``Program`` (or element 0 of ``ProgramArguments`` when there is none —
+    the fallback shape :func:`local_operator.procname.launchd_job` renders, where
+    that element is a real image path, not a label), Linux reads the first token
+    of ``ExecStart`` through ``shlex`` because ``supervisors.quoted`` writes the
+    image double-quoted with backslashes escaped and ``%`` doubled (systemd
+    expands specifiers inside quotes). ``None`` on every failure — no unit, an
+    unreadable one, a shape this reader does not know — and callers treat it as
+    "no answer", never as "no move".
+    """
+    try:
+        if sys.platform == "darwin" and plist_path().exists():
+            from local_operator import launchd
+
+            data = launchd.load(plist_path())
+            if data is None:
+                return None
+            program = data.get("Program")
+            if isinstance(program, str) and program:
+                return Path(program)
+            arguments = data.get("ProgramArguments")
+            if isinstance(arguments, list) and arguments and isinstance(arguments[0], str):
+                return Path(arguments[0])
+            return None
+        if sys.platform.startswith("linux") and systemd_path().exists():
+            text = systemd_path().read_text(encoding="utf-8", errors="replace")
+            found = re.search(r"^ExecStart=(.*)$", text, flags=re.MULTILINE)
+            if found:
+                tokens = shlex.split(found.group(1))
+                if tokens:
+                    return Path(tokens[0].replace("%%", "%"))
+    except Exception:  # noqa: BLE001 — a probe must never fail the action it describes
+        pass
+    return None
+
+
+def _names_the_shim(image: Path) -> bool:
+    """Whether a restart through ``image`` resolves the generation pointer.
+
+    The shim (:func:`local_operator.update.daemon_image_path`) reads ``current``
+    once at exec, so a unit naming it IS the generation axis; every other image
+    names a build in its own tree. Compared through ``resolve`` because the unit
+    may spell the stable root through a different physical path (a symlinked
+    home), and a failure to resolve is a "no" rather than an exception — the
+    callers render every unproven thing as "not reported".
+    """
+    from local_operator import update
+
+    shim = update.daemon_image_path()
+    if image == shim:
+        return True
+    try:
+        return image.resolve() == shim.resolve()
+    except OSError:
+        return False
+
+
+def _restart_target() -> tuple[Path | None, Path | None, bool]:
+    """``(generation, image, through_the_shim)``: what a restart would execute.
+
+    The unit's own image when one is installed and readable; otherwise the shim a
+    (re)install from this build would name
+    (:func:`local_operator.update.daemon_image`) — both are "what a restart would
+    execute", and neither is the generation pointer the old reading followed off
+    this machine's actual install. The generation half is filled only when that
+    image is the shim, because that is the only shape whose exec resolves
+    ``current``; a plain interpreter names a build directly
+    (:func:`local_operator.update.version_of_image`).
+    """
+    from local_operator import update
+
+    image = _unit_image()
+    if image is None:
+        image = update.daemon_image()
+    if image is None:
+        return None, None, False
+    if _names_the_shim(image):
+        return update.current_generation(), image, True
+    return None, image, False
+
+
 def generation_reading(pid: int | None) -> dict[str, Any]:
-    """The running relay's build, on the generation axis, for the status surfaces.
+    """The running relay's build, for the status surfaces.
 
     WHY THIS EXISTS (drill 2026-10-04, F6): an update moves the install onto a new
     generation while the relay keeps serving the build it was started from, and
@@ -12047,58 +12139,72 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
     ``lop network status`` names and flags.
 
     IT IS READ FROM THE RUNNING PROCESS ITSELF, never from a field the relay
-    carries: the generation is in the process's own image path (its argv — the
-    shim ``exec``s the generation's image), the same source
+    carries: the build is in the process's own image path (its argv — the shim
+    ``exec``s the generation's image), the same source
     ``launchd.restart_if_build_moved`` trusts, so it answers for EVERY build
     including the old ones the drill found — a relay cannot be asked to report a
     field it was never built to send, and this needs no cooperation.
 
-    THE FACTS, from the two shipped readers, so this surface and the repair
-    cannot drift about what "older" means:
+    THE FACTS, from the shipped readers, so no surface and the repair can drift
+    about what "older" means:
 
-    * ``relay_generation`` — the generation NAME the process was exec'd from.
-      ``None`` covers three different facts (no process, no generation layout,
-      an unreadable argv); a caller renders it as "not reported" only where a
-      layout exists, because that is the only case where the question is real;
-    * ``installed_generation`` — what ``current`` names, or ``None``;
-    * ``relay_generation_stale`` — True only when
-      :func:`local_operator.update.stale_generation_of_process` PROVES the
-      running build is not the installed one. The direction rule holds here as
-      it does at the repair (a missed flag leaves a relay where it is, while a
-      wrong one sends an operator to restart a healthy relay), so an unreadable
-      probe answers False and never True;
-    * ``relay_build`` / ``installed_build`` — the VERSION inside each tree
-      (:func:`local_operator.update.generation_version`), which the human
-      surfaces read in place of the ids (design round 1, D3/D4). ``None`` when
-      a tree was pruned or never carried a distribution; the renderer then
-      keeps the generation name, which is still true provenance.
+    * ``relay_generation`` — the generation NAME the process was exec'd from, or
+      ``None``. THE GENERATION AXIS ONLY (F10): a process on a plain ``uv tool``
+      or pip install has none, and that is not an unreadable answer;
+    * ``relay_build`` — the VERSION of the tree the process runs from:
+      :func:`local_operator.update.generation_version` on the generation axis,
+      :func:`local_operator.update.version_of_process` — its argv[0]'s own tree —
+      off it. ``None`` when neither can be read;
+    * ``installed_generation`` / ``installed_build`` — what a RESTART of the
+      managed unit would execute, read from the unit or the shim
+      (:func:`_restart_target`) rather than from the pointer alone, because a
+      flow install never moves the pointer (F10's live ``installed_build:
+      0.67.2`` beside a 0.67.8 CLI);
+    * ``relay_generation_stale`` — TRI-STATE (F10 slice A). ``True`` only when
+      :func:`local_operator.update.generation_staleness_of_process` PROVES the
+      process is on a generation other than ``current``; ``False`` only when it
+      proves the match; ``None`` whenever the comparison could not be made (no
+      generation in the argv, no readable pointer, a pointer mid-rename, an
+      install whose mutable tree cannot prove what the process loaded). Never a
+      boolean from an unreadable probe: the surfaces render ``None`` as "not
+      reported" for an unreadable running build, and name a read one
+      (``… — cannot confirm it is current``) when only the comparison is
+      unproven — never the bare version, never the remedy.
 
-    Never raises, and never spends a probe on a machine without the layout —
-    this decorates a diagnostic, and a pip/pipx install (no pointer, no
-    generations) must not pay for a question that cannot have an answer.
+    Never raises, and never spends a probe on a machine with nothing to ask
+    about: a machine with no generation layout, no unit and no shim gets
+    all-``None`` facts, and the surfaces print no row for it.
     """
     reading: dict[str, Any] = {
         "relay_generation": None,
         "installed_generation": None,
-        "relay_generation_stale": False,
+        "relay_generation_stale": None,
         "relay_build": None,
         "installed_build": None,
     }
     try:
         from local_operator import update
 
-        current = update.current_generation()
-        if current is not None:
-            reading["installed_generation"] = current.name
-            reading["installed_build"] = update.generation_version(current) or None
-            if isinstance(pid, int):
-                running = update.generation_of_process(pid)
-                if running is not None:
-                    reading["relay_generation"] = running.name
-                    reading["relay_build"] = update.generation_version(running) or None
-                reading["relay_generation_stale"] = (
-                    update.stale_generation_of_process(pid) is not None
-                )
+        if isinstance(pid, int) and pid > 0:
+            running = update.generation_of_process(pid)
+            if running is not None:
+                reading["relay_generation"] = running.name
+                reading["relay_build"] = update.generation_version(running) or None
+            else:
+                reading["relay_build"] = update.version_of_process(pid) or None
+
+        target_generation, target_image, through_shim = _restart_target()
+        if target_image is not None:
+            if through_shim:
+                if target_generation is not None:
+                    reading["installed_generation"] = target_generation.name
+                    reading["installed_build"] = (
+                        update.generation_version(target_generation) or None
+                    )
+                if isinstance(pid, int) and pid > 0:
+                    reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
+            else:
+                reading["installed_build"] = update.version_of_image(target_image) or None
     except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
         pass
     return reading
@@ -12109,32 +12215,47 @@ def generation_words(facts: Mapping[str, Any]) -> str:
 
     THE REGISTER IS THE FAMILY'S (design round 1, D3/D4): the word "build", a
     version for the value (the generation id reads as noise outside this module
-    and rides ``--json`` as provenance), and the ``behind X`` + ``run Y`` shape
+    and rides ``--json`` as provenance), and the ``behind X`` + remedy shape
     :func:`local_operator.network.readiness.build_suffix` already prints. The id
     is also the fallback for the one corner a version cannot be read out of — a
     pruned tree whose process still runs, which is the drill's own incident —
     because dropping it there would leave the row saying nothing.
 
-    ``""`` when there is no generation layout (the question cannot exist),
-    ``"not reported"`` where one exists and the running build could not be read
-    (silence would read as healthy), the bare version when current, and the
-    flagged form when the reading proves the move. The same-build-into-a-newer-
-    generation case reads "behind the install" rather than a version pair that
-    says nothing against itself (the flag is still true — the tree moved).
+    FOUR ANSWERS (F10 slice A; the third is design round 1's D1 correction).
+    ``""``: nothing on either side can be named (no generation layout, no unit,
+    no shim — the question cannot exist, and a pip/pipx machine keeps its block
+    byte-for-byte). ``"not reported"``: the running build could not be read at
+    all — F6's meaning of the words, preserved. ``"{build} — cannot confirm it
+    is current"``: the build WAS read and the comparison could not be proven.
+    That read-but-unproven case is the steady state of a flow-install node, and
+    withholding a value the surface holds made the row information-free exactly
+    where the drill ran (D1): name what was read, decline the verdict. The bare
+    version only when the shipped comparison proves the process current, and the
+    flagged form only when it proves the move.
 
-    WIDTHS: every rendered form is ≤80 columns with the sentence-shaped
-    ``running, pid N, `` prefix included, so the remedy never wraps.
+    WIDTHS (design round 1, D3): every rendered form is ≤80 columns with the
+    sentence-shaped ``running, pid N, `` prefix included to a SIX-digit pid —
+    the widest, the version pair, measures 80 there (81 at seven). Both flagged
+    forms name their referent — ``behind the install`` / ``behind install X``
+    (D2): the number after *behind* is this device's own install, and the tail
+    drops the ``run`` the original carried so the referent fits inside the
+    budget.
     """
     name = facts.get("relay_generation")
     installed = facts.get("installed_generation")
-    if not isinstance(name, str) or not name:
-        return "not reported" if installed else ""
     running = facts.get("relay_build") or name
     own = facts.get("installed_build") or installed or ""
-    if not facts.get("relay_generation_stale"):
+    if not running and not own:
+        return ""
+    stale = facts.get("relay_generation_stale")
+    if not running:
+        return "not reported"
+    if not isinstance(stale, bool):
+        return f"{running} — cannot confirm it is current"
+    if not stale:
         return str(running)
-    where = f"behind {own}" if (own and own != running) else "behind the install"
-    return f"{running} — {where}; run `lop network restart`"
+    where = f"behind install {own}" if (own and own != running) else "behind the install"
+    return f"{running} — {where}; `lop network restart`"
 
 
 def generation_clause(facts: Mapping[str, Any]) -> str:
@@ -12181,10 +12302,12 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
     (:data:`MEMBERSHIP_READ_CLIENT_TIMEOUT_S`) instead of the 3 s the boolean probes
     use. The relay's wait is bounded and an unlanded pass is reported with its age.
 
-    THE RUNNING GENERATION (F6) rides the three ``relay_generation*`` keys: the
-    build the relay process was exec'd from, what ``current`` names, and whether
-    the first is provably older than the second — see :func:`generation_reading`
-    for why it is read from the process rather than reported by the relay.
+    THE RUNNING BUILD (F6, extended by F10) rides the ``relay_generation*`` keys:
+    the build the relay process runs (generation or own tree), what a RESTART of
+    the unit would execute, and — tri-state — whether the first is provably older
+    than the second, with ``None`` for "could not be compared" so no unreadable
+    probe can render as current — see :func:`generation_reading` for why it is
+    read from the process and the unit rather than reported by the relay.
     """
     record, state = store.scan_own_relay()
     live = health(timeout=MEMBERSHIP_READ_CLIENT_TIMEOUT_S, refresh=True) if refresh else health()

@@ -5623,13 +5623,17 @@ def _generation_line(payload: Mapping[str, Any]) -> str:
     the value (the generation id reads as noise outside this module and rides
     ``--json`` as provenance), and the ``behind X`` + remedy shape
     ``readiness.build_suffix`` already prints — every rendered form ≤80 columns
-    so the remedy never wraps. One missing reading is two different things: a
-    machine with no generation layout at all (a pip/pipx install) cannot have
-    this problem, so there is no row; a machine WITH a layout whose running
-    build cannot be read says ``not reported`` rather than staying silent,
-    because silence would read as healthy. The flag is never guessed —
-    ``relay_generation_stale`` is only True when the shipped probe proves the
-    move — so the remedy appears only when the restart is warranted.
+    so the remedy never wraps. One missing reading is two different things, and
+    design round 1 (D1) made the row say which is which: a machine with nothing
+    to name on either side (no layout, no unit, no shim) cannot have this
+    question, so there is no row; a machine whose running build cannot be read
+    at all says ``not reported`` rather than staying silent, because silence
+    would read as healthy; and a machine whose build WAS read while the
+    comparison could not be proven names that build (``… — cannot confirm it is
+    current``) instead of withholding it. The flag is never guessed —
+    ``relay_generation_stale`` is True/False only when the shipped probe proves
+    the move or the match — so the remedy appears only when the restart is
+    warranted.
     """
     from local_operator.network.relay import generation_words
 
@@ -6521,8 +6525,10 @@ def _relay_state() -> tuple[str, bool]:
     the same reading `lop network status` names, so the fallback path this
     function feeds (doctor, ready) cannot describe a relay a generation behind
     without saying so. What it cannot read, it never dresses as current: an
-    unreadable build adds the ``not reported`` words only where a generation
-    layout exists, and a machine without one keeps this sentence byte-for-byte.
+    unreadable build adds ``not reported``, and a readable one with an unproven
+    comparison (F10) is named with ``… — cannot confirm it is current`` — both
+    only where the question exists (a generation layout, an installed unit, or a
+    shim), and a machine with none of them keeps this sentence byte-for-byte.
     """
     from local_operator.network import relay as relay_mod
     from local_operator.network import store
