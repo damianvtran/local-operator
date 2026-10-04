@@ -235,14 +235,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # the local failure class (a sealed record that failed authentication, a
     # peer that closed, a timeout) is only observable on the wire. It reports the
     # local ``join`` block (stage + class + kind + counters) and the persisted
-    # last-attempt record. DOCUMENTED AS ONE ATTEMPT: it dials, it can admit, and
-    # it spends the invite exactly like a join does.
+    # last-attempt record. DOCUMENTED AS ONE ATTEMPT: it dials, it may admit the
+    # device, and it spends the invite exactly like a join does. ``--park``
+    # composes with it on purpose (review round 1, NIT 1 — see the park block
+    # below): the parked hold IS that one attempt.
     join.add_argument(
         "--explain",
         action="store_true",
         help=(
             "Preflight the token locally, then run ONE attempt and report the local "
-            "failure class and stage (one attempt: it can admit and spends the invite)"
+            "failure class and stage (it dials, may admit the device and spends the "
+            "invite; with --park that attempt parks and waits for --confirm as a "
+            "normal join does)"
         ),
     )
     join.add_argument(
@@ -2458,6 +2462,14 @@ def _cmd_join(args: argparse.Namespace) -> int:
         # USAGE errors, not refusals (the guide's rc 2): each names a flag pair that
         # cannot mean one thing at the same time, and silently dropping one of the two
         # would leave the caller believing the other had been honoured.
+        #
+        # ``--explain`` IS NOT IN THIS LIST, deliberately (review round 1, NIT 1):
+        # the parked hold IS ``--explain``'s one attempt — it dials once, persists
+        # the attempt record, and reports the same block every other seat reports;
+        # an unanswered window settles as the ``timeout``/``pairing_unanswered``
+        # class with exit 3, because the park seat threads the attempt through for
+        # exactly this. Only a SECOND invocation's flag is incoherent beside a
+        # fresh attempt, and ``--confirm`` (refused above) is that one.
         if getattr(args, "sas_stdin", False):
             print(
                 "--park waits for `--confirm`; --sas-stdin answers a prompt — use one "
@@ -2493,8 +2505,10 @@ def _cmd_join(args: argparse.Namespace) -> int:
         if not explain:
             raise
         # The FIRST preflight answer, reported rather than raised: the caller asked
-        # for the local class, and "the token does not decode" IS one.
-        preflight.append(_preflight("token", "failed", exc.sentence))
+        # for the local class, and "the token does not decode" IS one. The entry
+        # carries the CODE alone — the sentence is inherited prose and rides the
+        # message line once (design round 1, D4).
+        preflight.append(_preflight("token", "failed", code=exc.code))
         return _explain_refusal(args, exc, preflight, store, from_attempt=False)
     if explain:
         preflight.append(
@@ -2513,11 +2527,15 @@ def _cmd_join(args: argparse.Namespace) -> int:
         )
         if not explain:
             raise exc
-        preflight.append(_preflight("hosts", "failed", exc.sentence))
+        preflight.append(_preflight("hosts", "failed", code=exc.code))
         return _explain_refusal(args, exc, preflight, store, from_attempt=False)
     if explain:
         preflight.append(
-            _preflight("hosts", "ok", f"{len(hosts)} endpoint(s): " + ", ".join(hosts))
+            _preflight(
+                "hosts",
+                "ok",
+                f"{len(hosts)} endpoint{'s' if len(hosts) != 1 else ''}: " + ", ".join(hosts),
+            )
         )
     identity = load_or_mint(name=args.name)
     settings = relay_mod.NetworkSettings.from_config()
@@ -2540,7 +2558,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
         )
         if not explain:
             raise exc
-        preflight.append(_preflight("expiry", "failed", exc.sentence))
+        preflight.append(_preflight("expiry", "failed", code=exc.code))
         return _explain_refusal(args, exc, preflight, store, from_attempt=False)
     if explain:
         preflight.append(_preflight("expiry", "ok", f"{int(expires_at - now)}s left on it"))
@@ -2550,8 +2568,13 @@ def _cmd_join(args: argparse.Namespace) -> int:
         preflight.extend(_explain_member_checks(token, envelope, invite_mod))
         stopped = next((entry for entry in preflight if entry["state"] == "failed"), None)
         if stopped is not None:
+            # THE MESSAGE IS AUTHORED HERE, NOT INHERITED (design round 1, D4): the
+            # entry carries the code alone, and the refusal's own sentence stays on
+            # the original site — this surface must not re-emit prose that names
+            # terminal commands (the `§2.9` repave of those sites is deferred).
+            check = str(stopped.get("check") or "preflight")
             code = str(stopped.get("code") or "invite_unusable")
-            exc = MeshRefusal(code, str(stopped.get("reading") or ""))
+            exc = MeshRefusal(code, f"the offline preflight stopped at {check} ({code})")
             return _explain_refusal(args, exc, preflight, store, from_attempt=False)
 
     if bool(getattr(args, "park", False)):
@@ -2623,7 +2646,10 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 message="",
                 preflight=preflight,
                 store=store,
-                block={},
+                # THE CROPPED BLOCK ON EVERY ``--explain`` (design round 1, N4):
+                # an agent reading one key must not have to branch on the outcome;
+                # ``_explain_report`` crops it from the record just persisted.
+                block=None,
                 payload=link_result[1],
                 lines=link_result[0],
             )
@@ -2766,21 +2792,24 @@ class _JoinAttempt:
 def _join_class_of(exc: BaseException) -> tuple[str, str]:
     """The local ``(class, kind)`` of a connection that died mid-attempt.
 
-    SPECIFIC FIRST: ``TimeoutError`` and ``ConnectionError`` are both ``OSError``
-    subclasses, so the order IS the classification. A ``LinkCryptoError`` carries
-    ``wire.LINK_CRYPTO_KINDS``; the socket classes carry themselves as their kind,
-    so the payload discriminates exactly
+    The CLASS word comes from ``relay.socket_failure_class`` — the inviter files
+    the same death under the same word, and one classifier is the only way the
+    two ends' vocabularies cannot drift apart (review round 1, NIT 2: two hand-
+    written copies of the same specific-first order). The joiner's KIND is the
+    finer token relay keeps in ``detail``: a ``LinkCryptoError`` carries
+    ``wire.LINK_CRYPTO_KINDS``; the socket classes carry themselves as their
+    kind, so the payload discriminates exactly
     ``auth``/``limit``/``parse``/``sequence``/``peer_closed``/``timeout``/``io``.
     """
+    from local_operator.network import relay as relay_mod
     from local_operator.network import wire
 
+    failure_class = relay_mod.socket_failure_class(exc)
     if isinstance(exc, wire.LinkCryptoError):
-        return "link_crypto", exc.kind
-    if isinstance(exc, TimeoutError):
-        return "timeout", "timeout"
-    if isinstance(exc, ConnectionError):
-        return "peer_closed", "peer_closed"
-    return "io", exc.__class__.__name__
+        return failure_class, exc.kind
+    if failure_class == "io":
+        return failure_class, exc.__class__.__name__
+    return failure_class, failure_class
 
 
 def _record_join_attempt(attempt: _JoinAttempt, envelope: Any, store: Any, *, ok: bool) -> None:
@@ -2815,10 +2844,20 @@ def _attempt_record(store: Any) -> dict[str, Any] | None:
 
 
 def _attempt_block_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The ``join`` payload block cropped from a persisted record, or ``None``."""
+    """The ``join`` payload block cropped from a persisted record, or ``None``.
+
+    Empty fields are dropped rather than shipped as ``""``: on a SUCCESS the
+    record carries ``class``/``kind`` as empty strings (nothing failed), and a
+    reader of ``join`` should not have to tell "absent" from "blank" (design
+    round 1, N4 — the block now rides every ``--explain`` answer).
+    """
     if not record:
         return None
-    block = {key: record[key] for key in _JOIN_BLOCK_KEYS if key in record}
+    block = {
+        key: record[key]
+        for key in _JOIN_BLOCK_KEYS
+        if key in record and record[key] not in (None, "")
+    }
     return block or None
 
 
@@ -2835,15 +2874,25 @@ def _attach_join_block(exc: BaseException, block: dict[str, Any] | None) -> None
         setattr(exc, "join_block", block)
 
 
-def _preflight(check: str, state: str, reading: str, *, code: str = "") -> dict[str, str]:
+def _preflight(check: str, state: str, reading: str = "", *, code: str = "") -> dict[str, str]:
     """One line of ``join --explain``'s offline preflight.
 
     ``state`` is ``ok`` (checked and fine), ``failed`` (a hard local fact that
     stops the dial), ``skipped`` (this device cannot answer it offline) or
-    ``noted`` (a fact reported, neither pass nor fail). ``code`` is set only on a
-    ``failed`` entry, where it becomes the refusal's machine code.
+    ``noted`` (a fact reported, neither pass nor fail). ``code`` is the machine
+    word: the refusal's own code on a ``failed`` entry, the reason on a
+    ``skipped`` one.
+
+    AN INHERITED REFUSAL SENTENCE IS NEVER COPIED IN HERE (design round 1, D4):
+    the join path's sentences are authored for a refusal and some name terminal
+    commands (``§2.9``'s repave covers those sites, deferred), and this surface
+    is a READING, not a second refusal — so where a sentence exists its callers
+    pass ``code`` alone, and the sentence appears at most once, in the refusal's
+    own message line. ``reading`` carries only prose authored FOR this frame.
     """
-    entry = {"check": check, "state": state, "reading": reading}
+    entry = {"check": check, "state": state}
+    if reading:
+        entry["reading"] = reading
     if code:
         entry["code"] = code
     return entry
@@ -2886,12 +2935,17 @@ def _explain_member_checks(token: str, envelope: Any, invite_mod: Any) -> list[d
     try:
         secrets = store.require_secrets(envelope.network_id)
     except (MeshRefusal, FileNotFoundError) as exc:
+        # THE REFUSAL'S CODE, NOT ITS SENTENCE (design round 1, D4): the inherited
+        # sentence names terminal commands (`§2.9`) and belongs to the refusal
+        # surface; here the code is the reading. Only a code-less failure (the
+        # secret file unreadable) falls back to this frame's own prose.
+        code = str(getattr(exc, "code", "") or "")
         entries.append(
             _preflight(
                 "secret_tag",
                 "skipped",
-                str(getattr(exc, "sentence", ""))
-                or "this device's secret for that network is unreadable",
+                "" if code else "this device's secret for that network is unreadable",
+                code=code,
             )
         )
         return entries
@@ -2902,17 +2956,18 @@ def _explain_member_checks(token: str, envelope: Any, invite_mod: Any) -> list[d
             wire.invite_key(secrets.secret, envelope.network_id, envelope.invite_id),
         )
     except MeshRefusal as exc:
-        entries.append(_preflight("secret_tag", "failed", exc.sentence, code=exc.code))
+        entries.append(_preflight("secret_tag", "failed", code=exc.code))
         return entries
     entries.append(
         _preflight("secret_tag", "ok", "the token's tag verifies against this device's own secret")
     )
     me = record.member(record.self_device_id)
     if me is not None and me.active:
+        # NOT CIRCULAR (design round 1, N5): the old reading restated "someone is
+        # already here" twice; what it must say is WHY an attempt still runs.
         reading = (
-            f"this device is already an active member at epoch {record.epoch}; this "
-            "explain run performs the same ONE attempt a re-run of the join "
-            "mechanism would"
+            f"already an active member at epoch {record.epoch} (the attempt still "
+            "runs, because only the wire shows the join mechanism's class)"
         )
     elif me is not None:
         reading = (
@@ -2930,39 +2985,48 @@ def _join_class_sentence(block: dict[str, Any], budget_s: float | None) -> str:
 
     The sentences for the silent classes say exactly what this device observed and
     NOTHING about the peer's reason ("not visible from here by design") — the same
-    non-claim discipline as the relay's ``_note_refused_handshake``. The classes
-    whose existing sentences already say everything (``invite``, ``dial``,
-    ``handshake``, ``refused``) return "" so the message is not duplicated.
+    non-claim discipline as the relay's ``_note_refused_handshake``. NO SENTENCE
+    RESTATES THE STAGE (design round 1, D3): the head above it already printed
+    ``at <stage>``, so a second mention of the same word is noise — the sentences
+    speak about the read, the head about where. The classes whose existing refusal
+    sentences already say everything (``invite``, ``dial``, ``handshake``) return
+    "" so the message is not duplicated; ``refused`` does NOT (D1) — its message
+    carries only the peer's code, and that code is the wire's deliberately coarse
+    word, so the record must say what it holds and no more.
     """
-    stage = str(block.get("stage") or "the attempt")
     kind = str(block.get("kind") or "")
     failure_class = str(block.get("class") or "")
+    if failure_class == "refused":
+        # THE ARCHETYPAL WITHHOLDING (design round 1, D1): every refusal on this
+        # path arrives as one coarse code — the finer class is local to the keys
+        # that refused the record — so the record names the code it was given and
+        # refuses to diagnose beyond it, exactly as ``peer_closed`` refuses.
+        return (
+            "the peer refused; its reason is not sent over the wire by design — "
+            "this record carries the code and does not pretend to diagnose it"
+        )
     if failure_class == "link_crypto":
         if kind == "auth":
             return (
-                f"a sealed record could not be authenticated at {stage}; the link "
-                "closed rather than resynchronise (by design)"
+                "a sealed record could not be authenticated; the link closed rather "
+                "than resynchronise (by design)"
             )
         if kind == "limit":
             return (
-                f"a record exceeded the wire's record-size limit at {stage}; the link "
-                "is closed rather than fragmented"
+                "a record exceeded the wire's record-size limit; the link is closed "
+                "rather than fragmented"
             )
         if kind == "parse":
             return (
-                f"a record at {stage} decrypted to something that was not a JSON frame; "
-                "the link is closed"
+                "a record decrypted to something that was not a JSON frame; the link " "is closed"
             )
         if kind == "sequence":
-            return (
-                f"the link's sequence numbers were exhausted at {stage}; reconnect with "
-                "a fresh handshake"
-            )
-        return f"a sealed record failed at {stage} ({kind or 'unknown kind'})"
+            return "the link's sequence numbers were exhausted; reconnect with a fresh " "handshake"
+        return "a sealed record failed; the link is closed"
     if failure_class == "peer_closed":
         return (
-            f"the peer closed the connection at {stage} without a frame; the reason "
-            "is not visible from here by design"
+            "the peer closed the connection without a frame; the reason is not "
+            "visible from here by design"
         )
     if failure_class == "timeout":
         if kind == "pairing_unanswered":
@@ -2971,11 +3035,34 @@ def _join_class_sentence(block: dict[str, Any], budget_s: float | None) -> str:
                 "needs to read the code on both devices"
             )
         if isinstance(budget_s, (int, float)) and budget_s:
-            return f"no frame arrived at {stage} within {int(budget_s)}s"
-        return f"no frame arrived at {stage} within its deadline"
+            return f"no frame arrived within {int(budget_s)}s"
+        return "no frame arrived within its deadline"
     if failure_class == "io":
-        return f"the connection failed at {stage} ({kind or 'an OS error'})"
+        # THE EXCEPTION NAME LIVES IN THE HEAD'S KIND (design round 1, N1): it was
+        # repeated in parens here ("the connection failed (OSError)" under
+        # ``io:OSError``), which read as one fact said twice.
+        return "the connection failed on a local OS error; the link is down"
     return ""
+
+
+def _class_stage(block: dict[str, Any]) -> str:
+    """``<class>[:<kind>] at <stage>`` with the repeats dropped (design round 1, D2).
+
+    Two stutters this exists to prevent: the kind echoing the class
+    (``peer_closed:peer_closed``, ``timeout:timeout``) folds to one token, and a
+    stage that IS the class word (a ``dial`` failure, where ``…at dial`` says the
+    same token twice on the line) drops from the tail. A kind that ADDS a fact
+    (``link_crypto:auth``, ``io:ConnectionRefusedError``) is kept.
+    """
+    failure_class = str(block.get("class") or "")
+    kind = str(block.get("kind") or "")
+    stage = str(block.get("stage") or "")
+    if not failure_class:
+        return ""
+    name = failure_class if kind in ("", failure_class) else f"{failure_class}:{kind}"
+    if stage and stage != failure_class:
+        return f"{name} at {stage}"
+    return name
 
 
 def _record_reading(record: dict[str, Any]) -> str:
@@ -2990,7 +3077,7 @@ def _record_reading(record: dict[str, Any]) -> str:
     if record.get("ok"):
         what = "succeeded"
     else:
-        what = f"{block.get('class')}:{block.get('kind')} at {block.get('stage')}"
+        what = _class_stage(block) or "failed"
     return f"{when} — {what} ({block.get('host') or 'no host'})"
 
 
@@ -2999,21 +3086,34 @@ def _explain_lines(
     preflight: list[dict[str, str]],
     record: dict[str, Any] | None,
 ) -> list[str]:
-    """The human half of ``join --explain``: class, preflight lines, the record."""
+    """The human half of ``join --explain``: class, preflight lines, the record.
+
+    ONE PREFLIGHT CLAUSE PER LINE, the label stated once and continuations
+    indented under it (design round 1, D6): a single ~250-char semicolon line
+    wrapped mid-reading in an 80-column terminal and buried the token reading —
+    the signal that the token is not the problem — in the middle of it.
+
+    A ``failed``/``skipped`` entry renders the machine ``code`` when it has no
+    authored ``reading`` (design round 1, D4): what the join's own refusals say
+    is inherited prose (some of it naming terminal commands) and appears at most
+    once, on the message line; this frame is a reading, not a second refusal.
+    """
     lines: list[str] = []
     if block:
-        head = f"class: {block.get('class')}:{block.get('kind')} at {block.get('stage')}"
+        head = _class_stage(block)
         budget = record.get("budget_s") if record else None
         sentence = _join_class_sentence(block, budget if isinstance(budget, (int, float)) else None)
-        lines.append(f"{head} — {sentence}" if sentence else head)
+        if head:
+            lines.append(f"class: {head} — {sentence}" if sentence else f"class: {head}")
     if preflight:
-        lines.append(
-            "preflight: "
-            + "; ".join(
-                f"{entry.get('check')} {entry.get('state')} ({entry.get('reading')})"
-                for entry in preflight
-            )
-        )
+        label = "preflight: "
+        width = len(label)
+        for index, entry in enumerate(preflight):
+            text = str(entry.get("reading") or entry.get("code") or "")
+            clause = f"{entry.get('check')} {entry.get('state')}"
+            if text:
+                clause = f"{clause} ({text})"
+            lines.append((label if index == 0 else " " * width) + clause)
     if record is not None:
         lines.append(f"last record: {_record_reading(record)}")
     return lines
@@ -3189,6 +3289,10 @@ def _join_one(
             envelope.epoch,
             wire.invite_key(envelope.material, envelope.network_id, envelope.invite_id),
         )
+        # THE `challenge` → `auth` BOUNDARY (review round 1, MINOR 2): the ladder in
+        # ``_JoinAttempt`` names it, and without this line a death while WRITING the
+        # auth frame was filed at `challenge` — one statement behind the wire.
+        attempt.stage = "auth"
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
         handshake.read_welcome(reader, deadline)

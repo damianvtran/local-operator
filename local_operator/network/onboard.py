@@ -1397,11 +1397,18 @@ class OnboardRun:
                 if isinstance(node_join, dict):
                     copied = {
                         key: node_join[key]
-                        for key in ("stage", "class", "kind", "code")
+                        for key in ("stage", "class", "kind")
                         if node_join.get(key) not in (None, "")
                     }
-                    if refusal and "code" not in copied:
-                        copied["code"] = refusal
+                    # THE RECEIPT'S OWN WORD RIDES ``refusal_code`` (design round 1,
+                    # N3): the block's other keys are the node's taxonomy, and the
+                    # receipt's refusal word filed under a bare ``code`` beside them
+                    # read as one object with two vocabularies. A node block that
+                    # carries its own ``code`` keeps it (its word wins over our
+                    # reconstruction); when neither exists the field stays absent.
+                    block_code = str(node_join.get("code") or refusal or "")
+                    if block_code:
+                        copied["refusal_code"] = block_code
                     if copied:
                         data["join"] = copied
                 # WHAT THE NODE PROBE VERIFIED, IN ITS OWN WORDS (drill finding,

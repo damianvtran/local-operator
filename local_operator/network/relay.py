@@ -942,7 +942,7 @@ def handshake_refused_reason(exc: BaseException) -> str:
     return f"{HANDSHAKE_REFUSED}:{exc.__class__.__name__}"
 
 
-def _socket_cause(exc: BaseException) -> str:
+def socket_failure_class(exc: BaseException) -> str:
     """The LOCAL class of a connection that died, as a countable machine cause.
 
     SPECIFIC FIRST, because ``TimeoutError`` and ``ConnectionError`` are both
@@ -950,6 +950,11 @@ def _socket_cause(exc: BaseException) -> str:
     words are the audit enum's own (``audit.CAUSES``); a ``LinkCryptoError`` keeps
     its finer kind in the row's ``detail.kind`` rather than minting one cause per
     kind, so the counting surface stays small (F4, drill 2026-10-04).
+
+    PUBLIC BECAUSE TWO MODULES FILE FROM IT (review round 1, NIT 2): the joiner's
+    CLI classifies its own dead attempt with this same function
+    (``cli._join_class_of``), so the two ends of one failure cannot drift into two
+    vocabularies.
     """
     if isinstance(exc, wire.LinkCryptoError):
         return "link_crypto"
@@ -4738,7 +4743,7 @@ class RelayServer:
                         subject=peer_addr,
                         outcome="failed",
                         network_id=network_id,
-                        cause=_socket_cause(exc),
+                        cause=socket_failure_class(exc),
                         detail={
                             "stage": stage,
                             "mode": mode,
@@ -8195,27 +8200,17 @@ class RelayServer:
             # ``cause=policy``, the fallback word: an incident reader was told the
             # refusal was a policy decision when in fact the sealed layer failed.
             # The finer tokens ride ``detail``: ``kind`` distinguishes the codec's
-            # own classes, ``stage`` names the statement boundary it died at.
-            if isinstance(exc, wire.LinkCryptoError):
-                cause = "link_crypto"
+            # own classes, ``stage`` names the statement boundary it died at. The
+            # class word itself is ``socket_failure_class`` — ONE spelling shared
+            # with the joiner's CLI (review round 1, NIT 2).
+            if isinstance(exc, (wire.LinkCryptoError, OSError)):
+                cause = socket_failure_class(exc)
                 detail: dict[str, Any] = {
                     "cause": reason,
                     "subject": joiner_id,
-                    "kind": exc.kind,
+                    "kind": exc.kind if isinstance(exc, wire.LinkCryptoError) else "",
                     "stage": stage,
                 }
-                outcome = "failed"
-            elif isinstance(exc, TimeoutError):
-                cause = "timeout"
-                detail = {"cause": reason, "subject": joiner_id, "kind": "", "stage": stage}
-                outcome = "failed"
-            elif isinstance(exc, ConnectionError):
-                cause = "peer_closed"
-                detail = {"cause": reason, "subject": joiner_id, "kind": "", "stage": stage}
-                outcome = "failed"
-            elif isinstance(exc, OSError):
-                cause = "io"
-                detail = {"cause": reason, "subject": joiner_id, "kind": "", "stage": stage}
                 outcome = "failed"
             else:
                 cause = _PAIR_CAUSE.get(reason, "policy")

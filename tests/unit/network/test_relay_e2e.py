@@ -10,6 +10,7 @@ human-confirmed pairing), R4 (zero trust: an unauthorised frame is refused) and 
 from __future__ import annotations
 
 import ast
+import socket
 import threading
 import time
 from argparse import Namespace
@@ -684,6 +685,68 @@ def test_a_forced_sealed_failure_is_classified_on_the_inviter(
     assert attempt["class"] == "refused"
     assert attempt["kind"] == "error"
     assert attempt["stage"] == "result_read"
+
+
+def test_a_connection_that_dies_after_its_hello_leaves_a_handshake_stopped_row(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+) -> None:
+    """F4's pre-welcome row, both halves (review round 1, MINOR 1; QA round 1).
+
+    A connection that PASSED its hello and died while the relay waited for the
+    auth frame leaves a ``handshake_stopped`` row naming stage + mode + addr —
+    the row that answers "the relay saw it" when a join dies pre-welcome and the
+    join-side record alone cannot say whether the inviter ever noticed.
+
+    And the bound, in the same cell: a BARE connect-and-close is a port scan and
+    writes NOTHING. The row count assertion is the discriminator — if the bare
+    connection had filed anything, the count would be two.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+
+    # 1. The scan: connect, close, no hello. This must contribute zero rows.
+    bare = socket.create_connection((host, port), timeout=5.0)
+    bare.close()
+
+    # 2. The real peer: a member hello the relay accepts, then a death exactly
+    #    where the relay waits for the auth frame.
+    sock = socket.create_connection((host, port), timeout=5.0)
+    # The relay records the PEER's own socket address, which is this side's
+    # ephemeral source port — captured here so the assertion is exact.
+    client_addr = sock.getsockname()
+    handshake = Handshake.new(
+        role="dialer",
+        identity=server_b.identity,
+        network_id=record.network_id,
+        epoch=record.epoch,
+        instance_id=server_b.instance_id,
+        session_protocol=net_cli._session_protocol(),  # noqa: SLF001 — the CLI's own value
+        mode="member",
+        capabilities=list(wire.LINK_CAPABILITIES),
+        build={},
+    )
+    handshake.send_hello(sock)
+    # Reading the challenge back is the proof the relay ACCEPTED the hello: past
+    # this point it is inside the handshake, one statement from its auth wait.
+    handshake.read_challenge(wire.FrameReader(sock), wire.deadline_in(30.0))
+    sock.close()
+
+    _await_event(server_a, "handshake_stopped")
+    rows = [
+        row for row in server_a.audit.tail(limit=500) if row.get("event") == "handshake_stopped"
+    ]
+    assert len(rows) == 1, f"the bare connect contributed a row: {rows}"
+    row = rows[0]
+    assert row["cause"] == "peer_closed", row
+    assert row["outcome"] == "failed", row
+    assert row["network_id"] == record.network_id, row
+    # The stage names the statement the relay was IN (the auth wait), and the id
+    # in the hello is a CLAIM until its MAC verifies — so the actor says so.
+    assert row["detail"]["stage"] == "auth", row
+    assert row["detail"]["mode"] == "member", row
+    assert row["detail"]["their_addr"] == f"{client_addr[0]}:{client_addr[1]}", row
+    assert row["detail"]["their_device"] == "", row
+    assert row["actor"] == "unknown", row
 
 
 def test_a_replayed_invite_is_refused(

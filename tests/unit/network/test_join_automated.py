@@ -311,3 +311,35 @@ def test_explain_refuses_the_confirm_combination(capsys: pytest.CaptureFixture[s
     args.explain = True
     assert net_cli._cmd_join(args) == 2  # noqa: SLF001
     assert "use one or the other" in capsys.readouterr().err
+
+
+def test_explain_carries_the_join_block_on_success_too(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N4: one key across both outcomes — the cropped block rides every explain.
+
+    The success seat used to omit ``join`` (it lived only under
+    ``explain.record``), so an agent reading ``join`` had to branch on ``ok``
+    first. Now the block is cropped from the record the attempt just persisted:
+    ``stage: joined``, the counters, and no empty fields shipped as blanks.
+    """
+    server_a, server_b, _host, _port = devices
+    _record, minted = _minted(server_a)
+    _pre_answer(server_a, minted.record.invite_id)
+
+    args = _automated_args(name=server_b.identity.name)
+    args.explain = True
+    args.network_command = "join"
+    args.advertise_hosts = []
+    args.token = minted.token
+    rc = net_cli.main(args)
+    assert rc == 0
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["ok"] is True
+    block = body["join"]
+    assert block["stage"] == "joined"
+    assert block["records_received"] >= 1
+    assert "class" not in block and "kind" not in block
+    assert body["explain"]["record"]["ok"] is True

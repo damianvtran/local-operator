@@ -746,6 +746,123 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     assert network_store.pair_decision("inv_1", isolated) is None
 
 
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        # The live shape: the node's own taxonomy, plus the receipt's refusal
+        # word beside it under its own name (N3) — never a bare second ``code``.
+        (
+            {
+                "stage": "offer_read",
+                "class": "link_crypto",
+                "kind": "auth",
+                "host": "127.0.0.1:4098",
+                "records_sent": 0,
+                "records_received": 0,
+                "local_only": True,
+            },
+            {
+                "stage": "offer_read",
+                "class": "link_crypto",
+                "kind": "auth",
+                "refusal_code": "join_failed",
+            },
+        ),
+        # A node block carrying its own ``code`` keeps it: its word wins over
+        # the receipt's reconstruction.
+        (
+            {
+                "stage": "preflight",
+                "class": "invite",
+                "kind": "invite_expired",
+                "code": "node_expired",
+            },
+            {
+                "stage": "preflight",
+                "class": "invite",
+                "kind": "invite_expired",
+                "refusal_code": "node_expired",
+            },
+        ),
+        # An older node has no block key at all: the receipt stays silent about
+        # a class it was not told rather than guessing.
+        (None, None),
+        # Empty values are filtered, never shipped as blanks; the refusal word
+        # still lands under ``refusal_code``.
+        (
+            {"stage": "", "class": "refused", "kind": None, "code": ""},
+            {"class": "refused", "refusal_code": "join_failed"},
+        ),
+    ],
+)
+def test_the_receipt_copies_the_nodes_join_block(
+    isolated: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    block: dict[str, Any] | None,
+    expected: dict[str, Any] | None,
+) -> None:
+    """F4: the inviter-side agent reads the joiner's class without an SSH session.
+
+    The node's ``join --json`` refusal body carries a ``join`` block; the receipt
+    copies the node's own keys verbatim and files the receipt's refusal word
+    beside them as ``refusal_code`` (design round 1, N3 — one object must not mix
+    two taxonomies under one bare name). QA round 1 probed this over the frozen
+    fakes; this cell is the regression guard it asked for.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    refusal: dict[str, Any] = {
+        "ok": False,
+        "code": "join_failed",
+        "message": ("could not join: the handshake at 127.0.0.1:4098 stopped (LinkCryptoError)"),
+    }
+    if block is not None:
+        refusal["join"] = block
+    outputs = [
+        ("uname", {"stdout": PRE_READ_OK}),
+        ("lop-update", {"stdout": "rebuilt\n"}),
+        ("lop --version", {"stdout": "v0.64.12\n"}),
+        (
+            "identity show",
+            {"stdout": json.dumps({"ok": True, "device_id": "d_node", "fingerprint": "FP"})},
+        ),
+        ("network join", {"rc": 1, "stdout": json.dumps(refusal)}),
+        # The failure path probes the node's own relay for the sentence; a
+        # stopped relay keeps this cell about the copy, not the relay branches.
+        (
+            "network status",
+            {
+                "stdout": json.dumps(
+                    {"ok": True, "relay_running": False, "relay_answering": False, "networks": []}
+                )
+            },
+        ),
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    failing = payload["steps"][-1]
+    assert failing["step"] == "join" and failing["ok"] is False
+    copied = failing["data"].get("join")
+    if expected is None:
+        assert copied is None, copied
+    else:
+        assert copied == expected, copied
+
+
 def test_a_join_failure_names_the_already_serving_relay_and_keeps_the_nodes_message(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

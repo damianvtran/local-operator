@@ -2032,3 +2032,74 @@ def test_a_damaged_store_degrades_instead_of_raising(
         finally:
             if database.exists():
                 os.chmod(database, 0o600)
+
+
+# ---------------------------------------------------------------------------
+# F4: the local failure copy (drill 2026-10-04; design round 1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_class_sentence_for_refused_names_the_withholding() -> None:
+    """D1 (MAJOR): ``refused:<code>`` is the archetypal withholding — the record
+    must say so, not present the wire's coarse word as a diagnosis."""
+    sentence = net_cli._join_class_sentence(  # noqa: SLF001
+        {"class": "refused", "kind": "error", "stage": "result_read"}, None
+    )
+    assert sentence
+    assert "by design" in sentence
+    assert "pretend" in sentence
+    # The stage is the HEAD's job; the sentence must not restate it (D3).
+    assert "result_read" not in sentence
+
+
+def test_class_sentences_drop_the_stage_the_head_already_printed() -> None:
+    """D3: every sentence that used to interpolate ``at {stage}`` no longer does."""
+    for block, budget in (
+        ({"class": "link_crypto", "kind": "auth", "stage": "offer_read"}, None),
+        ({"class": "link_crypto", "kind": "limit", "stage": "offer_read"}, None),
+        ({"class": "link_crypto", "kind": "parse", "stage": "offer_read"}, None),
+        ({"class": "link_crypto", "kind": "sequence", "stage": "offer_read"}, None),
+        ({"class": "peer_closed", "kind": "peer_closed", "stage": "offer_read"}, None),
+        ({"class": "timeout", "kind": "timeout", "stage": "challenge"}, 15.0),
+        ({"class": "io", "kind": "OSError", "stage": "establish"}, None),
+    ):
+        sentence = net_cli._join_class_sentence(block, budget)  # noqa: SLF001
+        assert sentence, block
+        assert block["stage"] not in sentence, (block, sentence)
+
+
+def test_the_class_head_folds_repeated_tokens_and_a_repeated_stage() -> None:
+    """D2: ``peer_closed:peer_closed at …`` stutters, and ``dial:… at dial`` says
+    one word twice; a kind that adds a fact is kept."""
+    stage_of = net_cli._class_stage  # noqa: SLF001
+    assert stage_of({"class": "peer_closed", "kind": "peer_closed", "stage": "offer_read"}) == (
+        "peer_closed at offer_read"
+    )
+    assert stage_of({"class": "timeout", "kind": "timeout", "stage": "challenge"}) == (
+        "timeout at challenge"
+    )
+    assert stage_of({"class": "link_crypto", "kind": "auth", "stage": "offer_read"}) == (
+        "link_crypto:auth at offer_read"
+    )
+    assert stage_of({"class": "dial", "kind": "ConnectionRefusedError", "stage": "dial"}) == (
+        "dial:ConnectionRefusedError"
+    )
+
+
+def test_the_explain_frame_renders_inherited_readings_as_codes_and_token_first() -> None:
+    """D4/D6: one clause per line with the token leading; an inherited failure
+    renders its code, never the refusal's prose (the ``§2.9`` repave of the
+    source sentences is deferred, so the frame must not re-emit them)."""
+    lines = net_cli._explain_lines(  # noqa: SLF001
+        None,
+        [
+            {"check": "token", "state": "ok", "reading": "decoded invite inv_1 for mesh-a"},
+            {"check": "expiry", "state": "failed", "code": "invite_expired"},
+            {"check": "secret_tag", "state": "skipped", "code": "no_network_secret"},
+        ],
+        None,
+    )
+    assert lines[0] == "preflight: token ok (decoded invite inv_1 for mesh-a)"
+    assert lines[1] == "           expiry failed (invite_expired)"
+    assert lines[2] == "           secret_tag skipped (no_network_secret)"
+    assert all("`" not in line for line in lines)
