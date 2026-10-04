@@ -570,6 +570,12 @@ export interface Directories {
 	recent: string[];
 	/** The system temp dir, offered as a scratch start directory. */
 	tmp?: string;
+	/** Where a start with NO ``cwd`` lands, resolved by the daemon (the same
+	    answer ``GET /api/directories`` publishes and ``POST
+	    /api/sessions/start`` uses). The phone never derives this itself: a
+	    second answer to "where does a one-tap start begin" is a second answer
+	    that can drift from the one the start route actually honours. */
+	default: string;
 }
 
 /* ---- command ops (POST /api/sessions/{session_id}/command) --------------- */

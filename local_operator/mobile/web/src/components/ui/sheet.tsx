@@ -237,10 +237,23 @@ export function Sheet({
 			{/* Focus guards enforce containment even when a native WebKit Tab move
 			    occurs before JavaScript receives a keyboard event. */}
 			<span data-focus-guard tabIndex={0} aria-hidden onFocus={() => setTimeout(() => focusEdge(true), 0)} />
+			{/* TAP-TO-DISMISS, NOT A SECOND CLOSE CONTROL (UX round 1, U7). The
+			    scrim is a full-viewport button, and naming it "close" gave
+			    assistive tech a control that collides with the panel's own ✕
+			    ("close sheet") -- two ways to say one thing, one of them
+			    invisible. It stays a button (the click is the affordance for a
+			    pointer) and keeps its `tabIndex={-1}` opt-out of the focus trap,
+			    but it leaves the ACCESSIBILITY tree entirely: a reader who
+			    cannot see the backdrop has nothing to do with it. */}
 			<button
 				type="button"
 				tabIndex={-1}
-				aria-label="close"
+				aria-hidden
+				/* The one handle a test CAN hold on to now that the scrim is out
+				   of the a11y tree -- and the same idiom the pending card already
+				   uses for an element selected for behaviour rather than meaning
+				   (``data-testid="pending-card"``). */
+				data-testid="sheet-scrim"
 				className="lo-scrim absolute inset-0 bg-scrim"
 				onClick={onClose}
 			/>

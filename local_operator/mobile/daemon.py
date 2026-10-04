@@ -3582,6 +3582,33 @@ class MobileDaemon:
             client.close()
             raise
 
+    def phone_viewer(self, session_id: str) -> "AttachClient | None":
+        """This relay's OWN live viewer connection for a session, if any.
+
+        THE MOVE'S TRANSPORT, and the whole reason this accessor exists. The
+        runtime retires a pristine session only when NO OTHER attach client is
+        registered, and it excludes exactly the connection that ASKED (see
+        ``RuntimeServer._other_observers``). A relay that dialled a FRESH
+        attach connection to ask would therefore be counted against itself:
+        measured against a live relay, ``retire_if_pristine`` answers
+        "kept: 1 viewer(s) still attached" while the phone's stream is open,
+        and only an un-watched session (no SSE subscriber and the 60 s startup
+        lease elapsed) retires from a fresh connection. So the ask must ride
+        the connection the runtime already knows as this viewer —
+        ``_phone_attaches`` — which is also exactly what the desktop's
+        ``/move`` does: the mounted facade sends it over the socket the runtime
+        counts as that viewer.
+
+        Returns None when the relay holds no CONNECTED viewer for the session
+        (no phone watching, or the client is mid-reconnect): the caller then
+        dials a throwaway connection, which is correct precisely because there
+        is no viewer to be counted against it.
+        """
+        client = self._phone_attaches.get(session_id)
+        if client is None or not client.connected:
+            return None
+        return client
+
     def claim_phone_view(self, session_id: str) -> None:
         """Transfer the startup lease to the already-registered SSE subscriber."""
         timer = self._phone_handoffs.pop(session_id, None)
@@ -3920,6 +3947,81 @@ class MobileDaemon:
 # ---------------------------------------------------------------------------
 # Web application
 # ---------------------------------------------------------------------------
+
+
+#: The phone's copy for ``POST /api/sessions/{id}/directory``, keyed by the
+#: stable code the native app branches on. The app renders ``error`` VERBATIM,
+#: so these strings are a published contract, not diagnostics: they are
+#: deliberately plain, phone-sized sentences that do not name the transport,
+#: the runtime generation or the relay.
+#:
+#: THREE CODES, AND ONLY THREE. The runtime can refuse a pristine retire for
+#: several reasons ("session has work or history", "work arrived while stopping
+#: was announced", "N viewer(s) still attached", a probe that failed, a runtime
+#: too old to stop itself), and every one of them is mapped onto one of these
+#: by :func:`_directory_refusal_code` rather than forwarded. The raw ``kept: …``
+#: detail is a sentence written for a log, and a phone that echoed it would be
+#: reciting the relay's internals back at the user.
+_DIRECTORY_REFUSALS: dict[str, str] = {
+    "session_has_history": (
+        "This session already has messages, so its working directory can't change."
+    ),
+    "session_busy": ("This session is busy right now, so its working directory can't change."),
+    "move_unavailable": "The working directory can't change right now.",
+}
+
+
+def _directory_refusal_code(detail: str) -> str:
+    """Map the runtime's own ``kept: <why>`` detail onto a phone-facing code.
+
+    Deliberately a SMALL, closed mapping: the runtime's vocabulary is wider than
+    the phone's, and the extra detail is not something a user can act on
+    differently. Two reasons ARE distinguishable and worth distinguishing —
+    "this conversation already has content" is permanent for this session,
+    while "work arrived while we were stopping" is a race the user can retry —
+    so those two get their own codes and every other refusal falls to the
+    generic ``move_unavailable``. Anything unrecognised must never be reported
+    as a success, so the fallback is the refusal, not the happy path.
+    """
+    reason = detail.split(":", 1)[1].strip().lower() if ":" in detail else ""
+    if "history" in reason:
+        return "session_has_history"
+    if "work arrived" in reason:
+        return "session_busy"
+    return "move_unavailable"
+
+
+async def _wait_for_owner_to_unpublish(session_id: str, retired_pid: int, timeout: float) -> bool:
+    """Wait, bounded, for a retiring owner's discovery record to disappear.
+
+    THE ADOPTION GUARD: ``MobileDaemon.spawn_session`` reads the discovery
+    record FIRST and adopts a live owner it finds (that is how a retried start
+    reattaches instead of double-spawning). A successor engaged while the
+    retiring owner's record is still on disk would therefore be handed the
+    DYING runtime's pid and report a move that never happened — the exact
+    same-id identity this route promises, silently broken. So the caller waits
+    for the old record to go before spawning.
+
+    ``retired_pid`` is matched rather than a bare existence check: a record
+    that is already a DIFFERENT generation is not the owner we retired, and
+    waiting for it would be waiting for the successor we are about to start.
+    A fired bound returns False — the caller decides what to do with a
+    retirement that will not settle, rather than blocking a request forever.
+    """
+    from local_operator.mobile.attach_client import find_runtime_record
+    from local_operator.paths import config_dir
+
+    deadline = time.monotonic() + timeout
+    while True:
+        record, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
+        if record is None or record.pid != retired_pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        # 50 ms: the owner unpublishes within a few hundred ms of the stop
+        # ack, and the request is holding a phone's tap — a coarser poll would
+        # add its granularity to the user-visible latency for no saving.
+        await asyncio.sleep(0.05)
 
 
 def build_app(daemon: MobileDaemon):
@@ -5102,7 +5204,18 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "request body must be an object"}, status_code=400)
-        cwd_raw = str(body.get("cwd") or Path.home())
+        # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
+        # The one-tap start posts no cwd at all, so the resolution lives here,
+        # server-side, and is the SAME function ``GET /api/directories``
+        # publishes as ``default`` — the directory the phone lands in is
+        # therefore always one the picker would also have offered.
+        requested = str(body.get("cwd") or "").strip()
+        # RESOLVED OFF THE LOOP, exactly as the sibling reader below does it:
+        # ``_default_start_cwd`` builds an AgentRegistry and reads every agent's
+        # metadata from disk, and this coroutine shares its loop with every
+        # connected phone's SSE stream. The short-circuit stays, so an explicit
+        # cwd -- the common case -- never pays for the read at all.
+        cwd_raw = requested or await asyncio.to_thread(_default_start_cwd)
         # Resolve to a real directory the picker is allowed to open: anywhere
         # under the owner's home, OR the system temp dir. The spawn runs with
         # the daemon's own environment (it is the owner's account either way),
@@ -5202,14 +5315,190 @@ def build_app(daemon: MobileDaemon):
 
     async def api_directories(request: Request) -> Response:
         """The new-session form's cwd picker: home plus the directories of
-        recent sessions (where the user has been working lately)."""
+        recently active agents, plus the system temp dir, plus the DEFAULT a
+        no-cwd start resolves to.
+
+        ``default`` is resolved by the SAME function the start route uses
+        (``_default_start_cwd``), never recomputed here: a picker that offered
+        a default of its own would be a second answer to "where does a one-tap
+        start land", and the two would drift the first time the resolution
+        changed. ``recent`` is already filtered by the spawn gate inside
+        ``_recent_directories`` — every row is a directory a session can start
+        in, so no suggestion is a dead tap.
+        """
         denied = gate(request)
         if denied is not None:
             return denied
         recent = await asyncio.to_thread(_recent_directories)
+        # ``default`` is the directory a no-cwd start resolves to, resolved by
+        # the SHARED function rather than re-derived here: the directory the
+        # picker marks as current and the directory a one-tap start lands in
+        # are the same answer by construction (pinned by a test).
+        default = await asyncio.to_thread(_default_start_cwd)
         # ``tmp`` is offered as an explicit scratch start dir beside home and
         # the recents — the spawn gate admits it (see _spawn_dir_allowed).
-        return JSONResponse({"home": str(Path.home()), "recent": recent, "tmp": _tmp_dir()})
+        return JSONResponse(
+            {
+                "home": str(Path.home()),
+                "recent": recent,
+                "tmp": _tmp_dir(),
+                "default": default,
+            }
+        )
+
+    async def api_session_directory(request: Request) -> Response:
+        """Point a PRISTINE session at a different working directory.
+
+        A session's cwd is baked into its runtime at spawn
+        (``LOP_MOBILE_CHILD_CWD``), so the only honest way to honour "start
+        this conversation somewhere else" is to retire the pristine runtime
+        and engage a successor in the new directory UNDER THE SAME SESSION ID.
+        The identity is the published contract: the phone's route, the durable
+        transcript directory, the transcript the user typed into and the SSE
+        stream all key on ``session_id``, so a move that minted a new id would
+        read as "your conversation was replaced by a different one".
+
+        WHO IS ASKED, and why it is not a fresh connection: the runtime
+        retires a pristine session only when no OTHER attach client is
+        registered, and it excludes exactly the connection that asked
+        (``RuntimeServer._other_observers`` / ``_retire_if_pristine``). The
+        relay holds its own viewer connection whenever the phone is watching
+        (``_phone_attaches``), so a fresh connection here would be counted
+        against itself and ALWAYS refused (measured against a live relay:
+        "kept: 1 viewer(s) still attached"). The ask therefore rides the
+        relay's own viewer connection when one exists -- the same shape the
+        desktop's ``/move`` uses, where the mounted facade sends it over the
+        socket the runtime counts as that viewer -- and dials a throwaway
+        connection only when there is no viewer to be counted against it.
+
+        Refusals are ``{"error": <sentence>, "code": <stable-code>}`` and the
+        sentences are the phone-facing contract (see ``_DIRECTORY_REFUSALS``).
+        The raw ``kept: …`` detail never crosses the wire.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        cwd_raw = str(body.get("cwd") or "").strip()
+        if not cwd_raw:
+            return JSONResponse({"error": "cwd is required"}, status_code=400)
+        # THE SAME ADMISSION THE START ROUTE APPLIES TO A SPAWN PATH, resolved
+        # the same way, so a directory this route accepts is always one a
+        # successor can actually be spawned in. The STATUS AND SHAPE mirror the
+        # start route (a bare ``error``, no code): a bad path is a typo, not one
+        # of the three lifecycle refusals the phone branches on.
+        #
+        # TWO SENTENCES, NOT ONE, because these are two problems with two
+        # different recoveries (UX round 1, U2): "there is nothing at that path"
+        # is a typo the reader fixes, while "that is outside the directories a
+        # session may work in" is a RULE they can only obey if it is stated --
+        # the shipped single sentence covered both causes and named neither, so
+        # the reader's only route back was to guess. Both echo the path AS
+        # TYPED, because the typed spelling is what they have to change.
+        cwd_path = Path(cwd_raw).expanduser().resolve()
+        if not cwd_path.is_dir():
+            return JSONResponse({"error": f"there's no directory at {cwd_raw}"}, status_code=400)
+        if not _spawn_dir_allowed(cwd_path):
+            return JSONResponse(
+                {
+                    "error": (
+                        "a session can only work inside your home folder or the tmp root: "
+                        f"{cwd_raw}"
+                    )
+                },
+                status_code=400,
+            )
+        cwd = str(cwd_path)
+
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None:
+            # The same status and body the other session routes give an
+            # unknown/ended session, so one client habit covers them all. Not a
+            # 500: "there is no such live conversation" is an answer, not a
+            # fault.
+            return JSONResponse({"error": "session not connected"}, status_code=409)
+        owner_pid = entry.record.pid
+
+        # A LIVE TURN IS BUSY, not "has history". The runtime reports both as
+        # "kept: session has work or history", and the two differ in exactly
+        # the way the user cares about: a conversation with an answer is
+        # permanently un-moveable, while a turn in flight is moveable the
+        # moment it lands. The projection is the relay's own read of the
+        # session, so this costs nothing and never races the runtime's own
+        # judge: a session that stops streaming between this check and the ask
+        # simply gets the runtime's answer instead.
+        if entry.projection is not None and entry.projection.streaming:
+            code = "session_busy"
+            return JSONResponse({"error": _DIRECTORY_REFUSALS[code], "code": code}, status_code=409)
+
+        from local_operator.mobile.attach_client import AttachClient
+
+        viewer = daemon.phone_viewer(session_id)
+        throwaway: AttachClient | None = None
+        if viewer is None:
+            throwaway = AttachClient(
+                lambda _projection: None,
+                lambda _reason: None,
+                locality="remote",
+                on_operator_prompt=lambda copy: logger.warning(
+                    "mobile session move: owner prompts an operator: %s", copy
+                ),
+            )
+            try:
+                await throwaway.connect(entry.record, session_id)
+            except Exception:  # noqa: BLE001 -- dial failures are refusals
+                logger.warning("mobile session move: could not reach the owner", exc_info=True)
+                throwaway.close()
+                code = "move_unavailable"
+                return JSONResponse(
+                    {"error": _DIRECTORY_REFUSALS[code], "code": code}, status_code=409
+                )
+            viewer = throwaway
+
+        try:
+            detail = await viewer.retire_if_pristine()
+        except Exception:  # noqa: BLE001 -- a dead socket is a refusal, never a 500
+            logger.warning("mobile session move: retire request failed", exc_info=True)
+            code = "move_unavailable"
+            return JSONResponse({"error": _DIRECTORY_REFUSALS[code], "code": code}, status_code=409)
+        finally:
+            if throwaway is not None:
+                throwaway.close()
+
+        if not str(detail).startswith("retired"):
+            code = _directory_refusal_code(str(detail))
+            logger.info("mobile session move: owner refused for %s (%s)", session_id, detail)
+            return JSONResponse({"error": _DIRECTORY_REFUSALS[code], "code": code}, status_code=409)
+
+        # THE ADOPTION GUARD (see ``_wait_for_owner_to_unpublish``): spawn only
+        # once the retiring owner's discovery record is gone, or the successor
+        # would adopt the dying runtime and the reply would name a pid that is
+        # about to exit.
+        if not await _wait_for_owner_to_unpublish(session_id, owner_pid, SESSION_START_TIMEOUT_S):
+            logger.warning(
+                "mobile session move: owner %s did not unpublish within %.0fs",
+                owner_pid,
+                SESSION_START_TIMEOUT_S,
+            )
+            code = "move_unavailable"
+            return JSONResponse({"error": _DIRECTORY_REFUSALS[code], "code": code}, status_code=409)
+
+        try:
+            pid = await daemon.spawn_session(cwd, resume=session_id)
+        except Exception as exc:  # noqa: BLE001 -- mirrors the start route's 500
+            logger.warning("mobile session move failed", exc_info=True)
+            return JSONResponse(
+                {"error": str(exc)[:300], "code": "move_unavailable"}, status_code=500
+            )
+        # START-RESPONSE SHAPE, UNCHANGED: the phone reuses its start path for
+        # the successor, so this route answers exactly what /start answers.
+        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_past_sessions(request: Request) -> Response:
         """Resumable past sessions — the phone's "go back to a conversation"
@@ -5815,6 +6104,11 @@ def build_app(daemon: MobileDaemon):
         # longer unread -- needs one route to name its session again.
         Route("/api/push/conversation/{handle:str}", api_push_conversation),
         Route("/api/sessions/start", api_start_session, methods=["POST"]),
+        Route(
+            "/api/sessions/{session_id:str}/directory",
+            api_session_directory,
+            methods=["POST"],
+        ),
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
         Route("/api/sessions/past", api_past_sessions),
@@ -6007,9 +6301,26 @@ def _spawn_dir_allowed(cwd_path: Path) -> bool:
 
 
 def _recent_directories(limit: int = 8) -> list[str]:
-    """The new-session form's cwd suggestions: the working directories of
+    """The cwd suggestions the phone offers: the working directories of
     recently active agents from the on-disk registry (the durable store both
-    the CLI and server write), deduped, live directories only."""
+    the CLI and server write), deduped, live directories only — AND admitted by
+    the spawn gate.
+
+    THE GATE IS THE POINT (mobile new-session streamline). The picker offers
+    these as one-tap choices, so a recent directory outside the spawn gate
+    (home/tmp) would be a SUGGESTION THAT 400s at ``POST /api/sessions/start``
+    — a dead tap the user can only diagnose by reading the error. Filtering the
+    list through the SAME predicate the start route applies is what makes every
+    row a directory a session can actually start in.
+
+    THE FILTER BELONGS HERE because both readers want it: this list is served
+    as the picker's rows (``GET /api/directories``) and read by
+    ``_default_start_cwd`` for the directory a no-cwd start lands in -- and both
+    of those answers have to be spawnable, or the phone offers a default it
+    cannot honour. A future consumer that genuinely needs the unfiltered
+    ranking should filter at that consumer rather than relaxing this, because
+    the dead-tap property is a property of the SUGGESTION, not of the registry.
+    """
     try:
         from local_operator.agents import AgentRegistry
         from local_operator.paths import config_dir
@@ -6023,13 +6334,41 @@ def _recent_directories(limit: int = 8) -> list[str]:
         seen: list[str] = []
         for agent in agents:
             cwd = agent.current_working_directory
-            if cwd and cwd not in seen and Path(cwd).is_dir():
+            if not cwd or cwd in seen:
+                continue
+            # The gate reads RESOLVED paths (the same way
+            # ``api_start_session`` resolves what it is handed), while the list
+            # keeps the registry's own spelling so the picker shows the
+            # directory the way the user knows it.
+            path = Path(cwd).expanduser()
+            if path.is_dir() and _spawn_dir_allowed(path.resolve()):
                 seen.append(cwd)
             if len(seen) >= limit:
                 break
         return seen
     except Exception:  # noqa: BLE001
         return []
+
+
+def _default_start_cwd() -> str:
+    """Where a phone-started session begins when the client names no directory.
+
+    The FIRST recent directory the spawn gate admits, else the owner's home.
+    Resolved SERVER-SIDE and shared: ``GET /api/directories``'s ``default``
+    field and ``POST /api/sessions/start`` both call this ONE function, so the
+    directory a one-tap start lands in is always a directory the picker also
+    offers — the two cannot drift into disagreeing about "where the user has
+    been working lately".
+
+    Home is the fallback because it is the one path the gate always admits
+    (``_spawn_dir_allowed``), so this function never returns something the
+    start route would refuse.
+    """
+    for candidate in _recent_directories():
+        path = Path(candidate).expanduser().resolve()
+        if path.is_dir() and _spawn_dir_allowed(path):
+            return str(path)
+    return str(Path.home())
 
 
 def _provider_display_name(provider_id: str) -> str:
