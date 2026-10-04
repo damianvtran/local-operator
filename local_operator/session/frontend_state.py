@@ -3702,7 +3702,7 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
         snapshot["goal_judge"] = None
 
 
-#: Per-question text bounds for the ask wire, and the whole field's budget.
+#: Bounds on the ask wire: what the field may carry, and why they are COUNTS.
 #:
 #: The fold caps the LIST (``asks.policy.PROJECTION_CAP``, 20 rows, open first),
 #: and that is a bound on count — not on bytes. A question, its option labels and
@@ -3712,36 +3712,68 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: shape this module's wire bounds exist to close. The frame had ~110 B of slack
 #: at this head, so the ask list's share has to be small and stated.
 #:
-#: The whole-field budget is spent in the fold's own order (open first), so the
-#: rows that survive a clip are the ones a user must answer, and the tail gives
-#: way — the same "the cap keeps what the reader loads first" rule the effort
-#: lineage uses. Text is clipped with an ellipsis rather than dropped, so a
-#: surface can tell a short question from a truncated one.
-ASK_QUESTION_WIRE_CHARS = 200
-ASK_OPTION_LABEL_WIRE_CHARS = 60
-ASK_OPTION_DESC_WIRE_CHARS = 80
-#: Counts are bounded as well as text, and that is a review finding rather than
-#: symmetry: with only a byte budget the FIRST row was exempt from it, so one ask
-#: carrying a hundred questions could spend the whole frame by itself. An ask is
-#: put to a human one screen at a time, so the wire carries a screenful.
+#: WHAT A CAP MAY BOUND, AND WHAT IT MUST NOT. The first revision clipped the
+#: question to 200 characters, every option LABEL to 60 and every description to
+#: 80, each marked with an ellipsis. That spent the wrong currency, because two
+#: of those fields are not display text:
+#:
+#: * the option LABEL is the ANSWER. The answering surface keys the selection on
+#:   the label string and submits it verbatim — local-operator-ui's
+#:   ``ask-panel.tsx`` does ``selected.includes(option.label)``,
+#:   ``data-ask-option={option.label}`` and ``onSelect(option.label)`` — and the
+#:   ledger records exactly that string (``asks.jsonl``). A clipped label is a
+#:   clipped ANSWER, not a shortened sentence. Measured on the operator's own
+#:   store, in ``sessions/439818272d84/asks.jsonl``: an ask whose label is
+#:   "Amend the clause: grade on client latency, record depth beside it" was
+#:   recorded as "Amend the clause: grade on client latency, record depth besi…"
+#:   — ``label[:60] + "…"``, byte for byte. The option the operator actually
+#:   picked is where the collision landed (a 65-character label, and its two
+#:   siblings are 68 and 63), which makes this the common case rather than the
+#:   edge one: any label past 60 characters is a corrupted answer.
+#: * the QUESTION and the DESCRIPTION are what the human reads to choose between
+#:   the options. Truncating them leaves the reader deciding from a fragment, and
+#:   the ellipsis is the only signal that anything is missing.
+#:
+#: So the rule here, and the constraint a later editor must keep: on the
+#: ANSWERING surface a bound may bound the NUMBER of things carried, never the
+#: LENGTH of a field the user must read or act on. A truncated LIST is
+#: recoverable — ``dropped`` marks it (``asks_truncated`` on the wire), the true
+#: count still rides (``asks_open``), and the aggregate routes
+#: (``GET /v1/desktop/asks``, ``GET /api/asks``) carry the rest; a truncated
+#: ANSWER is not recoverable at all, and a truncated question is a decision made
+#: on a fragment. What is forbidden is cutting a field THIS surface shows and
+#: the answer then carries.
+#:
+#: LENGTH CLIPPING IS STILL RIGHT WHERE A FRAGMENT CANNOT BE AN ANSWER, and the
+#: rule above deliberately does not reach those: ``asks.render._clip`` cuts
+#: question text to 200 characters in the TIMEOUT NOTICE, a summarised
+#: notification the user acts on through the ask list rather than through the
+#: notice, and the TUI picker keeps its labels whole instead of cutting them
+#: (``ask_picker._labels_must_all_fit``). Neither is this surface.
+#:
+#: The counts below are that bound, and a review finding is why they exist
+#: rather than symmetry: with only a byte budget the FIRST row was exempt from
+#: it, so one ask carrying a hundred questions could spend the whole frame by
+#: itself. An ask is put to a human one screen at a time, so the wire carries a
+#: screenful and ``dropped`` says when it could not.
 ASK_WIRE_QUESTIONS_MAX = 12
 ASK_WIRE_OPTIONS_MAX = 10
-#: The field's text budget, spent in the fold's own order (open first) so the
-#: rows that survive are the ones a user must answer. The FIRST row is clipped to
-#: fit this budget rather than exempt from it: the guarantee is that one row rides
-#: the frame, not that one row may be any size.
+#: The ask field's text budget, and the allowance for the TAIL only. Spent in the
+#: fold's own order (open first) so the rows that survive are the ones a user
+#: must answer; a row that would push the field past it is left out WHOLE
+#: (``dropped``), never clipped. The FIRST row is exempt from the budget as well
+#: as from the drop — the surface must have the head ask to answer, and its
+#: bytes must not spend the allowance the tail answers with (see
+#: :func:`bound_ask_rows`). A frame that genuinely cannot carry the list at all
+#: is handled by ``_yield_asks_when_the_frame_has_no_room``, which drops the
+#: whole field and says so rather than shipping something corrupt.
 ASK_WIRE_TEXT_BUDGET_CHARS = 6_000
-
-
-def _clip_for_wire(text: str, cap: int) -> str:
-    """``text`` cut to ``cap`` characters, marked the way the neighbours mark it."""
-    return text if len(text) <= cap else text[:cap] + "…"
 
 
 def bound_ask_rows(
     rows: Any, *, budget: int = ASK_WIRE_TEXT_BUDGET_CHARS
 ) -> tuple[list[dict[str, Any]], bool]:
-    """``(rows, dropped)``: the ask list clipped to what this field may carry.
+    """``(rows, dropped)``: the ask list bounded to what this field may carry.
 
     ONE implementation for BOTH routes that serialize asks — the attach snapshot
     in :func:`sync_wire_payload` and the delta in ``FrontendStateStore.mutate`` —
@@ -3749,20 +3781,28 @@ def bound_ask_rows(
     for jobs ("a bound placed only at the snapshot boundary holds for the first
     frame and leaks on every one after it").
 
-    The FIRST row always survives and is then clipped until it fits: a surface
-    must have the head ask to answer, and the reviewer's reproduction (one row
-    carrying a hundred long questions) showed that "exempt" and "bounded" cannot
-    both be true of it. Every field that can grow is cut — question text, option
-    labels, option descriptions, the number of questions, the number of options
-    per question — and ``dropped`` says whether any row was left out, so a client
-    can be told the list is a prefix instead of inferring it from a count.
+    TEXT IS NOT CUT (see the constants above for the measured corruption that
+    clipping caused): the bounds drop whole QUESTIONS past
+    ``ASK_WIRE_QUESTIONS_MAX``, whole OPTIONS past ``ASK_WIRE_OPTIONS_MAX`` and
+    whole ROWS past the budget, so every string a surface shows — and the label
+    an answer records — is the string the model wrote. A bound removes a whole
+    unit or nothing; it never trims a field the reader or the answer needs.
+
+    The FIRST row always survives, bounded only in its question and option
+    COUNTS, and it does NOT spend the tail's allowance: it is the ask the user
+    must answer, so charging its bytes into the budget would leave the field
+    already over and drop every later row — an over-budget head ask silently
+    taking the tail asks off the wire is the opposite of what the exemption is
+    for (review round 1, MAJOR-1). ``dropped`` says whether anything was left
+    out, so a client can be told the list is a prefix instead of inferring it
+    from a count.
     """
     if not isinstance(rows, list):
         return [], False
     kept: list[dict[str, Any]] = []
     spent = 0
     dropped = False
-    for position, row in enumerate(rows):
+    for row in rows:
         if not isinstance(row, dict):
             continue
         raw_questions = [q for q in (row.get("questions") or []) if isinstance(q, dict)]
@@ -3771,40 +3811,33 @@ def bound_ask_rows(
         questions: list[dict[str, Any]] = []
         charge = 0
         for question in raw_questions[:ASK_WIRE_QUESTIONS_MAX]:
-            text = _clip_for_wire(str(question.get("question") or ""), ASK_QUESTION_WIRE_CHARS)
             raw_options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
             if len(raw_options) > ASK_WIRE_OPTIONS_MAX:
                 dropped = True
-            options: list[dict[str, Any]] = []
-            for option in raw_options[:ASK_WIRE_OPTIONS_MAX]:
-                label = _clip_for_wire(str(option.get("label") or ""), ASK_OPTION_LABEL_WIRE_CHARS)
-                description = _clip_for_wire(
-                    str(option.get("description") or ""), ASK_OPTION_DESC_WIRE_CHARS
-                )
-                options.append({**option, "label": label, "description": description})
-                charge += len(label) + len(description)
-            questions.append({**question, "question": text, "options": options})
-            charge += len(text)
-        if position == 0 and charge > budget and questions:
-            # ONE row, still over budget: its TEXT gives way, so the frame
-            # carries a legible head rather than an oversized one. The clip is
-            # applied to the widest cells first (the questions), which is what
-            # the budget arithmetic here is for.
-            over = charge - budget
-            for index, question in enumerate(questions):
-                if over <= 0:
-                    break
-                text = str(question.get("question") or "")
-                room = max(0, len(text) - over)
-                cut = _clip_for_wire(text, room)
-                over -= len(text) - len(cut)
-                questions[index] = {**question, "question": cut}
-            charge = min(charge, budget + sum(len(q["question"]) for q in questions))
+            # ``dict(option)`` rather than a rebuilt pair: the whole option rides,
+            # and any key a later schema adds rides with it instead of being
+            # dropped by a two-key reconstruction.
+            options = [dict(option) for option in raw_options[:ASK_WIRE_OPTIONS_MAX]]
+            questions.append({**question, "options": options})
+            charge += len(str(question.get("question") or ""))
+            charge += sum(
+                len(str(option.get("label") or "")) + len(str(option.get("description") or ""))
+                for option in options
+            )
         if kept and spent + charge > budget:
+            # The TAIL gives way, whole rows at a time — the same "the cap keeps
+            # what the reader loads first" rule the effort lineage uses, applied
+            # to rows rather than to characters.
             dropped = True
             break
         kept.append({**row, "questions": questions})
-        spent += charge
+        if len(kept) > 1:
+            # The HEAD row is exempt from the budget, so it must not SPEND it
+            # (review round 1, MAJOR-1): charging its bytes into ``spent`` left
+            # the field already past budget and dropped every row after it, so
+            # one over-budget head ask took three answerable tail asks off the
+            # wire. Only rows the budget actually governs are charged.
+            spent += charge
     return kept, dropped
 
 
