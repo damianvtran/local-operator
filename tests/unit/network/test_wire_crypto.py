@@ -182,6 +182,31 @@ def test_oversized_record_is_refused_before_allocating(socketpair: object) -> No
     assert "limit" in str(excinfo.value)
 
 
+def test_the_codec_kinds_for_limit_and_sequence_are_the_payloads_own_tokens() -> None:
+    """F4 (QA round 1 note): ``auth`` and ``parse`` are pinned by the failure
+    cells; these are the two kinds a cell can force with no wire at all.
+
+    A payload past the record-size limit and a sequence number at the
+    ``MAX_SEQ`` ceiling — past it the derived nonce stops being safe, so the
+    codec refuses to keep counting — must carry their own kinds, because the
+    joiner's ``join`` block discriminates exactly these tokens.
+    """
+    keys = wire.link_keys(_shared(), b"t" * 32, b"l" * 16)
+    dialer = wire.LinkCrypto(keys, role="dialer")
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        dialer.seal({"op": "x", "blob": "a" * (wire.MAX_RECORD_BYTES + 1)})
+    assert excinfo.value.kind == "limit"
+
+    exhausted = wire.LinkCrypto(keys, role="listener")
+    # The RECEIVING side's counter IS the thing under test (its ceiling), and
+    # reaching it honestly would mean 2**40 records; the poke is the mechanism.
+    # The check runs before decryption, so a junk payload proves the kind.
+    exhausted._recv_seq = wire.LinkCrypto.MAX_SEQ  # noqa: SLF001
+    with pytest.raises(wire.LinkCryptoError) as excinfo:
+        exhausted.open(b"whatever")
+    assert excinfo.value.kind == "sequence"
+
+
 def test_frame_reader_pipelines_without_losing_bytes(socketpair: object) -> None:
     """Byte-oriented sockets have no message boundaries, so a reader that assumed
     one-read-one-frame would lose the tail of a pipelined write."""

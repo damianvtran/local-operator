@@ -404,9 +404,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "content the store never reads",
     ),
     "local_operator/network/store.py": (
-        5,
+        6,
         "the mesh's own store under ``<config>/network``: catalogue, audit, outbox, "
-        "pending and the networks directory",
+        "pending, the networks directory and the last-join-attempt record",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
     "local_operator/network/audit.py": (

@@ -616,6 +616,97 @@ def test_offer_is_the_first_sealed_record_after_welcome(
     assert offer["digest"] == offers.digest_of(offer["items"])
 
 
+class _FailingCodec:
+    """The real codec with its FIRST ``open`` refused — a forced sealed-phase failure.
+
+    A real authentication failure needs a key divergence, so the inviter-side cell
+    corrupts bytes in flight; here the point is the JOINER's own catch-and-record
+    path, so the codec is the real one and only ``open`` refuses — with the real
+    exception class, message and kind, which is exactly what a wire failure raises.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.refused = False
+
+    def open(self, payload: Any) -> dict[str, Any]:
+        if not self.refused:
+            self.refused = True
+            raise wire.LinkCryptoError(
+                "a record failed authentication: the link is closed and nothing in it "
+                "is repaired",
+                kind="auth",
+            )
+        return self.inner.open(payload)
+
+    def seal(self, frame: dict[str, Any]) -> bytes:
+        return self.inner.seal(frame)
+
+
+class _FailingHandshake(Handshake):
+    """The real ``Handshake``, handing out a codec whose first open refuses."""
+
+    def codec(self) -> Any:
+        return _FailingCodec(super().codec())
+
+
+def test_a_forced_sealed_failure_leaves_the_joiner_its_own_record(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+) -> None:
+    """F4 (drill 2026-10-04): a sealed record that fails authentication names its
+    stage and class LOCALLY on the joining end.
+
+    Run 10 stopped at this layer and read as "no entries": the payload said only
+    ``(LinkCryptoError)`` and nothing said WHERE (which read) or WHICH kind. The
+    forced failure lands on the FIRST sealed read — the offer drain — because both
+    ends advertise ``pair-offer-v1``, so "the first sealed read failed" is the
+    reading a re-run must find in the record.
+    """
+    server_a, server_b, host, port = devices
+    record, minted = _minted(server_a)
+    args = _park_args(park=False, automated=True, name=server_b.identity.name)
+
+    result = net_cli._join_one(  # noqa: SLF001 — the CLI's own driver, run as the CLI runs it
+        host=f"{host}:{port}",
+        token=minted.token,
+        envelope=minted.envelope,
+        identity=server_b.identity,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        args=args,
+        wire=wire,
+        Handshake=_FailingHandshake,
+        Credential=Credential,
+        pair_abort_frame=pair_abort_frame,
+        pair_timeout_seconds=pair_timeout_seconds,
+        sas_matches=sas_matches,
+        invite_mod=invite_mod,
+        store=store,
+        relay_mod=relay,
+    )
+
+    # 1. The sentence is the one run 10 saw, UNCHANGED (the wire copy is pinned).
+    assert isinstance(result, str)
+    assert "(LinkCryptoError)" in result
+
+    # 2. The local record names stage + class + kind, read back from the store...
+    attempt = store.join_attempt()
+    assert attempt is not None
+    assert attempt["ok"] is False
+    assert attempt["stage"] == "offer_read"
+    assert attempt["class"] == "link_crypto"
+    assert attempt["kind"] == "auth"
+    assert attempt["host"] == f"{host}:{port}"
+    assert attempt["invite_id"] == minted.envelope.invite_id
+    assert attempt["network_id"] == record.network_id
+    assert attempt["records_sent"] == 0
+    assert attempt["records_received"] == 0
+    # ...and the block is marked local-only, which is what keeps an F4 reader from
+    # treating it as something the peer said.
+    assert attempt["local_only"] is True
+    # NEGATIVE: nothing was admitted; the failure did not sneak a member in.
+    assert store.load(record.network_id, server_a.root).member(server_b.identity.device_id) is None
+
+
 # ---------------------------------------------------------------------------
 # Phase one carries the list (memo §7 cells 4, 5, 7)
 # ---------------------------------------------------------------------------

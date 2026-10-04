@@ -1467,6 +1467,33 @@ class OnboardRun:
                     "code": refusal,
                     "node_refused": bool(refusal or message),
                 }
+                # THE NODE'S OWN LOCAL FAILURE CLASS (F4, drill 2026-10-04): the
+                # node's ``join --json`` refusal body carries a ``join`` block —
+                # stage + class + kind (a sealed record that failed
+                # authentication, a peer that closed, a timeout) — and copying it
+                # here is what lets the inviter-side agent read which step and
+                # which class failed WITHOUT an SSH session. Absent on an older
+                # node (no ``join`` key) and on failures that never dialled; the
+                # receipt then says nothing rather than guessing. The block is
+                # the node's LOCAL diagnosis and never rides any frame.
+                node_join = payload.get("join") if isinstance(payload, dict) else None
+                if isinstance(node_join, dict):
+                    copied = {
+                        key: node_join[key]
+                        for key in ("stage", "class", "kind")
+                        if node_join.get(key) not in (None, "")
+                    }
+                    # THE RECEIPT'S OWN WORD RIDES ``refusal_code`` (design round 1,
+                    # N3): the block's other keys are the node's taxonomy, and the
+                    # receipt's refusal word filed under a bare ``code`` beside them
+                    # read as one object with two vocabularies. A node block that
+                    # carries its own ``code`` keeps it (its word wins over our
+                    # reconstruction); when neither exists the field stays absent.
+                    block_code = str(node_join.get("code") or refusal or "")
+                    if block_code:
+                        copied["refusal_code"] = block_code
+                    if copied:
+                        data["join"] = copied
                 # WHAT THE NODE PROBE VERIFIED, IN ITS OWN WORDS (drill finding,
                 # 2026-10-03; design round 1, D4/D5; extended 2026-10-04). Four
                 # failed re-onboards ran while the node's own systemd relay held
