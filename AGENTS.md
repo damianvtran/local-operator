@@ -3008,7 +3008,7 @@ starting state is production-reachable**, at use time rather than at capture —
 state drifts out of a failure condition as readily as it is mis-set into one
 production never produces.
 
-Two rules sit beside this one, each earned the hard way:
+Three rules sit beside this one, each earned the hard way:
 
 **When you fix something that raises or refuses, verify it still raises where
 it should** — otherwise you have proven only that you removed a check. A
@@ -3029,10 +3029,37 @@ digit. A disk figure taken against the wrong mount propagated through a dozen
 sessions, each one confirming it back against the same wrong basis; every
 confirmation strengthened a number that was never right.
 
+The same basis error decides a release gate, because the consumer's index is
+not the one that is easiest to query. A tag, a GitHub Release and the pull
+request inside them can all exist while the package index the installer
+actually reads has not caught up — measured here as the release published at
+15:56 with `pip`'s JSON API answering for the new version while the PyPI
+**simple index** served nothing until 17:00:28. A run in that window fails an
+install step it had passed twice before, and it reads as flakiness rather
+than as a publication lag. **Name the basis the consumer reads, not the one
+that answers first.**
+
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
 landmine — the next reader treats it as unresolved-but-real and "corrects" a
 correct value into a wrong one.
+
+**Never assert a verdict from a value you do not have.** A device's relay
+honesty field reported `relay_generation_stale: false` on a machine where
+`relay_build` and `relay_generation` were both `None` — a boolean answering
+about a value it had not read. The same read reported `installed_build: 0.67.2`
+for a command-line tool running `0.67.8`, because the field inspects the
+generation layout while the installer that put the newer build there used a
+different one: the number was well-formed, plausible, and about a directory the
+running build does not live in. Both arrived in the fix for the previous
+instance of this class, which is the base rate rather than an irony — every one
+of these was written by someone who had just been bitten by the last one, so
+the guard has to be mechanical rather than attentional. **Name the thing, or
+say "not reported"; never let unknown default to a boolean in either
+direction** — a stale flag defaulting to a safe `true` fails identically,
+because the fault is asserting a verdict at all, not the way it points. And
+when the value is a path, say **which** path: two install layouts can both be
+real, and only one of them is the one running.
 
 ### When a test is already flaking
 
