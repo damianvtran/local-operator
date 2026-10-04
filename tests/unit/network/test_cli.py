@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from local_operator import resume
+from local_operator import update as update_mod
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import readiness, relay, store, types, wire
@@ -1542,6 +1543,200 @@ def test_a_failed_audit_write_reads_degraded_before_anything_else_on_the_block(
     out = capsys.readouterr().out
     assert "audit:      DEGRADED" in out, out
     assert log.degraded_reason in out, (log.degraded_reason, out)
+
+
+# ---------------------------------------------------------------------------
+# F6 — the running relay's generation, named and flagged on the block
+# ---------------------------------------------------------------------------
+
+
+def _generation_status(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    running: str | None,
+    installed: str | None,
+    stale: bool,
+    pid: int = 4711,
+) -> dict[str, Any]:
+    """``relay.status()``'s payload, through the REAL reader and the real merge.
+
+    The three ``relay_generation*`` facts are produced by
+    ``relay.generation_reading`` inside a real ``relay.status()`` call, with the
+    update probes as the injected seam (``test_daemon_build_probe`` owns their
+    own reading), so these cells cannot keep passing against a payload that
+    stopped carrying the facts — the thing a hand-typed fixture would let happen.
+    """
+    generations = root / "generations"
+    monkeypatch.setattr(
+        update_mod,
+        "current_generation",
+        (lambda: generations / installed) if installed else (lambda: None),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "generation_of_process",
+        (lambda _pid: generations / running) if running else (lambda _pid: None),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        (lambda _pid: generations / running) if (stale and running) else (lambda _pid: None),
+    )
+    monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": pid})
+    monkeypatch.setattr(store, "scan_own_relay", lambda *a, **k: (None, "stopped"))
+    return relay.status(refresh=True)
+
+
+def _render_status(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> str:
+    """Run ``_cmd_status`` against one payload and return the human block."""
+    monkeypatch.setattr(relay, "status", lambda *a, **k: payload)
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    return capsys.readouterr().out
+
+
+def test_the_status_block_names_the_running_relays_generation_when_it_matches(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F6, the matching cell: the row names the build, at the block's own column.
+
+    The drill's first shape — the relay runs the generation ``current`` names —
+    is the state an operator should be able to READ and move on from: one
+    generation id, no flag. Off the diff this row does not exist, which is
+    exactly the defect: the block said ``running, pid N`` about a process nobody
+    could place.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    gen = "20260924T103058Z-509c7450dbf6"
+    payload = _generation_status(root, monkeypatch, running=gen, installed=gen, stale=False)
+    out = _render_status(monkeypatch, payload, capsys)
+    assert f"generation: {gen}" in out, out
+    line = next(line for line in out.splitlines() if line.startswith("generation:"))
+    # The same register as the rows above it: every value starts at cell 12.
+    assert line.index(gen) == 12, line
+    assert "older than" not in out, out
+    assert "not reported" not in out, out
+
+
+def test_an_older_relays_generation_is_flagged_with_the_restart_remedy(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F6, the cell the drill exists for: a relay a generation behind says so.
+
+    ``lop update`` leaves the relay on the generation it was started from when
+    nothing moves it; the whole finding was that nothing said so. The flag and
+    the one-line remedy are pinned together, and the ``--json`` payload carries
+    the same three facts so an agent does not have to parse the sentence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
+    payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
+    out = _render_status(monkeypatch, payload, capsys)
+    assert (
+        f"generation: {old} — older than the installed generation; run `lop network restart`"
+    ) in out, out
+
+    monkeypatch.setattr(relay, "status", lambda *a, **k: payload)
+    assert net_cli._cmd_status(Namespace(json=True)) == 0  # noqa: SLF001
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["relay_generation"] == old
+    assert printed["installed_generation"] == new
+    assert printed["relay_generation_stale"] is True
+
+
+def test_a_generation_that_cannot_be_read_says_not_reported_where_a_layout_exists(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F6, the unknown cell: silence would read as healthy, so it must speak.
+
+    Two different facts must not render the same. On a machine WITH a generation
+    layout whose running build cannot be read (an argv that names no generation,
+    a pointer being moved), the row says ``not reported``; on a machine with no
+    layout at all — a pip/pipx install, where the question cannot exist — there
+    is no row, pinned by its own cell. Neither claims a move: the flag comes
+    only from the shipped comparison, never from an absence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    payload = _generation_status(
+        root, monkeypatch, running=None, installed="20260924T103058Z-509c7450dbf6", stale=False
+    )
+    out = _render_status(monkeypatch, payload, capsys)
+    assert "generation: not reported" in out, out
+    assert "older than" not in out, out
+
+
+def test_a_machine_without_generations_gets_no_generation_row(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No layout, no question: a pip/pipx machine keeps the block byte-for-byte.
+
+    A relay under a pip install has no generation, so a row would be noise that
+    can never resolve — and the drill fix must not turn every non-uv machine's
+    status into a question it cannot answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    payload = _generation_status(root, monkeypatch, running=None, installed=None, stale=False)
+    out = _render_status(monkeypatch, payload, capsys)
+    assert "generation:" not in out, out
+    assert "relay:      running, pid 4711" in out, out
+
+
+def test_a_just_restarted_relay_reads_current_on_the_next_status(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F6, the readback: the repair moves the build, and the surface must agree.
+
+    The drill's loop is stale → ``lop network restart`` → current; this pins both
+    halves against the same reading. First render: the relay is a generation
+    behind and the block flags it. Then the restart lands — the probe now reads
+    the new process's argv, which is the same reading on a replaced process —
+    and the same block must read current WITHOUT the flag. A surface still
+    reading a cached or recorded build would keep flagging it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20260921T125352Z-0.61.12"
+    new = "20260924T103058Z-509c7450dbf6"
+    # BOTH payloads are built before either render: ``_render_status`` pins
+    # ``relay.status`` to one payload, and the second build has to go through the
+    # real function for this to be the readback it claims to be.
+    stale_payload = _generation_status(root, monkeypatch, running=old, installed=new, stale=True)
+    fresh_payload = _generation_status(root, monkeypatch, running=new, installed=new, stale=False)
+    out = _render_status(monkeypatch, stale_payload, capsys)
+    assert "older than the installed generation" in out, out
+
+    out = _render_status(monkeypatch, fresh_payload, capsys)
+    assert f"generation: {new}" in out, out
+    assert "older than" not in out, out
+    assert "not reported" not in out, out
+
+
+def test_the_doctor_fallback_names_the_running_build_where_it_can(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6: ready/doctor's fallback sentence carries the same reading as status.
+
+    ``_relay_state`` feeds both fallbacks (the relay did not answer the op), and
+    before this diff it could describe a relay a generation behind without
+    saying so. Same rule as the block: name it, flag it, and the same remedy.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20260921T125352Z-0.61.12"
+    generations = root / "generations"
+    monkeypatch.setattr(relay, "health", lambda *a, **k: {"pid": 4711})
+    monkeypatch.setattr(
+        update_mod, "current_generation", lambda: generations / "20260924T103058Z-509c7450dbf6"
+    )
+    monkeypatch.setattr(update_mod, "generation_of_process", lambda _pid: generations / old)
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda _pid: generations / old)
+    line, up = net_cli._relay_state()  # noqa: SLF001
+    assert up is True
+    assert line == (
+        f"running, pid 4711, generation {old} — older than the installed generation; "
+        "run `lop network restart`"
+    ), line
 
 
 def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:

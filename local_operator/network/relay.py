@@ -10799,10 +10799,22 @@ def refresh_plist_if_stale() -> Any:
     (measured: a kickstart after a rewrite keeps running the previous argv), and
     every path is guarded by ``launchd.is_own_plist`` so a sandboxed run cannot
     restart the operator's relay.
+
+    A CURRENT PLIST IS NOT A CURRENT BUILD, and this is the daemon the drill
+    (2026-10-04, F6) found serving a superseded build three times in one night —
+    one relay 14 hours stale, and two joins that handshook across two builds.
+    The unit names the stable shim, so its content is byte-identical across
+    generations while a relay started from an older one keeps serving it, and
+    the relay is the one process whose protocol must match its peers'. So the
+    second staleness question is asked here exactly as the other supervised
+    daemons ask it (:func:`launchd.restart_if_build_moved`): a relay whose
+    RUNNING build is provably not ``current`` gets one ``kickstart``, which is
+    also what puts it back in step after ``lop update`` has rolled everything
+    else onto the new generation.
     """
     from local_operator import launchd
 
-    name = "network"
+    name = "network relay"
     try:
         if not is_supported():
             return launchd.PlistRefresh(name=name, kind="unsupported")
@@ -10811,6 +10823,18 @@ def refresh_plist_if_stale() -> Any:
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind == "current":
+            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
+            # shim, so its content is byte-identical across generations while a
+            # relay started from an older one keeps serving it. See
+            # :func:`launchd.restart_if_build_moved`.
+            return launchd.restart_if_build_moved(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop network install",
+                run=_launchctl,
+            )
         if outcome.kind != "repaired":
             return outcome
         reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
@@ -11968,6 +11992,66 @@ def health(timeout: float = 3.0, *, refresh: bool = False) -> dict[str, Any] | N
     return detail if isinstance(detail, dict) else None
 
 
+def generation_reading(pid: int | None) -> dict[str, Any]:
+    """The running relay's build, on the generation axis, for the status surfaces.
+
+    WHY THIS EXISTS (drill 2026-10-04, F6): an update moves the install onto a new
+    generation while the relay keeps serving the build it was started from, and
+    nothing on any surface said so — three stale relays were found in one night,
+    one of them 14 hours behind, and the relay is the one process whose protocol
+    must match the peer's (a relay a version behind is how run 10's
+    ``LinkCryptoError`` looked before the skew was found). This is the reading
+    ``lop network status`` names and flags.
+
+    IT IS READ FROM THE RUNNING PROCESS ITSELF, never from a field the relay
+    carries: the generation is in the process's own image path (its argv — the
+    shim ``exec``s the generation's image), the same source
+    ``launchd.restart_if_build_moved`` trusts, so it answers for EVERY build
+    including the old ones the drill found — a relay cannot be asked to report a
+    field it was never built to send, and this needs no cooperation.
+
+    THREE FACTS, from the two shipped readers, so this surface and the repair
+    cannot drift about what "older" means:
+
+    * ``relay_generation`` — the generation NAME the process was exec'd from.
+      ``None`` covers three different facts (no process, no generation layout,
+      an unreadable argv); a caller renders it as "not reported" only where a
+      layout exists, because that is the only case where the question is real;
+    * ``installed_generation`` — what ``current`` names, or ``None``;
+    * ``relay_generation_stale`` — True only when
+      :func:`local_operator.update.stale_generation_of_process` PROVES the
+      running build is not the installed one. The direction rule holds here as
+      it does at the repair (a missed flag leaves a relay where it is, while a
+      wrong one sends an operator to restart a healthy relay), so an unreadable
+      probe answers False and never True.
+
+    Never raises, and never spends a probe on a machine without the layout —
+    this decorates a diagnostic, and a pip/pipx install (no pointer, no
+    generations) must not pay for a question that cannot have an answer.
+    """
+    reading: dict[str, Any] = {
+        "relay_generation": None,
+        "installed_generation": None,
+        "relay_generation_stale": False,
+    }
+    try:
+        from local_operator import update
+
+        current = update.current_generation()
+        if current is not None:
+            reading["installed_generation"] = current.name
+            if isinstance(pid, int):
+                running = update.generation_of_process(pid)
+                if running is not None:
+                    reading["relay_generation"] = running.name
+                reading["relay_generation_stale"] = (
+                    update.stale_generation_of_process(pid) is not None
+                )
+    except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
+        pass
+    return reading
+
+
 def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]:
     """What a human needs: is it installed, is it running, what does it see.
 
@@ -11999,11 +12083,22 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
     at the last cadence tick, and the client waits the fresh read's own deadline
     (:data:`MEMBERSHIP_READ_CLIENT_TIMEOUT_S`) instead of the 3 s the boolean probes
     use. The relay's wait is bounded and an unlanded pass is reported with its age.
+
+    THE RUNNING GENERATION (F6) rides the three ``relay_generation*`` keys: the
+    build the relay process was exec'd from, what ``current`` names, and whether
+    the first is provably older than the second — see :func:`generation_reading`
+    for why it is read from the process rather than reported by the relay.
     """
     record, state = store.scan_own_relay()
     live = health(timeout=MEMBERSHIP_READ_CLIENT_TIMEOUT_S, refresh=True) if refresh else health()
     running = live is not None or state in ("live", "wedged")
-    return {
+    # THE PROCESS THE BUILD QUESTION IS ABOUT (F6): the one that ANSWERED,
+    # falling back to the record's pid — a relay that is up but silent still
+    # has a process whose build can be read.
+    served_pid = live.get("pid") if isinstance(live, Mapping) else None
+    if not isinstance(served_pid, int):
+        served_pid = record.pid if record is not None else None
+    payload = {
         "installed": _supervision_unit_present(),
         "supported": is_supported(),
         "relay_running": running,
@@ -12041,6 +12136,11 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
             ]
         ),
     }
+    # THE RUNNING BUILD (F6), merged here so every reader of this payload — the
+    # human block, ``--json``, doctor's fallback — renders one source. See
+    # :func:`generation_reading`.
+    payload.update(generation_reading(served_pid))
+    return payload
 
 
 def control_request(

@@ -1,4 +1,4 @@
-"""The stale-LaunchAgent repair: the four daemons ``lop-update`` never touched.
+"""The stale-LaunchAgent repair: the supervised daemons ``lop-update`` never touched.
 
 WHY THIS EXISTS. Three of the four installers wrote their plist at install time
 and never read it again, and ``lop-update`` bounced only the mobile daemon — so a
@@ -46,6 +46,7 @@ from local_operator import launchd, procname, supervisors
 from local_operator import update as update_mod
 from local_operator.browser_bridge import install as browser_install
 from local_operator.mobile import install as mobile_install
+from local_operator.network import relay as relay_install
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tunnels import config as tunnel_config
 from local_operator.tunnels import install as tunnel_install
@@ -184,7 +185,7 @@ def _patch_launcher(
 
 
 def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Target]:
-    """``name -> (module, plist path, render, label)`` for the four daemons.
+    """``name -> (module, plist path, render, label)`` for the five daemons.
 
     ``plist_path`` is patched to ``tmp_path`` on every one of them: the repair's
     job is to touch the file launchd resolves, and these tests care about which
@@ -200,10 +201,11 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
     # own guard is pinned in `test_launchd.py`; here it is the repair under test.
     monkeypatch.setattr(launchd, "config_lives_in_real_home", lambda config: True)
     monkeypatch.setattr(wakes_install, "_config_lives_in_real_home", lambda config: True)
-    # The supervisor IDENTITY is what the four repairs branch on now (a repair is
+    # The supervisor IDENTITY is what the five repairs branch on now (a repair is
     # launchd's, and the other two platforms' units are handled elsewhere), so
-    # the seam is `supervisors.supervisor` — one patch covering mobile, wakes and
-    # the browser bridge, whose own `_supervisor()` delegates to it.
+    # the seam is `supervisors.supervisor` — one patch covering mobile, wakes, the
+    # browser bridge and the network relay, whose own
+    # `_supervisor()`/`is_supported()` delegate to it.
     monkeypatch.setattr(supervisors, "supervisor", lambda: "launchctl")
     monkeypatch.setattr(browser_install, "_supervisor", lambda: "launchctl")
 
@@ -245,6 +247,13 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
             lambda: wakes_install.render_plist(store),
             wakes_install.LABEL,
         ),
+        (
+            "network relay",
+            relay_install,
+            "plist_path",
+            lambda: relay_install.render_plist(),
+            relay_install.LABEL,
+        ),
     ):
         path = tmp_path / f"{label}.plist"
         monkeypatch.setattr(module, path_attr, lambda path=path: path)
@@ -275,6 +284,7 @@ def _module_for(name: str) -> str:
         "browser bridge": "local_operator.browser_bridge.daemon",
         "tunnel": "local_operator.tunnels.service",
         "wakes supervisor": "local_operator.wakes.supervisor",
+        "network relay": "local_operator.network.relay",
     }[name]
 
 
@@ -291,6 +301,7 @@ _RECOVERY = {
     "browser bridge": "lop browser install",
     "tunnel": "lop tunnel install",
     "wakes supervisor": "lop wake install",
+    "network relay": "lop network install",
 }
 
 
@@ -315,7 +326,9 @@ def test_the_killed_refresh_reports_the_vocabulary_this_file_pins() -> None:
     assert pinned == {name: recovery for name, recovery in _RECOVERY.items() if name != "mobile"}
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -345,7 +358,9 @@ def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
     assert calls[3] == ("print", f"gui/{os.getuid()}/{label}"), calls
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_a_current_plist_is_not_touched_at_all(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,7 +389,9 @@ def test_a_current_plist_is_not_touched_at_all(
     assert calls == []
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_an_absent_plist_is_left_alone(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -389,7 +406,9 @@ def test_an_absent_plist_is_left_alone(
     assert calls == []
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_a_sandbox_never_reaches_launchd(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,7 +428,9 @@ def test_a_sandbox_never_reaches_launchd(
     assert render() is not None  # the renderer is never even needed
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_a_failed_bootstrap_is_reported_not_raised(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -432,7 +453,9 @@ def test_a_failed_bootstrap_is_reported_not_raised(
     assert outcome.warning().startswith("warning: "), outcome
 
 
-@pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
+@pytest.mark.parametrize(
+    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+)
 def test_a_raising_repair_never_escapes(name: str, targets: dict[str, Target], monkeypatch) -> None:
     """``lop-update`` has already succeeded; nothing here may roll that back."""
     module, path, _render, label = targets[name]
@@ -531,7 +554,13 @@ def test_the_port_is_taken_from_the_plist_being_replaced(
 
 #: One pid per daemon, as `launchctl print` would report one. Distinct on purpose: a
 #: repair that probed the wrong daemon's pid would still "work" with one shared value.
-_PIDS = {"mobile": 111, "browser bridge": 222, "tunnel": 333, "wakes supervisor": 444}
+_PIDS = {
+    "mobile": 111,
+    "browser bridge": 222,
+    "tunnel": 333,
+    "wakes supervisor": 444,
+    "network relay": 555,
+}
 
 #: The pid a successful REVIVAL brings up for a loaded-but-stopped job. Distinct
 #: from every ``_PIDS`` value, so a cell that revived the wrong daemon — or a
@@ -600,7 +629,7 @@ def _rig(
     unconditionally right after this one, so ``refresh_plist_if_stale`` returns before
     touching launchd. Every test here therefore expects NO call at all for
     ``mobile`` — which is also what makes the "nothing moved" case below a statement
-    about three daemons rather than four.
+    about four daemons rather than five.
     """
     _layout(tmp_path, monkeypatch, running=running, current=current, pointer=pointer)
     for _name, (_module, path, render, _label) in targets.items():
@@ -708,7 +737,7 @@ def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
         # a move, so a successful restart costs one more read of the same question.
         ("print", f"{domain}/{label}"),
     ], calls["tunnel"]
-    for name in ("browser bridge", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor", "network relay"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
     # MOBILE IS NOT EVEN READ: its own step bounces it unconditionally on the same
     # upgrade, so asking here would restart the phone relay twice (R4).
@@ -719,6 +748,52 @@ def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
     assert captured.err == ""
     assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
         "tunnel daemon: restarted onto the new build " "— expect a brief remote-access blip"
+    ], captured.out
+
+
+def test_the_network_relay_a_generation_behind_is_restarted_onto_the_new_build(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """F6: the relay is IN the roll, and this is the state the roll exists to move.
+
+    The drill (2026-10-04) found three relays serving superseded generations in
+    one night — ``lop update`` moved every other daemon and left the relay, the one
+    process whose protocol must match its peer's, which is how run 10's
+    ``LinkCryptoError`` looked before the skew was found. This cell fails two ways
+    off the diff: a ``_refresh_steps`` without the relay never announces it, and a
+    relay refresh that stops at ``current`` (no build question) never kicks.
+    """
+    running = "20260921T125352Z-0.61.12"
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running=running,
+        current="20260924T103058Z-509c7450dbf6",
+        moved_pid=_PIDS["network relay"],
+    )
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    domain = launchd.job_domain()
+    label = targets["network relay"][3]
+    assert calls["network relay"] == [
+        ("print", f"{domain}/{label}"),
+        ("kickstart", "-k", f"{domain}/{label}"),
+        # The confirmation, the same one the tunnel's climb-out pinned: a new pid
+        # has to come back before the line claims a move.
+        ("print", f"{domain}/{label}"),
+    ], calls["network relay"]
+    for name in ("browser bridge", "tunnel", "wakes supervisor"):
+        assert all(call[0] != "kickstart" for call in calls[name]), (name, calls[name])
+    assert calls["mobile"] == [], calls["mobile"]
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
+        "network relay daemon: restarted onto the new build " "(was on 20260921T125352Z-0.61.12)"
     ], captured.out
 
 
@@ -748,7 +823,7 @@ def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(
     assert update_mod.daemons_refresh_command() == 0
 
     domain = launchd.job_domain()
-    for name in ("browser bridge", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor", "network relay"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
     # THE TUNNEL READS TWICE, and that is the stopped question's cost on a healthy
     # machine: the build question reads the pid and finds the build current, and
@@ -856,7 +931,7 @@ def test_a_daemon_that_is_not_running_is_never_kicked(
     assert update_mod.daemons_refresh_command() == 0
 
     domain = launchd.job_domain()
-    for name in ("browser bridge", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor", "network relay"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
     # THE TUNNEL READS TWICE and no kick: the build question reads and declines
     # (no pid), then the stopped arm reads again — finding the label gone, which
@@ -989,11 +1064,12 @@ def test_a_probe_that_raises_is_reported_and_never_escapes(
 
     assert update_mod.daemons_refresh_command() == 0
 
-    for name in ("browser bridge", "tunnel", "wakes supervisor"):
+    for name in ("browser bridge", "tunnel", "wakes supervisor", "network relay"):
         assert [call[0] for call in calls[name]] == ["print"], (name, calls[name])
     assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
     assert "warning: tunnel daemon was not refreshed: ps exploded" in captured.err
+    assert "warning: network relay daemon was not refreshed: ps exploded" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -1084,7 +1160,7 @@ def test_a_silently_stopped_tunnel_is_started_again_by_the_refresh(
         ("kickstart", "-k", f"{domain}/{label}"),
         ("print", f"{domain}/{label}"),
     ], calls["tunnel"]
-    for name in ("browser bridge", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor", "network relay"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
     assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
