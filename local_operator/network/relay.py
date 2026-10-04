@@ -942,6 +942,29 @@ def handshake_refused_reason(exc: BaseException) -> str:
     return f"{HANDSHAKE_REFUSED}:{exc.__class__.__name__}"
 
 
+def socket_failure_class(exc: BaseException) -> str:
+    """The LOCAL class of a connection that died, as a countable machine cause.
+
+    SPECIFIC FIRST, because ``TimeoutError`` and ``ConnectionError`` are both
+    ``OSError`` subclasses and a bare except-order would file them as ``io``. The
+    words are the audit enum's own (``audit.CAUSES``); a ``LinkCryptoError`` keeps
+    its finer kind in the row's ``detail.kind`` rather than minting one cause per
+    kind, so the counting surface stays small (F4, drill 2026-10-04).
+
+    PUBLIC BECAUSE TWO MODULES FILE FROM IT (review round 1, NIT 2): the joiner's
+    CLI classifies its own dead attempt with this same function
+    (``cli._join_class_of``), so the two ends of one failure cannot drift into two
+    vocabularies.
+    """
+    if isinstance(exc, wire.LinkCryptoError):
+        return "link_crypto"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ConnectionError):
+        return "peer_closed"
+    return "io"
+
+
 #: The stage word a ``lop network doctor`` reachability row carries when its
 #: address ANSWERED and the link was established at ANOTHER address the member
 #: publishes: one dial, one winner, and this row is the loser that is not a
@@ -4571,6 +4594,11 @@ class RelayServer:
         mode = "member"
         network_id = ""
         peer_addr = f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr)
+        #: WHICH STATEMENT BOUNDARY THE CONNECTION WAS AT when it died — the field
+        #: that turns "no rows at all" into "died while reading the hello" /
+        #: "died waiting for the auth frame". Local diagnosis only; nothing here
+        #: is ever put on the wire.
+        stage = "hello"
         #: Bound BEFORE the ``try`` because the refusal handler reports what the
         #: handshake knows, and ``Handshake.new`` itself can refuse (an unknown
         #: protocol version, a malformed hello) — the one case where there is no
@@ -4658,6 +4686,7 @@ class RelayServer:
                         joined, joined_secrets.secret, invite_id
                     )
             handshake.send_challenge(sock, policy)
+            stage = "auth"
             handshake.verify_auth(reader, deadline, policy)
             if handshake.mode == "join":
                 # NOW the durable state change, and still BEFORE any human is shown
@@ -4678,6 +4707,7 @@ class RelayServer:
                         raise
                     mark_redeemed(joined, invite_id, device_id=handshake.peer_device_id)
                     store.save(joined, self.root)
+            stage = "establish"
             result = handshake.establish()
         except MeshRefusal as refusal:
             self._audit_handshake_refusal(
@@ -4694,7 +4724,41 @@ class RelayServer:
             )
             _close_quietly(sock)
             return
-        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError):
+        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
+            # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME LEAVES A ROW
+            # (F4, drill 2026-10-04). BOUNDED TO REAL PEERS: ``handshake is None``
+            # means the first read never produced a hello — a port scan, an empty
+            # connect, garbage — and writes nothing, so scans cannot flood the
+            # log. Past that point the connection named a network (and, for a
+            # join, a real invite), and "which stage, which local class" was
+            # exactly the fact missing when run 10's join died here and read as
+            # "no entries on either end".
+            if handshake is not None:
+                self.audit.record(
+                    AuditEvent(
+                        event="handshake_stopped",
+                        # NAMED ONLY WHEN PROVEN (Q-R1-4): before the auth MAC
+                        # verified, the id in the hello is a claim, not an identity.
+                        actor=(handshake.peer_device_id if handshake.auth_verified else "unknown"),
+                        subject=peer_addr,
+                        outcome="failed",
+                        network_id=network_id,
+                        cause=socket_failure_class(exc),
+                        detail={
+                            "stage": stage,
+                            "mode": mode,
+                            "their_addr": peer_addr,
+                            "their_device": (
+                                handshake.peer_device_id if handshake.auth_verified else ""
+                            ),
+                            "kind": exc.kind if isinstance(exc, wire.LinkCryptoError) else "",
+                        },
+                    )
+                )
+                # PUBLISHED NOW, not on the heartbeat's next tick: an agent
+                # reading ``audit.jsonl`` seconds after the failure must find
+                # this row (batching can otherwise hide it for up to 15 s).
+                self.audit.flush()
             _close_quietly(sock)
             return
         except Exception as exc:  # noqa: BLE001 — never kill the accept loop
@@ -7839,6 +7903,10 @@ class RelayServer:
         # number to the person, so the promise and the wait cannot drift again.
         deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
         member_row: MemberRecord | None = None
+        #: WHICH STATEMENT BOUNDARY THE PAIR LISTENER WAS AT when a socket-class
+        #: failure landed — the field that turns "the pairing was refused" into
+        #: "the first sealed read failed". Local record only, never on the wire.
+        stage = "offer_send"
         try:
             # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
             # waits on a human, so both ends can show the same list before either
@@ -7857,6 +7925,7 @@ class RelayServer:
                         )
                     )
                 )
+            stage = "ready_read"
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
             except TimeoutError as exc:
@@ -7868,6 +7937,7 @@ class RelayServer:
                 raise PairingRefusal(
                     "timeout", "the code was not typed on both screens in time"
                 ) from exc
+            stage = "admit"
             if ready.get("op") != "net_pair_ready":
                 raise PairingRefusal("protocol_error", "the joining device did not confirm a code")
             typed = str(ready.get("sas") or "")
@@ -8014,6 +8084,7 @@ class RelayServer:
                 shares=granted_keys,
                 reduced=reduced_keys,
             )
+            stage = "result_send"
             sock.sendall(codec.seal(frame))
             self.audit.record(
                 AuditEvent(
@@ -8121,17 +8192,47 @@ class RelayServer:
                 )
             except OSError:
                 pass
+            # THE LOCAL CLASS OF A SOCKET FAILURE, NOT ``policy`` (F4). The abort
+            # frame above still carries ``reason`` exactly as before — for a
+            # ``LinkCryptoError`` that is "error", and the peer-visible bytes must
+            # not move — what changes is this device's OWN record. A crypto failure
+            # (or a peer that vanished, or a timeout) used to be audited as
+            # ``cause=policy``, the fallback word: an incident reader was told the
+            # refusal was a policy decision when in fact the sealed layer failed.
+            # The finer tokens ride ``detail``: ``kind`` distinguishes the codec's
+            # own classes, ``stage`` names the statement boundary it died at. The
+            # class word itself is ``socket_failure_class`` — ONE spelling shared
+            # with the joiner's CLI (review round 1, NIT 2).
+            if isinstance(exc, (wire.LinkCryptoError, OSError)):
+                cause = socket_failure_class(exc)
+                detail: dict[str, Any] = {
+                    "cause": reason,
+                    "subject": joiner_id,
+                    "kind": exc.kind if isinstance(exc, wire.LinkCryptoError) else "",
+                    "stage": stage,
+                }
+                outcome = "failed"
+            else:
+                cause = _PAIR_CAUSE.get(reason, "policy")
+                detail = {"cause": reason, "subject": joiner_id}
+                outcome = "refused"
             self.audit.record(
                 AuditEvent(
                     event="pairing_refused",
                     actor=joiner_id,
                     subject=record.network_id if record else "",
-                    outcome="refused",
+                    outcome=outcome,
                     network_id=record.network_id if record else "",
-                    cause=_PAIR_CAUSE.get(reason, "policy"),
-                    detail={"cause": reason, "subject": joiner_id},
+                    cause=cause,
+                    detail=detail,
                 )
             )
+            # PUBLISHED NOW (F4): ``pairing_refused`` is a durable event and
+            # ``record()`` already writes it through, but the explicit flush states
+            # THIS SITE's requirement — an agent reading ``audit.jsonl`` right after
+            # the failure must find it — so a future re-classification of the event
+            # cannot silently reintroduce the batching lag.
+            self.audit.flush()
             _close_quietly(sock)
 
     # -- fan-out and the durable outbox -------------------------------------

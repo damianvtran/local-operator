@@ -423,6 +423,16 @@ def normalize_sas(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# The LOCAL failure kinds a ``LinkCryptoError`` may carry. LOCAL ONLY, and that
+# is the whole point: the peer sees the same silent close for every one of them
+# (the anti-oracle rule — an answer that said "your record failed authentication"
+# would let a stranger probe keys), while the operator's own records name which
+# kind failed so one run can tell a key divergence from a mid-ceremony close
+# (F4, drill 2026-10-04). ``wire.py`` is the ONE owner of the vocabulary; the
+# raise sites below tag every construction.
+LINK_CRYPTO_KINDS = frozenset({"auth", "sequence", "parse", "limit"})
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -476,7 +486,8 @@ class LinkCrypto:
         if len(plaintext) > MAX_RECORD_BYTES:
             raise LinkCryptoError(
                 f"a frame of {len(plaintext)} bytes exceeds the {MAX_RECORD_BYTES}-byte record "
-                "limit; the link is closed rather than fragmented"
+                "limit; the link is closed rather than fragmented",
+                kind="limit",
             )
         sequence = self._send_seq
         payload = AESGCM(self._key).encrypt(
@@ -496,7 +507,8 @@ class LinkCrypto:
         if sequence >= self.MAX_SEQ:
             raise LinkCryptoError(
                 "this link has carried more records than its sequence numbers can name; "
-                "reconnect with a fresh handshake"
+                "reconnect with a fresh handshake",
+                kind="sequence",
             )
         try:
             plaintext = AESGCM(self._recv_key).decrypt(
@@ -510,17 +522,21 @@ class LinkCrypto:
             # is not the peer's business, and the local audit record keeps the
             # distinction for the operator.
             raise LinkCryptoError(
-                "a record failed authentication: the link is closed and nothing in it is repaired"
+                "a record failed authentication: the link is closed and nothing in it is repaired",
+                kind="auth",
             ) from exc
         self._recv_seq += 1
         try:
             frame = json.loads(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkCryptoError(
-                "a record decrypted to something that is not a JSON frame; the link is closed"
+                "a record decrypted to something that is not a JSON frame; the link is closed",
+                kind="parse",
             ) from exc
         if not isinstance(frame, dict):
-            raise LinkCryptoError("a record decrypted to a JSON value that is not an object")
+            raise LinkCryptoError(
+                "a record decrypted to a JSON value that is not an object", kind="parse"
+            )
         return frame
 
     @staticmethod
@@ -532,7 +548,19 @@ class LinkCrypto:
 
 
 class LinkCryptoError(Exception):
-    """A record failed to authenticate or to parse. Always fatal to the link."""
+    """A record failed to authenticate or to parse. Always fatal to the link.
+
+    ``kind`` is the LOCAL failure class — one of :data:`LINK_CRYPTO_KINDS` — and
+    it must NEVER be rendered toward the peer or folded into a wire frame: the
+    same coarse close is all a peer gets for every kind (see the module comment
+    above ``LINK_CRYPTO_KINDS``). Local records (the joiner's last-attempt
+    record, the relay's pair-phase audit row) carry it so "which end failed, at
+    which stage, and how" is answerable from one device's own files.
+    """
+
+    def __init__(self, message: str, *, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +605,8 @@ class FrameReader:
                 return _parse_line(raw, limit=MAX_HANDSHAKE_LINE)
             if len(self._buffer) > MAX_HANDSHAKE_LINE:
                 raise LinkCryptoError(
-                    f"a handshake frame exceeded the {MAX_HANDSHAKE_LINE}-byte limit"
+                    f"a handshake frame exceeded the {MAX_HANDSHAKE_LINE}-byte limit",
+                    kind="limit",
                 )
             self._fill(deadline)
 
@@ -592,10 +621,13 @@ class FrameReader:
         if length > MAX_RECORD_BYTES:
             raise LinkCryptoError(
                 f"a peer announced a {length}-byte record, over the {MAX_RECORD_BYTES}-byte "
-                "limit; the link is closed"
+                "limit; the link is closed",
+                kind="limit",
             )
         if length == 0:
-            raise LinkCryptoError("a peer announced an empty record, which is never valid")
+            raise LinkCryptoError(
+                "a peer announced an empty record, which is never valid", kind="limit"
+            )
         return self._read_exactly(length, deadline)
 
     def _read_exactly(self, count: int, deadline: float | None) -> bytes:
@@ -625,13 +657,13 @@ class FrameReader:
 
 def _parse_line(raw: bytes, *, limit: int) -> dict[str, Any]:
     if len(raw) > limit:
-        raise LinkCryptoError(f"a frame exceeded the {limit}-byte limit")
+        raise LinkCryptoError(f"a frame exceeded the {limit}-byte limit", kind="limit")
     try:
         frame = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise LinkCryptoError("a frame was not valid UTF-8 JSON") from exc
+        raise LinkCryptoError("a frame was not valid UTF-8 JSON", kind="parse") from exc
     if not isinstance(frame, dict):
-        raise LinkCryptoError("a frame was not a JSON object")
+        raise LinkCryptoError("a frame was not a JSON object", kind="parse")
     return frame
 
 
