@@ -1024,15 +1024,28 @@ def _record_decision(
                     "this request carries no operator-key provenance, so a decision cannot "
                     "be checked against it; nothing was written",
                 )
-            if (
-                str(anchor.get("key_id") or "") != str(trio["key_id"])
-                or str(anchor.get("spki_fp") or "") != str(trio["spki_fp"])
-                or str(anchor.get("statement_digest") or "") != str(trio["statement_digest"])
-            ):
+            mismatched = [
+                field_name
+                for field_name in ("key_id", "spki_fp", "statement_digest")
+                if str(anchor.get(field_name) or "") != str(trio[field_name])
+            ]
+            if mismatched:
+                # THE REMEDY IS REFILE for both shapes this catches (F5 review,
+                # Q1): a genuine rotation and a card filed under the retired
+                # 12-hex fingerprint both leave the request naming a statement
+                # this machine does not hold, and re-filing records the current
+                # one. The clause names the mismatched fields in the same product
+                # words the runner's refusal uses (``TRIO_LABELS``).
+                from local_operator.operator.trust import TRIO_LABELS
+
+                labels = ", ".join(
+                    TRIO_LABELS.get(field_name, field_name) for field_name in mismatched
+                )
                 raise MeshRefusal(
                     "approval_anchor_mismatch",
-                    "the operator key on this machine no longer matches the one this "
-                    "request was filed for; nothing was written",
+                    "this request was filed for an operator key that does not match "
+                    f"the one this machine holds ({labels}) — refile the request "
+                    "against the current key; nothing was written",
                 )
             if not signature_hex:
                 raise MeshRefusal(

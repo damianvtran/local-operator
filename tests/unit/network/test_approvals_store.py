@@ -507,6 +507,44 @@ def test_approve_refuses_a_record_whose_anchor_is_not_the_local_key(root: Path) 
     with pytest.raises(MeshRefusal) as raised:
         A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
     assert raised.value.code == "approval_anchor_mismatch"
+    # F5 review, Q1: the clause names the fields in product words and says the
+    # remedy (refile) — the old sentence reused the rotation wording verbatim
+    # and told the reader nothing to do.
+    sentence = str(raised.value)
+    assert "(key id, key fingerprint, statement digest)" in sentence
+    assert "refile" in sentence
+    assert "nothing was written" in sentence
+
+
+def test_approve_names_only_the_field_a_stale_card_disagrees_on(root: Path) -> None:
+    """F5 review, Q1: the stale-format shape (the retired 12-hex fingerprint)
+    disagrees on the fingerprint ALONE, and the refusal says which field — not
+    just "does not match" — while the untouched fields stay out of the clause."""
+    _make_key(root)
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    record = A.create_request(
+        **_device_request(
+            A.new_request_id(),
+            what={
+                "install": True,
+                "anchor": {
+                    "key_id": trio["key_id"],
+                    "spki_fp": "6DC6-1AAB-622A",
+                    "statement_digest": trio["statement_digest"],
+                },
+            },
+        ),
+        root=root,
+    )
+    decided_at = CREATED_AT + 30.0
+    signature = _sign_decision(root, record, "approve", decided_at)
+    with pytest.raises(MeshRefusal) as raised:
+        A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
+    sentence = str(raised.value)
+    assert "(key fingerprint)" in sentence
+    assert "key id" not in sentence and "statement digest" not in sentence
+    assert "refile" in sentence
 
 
 def test_approve_refuses_a_record_with_no_anchor_provenance(root: Path) -> None:

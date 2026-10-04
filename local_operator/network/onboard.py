@@ -1797,7 +1797,11 @@ class OnboardRun:
         handshake (F5).
         """
         from local_operator.operator import anchor_bytes
-        from local_operator.operator.trust import anchor_trio, load_local_anchor
+        from local_operator.operator.trust import (
+            TRIO_LABELS,
+            anchor_trio,
+            load_local_anchor,
+        )
         from local_operator.paths import config_dir
 
         anchor = load_local_anchor(config_dir())
@@ -1816,17 +1820,24 @@ class OnboardRun:
             if str(want.get(field_name) or "") != trio[field_name]
         ]
         if mismatched:
+            # The human clause says "key fingerprint" where ``data.mismatch``
+            # keeps ``spki_fp`` (F5 review, D3): the ledger token is for
+            # machines, the label is the one ``anchor export`` prints.
+            labels = ", ".join(TRIO_LABELS.get(field_name, field_name) for field_name in mismatched)
             return _StepOutcome(
                 False,
                 "the anchor this machine holds does not match the one the request "
-                f"approved ({', '.join(mismatched)}); nothing was planted",
+                f"approved ({labels}); nothing was planted",
                 {
                     "mismatch": mismatched,
                     # BOTH ends beside the field names (F5): a report that names
                     # only the fields costs the next reader the two values it
-                    # exists to show — the shape the join step's
-                    # ``membership.source`` cross-check reads. Public fingerprints
-                    # only; never key material.
+                    # exists to show. The values are the RUN's evidence — this
+                    # step's payload (``approvals run --json``) carries them; the
+                    # record keeps the frozen six fields (see
+                    # ``onboard_approvals.append_receipt``), so they do not reach
+                    # the card or a human line (F5 review, D4). Public
+                    # fingerprints only; never key material.
                     "held": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
                     "approved": {
                         key: str(want.get(key) or "")
@@ -1868,7 +1879,10 @@ class OnboardRun:
                     )
                 return _StepOutcome(
                     True,
-                    f"operator anchor {trio['key_id']} installed and trusted",
+                    # The fingerprint is the value export tells the operator to
+                    # compare, so the success line carries it too (F5 review, D5).
+                    f"operator anchor {trio['key_id']} installed and trusted "
+                    f"(fingerprint {trio['spki_fp']})",
                     {
                         "key_id": trio["key_id"],
                         "spki_fp": trio["spki_fp"],
@@ -2146,10 +2160,12 @@ def _receipt(
 
     §2.2 freezes ``{run_id, step, at, ok, detail, digest}``; ``data`` rides
     beside them because the runner READS ITS OWN RECEIPTS BACK (the retry's
-    contradiction check, the verify step's device id) and because a receipt the
-    UI can open is worth more than a sentence it cannot. The ``digest`` binds
-    the data — sha256 of its canonical JSON — so a receipt cannot be re-worded
-    without the digest disagreeing, and slice (a)'s writer appends rows verbatim.
+    contradiction check, the verify step's device id) and because a run payload
+    that names its facts is worth more than a sentence that cannot. The
+    ``digest`` binds the data — sha256 of its canonical JSON — so a receipt
+    cannot be re-worded without the digest disagreeing; the record keeps the
+    frozen six fields only, and ``data`` stays on the run payload the CLI returns
+    (F5 review, D4; ``onboard_approvals.append_receipt`` states the fold).
     """
     digest = (
         "sha256:"

@@ -416,6 +416,19 @@ def anchor_trio(anchor: OperatorAnchor) -> dict[str, Any]:
     }
 
 
+#: Product words for the trio's machine field names (F5 review, D3): the human
+#: clauses say "key fingerprint" where ``data.mismatch`` says ``spki_fp`` — the
+#: ledger token is for machines, and the labels match what ``lop operator anchor
+#: export`` prints ("key id", "fingerprint"). ONE map so the approve refusal
+#: (``network/approvals.py``) and the runner's refusal (``network/onboard.py``)
+#: cannot drift apart.
+TRIO_LABELS: dict[str, str] = {
+    "key_id": "key id",
+    "spki_fp": "key fingerprint",
+    "statement_digest": "statement digest",
+}
+
+
 def staging_path(config_root: Path) -> Path:
     """Where the anchor waits for the one privileged step.
 

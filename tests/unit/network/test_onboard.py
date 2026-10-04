@@ -18,6 +18,7 @@ shape.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -447,9 +448,9 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     # re-derivation agrees byte-for-byte with the card the REAL mint recorded —
     # the assertion pair that fails on either half of the old format split.
     anchor_step = next(row for row in payload["steps"] if row["step"] == "anchor")
-    assert (
-        anchor_step["detail"]
-        == f"operator anchor {record['what']['anchor']['key_id']} installed and trusted"
+    assert anchor_step["detail"] == (
+        f"operator anchor {record['what']['anchor']['key_id']} installed and trusted "
+        f"(fingerprint {record['what']['anchor']['spki_fp']})"
     )
     assert anchor_step["data"]["spki_fp"] == record["what"]["anchor"]["spki_fp"]
     assert anchor_step["data"]["statement_digest"] == record["what"]["anchor"]["statement_digest"]
@@ -782,6 +783,48 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     # note): the run wrote the admit decision at the invite and died at the
     # join; the runner that wrote it — and only it — clears it.
     assert network_store.pair_decision("inv_1", isolated) is None
+
+
+def test_a_stale_fingerprint_is_refused_in_product_words_with_both_ends(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F5 review, D3: the refusal names the mismatched field in the words the
+    product prints ("key fingerprint") while ``data.mismatch`` keeps the ledger
+    token (``spki_fp``) — and carries both ends' values in ``held``/``approved``.
+    QA round 1 drove this path over the wire; this cell pins its copy and its
+    data, and that nothing was planted."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    claim = record["what"]["anchor"]
+    original = dict(claim)
+    digest = hashlib.sha256(_anchor().spki).hexdigest().upper()
+    claim["spki_fp"] = f"{digest[0:4]}-{digest[4:8]}-{digest[8:12]}"
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    transport = FakeTransport(outputs=HAPPY_OUTPUTS)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    anchor_step = next(row for row in payload["steps"] if row["step"] == "anchor")
+    assert anchor_step["ok"] is False
+    assert "(key fingerprint)" in anchor_step["detail"]
+    assert "spki_fp" not in anchor_step["detail"], "the human clause stays product words"
+    assert anchor_step["data"]["mismatch"] == ["spki_fp"], "the ledger token stays in data"
+    assert anchor_step["data"]["held"]["spki_fp"] == original["spki_fp"]
+    assert anchor_step["data"]["approved"]["spki_fp"] == claim["spki_fp"]
+    # The runner stopped at the anchor: nothing was planted, and no later step ran.
+    commands = " | ".join(" ".join(c[1]) for c in transport.calls if c[0] == "run")
+    assert "operator install" not in commands, "nothing was planted"
+    assert "member grant" not in commands
 
 
 @pytest.mark.parametrize(
