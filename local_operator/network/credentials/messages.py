@@ -104,27 +104,27 @@ def render_broker_error(
         # credential. It has no local-login remedy (there is no 'lop login github'
         # in this build), and its "the owner has nothing" state is the INTERIM
         # state an operator actually meets — a node's push and PR-write wait for a
-        # GitHub App, which is one documented step, while everything else keeps
+        # GitHub App, which is a documented one-time setup, while everything else keeps
         # working. 'not "implemented", not "blocked" — the actual state'.
         if error.code == "no_local_credential":
             return (
                 f"{owner} holds no GitHub credential: push and PR-write through the "
-                "mesh are unavailable until a GitHub App is configured there (one "
-                "small step — the network guide has the checklist). Public clones "
+                "mesh are unavailable until a GitHub App is configured there (a short "
+                "one-time setup — the network guide has the checklist). Public clones "
                 "and non-GitHub work are unaffected."
             )
         if error.code == "not_a_holder":
             return (
                 f"{owner} does not share its GitHub credential with this device. Ask "
                 f"the operator on {owner} to share it (on that device: 'lop network "
-                "credential share github --with <this device>'). Public clones need "
-                "no credential."
+                "credential share github --with <this device>'). Public clones and "
+                "non-GitHub work are unaffected."
             )
         if error.code == "owner_offline":
             return (
                 f"No GitHub credential is reachable: {owner} owns it and was last "
                 f"seen {render_last_seen(last_seen_s)}. Reconnect that device; public "
-                "clones need no credential."
+                "clones and non-GitHub work are unaffected."
             )
 
     if error.code == "device_scope_required":
@@ -138,8 +138,8 @@ def render_broker_error(
     if error.code == "github_app_unusable":
         return (
             f"{owner} could not use its GitHub App credential, so nothing was minted "
-            f"(the App key there needs a look: 'lop secret describe GITHUB_APP' on "
-            f"{owner}). Nothing was lent."
+            f"(re-store the key there: 'lop secret update GITHUB_APP' on {owner} — the "
+            "network guide has the checklist). Nothing was lent."
         )
     if error.code == "github_repositories_unset":
         return (

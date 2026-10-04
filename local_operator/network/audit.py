@@ -184,6 +184,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # A membership-class event: who may borrow what changed here. "How could that
         # device spend my OpenAI account" is answered by exactly this record.
         "credential.placement",
+        # The mint-revoke half of the credential broker (github adapter): one row per
+        # revoke batch the owner's lender performed — the scheduled window-end DELETE,
+        # the operator's immediate revoke, and the retry after a failed call.
+        "credential.revoke",
         # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). Six lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or

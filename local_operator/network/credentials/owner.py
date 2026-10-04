@@ -919,8 +919,8 @@ class MeshCredentialBroker:
                     code="no_local_credential",
                     message=(
                         "no GitHub App credential is configured on this device yet, so "
-                        "nothing can be minted for github (public clones and non-GitHub "
-                        "work are unaffected; the network guide has the one-step setup)"
+                        "nothing can be minted for github (the network guide has the "
+                        "one-time setup; public clones and non-GitHub work are unaffected)"
                     ),
                     **common,
                 )
@@ -1474,10 +1474,6 @@ class MeshCredentialBroker:
         self._loop.close()
 
 
-#: The ONE broker a relay serves, keyed by the server object. WEAK, so a relay a
-#: test tore down cannot be pinned alive by this table, and built under a lock
-#: because the relay's peer handler and the ``credential_revoke`` local op can
-#: race for the first build on two different threads.
 #: The private attribute a relay server carries its one broker under.
 #:
 #: A STASH ON THE SERVER, not a side table: a ``WeakKeyDictionary`` cannot key
@@ -1485,7 +1481,9 @@ class MeshCredentialBroker:
 #: referenceable, and the per-relay keeper is part of the tested behaviour), and
 #: an ``id()``-keyed table can alias after a freed server's id is reused — a
 #: stale broker served for a different relay. The server object IS the identity;
-#: the broker lives on it and dies with it.
+#: the broker lives on it and dies with it. Built under a lock because the
+#: relay's peer handler and the ``credential_revoke`` local op can race for the
+#: first build on two different threads.
 _BROKER_ATTR = "_mesh_credential_broker"
 _BROKER_LOCK = threading.Lock()
 

@@ -69,7 +69,12 @@ import yaml
 from local_operator.network.credentials import github as github_mod
 from local_operator.network.credentials import owner as owner_mod
 from local_operator.network.credentials import placement as placement_mod
-from local_operator.network.credentials.types import BrokerError, Grant, GrantScope
+from local_operator.network.credentials.types import (
+    BrokerError,
+    CredentialRef,
+    Grant,
+    GrantScope,
+)
 from local_operator.paths import CONFIG_DIR_ENV
 
 OWNER_DEVICE = "d_00000000000000000000000000000031"
@@ -647,10 +652,6 @@ def _injected_env(env: _Env, token: str) -> dict[str, str]:
     return merged
 
 
-def _write_config_extra(env: _Env, extra: dict[str, str]) -> None:
-    pass  # placeholder kept out of the way; config extras ride _with_config below
-
-
 def _with_config(base: dict[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
     """Append git-config env entries (the node's own config-in-env, for tests)."""
     merged = dict(base)
@@ -812,7 +813,7 @@ def test_a_session_scoped_share_is_refused_by_name_in_the_document(owner: Any) -
 
 
 def test_the_missing_app_is_the_named_interim_state(env: _Env) -> None:
-    """The state a user meets TODAY: no App → ``no_local_credential``, one small step."""
+    """The state a user meets TODAY: no App → ``no_local_credential``, one-time setup."""
     from local_operator.network.credentials import messages
 
     root = env.root
@@ -847,7 +848,7 @@ def test_the_missing_app_is_the_named_interim_state(env: _Env) -> None:
     )
     assert "owner-laptop" in sentence
     assert "unavailable until a GitHub App is configured" in sentence
-    assert "one small step" in sentence
+    assert "a short one-time setup" in sentence
     assert "Public clones" in sentence
     assert "lop login" not in sentence, "github has no local-login remedy to offer"
 
@@ -1334,7 +1335,10 @@ def test_helper_bounds_matrix(env: _Env, monkeypatch: pytest.MonkeyPatch) -> Non
     listed = [SCRATCH]
     assert reply("get", ["protocol=https", "host=github.com", f"path={SCRATCH}.git"], listed)
     assert reply("get", ["protocol=https", "host=github.com:443", f"path={SCRATCH}.git"], listed)
-    assert reply("get", ["protocol=https", "host=github.com", f"path={SCRATCH}.git"], listed)
+    # Exact, LOWERCASED: the helper compares after lowercasing both sides, so a
+    # mixed-case host the config scope would still match is served — and this is
+    # the case variant the pair of "github.com" assertions used to duplicate.
+    assert reply("get", ["protocol=https", "host=GitHub.com", f"path={SCRATCH}.git"], listed)
     # Refusals: everything else is silence.
     assert reply("get", ["protocol=http", "host=github.com", f"path={SCRATCH}.git"], listed) == ""
     assert reply("get", ["protocol=https", "host=gitlab.com", f"path={SCRATCH}.git"], listed) == ""
@@ -1528,6 +1532,7 @@ def test_the_t6_t7_acceptance_records_are_present_and_claim_no_coverage() -> Non
     )  # noqa: SLF001 — the receipt's own copy
     assert "any process or session on peer-b" in disclosure
     assert "while the share stands" in disclosure
+    assert "can use it" in disclosure, "D4: one verb for the same-uid exposure"
     guides = Path(__file__).resolve().parents[3] / "local_operator" / "guides" / "network"
     appendix = Path(__file__).resolve().parents[3] / "docs" / "design" / "mesh-credentials.md"
     guide = guides / "GUIDE.md"
@@ -1570,15 +1575,98 @@ def test_the_revoke_op_deletes_now_and_the_receipt_carries_the_mint_revoke_copy(
     # The receipt copy, from the helpers the receipt itself uses.
     lines = network_cli._github_revoke_lines("peer-b", 1)  # noqa: SLF001 — the receipt's own copy
     assert "refused now" in lines[0] and "DELETE /installation/token" in lines[0]
+    assert "when it can be delivered" in lines[0], "D1: line 1 must hold the conditional"
     assert "1 outstanding token(s) revoked at GitHub just now" in lines[1]
     payload = network_cli._github_revocation_payload(1, 900)  # noqa: SLF001
     assert payload["minted_tokens_revoked"] == 1
     assert "60-minute ceiling" in payload["copied_bearer"]
     fallback = network_cli._github_revoke_lines("peer-b", None)  # noqa: SLF001
     assert "relay is not running" in fallback[1]
+    # The conditional lives in line 1, so the headline is IDENTICAL on both
+    # branches — neither branch can promise a DELETE the other retracts.
+    assert fallback[0] == lines[0]
 
     # The CLI routing call: the op name and the (key, holder) payload exist at
     # the one place that can ask this device's relay.
     source = inspect.getsource(network_cli._cmd_credential)
     assert '"credential_revoke"' in source
     assert "credential_key=key" in source and "holder=device" in source
+
+
+def test_after_the_window_the_next_command_gets_a_new_token_or_fails_clean(
+    env: _Env, owner: Any, github_api: _FakeGithub
+) -> None:
+    """T3(d): the claim that a second borrow gets a NEW token is a cell, not prose.
+
+    Three arms, each as real as it can be without a live relay:
+    (a) the OWNER mints fresh per borrow — two asks, two DISTINCT tokens, two
+        mints on the wire;
+    (b) the REAL ``MeshCredentialClient`` cache serves inside its window and
+        refuses to re-serve once the grant is inside the re-ask margin — with no
+        relay reachable the next command then FAILS CLEAN (``({}, "")``) and is
+        never handed the old bearer;
+    (c) the fetch-on-use path serves the token of the CURRENT fetch — after the
+        window a fresh grant carries the new token, and the env holds only it.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    # (a) Fresh mint per borrow, at the owner.
+    first = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
+    second = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
+    assert first != second, "the owner served the same token to two borrows"
+    assert len(github_api.mint_requests) == 2, github_api.mint_requests
+
+    # (b) The real client's cache window, with the re-ask margin exercised.
+    document = placement_mod.PlacementDocument("n_gh_next", root=env.root, written_by=OWNER_DEVICE)
+    document.declare(
+        github_mod.GITHUB_KEY,
+        owner_device=OWNER_DEVICE,
+        owner_device_name="owner-laptop",
+        provider=github_mod.GITHUB_KEY,
+        identity_label="",
+        by=OWNER_DEVICE,
+    )
+    document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
+    document.save()
+    client = MeshCredentialClient(
+        root=env.root,
+        self_device=BORROWER_DEVICE,
+        network_id="n_gh_next",
+        placement=document,
+        state=None,
+    )
+    now_ms = int(time.time() * 1000)
+
+    def _grant(token: str, grant_exp_ms: int) -> Grant:
+        return Grant(
+            access_token=token,
+            kind="bearer",
+            token_expires_at_ms=now_ms + 3_600_000,
+            grant_expires_at_ms=grant_exp_ms,
+            credential_ref=CredentialRef(
+                owner_device=OWNER_DEVICE,
+                owner_device_name="owner-laptop",
+                provider=github_mod.GITHUB_KEY,
+                kind=github_mod.GITHUB_KIND,
+                credential_id=0,
+            ),
+            served_by=OWNER_DEVICE,
+            scope=GrantScope(kind="device"),
+        )
+
+    client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(first, now_ms + 600_000))
+    served_env, served_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
+    assert served_token == first and served_env["GH_TOKEN"] == first
+
+    # The window ends: the entry is inside the re-ask margin, so the cache must
+    # NOT serve it. With no relay record on this root the ask fails clean.
+    client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(first, now_ms - 1))
+    assert client.grants.get(github_mod.GITHUB_KEY, "sess-next") is None, "the margin leaked"
+    clean_env, clean_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
+    assert (clean_env, clean_token) == ({}, ""), "a window ended and the old token was served"
+
+    # (c) A fresh fetch after the window carries the NEW token, never the old.
+    client.grants.put(github_mod.GITHUB_KEY, "sess-next", _grant(second, now_ms + 600_000))
+    next_env, next_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
+    assert next_token == second and next_token != first
+    assert next_env["GH_TOKEN"] == second

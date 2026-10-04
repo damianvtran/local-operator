@@ -1066,8 +1066,8 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             detail=(
                 f"{peer_label} commits as {name} <{email}> (push credentials are a "
                 "separate question this report does not cover yet; GitHub push "
-                "through the mesh waits on a configured GitHub App — one small "
-                "step, see the network guide)"
+                "through the mesh waits on a configured GitHub App — a short "
+                "one-time setup, see the network guide)"
             ),
             source=SOURCE_PEER,
         )

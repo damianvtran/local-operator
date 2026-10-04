@@ -1327,8 +1327,8 @@ best-effort belt; the token's own 60-minute ceiling is the floor under both.
 
 **Step 0 — the App does not exist yet (desk decision, 2026-10-03).** On a
 node today: **public clones work and non-GitHub work is unaffected; push and
-PR-write are unavailable until a GitHub App exists** — one small step,
-documented as a follow-up; the network guide carries the complete checklist
+PR-write are unavailable until a GitHub App exists** — a short one-time
+setup, documented as a follow-up; the network guide carries the complete checklist
 (what to create, permissions, where the key goes, the command to load it). A
 share attempt in this state refuses with `no_local_credential` and that
 sentence — the actual state, not "implemented" and not "blocked". The unit

@@ -11,7 +11,7 @@ module is the adapter the broker dispatches to, plus the borrower-side delivery
 
 THE APP KEY LIVES IN THE OWNER'S ENCRYPTED SECRET STORE (``GITHUB_APP``), one
 JSON blob holding ``app_id``, ``installation_id`` and the PEM private key. The
-one-step setup checklist is in the network guide; until that secret exists the
+one-time setup checklist is in the network guide; until that secret exists the
 adapter refuses ``no_local_credential`` in the reader's own terms (push and
 PR-write are unavailable; public clones and non-GitHub work are unaffected).
 Nothing here fails closed on the missing secret in a way that touches any other

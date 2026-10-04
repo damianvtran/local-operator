@@ -1700,7 +1700,13 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int) -> dict[str,
 
 
 def _github_revoke_lines(name: str, revoked_now: int | None) -> list[str]:
-    """The receipt's operator-visible lines, mint-revoke wording (M1, restated)."""
+    """The receipt's operator-visible lines, mint-revoke wording (M1, restated).
+
+    Line 1 holds the CONDITIONAL inside it — "and on this revoke's DELETE when it
+    can be delivered" — so it is true whether or not this relay could run the
+    call; line 2 says which branch actually happened. The ``--json`` payload
+    carries the same conditional in ``copied_bearer``.
+    """
     if revoked_now is None:
         delivered = (
             "no immediate DELETE could be delivered (this device's relay is not "
@@ -1716,8 +1722,8 @@ def _github_revoke_lines(name: str, revoked_now: int | None) -> list[str]:
     return [
         (
             f"new borrows by {name}: refused now; the outstanding GitHub token is "
-            "revoked at GitHub at its window end — and immediately when this revoke "
-            "runs — via `DELETE /installation/token` (204; idempotent)"
+            "revoked at GitHub at its window end, and on this revoke's DELETE when it "
+            "can be delivered — via `DELETE /installation/token` (204; idempotent)"
         ),
         delivered,
     ]
@@ -1735,7 +1741,7 @@ def _github_share_disclosure(name: str) -> str:
     """
     return (
         f"note: this loan is authorised by the DEVICE, not a session — while the "
-        f"share stands, any process or session on {name} (same user) can borrow it"
+        f"share stands, any process or session on {name} (same user) can use it"
     )
 
 
@@ -1983,15 +1989,16 @@ def _require_local_credential(key: str, provider: str) -> None:
         # THE INTERIM STATE, IN THE READER'S TERMS (desk call, 2026-10-03): the
         # GitHub adapter is present and its mint is real, but an App has not been
         # created, so a share today has nothing to lend — and that is what this
-        # sentence says, followed by the one-step remedy. Not "implemented", not
-        # "blocked": push and PR-write through the mesh are unavailable until the
-        # App exists, everything else already works.
+        # sentence says, followed by the one-time setup remedy. Not "implemented",
+        # not "blocked": push and PR-write through the mesh are unavailable until
+        # the App exists, everything else already works.
         raise MeshRefusal(
             "no_local_credential",
             "this device has no GitHub App credential yet, so there is nothing to "
             "share: push and PR-write through the mesh are unavailable until a "
-            "GitHub App is configured here (one small step — the network guide "
-            "has the checklist). Public clones and non-GitHub work are unaffected.",
+            "GitHub App is configured here (a short one-time setup — the network "
+            "guide has the checklist). Public clones and non-GitHub work are "
+            "unaffected.",
         )
     if is_mcp_key(key):
         url = mcp_url_from_key(key)

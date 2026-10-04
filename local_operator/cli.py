@@ -293,10 +293,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # The F1 credential shim (github adapter): run BY GIT from a child whose env
-    # the session built — see network/credentials/github.py. Hidden from the help
-    # narrative on purpose (it is an implementation detail of the brokered env,
-    # not a verb an operator types), but a real subcommand so the helper is the
-    # SAME BUILD that injected the env.
+    # the session built — see network/credentials/github.py. A real subcommand on
+    # purpose (the helper must be the SAME BUILD that injected the env, and tests
+    # invoke it directly); its help string labels it not-for-direct-use rather
+    # than hiding it, so `lop credential --help` still shows the full verb set.
     git_helper_parser = credential_subparsers.add_parser(
         "git-helper",
         help=(

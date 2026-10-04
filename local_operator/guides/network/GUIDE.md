@@ -567,8 +567,8 @@ unit: while the share stands, **any process or session on the borrowing device
 the design to bound.
 
 On a node today: **public clones work and non-GitHub work is unaffected; push
-and PR-write are unavailable until a GitHub App exists** — one small step,
-below. That is the actual state: `lop network credentials` lists no `github`
+and PR-write are unavailable until a GitHub App exists** — a short one-time
+setup, below. That is the actual state: `lop network credentials` lists no `github`
 row until the App is configured, and a share attempt says exactly this instead
 of "not implemented" or "blocked".
 
@@ -584,7 +584,7 @@ revoke` runs (`DELETE /installation/token`; verified, idempotent). Only if no
 revoke can be delivered (neither device running at window end, or the call
 fails) does it fall back to its own 60-minute ceiling.
 
-**The one small step (GitHub App setup, once per owner):**
+**The one-time App setup:**
 
 1. github.com → Settings → Developer settings → **GitHub Apps** → New GitHub
    App. Turn **Webhook → Active off** (none is needed). Repository permissions:
