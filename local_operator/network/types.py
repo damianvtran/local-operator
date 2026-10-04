@@ -427,8 +427,8 @@ MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"
 #: capability is never in a non-admin ROLE, and only an admin may hand it out.
 #: The ONE carve-out is the write-authorization set beside this table
 #: (:data:`SELF_DECIDED_SCOPES`): the two onboarding scopes are what the
-#: deciding device records on its own record, so it needs no admin row for
-#: exactly those.
+#: deciding device records in a PEER's row in its own record, so it needs no
+#: admin row for exactly those.
 #:
 #: ``approve`` and ``unattended`` are grantable and, like ``broker_credential``,
 #: are in no ROLE: they are the onboarding scopes the operator ticks on the
@@ -452,9 +452,10 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
     }
 )
 
-#: The capability names the DECIDING device writes about a peer on its OWN record
-#: without an admin row (F7). ``approve`` and ``unattended`` are the onboarding
-#: scopes: trust decisions about THIS device's own files and sessions ("may the
+#: The capability names the DECIDING device may write into a PEER's row in its
+#: OWN record without an admin row (F7). ``approve`` and ``unattended`` are the
+#: onboarding scopes: trust decisions about THIS device's own files and sessions
+#: ("may the
 #: laptop start sessions on THIS box"), and every consumer resolves them from this
 #: device's own member row per use (``relay.PeerLink.role_capabilities`` → the
 #: authoriser chokepoint, the ``yolo`` create gate, the forwarded approval

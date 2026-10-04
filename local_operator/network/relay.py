@@ -1643,8 +1643,9 @@ def set_member_capabilities(
     THE REFUSALS, each named: only an ADMIN device may change another's authority
     (the same test ``panic`` uses: this device's own row holds ``admin``), with ONE
     carve-out — when every named capability is an onboarding scope
-    (:data:`SELF_DECIDED_SCOPES`), the deciding device writes its OWN record
-    without an admin row (F7: those scopes govern this device's own files and
+    (:data:`SELF_DECIDED_SCOPES`), the deciding device writes the PEER's row in its
+    OWN record without an admin row (F7: those scopes govern this device's own
+    files and
     sessions, their grant is deliberately receiver-side, and no wire op can write
     another device's copy). The target must be an active member other than this
     device; a grant may not name ``admin`` (that is a role granted by an invite and
@@ -1658,11 +1659,13 @@ def set_member_capabilities(
     is_admin = bool(me and me.active and "admin" in me.capabilities)
     requested = {*grant, *revoke}
     # THE DECIDING DEVICE RECORDS ITS OWN DECISION (F7): when EVERY named
-    # capability is an onboarding scope (:data:`SELF_DECIDED_SCOPES`), this
-    # device's own row decides it — those scopes govern THIS device's files and
-    # sessions, their grant is deliberately receiver-side, and no wire op can
-    # write another device's copy, so the blanket admin gate refused the very
-    # device the decision belongs to. Anything else keeps the admin gate.
+    # capability is an onboarding scope (:data:`SELF_DECIDED_SCOPES`), the write
+    # is allowed without an admin row — it edits the PEER's row in this device's
+    # OWN record, never this device's own row (that stays refused, below). Those
+    # scopes govern THIS device's files and sessions, their grant is deliberately
+    # receiver-side, and no wire op can write another device's copy, so the
+    # blanket admin gate refused the very device the decision belongs to.
+    # Anything else keeps the admin gate.
     self_decided = bool(me and me.active) and bool(requested) and requested <= SELF_DECIDED_SCOPES
     if not (is_admin or self_decided):
         raise MeshRefusal(
@@ -1671,9 +1674,13 @@ def set_member_capabilities(
             f"{record.self_role or 'not an admin'} in {record.name}",
         )
     if device_id == record.self_device_id:
+        # F7 review round 1 (MINOR-1): the old tail pointed the reader at an admin
+        # device, which cannot write another device's copy either — state the
+        # mechanism instead.
         raise MeshRefusal(
             "self_capabilities",
-            "a device cannot change its own capabilities; ask an admin device in the network",
+            "a device cannot change its own capabilities; the set comes with the "
+            "device's admission",
         )
     member = record.member(device_id)
     if member is None or not member.active:
@@ -6394,13 +6401,24 @@ class RelayServer:
         # sentence that names the grant rather than pretending the wish is absurd.
         unattended = wire.yolo_requested(frame.get("yolo"))
         if unattended and "unattended" not in link.context.capabilities:
+            # The remedy NAMES the deciding device (F7 design round 1, D1): this
+            # sentence is relayed verbatim to the REQUESTING device, where "this
+            # device" means the READER's machine (the engine's own rule — the Mesh
+            # tab's "this device is X" cards), and the tab's onboarding cards are
+            # titled "Onboard <device>", so a name is also what is findable there.
+            named = str(self.identity.name or "").strip()
+            subject = named or "the device that would run the session"
+            remedy = (
+                f"approve setup for {named} in the Mesh tab"
+                if named
+                else "approve that device's setup in the Mesh tab"
+            )
             raise MeshRefusal(
                 "not_permitted",
                 "a session created on another device can start unattended (yolo) only when "
-                "this device grants the requesting member 'unattended'. The grant is made "
-                "on this device by its operator — approve setup for this device in the "
-                "Mesh tab. Until then, create it here or start it on your own device "
-                "with yolo.",
+                f"{subject} grants the requesting member 'unattended'. Its operator makes "
+                f"that grant there — {remedy}. Until then, create it here or start it on "
+                "your own device with yolo.",
             )
         from local_operator.fork import new_session_id
         from local_operator.network import definitions

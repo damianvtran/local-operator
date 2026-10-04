@@ -1990,8 +1990,13 @@ class OnboardRun:
                 reason = "only an admin device can change what a peer may do"
             return _StepOutcome(
                 True,
-                f"the capability grant was not applied on {where}: {reason} — the "
-                "requested scopes are not in effect there and nothing was granted.",
+                # Review round 1 (D2/D3/N1): lead with the SETTLED fact (the #1967
+                # join shape) and mark the node's reason as its own words — "this
+                # device" inside it belongs to the node speaking, while the reader
+                # sits on another machine.
+                f"{where} granted nothing and this step is settled — nothing was "
+                f'applied: {where} answers "{reason}" — the requested scopes are '
+                "not in effect there",
                 {
                     "device_id": mac.device_id,
                     "network": network_name,

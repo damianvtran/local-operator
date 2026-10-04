@@ -630,9 +630,13 @@ def test_a_refusal_the_node_reserves_is_a_satisfied_state_not_a_failure(
     grants = next(row for row in payload["steps"] if row["step"] == "grants")
     assert grants["ok"] is True
     detail = grants["detail"]
-    assert detail.startswith("the capability grant was not applied on cloud-node-1: "), detail
-    assert "only an admin device can change what a peer may do" in detail
-    assert "not in effect" in detail and "nothing was granted" in detail
+    # Review round 1 (D2/D3/N1): the settled state LEADS, the node is named, and
+    # its reason is marked as the node's own words — "this device" inside the
+    # quote belongs to the node speaking to a reader on another machine.
+    assert detail.startswith("cloud-node-1 granted nothing and this step is settled"), detail
+    assert "nothing was applied" in detail
+    assert 'cloud-node-1 answers "only an admin device can change what a peer may do' in detail
+    assert detail.endswith("not in effect there"), detail
     assert "ask an admin" not in detail, "no wire op can deliver that remedy"
     assert "`" not in detail, "§2.9: no terminal command in a refusal"
     assert grants["data"] == {

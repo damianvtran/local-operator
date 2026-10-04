@@ -551,6 +551,7 @@ def test_the_cli_records_the_onboarding_scopes_through_a_running_relay(
         {"grant": ["admin"]},
         {"revoke": ["move"]},
         {"grant": ["approve", "move"]},
+        {"revoke": ["unattended", "move"]},  # the union arm is shared; mixed revoke too (NIT-2)
     ],
 )
 def test_every_other_capability_still_needs_an_admin(root: Path, change: dict[str, Any]) -> None:
@@ -631,7 +632,13 @@ def test_the_onboarding_grant_opens_a_full_auto_create_on_an_already_open_link(
         frame = {"op": "net_session_create", "req": 71, "cwd": "", "yolo": True}
         before = link.request(dict(frame))
         assert before is not None and before["op"] == "error", before
-        assert "grants the requesting member 'unattended'" in before["message"], before
+        message = str(before["message"])
+        assert "grants the requesting member 'unattended'" in message, before
+        # F7 design round 1 (D1): the remedy NAMES the deciding device. This
+        # sentence is relayed to the REQUESTING side, where "this device" would
+        # mean the READER's machine, not the node that refused.
+        assert "approve setup for device-a in the Mesh tab" in message, before
+        assert "this device" not in message, before
         sender = server_b.identity.device_id
         assert "unattended" not in _caps(server_a.root, record.network_id, sender)
 
@@ -649,6 +656,8 @@ def test_the_onboarding_grant_opens_a_full_auto_create_on_an_already_open_link(
         assert "unattended" in _caps(server_a.root, record.network_id, sender)
 
         def _no_warm(self: Any, *args: Any, **kwargs: Any) -> None:
+            # The accept path's warm-up side effect is not the assertion here;
+            # the ack and the stamp are (review round 1, NIT-1).
             return None
 
         monkeypatch.setattr(relay.RelayServer, "_warm_after_create", _no_warm)

@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, types
+from local_operator.network import identity, relay, types
 from local_operator.session.placement import read_stamp
 
 
@@ -72,6 +72,9 @@ def test_a_yolo_create_without_the_grant_is_refused_and_names_it(root: Path) -> 
     refused create leaves no directory, no stamp and no claim behind (the rule the
     desktop route states for its own admissions).
     """
+    # A NAMED node makes the remedy's naming deterministic and mirrors the drill
+    # (`cloud-node-1`); unnamed, the identity would carry this host's name.
+    identity.mint(root, name="cloud-node-1")
     server = _server(root)
     link = _link(capabilities=("prompt",))
     with pytest.raises(types.MeshRefusal) as refused:
@@ -79,13 +82,36 @@ def test_a_yolo_create_without_the_grant_is_refused_and_names_it(root: Path) -> 
     assert refused.value.code == "not_permitted", refused.value
     message = str(refused.value)
     assert "unattended" in message, message
-    # The remedy is a PRODUCT action on the device that decides (F7): approving its
-    # setup in the Mesh tab is where the grant is given. It must NOT be the "ask an
-    # admin" dead end — no wire op writes another device's copy — and must not name
-    # a terminal command (§2.9).
-    assert "approve setup for this device in the Mesh tab" in message, message
+    # The remedy NAMES the deciding device (F7 design round 1, D1: this sentence
+    # is relayed to the requesting device, where "this device" would mean the
+    # READER's machine) and names a PRODUCT action — approving its setup in the
+    # Mesh tab, whose cards are titled "Onboard <device>". It must NOT be the
+    # "ask an admin" dead end (no wire op writes another device's copy) and must
+    # not name a terminal command (§2.9).
+    assert "approve setup for cloud-node-1 in the Mesh tab" in message, message
+    assert "this device" not in message, message
     assert "ask an admin" not in message, message
     assert not (root / "sessions").exists(), "a refused create left something on disk"
+
+
+def test_a_nameless_device_is_described_not_called_this_device(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F7 design round 1 (D1), fallback arm: with no name, describe the device.
+
+    The named arm is pinned by the refusal cell above and by the member-caps flip
+    cell; this keeps the no-name arm honest — the sentence still never says "this
+    device", which is a fact about the READER's machine on the requesting side.
+    """
+    server = _server(root)
+    monkeypatch.setattr(server.identity, "name", "")
+    link = _link(capabilities=("prompt",))
+    with pytest.raises(types.MeshRefusal) as refused:
+        server._op_session_create(link, _frame(yolo=True))  # noqa: SLF001 — the seam under test
+    message = str(refused.value)
+    assert "approve that device's setup in the Mesh tab" in message, message
+    assert "the device that would run the session grants" in message, message
+    assert "this device" not in message, message
 
 
 @pytest.mark.parametrize("value", ["false", "0", "no", None, False])
