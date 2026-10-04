@@ -143,7 +143,9 @@ answer-vs-deadline race. The precedence is **total** (first match wins, so every
 **Delivery marker = the transcript row, PER (ask_id, kind) — not one boolean.** Each
 terminal state has its own expected row, and `reconcile` writes exactly the rows that are
 missing; `transcript.has_entry(<id>)` (`session/transcript.py:1953`) is the guard, so
-idempotence is structural and a `late` ask owes **one** row — the response, which supersedes its deadline row for good (§2.3).
+idempotence is structural and a `late` ask owes **one** row — the response, which supersedes its deadline row for good (§2.3). The marker is DURABLE: the transcript row, not the
+handoff; `reconcile`'s `_handed` set is scheduling only (stops a re-entrant reconcile
+double-handing the handoff→append gap) — never a window term, never the wire's `delivered`.
 
 | status | expected transcript row(s) | injects a turn? |
 |---|---|---|
@@ -160,13 +162,25 @@ computes the fold, and delivers every missing row above. No two-phase "mark deli
 to lose in a crash. It runs at runtime boot (beside `process._drain_inbox_into`,
 `process.py:3612`), at turn start (beside `_drain_spooled_peer_inbox`, called
 `session.py:11748`), on every answer/decline/dismiss op, and from the timer below.
-Idempotent by construction. **Wire `delivered`** (contract §4) means "the row(s) *this*
-status requires are all present": for `late` that is the response row — a response
-supersedes its deadline row for good; for `open` it is `false`.
-It is **sticky** — once any response/timeout row exists for the ask it stays `true` for the
-life of the record, so an answered ask cannot flip back to undelivered when it folds to
-`expired` seven days later; `dismissed`/`expired` are `false` only when no delivered row
-exists at all.
+Idempotent by construction. **Wire `delivered`** (contract §4; amended 2026-10-04) means
+"the row(s) THIS status requires are DURABLE in the transcript":
+
+| status | `delivered: true` iff |
+|---|---|
+| `open` | never — nothing owed |
+| `answered` | response row durable |
+| `late` | response row durable — **not** the deadline row |
+| `timed_out` | deadline row durable |
+| `declined` | response row durable |
+| `dismissed` / `expired` | any response/timeout row durable |
+
+The flag is the CONSUMPTION flag: a `late` answer whose deadline notice went out reads
+`false` until its response row lands — the revision window staying open. It is **sticky** —
+once the required row is durable it stays `true` for the life of the record, so an answered
+ask cannot flip back to undelivered when it folds to `expired` seven days later; the one
+sanctioned flip is `timed_out`→`late` (the ANSWER is what is undelivered there), and
+`dismissed`/`expired` are `false` only when no delivered row exists at all. Handoff alone
+never reads true, for any reader — in-process, another process, or the index.
 
 **Derived index (non-authoritative, stdlib-only, self-healing):**
 `<config_dir>/asks/<sid>.json` — open + last-7d terminal asks with deadlines and a
@@ -272,6 +286,11 @@ Reuse the wake/peer rail; add no new transport for the live case. New
   response exists yet (§7 asserts both orders).
 - **Dedupe.** deterministic ids + `has_entry` in `_drain_steering` (`:14031` already skips a
   durable id). Two runtimes cannot both deliver: only the lease holder writes the transcript.
+- **Content is re-resolved at the append.** The handed message is built once for events and
+  scheduling; the row that lands is rebuilt from the fold at the transcript append (all four
+  writer paths), so a revision accepted between reconcile and append is what the model reads.
+  `AskResponseDeliveredEvent` stays at handoff — a paint-ahead preview, not the content of
+  record.
 - **Event for live paint:** `AskResponseDeliveredEvent`/`AskTimeoutDeliveredEvent` beside
   `WakeDeliveredEvent`, emitted **before** the turn spawn so surfaces paint the card ahead of
   the work it triggers.
@@ -374,11 +393,12 @@ The bump note (`mobile/types.py:33`) is a *breaking* lever; `peer_message`'s com
 PendingAsk (frontend_state.asks[] and SessionProjection.asks[] and index entry)
   ask_id, session_id?, created_at, expires_at, timeout_s, urgent, status
   (open|answered|declined|timed_out|late|dismissed|expired), answered_at?,
-  delivered: bool,   // terminal: the rows THIS status requires exist (§2.2 table) — `late`
-                     // requires the response row (a response supersedes its deadline row
-                     // for good — §2.3); STICKY (never flips back to false); `open` is
-                     // always false; `dismissed`/`expired` are false only when no delivered
-                     // row exists
+  delivered: bool,   // CONSUMPTION: the row(s) THIS status requires are DURABLE in the
+                     // transcript (§2.2); false while merely handed/queued. For `late` the
+                     // response row — the deadline notice does not deliver the answer (a
+                     // `timed_out` ask answered late flips to false until its row lands).
+                     // `dismissed`/`expired`: any row, else false. Once the required row is
+                     // durable it never flips back.
   questions[{id, question, options[{label,description?,recommended?}], multi, secret,
              persist}],
   answers?  {qid:[str]}        // secret: [<key>] only
@@ -399,6 +419,12 @@ relay:   GET /api/asks (aggregate) ; command op ask_respond via existing /comman
 > the desktop answers body gains `revise` (with `ask_id`+`answers`); §10 carries the
 > binding text for the revision window, the `revised` event, the refusal copy and the
 > kill-switch behaviour.
+>
+> **Amended 2026-10-04 (§10, consumption bound).** `delivered` re-pins from row-existence at
+> handoff to CONSUMPTION. Additive semantics only, no `PROTOCOL_VERSION` bump: clients gating
+> the change affordance on `delivered:false` now keep it open until the answer is committed
+> to the conversation — exactly §10's window. An old core still answers `unknown op` for
+> `ask_revise`; a new client against an old core reads the old flag.
 
 - **Queue is separate from approvals.** `pending_gate`/`pending`/`pending_count` keep meaning
   *blocking* things; `pending_count` stays the approval queue length (test comment,
@@ -943,7 +969,7 @@ copy contract gains the delivered refusal. The fold's precedence table, the deli
 and §3's timeout policy are unchanged, and the terminality horizons (`LATE_WINDOW_S`,
 defined in `asks/store.py` and re-exported by `asks/policy.py`; the late/expired bounds)
 are untouched: **this amendment adds no time bound of its own — its only bound is
-DELIVERY.**
+CONSUMPTION** (amended 2026-10-04: was DELIVERY; see the window bullet).
 
 **The problem.** A multi-question ask answers forward-only: once a response is recorded, a
 changed answer is refused — `already answered by <surface>` on the whole-ask path, and
@@ -968,12 +994,22 @@ between the answer's recording and its delivery.
   registrant answers `unknown op` (the client says the runtime predates queued asks), and
   an old client never sends it.
 
-- **The window is bounded by DELIVERY, not by status alone.** A revision is accepted iff,
-  when it is serialised against the log, the fold shows an answer not yet delivered —
-  status `answered` or `late` with `delivered: false`; `delivered` means "the agent has
-  been handed the answer" (for `late`, the response row is what delivers it). Successive
-  revisions are allowed while that window is open;
-  the latest accepted one is effective. Against an ask with no recorded answer yet
+- **The window is bounded by CONSUMPTION, not by handoff.** A revision is accepted iff,
+  when it is serialised against the log, the model's conversation does not yet carry the
+  answer — status `answered` or `late` whose `ask-response-<ask_id>` row is not yet DURABLE
+  in the transcript. `delivered: false` means exactly that (for `late` the response row is
+  what delivers it — the deadline notice does not; §4). Handing a message to a delivery
+  path, scheduling a turn, or returning from the answering op closes nothing: that is our
+  latency, and a window sized by it is sized by nothing the user cares about. The row's
+  append is the close point — the answer entering the conversation the model reads and (the
+  transcript being append-only, one row, no rewrite) the last instant a revision can still
+  change what the model will read. A revision arriving while that append is in flight is
+  refused, conservatively and for milliseconds, in the same delivered sentence: content
+  snapshot taken and carry provable cannot both hold. Successive revisions while the window
+  is open stay legal; the latest accepted one is effective, and it is what the append
+  carries because every delivery path RE-RESOLVES the row from the fold at its append (the
+  message built at reconcile is a preview, not the contract). `reconcile`, `_handed` and
+  the awaited ACK are scheduling, never the bound. Against an ask with no recorded answer yet
   (`open`/`timed_out`) the intent degrades to the plain first answer: one `answered`
   event, no `revised` — the `revised` event exists only to supersede.
 
@@ -988,8 +1024,9 @@ between the answer's recording and its delivery.
   regardless of surface.
 
 - **Refusals: the state table stays state-only; one sentence is op-qualified.** A
-  revision in-window → accepted, from any surface. **A revision once the response row
-  exists → `already delivered — send a new message`** — no silent overwrite, ever: the
+  revision in-window → accepted, from any surface. **A revision once the response row is
+  **durable** (or an append of it is in flight) → `already delivered — send a new message`**
+  — no silent overwrite, ever: the
   row pins what the model was told. That sentence is emitted by the revision path itself
   (`AskQueue.revise` / `Session.revise_ask` — the path that carries the op):
   `render.refusal_copy(record)` receives only the record, never the op, so it keeps its
@@ -1009,8 +1046,9 @@ between the answer's recording and its delivery.
   and the `delivered` flag are untouched: exactly one `ask-response-<ask_id>` row,
   carrying the effective map — a revision can never add a second row or buy a second
   turn. **Ordering invariant (what the code PR must show):** acceptance, the append and
-  the row's content can never disagree — an accepted revision is what delivery carries,
-  and a revision that lost the race to an existing row is refused with the delivered
+  the row's content can never disagree — an accepted revision is what the delivery append
+  carries (each append re-resolves content from the fold), and a revision that lost the
+  race to a durable row **or to an append in flight** is refused with the delivered
   sentence; never accepted-and-then-dropped.
 
 - **Under the kill switch** (after the flip, `LOP_ASK_NONBLOCKING=0` is the kill switch;

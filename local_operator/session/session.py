@@ -8617,6 +8617,76 @@ class Session:
             return
         self._spawn_background(self._prompt_messages(list(messages)))
 
+    async def _append_injected_message(
+        self, message: AgentMessage, *, producer_command_id: str | None = None
+    ) -> AgentMessage:
+        """Append one delivery-path message; re-resolve ASK rows at the append.
+
+        THE FOUR CALLERS OF THIS METHOD ARE THE ONLY PATHS THAT CAN PERSIST AN
+        ASK ROW, and that closure is the window's whole correctness argument
+        (design §2.3 as amended 2026-10-04): ``_run_turn``'s initial loop (the
+        idle spawn and the boot reconcile), ``_drain_steering`` (the mid-turn
+        courtesy batch), ``_drop_pre_aborted_turn`` and
+        ``_hold_deliveries_at_admission`` (the two holding arms). No other path
+        can carry a delivered ask: ``_persist_new_messages`` writes run output,
+        ``_drain_asides`` hub/wake rows, and ``_flush_context_journal`` rows
+        that are already durable.
+
+        WHY THE ASK ARM EXISTS. The revision window is bounded by CONSUMPTION —
+        the response row's durable append (design §10) — so a revision accepted
+        between the reconcile that built the message and this append must be
+        what the append lands: the handed message is a PREVIEW, not the
+        contract. For an ask row the append therefore re-resolves the content
+        from the fold (``refresh_delivery_message``) and brackets the write
+        with ``begin_row_commit``/``finish_row_commit`` — the guard that makes
+        a revision arriving while the write is in flight refuse (in the
+        delivered sentence) rather than be accepted and then dropped. On
+        success the queue is told the row is durable, so the wire's
+        ``delivered`` flips where the fold does, at the append.
+
+        BOTH ask kinds ride the bracket: a timeout row's append flips
+        ``delivered`` for a ``timed_out`` ask the same way, and the handed-set
+        lifecycle (dropped at the append outcome, either way) is what lets a
+        FAILED append be re-handed by the next reconcile instead of staying
+        sticky forever. Only response rows are content-refreshed — nothing about
+        a timeout notice is revisable.
+
+        Non-ask messages are appended exactly as their call sites always did —
+        same call, same ordering, no behaviour change — so the seam is the ask
+        arm's own and nothing else moves. The RETURNED object is what the caller
+        hands onward (a refreshed row replaces the preview everywhere: the
+        journal park, the steering list, the loop's ``initial``).
+        """
+        queue: Any = None
+        factory = getattr(self, "ask_queue", None)
+        if callable(factory):
+            try:
+                queue = factory()
+            except Exception:  # noqa: BLE001 — an unreadable queue must not block the append
+                logger.debug("ask: could not resolve the queue for an append", exc_info=True)
+        row_id = str(getattr(message, "id", "") or "")
+        if (
+            queue is None
+            or not isinstance(message, CustomMessage)
+            or message.custom_type not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE)
+            or not row_id
+        ):
+            await self._transcript.append_message(message, producer_command_id=producer_command_id)
+            return message
+        queue.begin_row_commit(row_id)
+        durable = False
+        try:
+            if message.custom_type == ASK_RESPONSE_MESSAGE_TYPE:
+                message = queue.refresh_delivery_message(message)
+            if not self._transcript.has_entry(row_id):
+                await self._transcript.append_message(
+                    message, producer_command_id=producer_command_id
+                )
+            durable = True
+        finally:
+            queue.finish_row_commit(row_id, durable=durable)
+        return message
+
     async def reconcile_asks(self, now_ms: int | None = None, *, load_time: bool = False) -> None:
         """Level-triggered: deliver whatever the ask log says is owed.
 
@@ -12429,7 +12499,7 @@ class Session:
             # that arrangement working.
             from local_operator.harness.rows import is_harness_chrome
 
-            for message in initial:
+            for index, message in enumerate(initial):
                 # ALREADY-DURABLE initials are not journaled a second time. The
                 # delivery path (``_on_job_completed`` -> ``_deliver_job_results``)
                 # makes each settled result's row durable the moment the job
@@ -12440,12 +12510,18 @@ class Session:
                 # provider request carrying each result twice. Normal prompts are
                 # unaffected: their message is new by construction.
                 if not self._transcript.has_entry(message.id):
-                    await self._transcript.append_message(
+                    message = await self._append_injected_message(
                         message,
                         producer_command_id=(
                             producer_command_id if message.id == admitted_id else None
                         ),
                     )
+                    # The refreshed object REPLACES the preview in ``initial``:
+                    # ``self._loop.run(initial, ...)`` below carries this same
+                    # list into the model's context, and an ask row's append
+                    # re-resolves its content (a revision accepted after the
+                    # reconcile built the message must be what the loop reads).
+                    initial[index] = message
                     # THE AUDIO SIDECAR FORKS ONLY HERE, strictly after the
                     # append above made the row durable AND only for a row
                     # THIS loop wrote: a record for a row the transcript does
@@ -12953,7 +13029,7 @@ class Session:
                     and isinstance(getattr(message, "details", None), dict)
                 ):
                     message.details["held"] = True
-                await self._transcript.append_message(
+                message = await self._append_injected_message(
                     message,
                     producer_command_id=(
                         producer_command_id if message.id == admitted_id else None
@@ -14835,7 +14911,7 @@ class Session:
         for message in initial:
             try:
                 if not self._transcript.has_entry(getattr(message, "id", "")):
-                    await self._transcript.append_message(message)
+                    message = await self._append_injected_message(message)
             except Exception:  # noqa: BLE001 — a hold must not strand the arrival
                 logger.warning(
                     "could not hold a delivery durably (the runtime is leaving); "
@@ -14846,6 +14922,9 @@ class Session:
             # Every ``_prompt_messages`` caller passes a ``CustomMessage`` (a
             # peer row, a job batch, a wake, a monitor, a catch-up); the guard
             # keeps the journal's contract literal if a future caller does not.
+            # The PARKED copy is the object the append returned — for an ask
+            # row that is the refreshed one, so live context and the durable
+            # row never disagree about what the user said.
             if isinstance(message, CustomMessage):
                 self._append_or_park_journal(message)
 
@@ -15137,7 +15216,13 @@ class Session:
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
-            producer_command_id = self._steering_producers.get(id(message))
+            # THE PRODUCERS MAP IS KEYED BY THE QUEUED OBJECT'S IDENTITY, so it
+            # is captured before the append below can REPLACE the object with a
+            # refreshed ask row (``_append_injected_message``): popping by the
+            # new object's id would leak the entry and skip the rejection
+            # bookkeeping the ``finally`` exists for.
+            queued_id = id(message)
+            producer_command_id = self._steering_producers.get(queued_id)
             if self._transcript.has_entry(message.id):
                 # ALREADY DURABLE, so this drain is not its writer. A turn
                 # dropped as pre-aborted persists its held message at the drop
@@ -15146,11 +15231,11 @@ class Session:
                 # it again produced two identical rows that survived into
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
-                self._steering_producers.pop(id(message), None)
+                self._steering_producers.pop(queued_id, None)
                 messages.append(message)
                 continue
             try:
-                await self._transcript.append_message(
+                message = await self._append_injected_message(
                     message,
                     producer_command_id=producer_command_id,
                 )
@@ -15161,7 +15246,7 @@ class Session:
                     logger.warning("could not journal steering message", exc_info=True)
                 continue
             finally:
-                self._steering_producers.pop(id(message), None)
+                self._steering_producers.pop(queued_id, None)
             # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
             # forks: strictly after THIS drain's own append made the row
             # durable (see ``_fork_audio_sidecars`` — a record for a row the
