@@ -3043,7 +3043,11 @@ first upload, 3m46s past the Release — rather than failing an `install` step t
 drill had already walked green twice and reading as flakiness. **Name the basis
 the consumer reads, not the one that answers first** — and **put both times on
 one clock**, since a local-clock reading beside a UTC one implies a gap that
-never existed.
+never existed. And do not treat the first hit as settled: the index is **not
+atomic at the instant it flips**, measured as a check that saw a new version
+there followed within the same second by an update failing as
+`unsatisfiable` — the identical command succeeding minutes later. **A hit
+proves the index has begun to move, not that it has stopped.**
 
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
