@@ -670,14 +670,18 @@ Diagnose in this order, and stop at the first answer that explains it:
      names the filed session), then run `lop network approvals run <id>
      --json`:
      installs/updates the build on it, lands the operator's public anchor
-     root-owned, joins the member, writes the grants and supervises the relay.
+     root-owned, joins the member, supervises the relay and writes the grants.
+     The relay goes first on purpose: it is what rolls a running relay onto the
+     new build, and the node's own relay executes the grants write when one
+     answers — a relay still on the previous build refuses it, and that refusal
+     does not fall back.
      The card's install target is the version the **agent's own `lop`** is
      running, unless the card names a build — so a node is only ever brought as
      current as the agent driving the run. To move a node onto a new release,
      the agent's `lop` must be on that release first — `lop-update` moves it
      there.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
-     `grants`, `relay`, `verify`. `join` is satisfied when the node is already
+     `relay`, `grants`, `verify`. `join` is satisfied when the node is already
      an active member: no dial is made, and the step's detail reads "<node> is
      already an active member of <network> (epoch N); admission is satisfied and
      no re-join was attempted — the invite goes unused and expires." Read it in

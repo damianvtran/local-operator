@@ -25,8 +25,8 @@ THE STEPS (named receipts, §3.3 steps 3-10; steps 1-2 are the request path):
     install   ``uv tool install [--force] --refresh local-operator==<tag>`` | ``lop-update <tag>``
     join      identity + ``lop network join @<token> --automated``
     anchor    ``lop operator anchor export`` → node → ``install --from`` (F4b)
-    grants    ``lop network member grant <net> <mac> approve unattended``
     relay     install/start the relay service; linger check (OQ11)
+    grants    ``lop network member grant <net> <mac> approve unattended``
     verify    ``doctor``/``ready``/``peers`` → the record folds to ``connected``
 
 CREDENTIAL HANDLING (§3.2). The record stores a REFERENCE, never material. The
@@ -1383,7 +1383,7 @@ class OnboardRun:
             # §3.4 names `lop-update` for an existing build; a node with a build
             # but no updater script still has uv, and a pinned reinstall is the
             # remaining documented spelling. The running relay picks the new
-            # build up at step 9's restart. `--refresh` as at the fresh-install
+            # build up at step 8's restart. `--refresh` as at the fresh-install
             # branch: a cached index can hide the release this run is for.
             command = f"uv tool install --force --refresh local-operator=={shlex.quote(tag)}"
             method = "uv-tool-reinstall"
