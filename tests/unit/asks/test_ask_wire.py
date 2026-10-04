@@ -976,7 +976,9 @@ def test_an_over_budget_head_row_does_not_starve_the_tail() -> None:
     from local_operator.session.frontend_state import bound_ask_rows
 
     head = _ask_row(0, questions=3, text="c" * 5_500)  # charge 16,515 > the budget
-    tail = [_ask_row(index) for index in (1, 2, 3)]  # charge 13 each
+    # Each tail row charges 15: a 12-character question ("Which one? 0") plus the
+    # 3-character "yes" label. Budget-bisected: 15 keeps the row, 14 drops it.
+    tail = [_ask_row(index) for index in (1, 2, 3)]
     kept, dropped = bound_ask_rows([head, *tail], budget=6_000)
     assert [row["ask_id"] for row in kept] == ["a-0000", "a-0001", "a-0002", "a-0003"]
     assert dropped is False
