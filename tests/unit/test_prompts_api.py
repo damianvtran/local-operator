@@ -741,10 +741,15 @@ def test_system_md_scopes_the_peer_gate_to_spawning_and_names_restart_cutoffs() 
     flat = " ".join(render_template("system.md", {}).split())
     assert "list or inspect sessions any time, and to spawn one only when the user asked" in flat
     assert "or a restart or update that cut a turn off" in flat
-    # The tool-first route: `sessions` owns list/inspect/resume/stop/peek, and
-    # no shell spelling of it is an agent's route back to a session — the CLI
-    # is the fallback for a human's terminal (mirrors the `send` precedent).
-    assert "Never shell out to `lop send`, `lop exec`" in flat
+    # The tool-first steer: `sessions` owns list/inspect/resume/stop/peek and
+    # is the default route; the messaging negative stays, and `lop exec` is the
+    # CLI fallback for a human's terminal — NOT a blanket ban, which would
+    # contradict the delegating-session allowance docs/EXEC.md still ships.
+    assert "Default to the tools" in flat
+    assert "never shell out to `lop send`, cmux, or another multiplexer" in flat
+    assert "`lop exec` is the fallback for a human's terminal" in flat
+    assert "not a way around `sessions`" in flat
+    assert "Never shell out to `lop send`, `lop exec`" not in flat
 
 
 def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> None:
