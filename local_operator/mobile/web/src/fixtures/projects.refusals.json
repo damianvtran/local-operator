@@ -1,0 +1,57 @@
+{
+	"create_name_taken": {
+		"status": 409,
+		"error": "project 'audit-sweep' already exists",
+		"code": "project_name_exists"
+	},
+	"create_name_invalid": {
+		"status": 422,
+		"error": "project name must be 1-64 characters of letters, digits, dot, underscore or hyphen, and cannot start with a hyphen",
+		"code": "project_invalid"
+	},
+	"patch_invalid_status": {
+		"status": 422,
+		"error": "status: Input should be 'planning', 'active', 'qa', 'validation', 'paused', 'done' or 'archived'",
+		"code": "project_invalid"
+	},
+	"patch_invalid_date": {
+		"status": 422,
+		"error": "target_date must be an ISO YYYY-MM-DD date",
+		"code": "project_invalid"
+	},
+	"patch_unknown_field": {
+		"status": 422,
+		"error": "unknown field(s): nope",
+		"code": "project_invalid"
+	},
+	"milestone_empty_name": {
+		"status": 422,
+		"error": "name is required",
+		"code": "project_invalid"
+	},
+	"milestone_bad_date": {
+		"status": 422,
+		"error": "milestone target_date must be an ISO YYYY-MM-DD date",
+		"code": "project_invalid"
+	},
+	"link_invalid_session": {
+		"status": 422,
+		"error": "session id 'nope' is not a 12-character hex id",
+		"code": "project_invalid"
+	},
+	"vanished_project": {
+		"status": 404,
+		"error": "no project with id or name 'not-a-project'",
+		"code": "project_not_found"
+	},
+	"delete_confirm_mismatch": {
+		"status": 422,
+		"error": "confirm must repeat the project name 'payments-migration' exactly (the name, not the id)",
+		"code": "project_confirm_mismatch"
+	},
+	"link_cap_reached": {
+		"status": 422,
+		"error": "project 'payments-migration' already has 64 linked sessions; unlink one first",
+		"code": "project_invalid"
+	}
+}

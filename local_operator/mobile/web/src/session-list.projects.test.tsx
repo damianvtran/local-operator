@@ -5,7 +5,7 @@
 // reader actually touches: a `projects` control exists in the footer, tapping
 // it opens the sheet, and dismissing the sheet closes it — three things a
 // refactor of the footer could break while every sheet test stayed green.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionListScreen } from "./screens/session-list";
 import type { SessionSummary } from "./types";
@@ -50,5 +50,22 @@ describe("projects entry point", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
 		expect(screen.queryByText("no projects yet")).toBeNull();
+	});
+
+	it("hands focus back to the footer control when the sheet closes", async () => {
+		/* `Sheet` restores focus to `returnFocusRef` (falling back to whatever was
+		   focused when it opened). The projects sheet was the one caller that
+		   passed no ref, so on a phone — where `document.activeElement` is
+		   usually `<body>` — closing it dropped the reader at the top of the
+		   document with no way back to the control they pressed. */
+		getProjects.mockResolvedValue({ projects: [] });
+		render(<SessionListScreen />);
+
+		const entry = screen.getByRole("button", { name: "projects" });
+		fireEvent.click(entry);
+		await screen.findByText("no projects yet");
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+
+		await waitFor(() => expect(document.activeElement).toBe(entry));
 	});
 });

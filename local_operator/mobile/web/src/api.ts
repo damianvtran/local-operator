@@ -477,16 +477,97 @@ export function getProject(
 
 /** Create one project. It starts UNLINKED by design (the desktop create body
     carries no sessions either): linking a session is a deliberate act, never
-    a side effect of creating a row. */
+    a side effect of creating a row.
+
+    The body is the desktop route's own create vocabulary
+    (``ProjectCreate``): ``description``, ``status`` and ``tags`` are the four
+    keys the daemon accepts beyond the name, and every one of them is optional
+    — an absent key is a field the daemon leaves at its default, not one the
+    client has to spell out. ``status`` defaults server-side to ``active``.
+
+    The response is a SUMMARY, not a full view: a create has no milestones,
+    no links and no history yet, so the caller that wants the view re-reads it.
+    A refusal carries the daemon's sentence in ``error`` and a machine ``code``
+    (``project_name_exists`` for a taken name — case-insensitively — and
+    ``project_invalid`` for a name or tag the store's grammar refuses). */
 export function createProject(input: {
 	name: string;
 	description?: string;
+	status?: string;
+	tags?: string[];
 }): Promise<{ ok: boolean; project: ProjectSummary }> {
 	return request("/api/projects", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(input),
 	});
+}
+
+/** Partially edit one project. ONLY the keys carried are touched — the
+    daemon forwards ``model_fields_set`` into the store, so an omitted key
+    keeps its stored value while an explicit ``""`` CLEARS a date.
+
+    THE ESTIMATE IS THE EXCEPTION, and it is the store's rule rather than this
+    client's: ``update_project``'s apply arm is ``if "estimate" in supplied
+    and fields.estimate is not None``, so an explicit ``null`` is a silent
+    NO-OP that leaves the stored number in place (measured against the real
+    daemon — a ``null`` estimate came back as ``3.0``). A caller that wants to
+    leave an estimate alone must therefore OMIT the key; one that wants to
+    clear it has no request at all. (An earlier revision of this comment
+    claimed ``null`` cleared it, which was exactly the sort of unverified
+    claim this file should not carry.)
+
+    The tri-state is the whole reason the caller builds the body rather than
+    posting a whole record: a form that re-sent every field it rendered would
+    have to guess the ones it never loaded (``owner``, ``team``, ``progress``)
+    and would clear them as a side effect of an edit that had nothing to do
+    with them. */
+export function patchProject(
+	key: string,
+	input: {
+		name?: string;
+		description?: string;
+		status?: string;
+		tags?: string[];
+		start_date?: string;
+		target_date?: string;
+		estimate?: number | null;
+		estimate_unit?: string;
+	},
+): Promise<{ ok: boolean; project: ProjectSummary }> {
+	return request(`/api/projects/${encodeURIComponent(key)}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/** Link one session to one project. The response is a SUMMARY (the write's
+    own answer, the same shape every link mutation returns), so a caller
+    showing the composed view re-reads it rather than patching one field of a
+    document this route never returned. */
+export function linkProjectSession(
+	key: string,
+	sessionId: string,
+): Promise<{ ok: boolean; project: ProjectSummary }> {
+	return request(`/api/projects/${encodeURIComponent(key)}/links`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ session_id: sessionId }),
+	});
+}
+
+/** Unlink one session. The id travels in the path — the route carries no body
+    — and the session id is percent-encoded because a hand-typed id is the one
+    place a caller could hand one through with a character the path forbids. */
+export function unlinkProjectSession(
+	key: string,
+	sessionId: string,
+): Promise<{ ok: boolean; project: ProjectSummary }> {
+	return request(
+		`/api/projects/${encodeURIComponent(key)}/links/${encodeURIComponent(sessionId)}`,
+		{ method: "DELETE" },
+	);
 }
 
 /** Delete one project. The confirmation the daemon requires is the NAME it
@@ -514,4 +595,25 @@ export function setProjectMilestone(
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(input),
 	});
+}
+
+/** Remove one milestone by name (case-insensitively, the same key the
+    add-or-update route uses). Answered with the whole project view, so a
+    caller renders the store's own list rather than a locally filtered one.
+
+    THE NAME TRAVELS IN THE PATH, and the route upstream is ``{name:str}``
+    (``[^/]+``), so a name containing a slash can never be addressed here —
+    measured: ``DELETE …/milestones/ship%2Fv2`` answers 404, even though the
+    same name was accepted on create. Percent-encoding is not the defect and
+    cannot fix it (the segment is decoded before routing). A caller must not
+    create such a name, and must refuse the removal with that explanation
+    rather than sending a request that cannot match. */
+export function removeProjectMilestone(
+	key: string,
+	name: string,
+): Promise<{ ok: boolean; project: ProjectView }> {
+	return request(
+		`/api/projects/${encodeURIComponent(key)}/milestones/${encodeURIComponent(name)}`,
+		{ method: "DELETE" },
+	);
 }

@@ -284,6 +284,18 @@ local_operator = [
     "mobile/web/tsconfig*.json",
     "mobile/web/vite.config.ts",
     "mobile/web/scripts/*.mjs",
+    # The declaration file beside those scripts. THE INSTALLED TREE COMPILES IT:
+    # `pnpm build` runs `tsc -b` over `tsconfig.app.json` with `include: ["src"]`,
+    # and the shipped `src/projects-status.test.tsx` imports
+    # `../scripts/generate-projects-status.mjs` for the drift guard — so a tree
+    # without its `.d.mts` fails the rebuild with TS7016 before vite runs, and
+    # the `lop mobile install` repair that is supposed to clear the phone's 503
+    # fails with it (review round 7, Q1: this file was added in `78addad00` with
+    # no glob, and the missing-declaration install is exactly the class of defect
+    # this list exists to prevent). The alternative — dropping the declaration —
+    # is not available: the `.mjs` it describes ships, and the consumer that
+    # imports it ships too.
+    "mobile/web/scripts/*.d.mts",
     "mobile/web/public/*",
     # The source tree is enumerated by directory rather than with `**`: the
     # `setuptools>=61.0.0` floor in [build-system] admits releases whose

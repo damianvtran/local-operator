@@ -732,6 +732,14 @@ export interface ProjectView {
 	progress_stale: boolean;
 	tags: string[];
 	sessions: string[];
+	/** The "filed by" ids (schema 2) — provenance, never work, and never counted
+	    by the `sessions` field or the live-session counts. Optional because an
+	    older daemon omits it entirely; a reader normalises with `?? []`. The
+	    sheet needs it for two things the work list alone cannot answer: whether
+	    a candidate session is a FILED link (linking it again would move it into
+	    the work set) and how much of the store's shared cap this project has
+	    already spent. */
+	coordination_sessions?: string[];
 	created_at: number;
 	updated_at: number;
 	start_date: string | null;
@@ -744,10 +752,20 @@ export interface ProjectView {
 
 export interface ProjectLinkedSession {
 	session_id: string;
+	/** ``work`` (the default, drives the stream and the liveness counts) or
+	    ``coordination`` (a "filed by" id — provenance only, and the reason
+	    ``runtime`` below is null). Optional because an older daemon omits it;
+	    a reader normalises with ``?? "work"``. */
+	role?: "work" | "coordination";
 	exists: boolean;
 	title: string | null;
 	created_at: number | null;
 	archived: boolean;
+	/** The runtime facts for a WORK link; **null for a coordination row** — a
+	    "filed by" id carries none of them, and the wire sends the key with a
+	    null value rather than omitting it. A reader must test the role before
+	    touching `runtime`: the field is not merely absent for a filing, and a
+	    dereference is a crash (this rig caught one). */
 	runtime: {
 		/** ``live`` / ``wedged`` / ``stale`` / ``stopped`` — or an unknown word
 		    from a newer build, which the row renders verbatim. */
@@ -755,7 +773,7 @@ export interface ProjectLinkedSession {
 		busy?: boolean | null;
 		heartbeat_age_s?: number | null;
 		pid?: number | null;
-	};
+	} | null;
 	/** ``null`` means UNKNOWN (no roster sidecar), never zero. */
 	subagents: { running: number; settled: number; names: string[] } | null;
 	/** ``null`` means UNKNOWN (no persisted snapshot), never zero. */
