@@ -75,7 +75,13 @@ review round had to rebuild a rig to look at (design round 4, D26/D29):
   frame could silently regress to the old grouping, or to a shorter tooltip
   that still looks like a tooltip, and be read as the new state. The
   `LO_SIDEBAR_SHOT_NO_COLOR=1` knob re-adds `NO_COLOR` inside the isolated
-  world (Textual reads it at App construction) for a colour-stripped frame.
+  world (Textual reads it at App construction) for a colour-stripped frame —
+  and it must ride INSIDE the isolation wrapper, `env -i PATH=… HOME=…
+  TERM=xterm-256color LO_SIDEBAR_SHOT_NO_COLOR=1 .venv/bin/python
+  scripts/sidebar_shot.py OUT.svg peers 100x30`: a knob set on the shell side
+  of `env -i` is stripped before the script runs and the "NO_COLOR" frame
+  silently comes back in colour (review round 2, MAJOR-2 — an uploaded frame
+  was byte-identical to a plain run because of exactly that).
 - `mesh_sidebar_shot.py` — the ONE capture built from a real mesh (two config
   roots, two identities, two relays on loopback, a live link) rather than from
   hand-stamped rows, which is what makes a row-producer regression fail here
