@@ -178,6 +178,44 @@ def test_unknown_event_kinds_and_torn_rows_do_not_break_the_fold():
     assert record["status"] == store.STATUS_OPEN
 
 
+def test_contract_b_unknown_event_kinds_are_skipped_never_raised():
+    """Design §12's contract (b), pinned as a property rather than a promise.
+
+    A build that predates an event kind — the shape every fold eventually has
+    for whatever kind ships NEXT — must keep folding a log that carries that
+    kind. ``withdrawn`` rides this contract today: a pre-§12 build has no branch
+    for it and must find the kind opaque rather than fail. The rows below are
+    hostile on purpose (no fields, junk types, unknown nested shapes) because
+    tolerance that only holds for well-formed unknown rows is tolerance for
+    rows that never occur — and the known events around them must still decide
+    the fold.
+    """
+    events = [
+        _queued(at=BASE, timeout_s=3600),
+        {"kind": "a_kind_from_the_future"},
+        {"kind": "another_future_kind", "ask_id": "a-1", "at": "not-a-number", "extra": [1]},
+        _answered(at=BASE + 100),
+    ]
+    (record,) = store.fold(events, BASE + 200)
+    assert record["status"] == store.STATUS_ANSWERED
+    # The same tolerance with NO known terminal event: the unknown kinds must
+    # not invent one either.
+    (open_record,) = store.fold(events[:3], BASE + 200)
+    assert open_record["status"] == store.STATUS_OPEN
+
+
+def test_a_withdrawn_row_with_junk_fields_is_read_by_presence_alone():
+    """The new kind obeys the same tolerant-reader contract it relies on: the
+    fold reads presence, never a field, so a malformed ``withdrawn`` row (a
+    field of the wrong type) must fold identically and raise nothing."""
+    events = [
+        _queued(at=BASE, timeout_s=3600),
+        {"kind": store.EVENT_WITHDRAWN, "ask_id": "a-1", "at": "not-a-number"},
+    ]
+    (record,) = store.fold(events, BASE + 100)
+    assert record["status"] == store.STATUS_WITHDRAWN
+
+
 # ---------------------------------------------------------------------------
 # delivered: the per-status CONSUMPTION flag (amended 2026-10-04)
 # ---------------------------------------------------------------------------
@@ -275,6 +313,83 @@ def test_a_revision_without_an_answered_row_does_not_invent_an_answer():
     assert "revised_at" not in record
 
 
+# ---------------------------------------------------------------------------
+# withdrawn: the agent-side settle's row (design §12)
+# ---------------------------------------------------------------------------
+
+
+def _withdrawn(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_WITHDRAWN,
+        "ask_id": ask_id,
+        "at": at,
+        "by": {"surface": "agent"},
+    }
+
+
+def test_a_withdrawn_row_folds_to_withdrawn_and_leaves_the_outstanding_set():
+    """Rule §12: a withdrawn row with NO answered sibling is terminal-on-write.
+
+    It injects nothing (the dismissal rule), so it owes no row, and it is
+    settled — never outstanding — for every tally that reads the one set.
+    """
+    events = [_queued(at=BASE, timeout_s=3600), _withdrawn(at=BASE + 100)]
+    (record,) = store.fold(events, BASE + 200)
+    assert record["status"] == store.STATUS_WITHDRAWN
+    assert record["delivered"] is False
+    assert store.is_outstanding(record["status"]) is False
+    assert store.outstanding_asks([record]) == []
+    assert store.expected_row_ids(record) == []
+    assert store.pending_row(record)["status"] == "withdrawn"
+
+
+def test_a_withdrawn_row_is_terminal_across_the_deadline_and_the_window_days():
+    """Terminal-on-write in TIME too: the deadline branches never judge a
+    retracted ask — before the deadline, at it, and 8 days past it."""
+    events = [_queued(at=BASE, timeout_s=3600), _withdrawn(at=BASE + 100)]
+    for now in (BASE + 200, BASE + 3600 * 1000, BASE + 3600 * 1000 + 8 * DAY_MS):
+        assert store.fold(events, now)[0]["status"] == store.STATUS_WITHDRAWN
+
+
+def test_contract_a_a_withdrawn_row_and_an_answered_row_in_both_orders():
+    """Design §12's contract (a): an ``answered`` row ALWAYS wins — only a
+    withdrawn row with no answered sibling folds to ``withdrawn``.
+
+    Both write orders are pinned because both are reachable: the racing
+    withdrawal may land before or after the answer that crossed its fold check
+    (the check-then-append gap is cross-process), and in neither order may the
+    operator's real answer be swallowed by the asker's retraction.
+    """
+    before = [
+        _queued(at=BASE, timeout_s=3600),
+        _answered(at=BASE + 100),
+        _withdrawn(at=BASE + 200),
+    ]
+    after = [
+        _queued(at=BASE, timeout_s=3600),
+        _withdrawn(at=BASE + 100),
+        _answered(at=BASE + 200),
+    ]
+    for events in (before, after):
+        record = store.fold(events, BASE + 300)[0]
+        assert record["status"] == store.STATUS_ANSWERED
+        assert record["answers"] == {"q": ["yes"]}
+
+
+def test_an_answered_late_row_also_outranks_a_later_withdrawn():
+    """The carve-out reads the ANSWERED ROW, not the folded status: an answer
+    past the deadline is still the operator's answer, and the withdrawal still
+    loses. It folds ``late``, never ``withdrawn``."""
+    events = [
+        _queued(at=BASE, timeout_s=120),
+        _answered(at=BASE + 200_000),
+        _withdrawn(at=BASE + 300_000),
+    ]
+    record = store.fold(events, BASE + 400_000)[0]
+    assert record["status"] == store.STATUS_LATE
+
+
 def test_expected_rows_are_per_kind_and_late_needs_the_response_alone():
     """A `late` ask owes ONE row, and that is the level-triggered rule.
 
@@ -292,6 +407,8 @@ def test_expected_rows_are_per_kind_and_late_needs_the_response_alone():
     assert store.expected_row_ids(answered) == [store.response_row_id("a-1")]
     dismissed = {"ask_id": "a-1", "status": store.STATUS_DISMISSED}
     assert store.expected_row_ids(dismissed) == []
+    withdrawn = {"ask_id": "a-1", "status": store.STATUS_WITHDRAWN}
+    assert store.expected_row_ids(withdrawn) == []
     # A dismissed ask that HAD a row keeps its delivered flag; the row is the
     # marker, not the status.
     assert store.pending_row({"ask_id": "a-1", "status": "dismissed"})["delivered"] is False
@@ -500,6 +617,7 @@ def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
         store.STATUS_LATE,
         store.STATUS_DECLINED,
         store.STATUS_DISMISSED,
+        store.STATUS_WITHDRAWN,
         store.STATUS_EXPIRED,
     ):
         assert not store.is_outstanding(settled)

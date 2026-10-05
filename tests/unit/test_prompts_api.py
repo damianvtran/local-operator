@@ -668,6 +668,10 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # §8.2.5) beside the scheduler, and only its PRESENCE is read here
             # — this test is about the ORDER of a fully-capable inventory.
             action_class="proactive",
+            # ``ask_withdraw`` (design §12) is createIf-gated on the session's
+            # queue door, bound in production exactly while the queued engine
+            # is live — presence-only here, like the registries above.
+            withdraw_ask=lambda *args, **kwargs: {"ok": True},
             # Presence-only, same rule as the two above: `project`/
             # `project_delete` are createIf-gated on a store being attached.
             project_registry=object(),

@@ -260,6 +260,206 @@ def test_decline_is_terminal_on_write(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# withdraw: the agent-side settle (design §12)
+# ---------------------------------------------------------------------------
+
+
+def test_moot_withdraw_settles_writes_one_row_and_injects_nothing(tmp_path: Path):
+    """The moot half, end to end at the queue's level: one ``withdrawn`` append,
+    a terminal fold, NO expected row — and the answer path refuses in the
+    state's own words because the box is gone everywhere."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(ask_id, reason="moot")
+    assert outcome["ok"] is True
+    assert "withdrawn" in outcome["text"] and "nothing will be delivered" in outcome["text"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_WITHDRAWN
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED, store.EVENT_WITHDRAWN]
+    _run(queue.reconcile())
+    assert session.transcript.ids == set()
+    assert session.batches == []
+    # A stale surface's answer is refused, and the sentence points at chat.
+    answer = queue.respond(ask_id, {"q0": ["yes"], "q1": ["no"]})
+    assert answer["ok"] is False
+    assert "withdrew this question" in answer["error"]
+    # A second settle is refused too, with the op's own words.
+    again = queue.withdraw(ask_id, reason="moot")
+    assert again["ok"] is False
+    assert "already withdrawn" in again["error"]
+
+
+def test_a_moot_withdraw_is_allowed_on_a_timed_out_ask(tmp_path: Path):
+    """A timed-out ask is still admissible — the agent retracting a question
+    nobody answered is the PRIMARY shape §12 exists for."""
+    queue = _queue(tmp_path, FakeSession())
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 300_000  # past the deadline, inside the window
+    assert queue.find(ask_id)["status"] == store.STATUS_TIMED_OUT
+    assert queue.withdraw(ask_id, reason="moot")["ok"] is True
+    assert queue.find(ask_id)["status"] == store.STATUS_WITHDRAWN
+
+
+def test_a_recorded_answer_refuses_both_withdraw_reasons_and_writes_nothing(
+    tmp_path: Path,
+):
+    """Contract (a) at the OP level: with the answer recorded, the withdrawal
+    is refused and no ``withdrawn`` row is written, so the fold carve-out is
+    belt-and-braces for the true cross-process race only."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": ["yes"]}, by="terminal")["ok"] is True
+    moot = queue.withdraw(ask_id, reason="moot")
+    assert moot["ok"] is False and "already has the user's answer" in moot["error"]
+    chat = queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["again"]})
+    assert chat["ok"] is False and "not recorded" in chat["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds.count(store.EVENT_WITHDRAWN) == 0
+    assert kinds.count(store.EVENT_ANSWERED) == 1
+
+
+def test_withdraw_refusals_are_per_state_and_change_nothing(tmp_path: Path):
+    """The settled states each no-op with a truthful sentence — declined and
+    dismissed say who acted, an expiry says there is nothing to retract — and
+    none of them appends anything."""
+    queue = _queue(tmp_path, FakeSession())
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    assert queue.decline(ask_id, by="phone")["ok"] is True
+    before = store.read_events(queue.session_dir)
+    declined = queue.withdraw(ask_id, reason="moot")
+    assert declined["ok"] is False and "declined" in declined["error"]
+    chat = queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["x"]})
+    assert chat["ok"] is False and "not recorded" in chat["error"]
+    assert store.read_events(queue.session_dir) == before
+
+    dismissed_queue = _queue(tmp_path, FakeSession())
+    dismissed_queue._now = lambda: BASE
+    second_id = dismissed_queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    dismissed_queue._now = lambda: BASE + 300_000
+    assert dismissed_queue.dismiss(second_id, by="phone")["ok"] is True
+    outcome = dismissed_queue.withdraw(second_id, reason="moot")
+    assert outcome["ok"] is False and "dismissed" in outcome["error"]
+
+    expired_queue = _queue(tmp_path, FakeSession())
+    expired_queue._now = lambda: BASE
+    third_id = expired_queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    expired_queue._now = lambda: BASE + store.LATE_WINDOW_S * 1000 + 200_000
+    outcome = expired_queue.withdraw(third_id, reason="moot")
+    assert outcome["ok"] is False and "expired" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds.count(store.EVENT_WITHDRAWN) == 0
+
+
+def test_the_reason_is_validated_and_moot_refuses_answers(tmp_path: Path):
+    """Both refusal guards before any state is consulted, and neither writes:
+    an unknown reason fails on the call, and answers on a ``moot`` are refused
+    rather than silently dropped (the model meant to record words)."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    bad = queue.withdraw(ask_id, reason="settle")
+    assert bad["ok"] is False and "moot" in bad["error"] and "answered_in_chat" in bad["error"]
+    mismatch = queue.withdraw(ask_id, reason="moot", answers={"q0": ["words"]})
+    assert mismatch["ok"] is False and "no answers" in mismatch["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+
+
+def test_answered_in_chat_records_verbatim_cells_and_names_the_chat_surface(
+    tmp_path: Path,
+):
+    """The chat half: the user's words as cells — an EMPTY LIST for a question
+    the message does not cover, the §2.4 completeness contract on the KEYS —
+    attributed to the chat surface (and the message, when the caller knows
+    it), and the standard response row follows through ``reconcile``."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id,
+        reason="answered_in_chat",
+        answers={"q0": ["the audit-log one", "keep it"], "q1": []},
+        message_id="m-7",
+    )
+    assert outcome["ok"] is True
+    assert "answered from the user's chat message" in outcome["text"]
+    record = queue.find(ask_id)
+    assert record["status"] == store.STATUS_ANSWERED
+    assert record["answers"] == {"q0": ["the audit-log one", "keep it"], "q1": []}
+    assert record["answered_by"] == {"surface": "chat", "message_id": "m-7"}
+    _run(queue.reconcile())
+    assert store.response_row_id(ask_id) in session.transcript.ids
+
+
+def test_answered_in_chat_without_a_message_id_carries_the_surface_alone(tmp_path: Path):
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["yes"]})["ok"] is True
+    assert queue.find(ask_id)["answered_by"] == {"surface": "chat"}
+
+
+def test_answered_in_chat_on_a_timed_out_ask_folds_late(tmp_path: Path):
+    """Admissible where an answer is: past the deadline the fold says ``late``,
+    exactly as a card answer after the deadline would — the same one response
+    row, one deadline too late."""
+    queue = _queue(tmp_path, FakeSession())
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 300_000
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"q0": ["after the deadline"]}
+    )
+    assert outcome["ok"] is True
+    assert queue.find(ask_id)["status"] == store.STATUS_LATE
+
+
+def test_answered_in_chat_refuses_a_secret_question_with_its_own_sentence(tmp_path: Path):
+    """The card stays the only secret path: no masked-entry hop from chat text
+    exists and none may be invented, so the whole op is refused and NOTHING is
+    written — the sentinel never touches any file because no row was appended."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(1, secret=True), None)["details"]["ask_id"]
+    outcome = queue.withdraw(
+        ask_id, reason="answered_in_chat", answers={"key-0": ["SENTINEL-VALUE"]}
+    )
+    assert outcome["ok"] is False
+    assert "only its card" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert kinds == [store.EVENT_QUEUED]
+    assert "SENTINEL-VALUE" not in store.asks_log_path(queue.session_dir).read_text()
+
+
+def test_answered_in_chat_refuses_a_missing_key_before_writing(tmp_path: Path):
+    """The §2.4 completeness contract is on the KEYS: a question the message
+    does not cover is sent as an EMPTY LIST, and a forgotten key is refused by
+    name rather than settling the ask without it."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    outcome = queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["yes"]})
+    assert outcome["ok"] is False
+    assert "q1" in outcome["error"] and "has no entry" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert store.EVENT_ANSWERED not in kinds
+
+
+def test_answering_a_withdrawn_ask_in_words_is_refused_not_dropped(tmp_path: Path):
+    """The refused surfaces read the same sentence §12 puts in the state table:
+    the state and the op agree about the one route left."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
+    assert queue.withdraw(ask_id, reason="moot")["ok"] is True
+    outcome = queue.respond(ask_id, {"q0": ["a real answer"]})
+    assert outcome["ok"] is False
+    assert (
+        outcome["error"]
+        == "the agent withdrew this question — if you have an answer, send it as a chat message."
+    )
+
+
+# ---------------------------------------------------------------------------
 # reconcile: which rows are written, and the N8 suppression
 # ---------------------------------------------------------------------------
 
@@ -1124,6 +1324,56 @@ def test_the_session_revision_op_refuses_in_words_without_a_queue() -> None:
     outcome = Session.revise_ask(cast(Any, _NoQueue()), "a-1", {"q0": ["yes"]})
     assert outcome["ok"] is False
     assert "predates queued asks" in outcome["error"]
+
+
+def test_the_session_withdraw_op_refuses_in_words_without_a_queue() -> None:
+    """THE KILL SWITCH (design §12), the same seam as the revision op: the
+    tool is not mounted on the blocking arm, and a stray call — a host script,
+    a stale client route — must answer in words rather than a traceback or a
+    silent success."""
+    from local_operator.session.session import Session
+
+    class _NoQueue:
+        def ask_queue(self) -> None:
+            return None
+
+    outcome = Session.withdraw_ask(cast(Any, _NoQueue()), "a-1", reason="moot")
+    assert outcome["ok"] is False
+    assert "predates queued asks" in outcome["error"]
+
+
+def test_the_session_withdraw_op_forwards_the_whole_call() -> None:
+    """The wrapper passes reason, answers, message_id and by through unchanged:
+    the refusals and the append are the queue's, and a second translation here
+    is how the two would drift."""
+    from local_operator.session.session import Session
+
+    captured: dict[str, Any] = {}
+
+    class _Queue:
+        def withdraw(self, ask_id: str, **kwargs: Any) -> dict[str, Any]:
+            captured.update(ask_id=ask_id, **kwargs)
+            return {"ok": True, "text": "x", "details": {}}
+
+    class _Session:
+        def ask_queue(self) -> _Queue:
+            return _Queue()
+
+    outcome = Session.withdraw_ask(
+        cast(Any, _Session()),
+        "a-1",
+        reason="answered_in_chat",
+        answers={"q0": ["words"]},
+        message_id="m-1",
+    )
+    assert outcome["ok"] is True
+    assert captured == {
+        "ask_id": "a-1",
+        "reason": "answered_in_chat",
+        "answers": {"q0": ["words"]},
+        "message_id": "m-1",
+        "by": "agent",
+    }
 
 
 # ---------------------------------------------------------------------------
