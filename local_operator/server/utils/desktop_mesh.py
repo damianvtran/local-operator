@@ -625,6 +625,33 @@ def lifecycle_on_owner(
     return mobility.lifecycle(session_id, action=action, peer=peer, confirmed=confirmed, root=root)
 
 
+def receipt_on_owner(
+    root: Path | None,
+    session_id: str,
+    *,
+    token: str,
+    peer: str,
+) -> dict[str, Any]:
+    """Clear a read receipt on ``peer``, where the conversation (and its mark) lives.
+
+    ROUTED, NOT REPLICATED, exactly as ``lifecycle_on_owner`` above: the unread
+    mark is written by the owner's runtime into the OWNER's own attention store,
+    so a cold local write for a peer's id could only 404 — the operator-reported
+    defect this exists for — about a conversation the user can see. The owner
+    runs its own acknowledgement (``mobility.receipt`` over
+    ``net_session_receipt``; one implementation, shared with the owner's desktop
+    daemon: ``session.attention.acknowledge_session_receipt``).
+
+    A refusal comes back as ``{"ok": False, "code", "message"}`` in the family's
+    shape — including the receipt's own verdicts (``superseded_completion_token``,
+    the store's unknown-token code), which the caller re-raises as the LOCAL
+    exceptions so one condition gets one answer on both paths.
+    """
+    from local_operator.network import mobility
+
+    return mobility.receipt(session_id, token=token, peer=peer, root=root)
+
+
 def invite(root: Path | None, network: str, *, role: str, device: str = "") -> dict[str, Any]:
     """Mint an invite and answer with the FILE PATH its token was written to.
 

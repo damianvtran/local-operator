@@ -288,7 +288,12 @@ the phases of the two op names that document reserves (`net_session_move`,
 | `net_session_move` phases *(name is the transport's)* | `move` | `phase: "status"｜"prepare"｜"ready"｜"commit"｜"done"｜"fork"｜"copy"`, `mode: "move"｜"copy"` (§6.3, §6.2) | see §6.3's literals |
 
 `net_session_lifecycle` (`delete`) carries `action: "archive"｜"restore"｜"delete"`
-(§8); `net_sync` (`view`) carries `phase: "plan"｜"fetch"｜"flush"` (§7).
+(§8); `net_sync` (`view`) carries `phase: "plan"｜"fetch"｜"flush"` (§7);
+`net_session_receipt` (`view`) carries `{session_id, token}`: one visible-read
+receipt, cleared on the OWNER's own attention store (`session/attention.py`) —
+the unread mark is written by the owner's runtime and lives nowhere else, so a
+front end's receipt for a peer's row routes there rather than replicating a
+write it could not make truthfully.
 
 Two properties of that vocabulary this design depends on, both already stated there:
 

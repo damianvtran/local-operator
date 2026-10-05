@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -1058,6 +1059,133 @@ def test_delete_of_a_live_remote_session_is_refused_by_the_owners_guard(
     assert result["code"] == "session_delete_refused"
     assert str(result["message"]) in set(_GUARD_REFUSALS.values()) or result["message"]
     assert source.exists()
+
+
+# ---------------------------------------------------------------------------
+# Read receipts on a peer: the OWNER's store is the one that changes
+# ---------------------------------------------------------------------------
+
+
+def _publish_completion(server: relay.RelayServer, session_id: str, anchor: str) -> str:
+    """One completion on ``server``'s own attention store, returning its token."""
+    from local_operator.session.attention import AttentionStore
+
+    token = str(uuid.uuid4())
+    AttentionStore(server.root / "attention.db").publish(
+        f"session/{session_id}", token, anchor, "complete"
+    )
+    return token
+
+
+def test_a_read_receipt_clears_on_the_owners_store(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unread mark lives on the owner: B forwards, A's store changes, B writes nothing.
+
+    The operator-reported defect this pins: the desktop's visible-read receipt for
+    a peer's row hit a cold local path and 404'd about a conversation the user
+    could see. The fix routes it to the owner over ``net_session_receipt``; this
+    cell drives the whole hop the way the desktop backend does (B's control
+    socket), so a slice that never registered the op fails here.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    token = _publish_completion(server_a, SESSION, "anchor-1")
+    result = mobility.receipt(
+        SESSION, token=token, peer=server_a.identity.device_id, root=server_b.root
+    )
+
+    assert result["ok"] is True, result
+    assert result["session_id"] == SESSION, result
+    state = AttentionStore(server_a.root / "attention.db").state(f"session/{SESSION}")
+    assert state["unseen"] is False and state["revision"] == [1, 1], state
+    # THE WRITE HAPPENED THERE, NOT HERE: B holds no receipt at all.
+    assert not (server_b.root / "attention.db").exists()
+
+    # AND A RETRY CONVERGES: a second identical acknowledgement lands on the
+    # same settled outcome, which is what the desktop's retry path needs.
+    again = mobility.receipt(
+        SESSION, token=token, peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert again["ok"] is True, again
+    again_state = again["state"]
+    assert isinstance(again_state, dict) and again_state["unseen"] is False, again
+
+
+def test_a_superseded_receipt_token_crosses_with_its_own_code(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's stale-token verdict is DATA with the code the renderer re-arms on."""
+    from local_operator.session.attention import AttentionStore
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    first = _publish_completion(server_a, SESSION, "anchor-1")
+    second = _publish_completion(server_a, SESSION, "anchor-2")
+
+    stale = mobility.receipt(
+        SESSION, token=first, peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert stale["ok"] is False, stale
+    assert stale["code"] == "superseded_completion_token", stale
+    assert "current token" in str(stale["message"]), stale
+    # The refusal marked nothing read.
+    assert (
+        AttentionStore(server_a.root / "attention.db").state(f"session/{SESSION}")["unseen"] is True
+    )
+
+    caught_up = mobility.receipt(
+        SESSION, token=second, peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert caught_up["ok"] is True, caught_up
+    caught_up_state = caught_up["state"]
+    assert isinstance(caught_up_state, dict) and caught_up_state["unseen"] is False, caught_up
+
+
+def test_an_unknown_receipt_token_is_refused_without_touching_state(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store's unknown-token verdict crosses as its own code and writes nothing."""
+    from local_operator.session.attention import AttentionStore
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    _publish_completion(server_a, SESSION, "anchor-1")
+    result = mobility.receipt(
+        SESSION, token=str(uuid.uuid4()), peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert result["ok"] is False, result
+    assert result["code"] == "unknown_completion_token", result
+    assert (
+        AttentionStore(server_a.root / "attention.db").state(f"session/{SESSION}")["unseen"] is True
+    )
+
+
+def test_a_receipt_for_a_session_the_owner_does_not_hold_is_refused(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chokepoint's ownership rule covers the new op: a relay acts only on its own ids."""
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    stranger = "0f1e2d3c4b5a"
+    result = mobility.receipt(
+        stranger, token=str(uuid.uuid4()), peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert result["ok"] is False, result
+    assert "does not live on this device" in str(result["message"]), result
 
 
 def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(

@@ -342,6 +342,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_lifecycle") == mobility.LIFECYCLE_OP_DEADLINE_S
+        # The receipt rides INLINE — a store write, not a copy or a retire — so it
+        # holds no slow worker and has no owner-side deadline to queue behind.
+        assert server.slow_op_deadline("net_session_receipt") is None
         # The unlanded slice keeps its by-name refusal...
         with pytest.raises(types.MeshRefusal) as excinfo:
             broker = server._handlers["net_broker"]  # noqa: SLF001
@@ -352,7 +355,7 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
         # ...and the landed ones answer AS THE SLICE: a frame with no conversation id
         # is refused by the handler in the family's own shape (a MeshRefusal the relay
         # shapes into a refusal frame), not by the name of a document.
-        for op in ("net_session_move", "net_sync", "net_session_lifecycle"):
+        for op in ("net_session_move", "net_sync", "net_session_lifecycle", "net_session_receipt"):
             with pytest.raises(types.MeshRefusal) as landed:
                 landed_handler = server._handlers[op]  # noqa: SLF001
                 landed_handler(None, {"req": 1})  # type: ignore[arg-type]
@@ -383,6 +386,11 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
         )
         assert isinstance(lifecycle, dict), lifecycle
         assert lifecycle["code"] == "session_lifecycle_refused", lifecycle
+        receipt = server._handlers["net_session_receipt"](  # noqa: SLF001
+            link, {"session_id": "9f3ac1e0b7d2", "token": "t"}
+        )
+        assert isinstance(receipt, dict), receipt
+        assert receipt["code"] == "session_receipt_refused", receipt
     finally:
         server.stop()
 

@@ -70,7 +70,7 @@ from local_operator.session.attached import (
     AttachedSession,
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
-from local_operator.session.attention import AttentionStore
+from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
     CatalogueScope,
@@ -5491,17 +5491,15 @@ class DesktopSessions:
         Validate the same durable user-session namespace as the bridge, but do
         not enter its acquire path: a completed cold conversation is readable
         even when its runtime and the mobile daemon are both stopped.
+
+        THE WRITE ITSELF IS SHARED (``session.attention.acknowledge_session_receipt``):
+        the mesh's owner-side receipt handler runs the same function, so a
+        receipt applied here and a receipt forwarded to this device cannot
+        disagree about which ids are acknowledgeable or what the store records.
         """
 
         def acknowledge() -> dict[str, Any]:
-            if not SESSION_ID.fullmatch(session_id):
-                raise KeyError("Unknown session")
-            path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                raise KeyError("Unknown session")
-            return AttentionStore(self.root / "attention.db").acknowledge(
-                f"session/{session_id}", token
-            )
+            return acknowledge_session_receipt(self.root, session_id, token)
 
         return await asyncio.to_thread(acknowledge)
 

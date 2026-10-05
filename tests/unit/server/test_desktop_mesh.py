@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -52,6 +53,7 @@ from local_operator.server.routes.capabilities import (
     capabilities as capabilities_endpoint,
 )
 from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.session.attention import AttentionStore
 from local_operator.session.cleanup import mark_store
 
 MINE = "a" * 12
@@ -1305,3 +1307,268 @@ async def test_a_local_archive_still_runs_here(mesh_api, monkeypatch: pytest.Mon
     from local_operator.session.archived import read_archived
 
     assert MINE in read_archived(root)
+
+
+# ---------------------------------------------------------------------------
+# A peer's read receipt, pin and claim: the state lives on the OWNER
+# ---------------------------------------------------------------------------
+
+
+def _publish_receipt(root: Path, session_id: str) -> str:
+    """One completion in ``root``'s own attention store, returning its token."""
+    token = str(uuid.uuid4())
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", token, "anchor-1", "complete"
+    )
+    return token
+
+
+def test_receipt_on_owner_speaks_the_session_receipt_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``receipt_on_owner`` asks THIS device's relay for ``session_receipt``.
+
+    The fields are the family's — the id, the completion token, and the owner the
+    caller resolved — and the relay's answer comes back as the family's dict,
+    which is what the route maps to a status.
+    """
+    from local_operator.server.utils import desktop_mesh as desktop_mesh_utils
+
+    relay = FakeRelay(
+        {"session_receipt": {"ok": True, "session_id": OTHER, "state": {"unseen": False}}}
+    )
+    _join(monkeypatch, relay)
+    result = desktop_mesh_utils.receipt_on_owner(tmp_path, OTHER, token=REQUEST_ID, peer=PEER)
+    assert relay.calls == [
+        ("session_receipt", {"session_id": OTHER, "token": REQUEST_ID, "peer": PEER})
+    ]
+    assert result == {"ok": True, "session_id": OTHER, "state": {"unseen": False}}
+
+
+@pytest.mark.asyncio
+async def test_a_peers_read_receipt_is_cleared_on_the_owner(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer-owned id forwards to the owner and answers the local success shape.
+
+    The operator-reported defect: this route's cold local path raised KeyError for
+    a peer's row and the shared ladder answered 404 about a conversation the user
+    could see. With an owner resolved, the receipt is written THERE — on the
+    owner's own attention store — and the reply is the owner's own state.
+    """
+    client, root = mesh_api
+    calls: list[dict[str, Any]] = []
+    state = {
+        "conversation_id": f"session/{OTHER}",
+        "completion_token": REQUEST_ID,
+        "anchor_id": "anchor-1",
+        "kind": "complete",
+        "unseen": False,
+        "revision": [1, 1],
+    }
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+
+    def fake_receipt(root_arg: Any, session_id: str, *, token: str, peer: str) -> dict[str, Any]:
+        calls.append({"session_id": session_id, "token": token, "peer": peer})
+        return {"ok": True, "session_id": session_id, "state": state}
+
+    monkeypatch.setattr("local_operator.server.utils.desktop_mesh.receipt_on_owner", fake_receipt)
+    response = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {**state, "supported": None}, response.text
+    assert calls == [{"session_id": OTHER, "token": REQUEST_ID, "peer": PEER}]
+    # NOTHING WAS WRITTEN HERE: the row is not this device's to clear.
+    assert not (root / "sessions" / OTHER).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_local_read_receipt_still_runs_here(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The branch is additive: no peer owner ⇒ the existing cold path, byte for byte.
+
+    The response is compared against a literal built from the store's own answer,
+    and the forward seam is armed to FAIL if it is called: a local id must not pay
+    a relay hop (the owner lookup is cache-first and reads no relay for a local
+    id).
+    """
+    client, root = mesh_api
+    _seed_session(root, MINE)
+    token = _publish_receipt(root, MINE)
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: pytest.fail("a local id must not be forwarded"),
+    )
+    response = await client.post(
+        f"/v1/desktop/sessions/{MINE}/seen", json={"completion_token": token}
+    )
+    assert response.status_code == 200, response.text
+    state = AttentionStore(root / "attention.db").state(f"session/{MINE}")
+    assert state["unseen"] is False, state
+    assert response.json() == {
+        "status": 200,
+        "message": "Desktop session result.",
+        "result": {
+            "conversation_id": state["conversation_id"],
+            "completion_token": state["completion_token"],
+            "anchor_id": state["anchor_id"],
+            "kind": state["kind"],
+            "unseen": False,
+            "revision": state["revision"],
+            "supported": None,
+        },
+    }, response.text
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_owner_answers_in_words_not_the_shared_404(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An undeliverable receipt names the device and the act; it is never "not found"."""
+    client, _root = mesh_api
+    sentence = "build-box is unreachable (no answer on its link); nothing was changed"
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: {"ok": False, "code": "unreachable", "message": sentence},
+    )
+    response = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_is_remote", detail
+    assert "build-box" in detail["message"], detail
+    assert "unreachable" in detail["message"], detail
+    assert "The unread mark was not cleared." in detail["message"], detail
+    assert "not found" not in detail["message"], detail
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_receipt_verdict_keeps_the_local_answer(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's stale/unknown token verdicts are re-raised as the LOCAL exceptions.
+
+    One condition gets one answer on both paths: a renderer's re-arm keys on
+    ``superseded_completion_token``, and the store's unknown-token 409 keeps its
+    exact local body (a bare sentence) instead of being reframed as reachability.
+    """
+    client, _root = mesh_api
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: {
+            "ok": False,
+            "code": "superseded_completion_token",
+            "message": "completion token superseded by a newer completion; "
+            "acknowledge the conversation's current token",
+        },
+    )
+    superseded = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert superseded.status_code == 409, superseded.text
+    assert superseded.json()["detail"]["code"] == "superseded_completion_token", superseded.text
+    assert "current token" in superseded.json()["detail"]["message"], superseded.text
+
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: {
+            "ok": False,
+            "code": "unknown_completion_token",
+            "message": "unknown completion token",
+        },
+    )
+    unknown = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert unknown.status_code == 409, unknown.text
+    assert unknown.json()["detail"] == "unknown completion token", unknown.text
+
+
+@pytest.mark.asyncio
+async def test_a_peers_pin_is_refused_in_words_not_a_404(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin lives on the owner; forwarding is deferred, so the answer is a 409.
+
+    Not the shared 404 (a lie about a row on the user's screen) and not a silent
+    200-no-op (a lie about the write): the state names the device it lives on.
+    """
+    client, _root = mesh_api
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.DesktopSessions.set_pin",
+        lambda *_a, **_k: pytest.fail("a peer's pin must not reach the local store"),
+    )
+    response = await client.post(f"/v1/desktop/sessions/{OTHER}/pin", json={"pinned": True})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_is_remote", detail
+    assert "build-box" in detail["message"] and "pin" in detail["message"], detail
+
+
+@pytest.mark.asyncio
+async def test_a_local_pin_still_runs_here(mesh_api, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No peer owner ⇒ the existing write, unchanged."""
+    client, root = mesh_api
+    _seed_session(root, MINE)
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner", lambda root_arg, sid: None
+    )
+    response = await client.post(f"/v1/desktop/sessions/{MINE}/pin", json={"pinned": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"session_id": MINE, "pinned": True}
+
+
+@pytest.mark.asyncio
+async def test_a_peers_delivery_claim_is_refused_in_words_not_a_404(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule for the banner claim: the watermark lives on the owner."""
+    client, root = mesh_api
+    _seed_session(root, MINE)
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box") if sid == OTHER else None,
+    )
+
+    async def refuse_peer(self: Any, session_id: str, token: str) -> bool:
+        if session_id == OTHER:
+            pytest.fail("a peer's claim must not reach the local store")
+        return False
+
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.DesktopSessions.claim_notification",
+        refuse_peer,
+    )
+    blocked = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/notified", json={"completion_token": REQUEST_ID}
+    )
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["code"] == "session_is_remote", detail
+    assert "build-box" in detail["message"] and "delivery claim" in detail["message"], detail
+
+    # AND A LOCAL CLAIM STILL RUNS: an unknown token on a local session answers
+    # the ordinary false rather than a refusal.
+    local = await client.post(
+        f"/v1/desktop/sessions/{MINE}/notified", json={"completion_token": REQUEST_ID}
+    )
+    assert local.status_code == 200, local.text
+    assert local.json()["result"] == {"claimed": False}, local.text
