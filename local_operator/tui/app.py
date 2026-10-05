@@ -428,6 +428,7 @@ from local_operator.tui.widgets.projects_view import (
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
+    PICKER_FLEET_ASKS,
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
 )
@@ -5622,6 +5623,27 @@ class OperatorApp(App[None]):
         #: which ask it belongs to, and the answer has to be routed to THAT ask —
         #: the queue is a store, and a card is only ever a view of one row.
         self._ask_mounted_id: str | None = None
+        #: Ask ids whose answer is IN FLIGHT through the engage seam (round 2:
+        #: F2/U5). AT APP LEVEL, keyed by ask id, because the widget that shows
+        #: it is the LIST — and answering a fleet row goes list → card → settle,
+        #: so the list is unmounted for the whole window the guard has to
+        #: survive. A widget-local flag could not see the card at all, and a
+        #: fresh list (reopened, or after a snapshot) started empty, which is how
+        #: a second Enter could spawn a second worker and CANCEL the first one
+        #: mid-engage. Every mount seeds the widget from this set.
+        self._ask_in_flight: set[str] = set()
+        #: ``session_id -> title`` from the session catalogue, for the fleet
+        #: list's row handles (round 2: U8/U6). A fleet row names the
+        #: conversation it belongs to, and the catalogue's title is the name
+        #: every other surface uses for it; the cwd segment is only the fallback.
+        self._ask_session_titles: dict[str, str] = {}
+        #: The FLEET list's own count facts, read with its rows: the index's
+        #: outstanding tally (the number the truncated frame states) and whether
+        #: any session's entry came back at the projection cap, where the split is
+        #: no longer knowable (round 2: F6). `None`/False is the session scope's
+        #: shape and the fleet's before its first read.
+        self._ask_fleet_open_count: int | None = None
+        self._ask_fleet_truncated: bool = False
         #: The mounted queued picker, if any. A SEPARATE slot from
         #: ``_ask_screen``: see the section comment on ``_sync_ask_surface``.
         self._ask_card: AskPickerScreen | None = None
@@ -11012,13 +11034,16 @@ class OperatorApp(App[None]):
             # says a cap belongs before it "ever feeds a frame"; the fleet list
             # fetches them once, off-thread, when that scope is opened (D2).
             ask_marks: dict[str, int] = {}
-            ask_total = 0
             from local_operator.asks import policy
 
             if self._ask_index_poll % ASK_INDEX_POLL_EVERY == 0 and policy.enabled():
-                ask_marks, ask_total = self._read_fleet_asks()
+                ask_marks, _ask_total = self._read_fleet_asks()
             self._ask_index_poll += 1
-            return entries, pins, total, silent, peer_rows, unanswered, ask_marks, ask_total
+            # The tally is NOT carried out of here: A4 derives the total by
+            # SUMMING the marks at paint time, and the current session's live
+            # wire count is unioned in there (round 2: F9 — the second return
+            # value used to ride this tuple and be unpacked unused).
+            return entries, pins, total, silent, peer_rows, unanswered, ask_marks
 
         async def refresh() -> None:
             try:
@@ -11030,7 +11055,6 @@ class OperatorApp(App[None]):
                     peer_rows,
                     unanswered,
                     ask_marks,
-                    ask_total,
                 ) = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
@@ -16719,29 +16743,35 @@ class OperatorApp(App[None]):
                 # Dismissed with Esc (or on an empty filter) — the session on
                 # screen is left exactly as it was, with nothing said: a
                 # cancelled picker is not an event worth a transcript line.
-                if session_id:
+                if session_id == PICKER_FLEET_ASKS:
+                    # THE PICKER'S OWN FLEET DOOR (round 2: U2). The count on its
+                    # chrome row is the only fleet surface a user sees under the
+                    # default `tui.sidebar_visible = False`, so a count with no
+                    # door was a dead end; pressing it opens the ONE list on the
+                    # fleet scope, exactly as the sidebar's note does.
+                    self.action_open_fleet_asks()
+                elif session_id:
                     self._resume_session(session_id, notice)
 
-            self.push_screen(
-                SessionPickerScreen(
-                    rows,
-                    time.time(),
-                    digests,
-                    # The picker re-reads liveness on its own animation tick
-                    # (D1+D3): a spinner that moves while reporting state from
-                    # when the picker opened is a stronger claim than a frozen
-                    # one and less true. The same overlay used to build the
-                    # rows does the refresh, so there is one definition of what
-                    # each marker means.
-                    refresh_live_state=self._overlay_live_state,
-                    # The FLEET ask total, read FRESH on open (amendment A2: the
-                    # fleet surfaces refresh on the picker's own open rather
-                    # than trusting the 10 s poll's last answer). Read here, on
-                    # the same path that already walked the session store, so
-                    # the picker never opens with a stale total.
-                    asks_total=self._fleet_ask_total_now(),
-                ),
-                _resume_choice,
+            picker = SessionPickerScreen(
+                rows,
+                time.time(),
+                digests,
+                # The picker re-reads liveness on its own animation tick
+                # (D1+D3): a spinner that moves while reporting state from
+                # when the picker opened is a stronger claim than a frozen
+                # one and less true. The same overlay used to build the
+                # rows does the refresh, so there is one definition of what
+                # each marker means.
+                refresh_live_state=self._overlay_live_state,
+                # The FLEET ask total, seeded from the poll's last answer and
+                # corrected a beat later by an off-thread read (F5). This used
+                # to read the whole index here, on the keypress path.
+                asks_total=self._fleet_ask_total_cached(),
+            )
+            self.push_screen(picker, _resume_choice)
+            self.run_worker(
+                self._refresh_picker_asks_total(picker), group="ask-fleet-total"
             )
             return
 
@@ -25833,6 +25863,15 @@ class OperatorApp(App[None]):
                     open_count=open_count,
                     truncated=truncated,
                 )
+        # THE ACTIVE SCOPE's rows — the whole of review round 2's F1. Both
+        # checks below used to read ``self._ask_rows``, the CURRENT session's
+        # rows, and a FLEET surface is by definition about OTHERS: a mounted
+        # fleet ask is never in that list, so the first snapshot after the door
+        # opened found it "gone" and collapsed it — and in the ordinary case
+        # (no current-session asks at all) the LIST went the same way. Snapshots
+        # land on any state change (turn, stream, job, wake, todo), so the door
+        # opened and the surface vanished under the reader.
+        active_rows = self._ask_current_rows()
         if self._ask_card is not None and self._ask_mounted_id is not None:
             # The CARD's title is derived from the row's STATUS, and a status is
             # exactly what a snapshot can change under a mounted card (an ask
@@ -25840,18 +25879,18 @@ class OperatorApp(App[None]):
             # what keeps the card from saying "the agent asked and moved on"
             # over a question the bar has already called timed out (UX U9).
             row = next(
-                (item for item in self._ask_rows if item.ask_id == self._ask_mounted_id), None
+                (item for item in active_rows if item.ask_id == self._ask_mounted_id), None
             )
             if row is not None:
                 self._ask_card.set_title(self._ask_card_title(row))
         if self._ask_mounted_id is not None and not any(
-            row.ask_id == self._ask_mounted_id for row in self._ask_rows
+            row.ask_id == self._ask_mounted_id for row in active_rows
         ):
             # The mounted ask is gone from the fold. Nothing awaits it here, so
             # this is a plain collapse — and the chat draft IS restored, because
             # the user never asked to leave; the surface left them.
             self._collapse_asks()
-        elif self._ask_mode and not self._ask_rows:
+        elif self._ask_mode and not active_rows:
             # Nothing left to answer at all: a list of zero rows is dead chrome
             # holding the composer hostage.
             self._collapse_asks()
@@ -25933,7 +25972,22 @@ class OperatorApp(App[None]):
         sidebar = getattr(self, "_session_sidebar", None)
         from local_operator.asks import policy
 
-        if sidebar is None or not policy.enabled():
+        if sidebar is None:
+            return
+        # THE KILL SWITCH CLEARS WHAT IS ALREADY PAINTED (round 2: F4). The
+        # early return used to sit ABOVE the push, so a sidebar that had painted
+        # `asks: N` and the marks kept them over an inert door once the flag
+        # went off — the flag is process-start in production, so this is a
+        # state-consistency bug rather than a live one, but the surface must not
+        # describe a queue it is no longer watching. Clearing FIRST and
+        # returning is the whole fix: with the flag off there is no fleet read,
+        # no total and no marks, which is what A8 promises.
+        if not policy.enabled():
+            try:
+                sidebar.set_asking({})
+                sidebar.set_asks_total(0)
+            except Exception:  # noqa: BLE001 — a sidebar never breaks an ask
+                logger.debug("could not clear the sidebar ask mark", exc_info=True)
             return
         # A4: the total is the SUM of the per-session outstanding counts, and
         # the marks it sums are the same map the rows are painted from — so a
@@ -25962,26 +26016,40 @@ class OperatorApp(App[None]):
             marks[session_id] = max(live, int(marks.get(session_id, 0)))
         return marks
 
-    def _fleet_ask_total_now(self) -> int:
-        """The fleet ask total, read on the spot for a surface that is opening.
+    def _fleet_ask_total_cached(self) -> int:
+        """The fleet total from the POLL's last answer — never an index read (F5).
 
-        The poll's answer is up to ``ASK_INDEX_POLL_EVERY`` ticks old, and a
-        surface that OPENS is exactly the moment the operator looks — so the
-        picker reads rather than trusts (A2). Best-effort: a broken index means
-        no note, never a failed open.
+        The picker is pushed from a keypress, and `index_asks` walks the whole
+        session store: reading it here put a directory scan between the user and
+        their own screen. The poll's answer is at most ``ASK_INDEX_POLL_EVERY``
+        ticks old, and the picker is corrected a beat later by
+        :meth:`_refresh_picker_asks_total`, which does the read off-thread — the
+        same shape every other fleet read on a paint path already uses.
         """
         from local_operator.asks import policy
 
         if not policy.enabled():
             return 0
-        try:
-            counts, _total = self._read_fleet_asks()
-        except Exception:  # noqa: BLE001 — a total is not worth a failed open
-            logger.debug("could not read the fleet ask total", exc_info=True)
-            return 0
         # The same union the sidebar paints (A4): the picker's note and the
         # sidebar's note must state one number for one fleet.
-        return sum(self._fleet_marks(counts).values())
+        return sum(self._fleet_marks().values())
+
+    async def _refresh_picker_asks_total(self, picker: Any) -> None:
+        """Read the fleet total OFF the UI thread and hand it to the picker (F5)."""
+        from local_operator.asks import policy
+
+        if not policy.enabled():
+            return
+        try:
+            counts, _total = await asyncio.to_thread(self._read_fleet_asks)
+        except Exception:  # noqa: BLE001 — a total is not worth a failed open
+            logger.debug("could not read the fleet ask total", exc_info=True)
+            return
+        total = sum(self._fleet_marks(counts).values())
+        try:
+            picker.set_asks_total(total)
+        except Exception:  # noqa: BLE001 — the picker may already be gone
+            logger.debug("could not set the picker ask total", exc_info=True)
 
     def _read_fleet_asks(self) -> tuple[dict[str, int], int]:
         """``(per-session outstanding counts, fleet total)`` from the index.
@@ -26300,6 +26368,14 @@ class OperatorApp(App[None]):
         Under the kill switch there is no fleet scope at all (amendment A8):
         the surfaces are absent, so the door must be inert rather than open a
         list the flag says this build does not have.
+
+        IDEMPOTENT BY CONSTRUCTION (review round 2, U1). Pressing the door again
+        while a fleet list is up is an ordinary gesture — the note did not seem
+        to respond, so press it again — and the answer is a RE-READ, not a
+        second surface: the worker below is ``exclusive``, and the mount it
+        lands on re-points the live list (``_mount_ask_list``). Remounting used
+        to raise ``DuplicateIds``, which Textual escalates to ``App.panic()``
+        and ends the session.
         """
         from local_operator.asks import policy
 
@@ -26317,8 +26393,11 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             raw = []
+        rows = ask_rows(raw)
         self._ask_scope = SCOPE_FLEET
-        self._ask_fleet_rows = ask_rows(raw)
+        self._ask_fleet_rows = rows
+        self._refresh_fleet_count_facts(raw)
+        await self._refresh_fleet_titles()
         self._mount_ask_list(scope=SCOPE_FLEET)
 
     async def _reload_fleet_rows(self) -> None:
@@ -26331,9 +26410,68 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             return
-        self._ask_fleet_rows = ask_rows(raw)
+        rows = ask_rows(raw)
+        self._ask_fleet_rows = rows
+        self._refresh_fleet_count_facts(raw)
         if self._ask_list is not None and self._ask_scope == SCOPE_FLEET:
-            self._ask_list.set_rows(self._ask_fleet_rows, now_ms=self._ask_now_ms())
+            self._ask_list.set_rows(
+                rows,
+                now_ms=self._ask_now_ms(),
+                open_count=self._ask_fleet_open_count,
+                truncated=self._ask_fleet_truncated,
+                session_titles=self._ask_session_titles,
+            )
+
+    def _refresh_fleet_count_facts(self, raw: list[dict[str, Any]]) -> None:
+        """Derive the fleet list's tally and its knowability from one read (F6).
+
+        ``AskQueue.projection`` caps each session's entry at ``PROJECTION_CAP``
+        with no marker, so a session AT the cap may have been truncated — and a
+        split computed from the rows this frame happens to carry would then be a
+        prefix passing for the whole queue. The session-scope list states the
+        backend's tally in that case; the fleet list used to decline the one
+        place a backend tally exists (its own index), so it states it too.
+
+        Conservative by construction: exactly-cap is treated as possibly
+        truncated, since 20 in-window rows is rare and the cost of a false
+        positive is a less specific (never a wrong) sentence. Open asks are
+        themselves capped at 8, so this is reachable only through settled
+        history.
+        """
+        from local_operator.asks import policy, store
+
+        per_session: dict[str, int] = {}
+        for row in raw:
+            key = str(row.get("session_id") or "")
+            per_session[key] = per_session.get(key, 0) + 1
+        self._ask_fleet_truncated = any(
+            count >= policy.PROJECTION_CAP for count in per_session.values()
+        )
+        self._ask_fleet_open_count = len(store.outstanding_asks(raw))
+
+    async def _refresh_fleet_titles(self) -> None:
+        """Map the fleet's session ids to the catalogue's own titles (U8/U6).
+
+        A fleet row names the conversation it belongs to, and the name every
+        other surface uses is the catalogue's title — the cwd's last segment was
+        only ever a stand-in, and it read as a DIFFERENT conversation from the
+        sidebar's (`pergamon` beside `Enrichment backfill review`). Read
+        off-thread for the same reason the rows are, and best-effort: a
+        catalogue that cannot be walked leaves each row its cwd handle, which is
+        the degraded but honest answer.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.session_catalog import load_catalog
+
+        try:
+            entries = await asyncio.to_thread(load_catalog, config_dir())
+        except Exception:  # noqa: BLE001 — a title is not worth a failed open
+            logger.debug("could not read the session catalogue for ask labels", exc_info=True)
+            return
+        self._ask_session_titles = {
+            entry.id: (entry.sub_title if entry.subagent else entry.row.name)
+            for entry in entries
+        }
 
     def _fleet_answer_starts_here(self, row: AskRow) -> bool:
         """Whether answering ``row`` needs the ENGAGE seam rather than the owner.
@@ -26342,11 +26480,18 @@ class OperatorApp(App[None]):
         through the owner contract this app already holds (the cheap, synchronous
         path the session list uses), and every other row — a runtime owned
         elsewhere, a stopped session, a cold one — goes through
-        ``engage_session_client``. ``session_id`` empty means a session list,
-        which is the owner's by construction.
+        ``engage_session_client``. ``session_id`` empty on a FLEET row means the
+        index gave us nothing to dial — not that the row belongs to whoever is on
+        screen. The fail-safe returns True (engage) so such a row refuses in the
+        ask's own words rather than quietly answering the WRONG conversation,
+        which is the one direction ask 2 forbids (review round 2, F10).
+        Unreachable from a real index — its rows always carry the key they were
+        filed under — but the rule is total this way.
         """
         current = str(getattr(getattr(self, "_session", None), "session_id", "") or "")
-        return bool(row.session_id) and row.session_id != current
+        if not row.session_id:
+            return True
+        return row.session_id != current
 
     def _ask_settle_callback(self, row: AskRow):
         """The card's settle handler for ``row``, routed by the ROW's OWN session.
@@ -26376,6 +26521,14 @@ class OperatorApp(App[None]):
             self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
             return
         self._run_fleet_ask_op(row, "respond", answers=answers)
+        # FEEDBACK, IMMEDIATELY (round 2: F2/U5). The card latches once it has
+        # settled (`AskPickerScreen.settle` hands its callback back exactly
+        # once), so leaving it up for the engage window — engage 30 s + ack 15 s
+        # — shows a control whose Esc and Enter both silently do nothing. The
+        # list the user came from says what is happening instead: the row paints
+        # `…` and refuses a second gesture, which is also where the refusal's own
+        # sentence lands.
+        self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
 
     def _run_fleet_ask_op(
         self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
@@ -26387,16 +26540,41 @@ class OperatorApp(App[None]):
         Textual worker because the window it must live with is the phone's own
         (engage 30 s + ack 15 s). The row is marked IN FLIGHT for that window so
         a second gesture cannot send the same answer twice.
+
+        A SECOND GESTURE IS DROPPED, NEVER RE-RUN (round 2: F2). The worker's
+        group is ``exclusive=True``, so starting it again would CANCEL the
+        engage that is already mid-dial — a guard meant to answer an ask once,
+        losing the answer. The app-level set is what the second gesture meets,
+        on whatever surface it is made (list, card, or a list reopened by f4).
         """
-        if self._ask_list is not None and any(
-            item.ask_id == row.ask_id for item in self._ask_list.visible_rows
-        ):
-            self._ask_list.set_in_flight(row.ask_id, True)
+        if row.ask_id in self._ask_in_flight:
+            return
+        self._mark_ask_in_flight(row.ask_id, True)
         self.run_worker(
             self._fleet_ask_worker(row, op, answers),
             group=f"ask-fleet-{row.ask_id}",
             exclusive=True,
         )
+
+    def _seed_ask_in_flight(self, listing: AskQueueList) -> None:
+        """Paint the app-level in-flight set onto a list that just mounted (F2).
+
+        The set is the source of truth precisely because it outlives the widget:
+        without this the row would come back inert-but-unmarked after a reopen,
+        and the second gesture it refuses would have no visible reason.
+        """
+        for ask_id in self._ask_in_flight:
+            listing.set_in_flight(ask_id, True)
+
+    def _mark_ask_in_flight(self, ask_id: str, active: bool) -> None:
+        """Record (or clear) ONE ask's in-flight state, app- and widget-level."""
+        if active:
+            self._ask_in_flight.add(ask_id)
+        else:
+            self._ask_in_flight.discard(ask_id)
+        listing = self._ask_list
+        if listing is not None and getattr(listing, "is_attached", False):
+            listing.set_in_flight(ask_id, active)
 
     async def _fleet_ask_worker(
         self, row: AskRow, op: str, answers: dict[str, list[str]] | None
@@ -26428,8 +26606,7 @@ class OperatorApp(App[None]):
             failed = str(exc) or "the answer could not be delivered"
             logger.warning("could not deliver a fleet answer", exc_info=True)
         finally:
-            if self._ask_list is not None:
-                self._ask_list.set_in_flight(row.ask_id, False)
+            self._mark_ask_in_flight(row.ask_id, False)
             await self._reload_fleet_rows()
         if failed:
             self._ask_gesture_refusal(failed)
@@ -26450,9 +26627,45 @@ class OperatorApp(App[None]):
         queue, the sidebar's fleet note opens every conversation's. The list
         paints the subject of the scope it was given and offers no toggle, so
         one surface serves both queues without becoming two affordances.
+
+        A LIST THAT IS ALREADY UP IS RE-POINTED, NEVER RE-MOUNTED (review round
+        2, U1). Two ways in make this the ordinary case rather than an edge: the
+        fleet door pressed a second time ("the note did not respond, press it
+        again" is exactly the double press) and `f4`'s session list followed by
+        the note. Mounting the replacement put a second `AskQueueList` in the
+        prompt host while the first one's removal was still deferred —
+        `DuplicateIds`, a failed worker, and `App.panic()` ends the session. The
+        retarget is also the better answer: the reader keeps their place, and the
+        second press gets a fresh read of the queue instead of a second surface.
         """
         scope = scope or self._ask_scope
         rows = self._ask_fleet_rows if scope == SCOPE_FLEET else self._ask_rows
+        # The FLEET list carries its own count facts too (F6): the index tally
+        # is the backend number the truncated frame states, and the caller's
+        # cap-detection is what makes that frame honest when a session's
+        # projection came back full.
+        open_count = self._ask_fleet_open_count if scope == SCOPE_FLEET else self._ask_open_count
+        truncated = self._ask_fleet_truncated if scope == SCOPE_FLEET else self._ask_truncated
+        listing = self._ask_list
+        if listing is not None and getattr(listing, "is_attached", False):
+            self._ask_scope = scope
+            listing.set_rows(
+                rows,
+                now_ms=self._ask_now_ms(),
+                open_count=open_count,
+                truncated=truncated,
+                scope=scope,
+                session_titles=self._ask_session_titles if scope == SCOPE_FLEET else None,
+            )
+            self._seed_ask_in_flight(listing)
+            if highlight:
+                for index, item in enumerate(listing.visible_rows):
+                    if item.ask_id == highlight:
+                        listing.select(index)
+                        break
+            self._enter_ask_mode()
+            listing.focus()
+            return
         # `_clear_ask_surface` and NOT `_collapse_asks`: the swap keeps ask mode
         # on and the stash intact (review round 1, BLOCKER-1).
         self._clear_ask_surface()
@@ -26461,9 +26674,11 @@ class OperatorApp(App[None]):
             widget_id="ask-queue-list",
             now_ms=self._ask_now_ms(),
             scope=scope,
-            open_count=None if scope == SCOPE_FLEET else self._ask_open_count,
-            truncated=False if scope == SCOPE_FLEET else self._ask_truncated,
+            open_count=open_count,
+            truncated=truncated,
+            session_titles=self._ask_session_titles if scope == SCOPE_FLEET else None,
         )
+        self._seed_ask_in_flight(widget)
         self._ask_list = widget
         if highlight:
             for index, item in enumerate(rows):

@@ -5281,3 +5281,118 @@ async def test_an_arrival_the_list_cannot_carry_yet_is_revealed_when_the_row_lan
         assert (
             sidebar.cursor_id != MINTED_PEER_SESSION
         ), "an expired arm still revealed a row that arrived after it"
+
+
+# -- round 2: the fleet door's keyboard route, its floors and its affordance ---
+
+
+@pytest.mark.asyncio
+async def test_the_fleet_note_survives_the_80x24_footer():
+    """U3: at 80x24 an unfocused sidebar kept `ctrl+b hide` and dropped the count.
+
+    29 content cells, where `f9 focus · ctrl+b hide · asks: 4` is 32 — so the
+    ladder used to fall all the way to a note-less rung and the ONLY fleet
+    surface on the frame was gone, one rung up from the operator's own report
+    ("if I wasn't at my desk I wouldn't have been able to see you had a
+    question").
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.set_asks_total(4)
+        await pilot.pause()
+        painted, _span = sidebar._footer_line(sidebar_content_width(29))
+        assert sidebar._asks_note() == "asks: 4"
+        assert "asks: 4" in painted
+        # The hint it displaces is the one that gives way — the count is
+        # discovered from nowhere else, `ctrl+b hide` is discovered by pressing.
+        assert "ctrl+b hide" not in painted
+        assert painted == "f9 focus · asks: 4"
+
+    # ...and at a real content width the whole ladder still fits, note included,
+    # with the keyboard route taught beside the pin (F9 mode only, like every
+    # other chord on this line).
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.set_asks_total(4)
+        sidebar.focus()
+        await pilot.pause()
+        painted = sidebar._footer_line(63)[0]
+        assert painted.endswith("asks: 4")
+        assert "ctrl+f asks" in painted
+        # At 21 cells the key hint and the pin both yield, and the NOTE — the
+        # only fleet surface here — is what survives with the lead.
+        assert sidebar._footer_line(21)[0] == "esc return · asks: 4"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_teaches_the_fleet_door_key_only_while_it_has_one():
+    """U2: the keyboard route is taught beside `ctrl+k pin`, and only with a note.
+
+    A hint for a door the frame does not carry would be the drift this footer's
+    ladder exists to prevent.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(130, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.focus()
+        await pilot.pause()
+        assert "ctrl+f asks" not in sidebar._footer_line(200)[0]
+        sidebar.set_asks_total(2)
+        await pilot.pause()
+        painted = sidebar._footer_line(200)[0]
+        assert "ctrl+k pin" in painted and "ctrl+f asks" in painted
+        sidebar.set_asks_total(0)
+        await pilot.pause()
+        assert "ctrl+f asks" not in sidebar._footer_line(200)[0]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_f_asks_for_the_fleet_list_from_the_sidebar():
+    """U2: the fleet scope had no keyboard route at all before this."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(130, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.focus()
+        await pilot.pause()
+        called: list[int] = []
+        app.action_open_fleet_asks = lambda: called.append(1)  # type: ignore[method-assign]
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        # THE WHOLE ROUTE: the chord reaches the sidebar's own binding (not the
+        # app's `fork_aside` shadow), which posts the message the app's handler
+        # turns into the one door action.
+        assert called == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_fleet_note_lights_under_the_pointer():
+    """U11: the one mouse-only control on that line had no affordance at all."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(130, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.set_asks_total(4)
+        await pilot.pause()
+        # The span and the hit test are read from the SAME fitted line the paint
+        # uses, so this is the internal-consistency claim: the target cannot
+        # drift from the cells that were drawn.
+        painted, _chip = sidebar._footer_line(sidebar.size.width)
+        span = sidebar._asks_span_in(painted)
+        assert span is not None and painted[span[0] : span[1]] == "asks: 4"
+        y = sidebar.size.height - 1
+        # Events arrive relative to the OUTER box; the span is in the content box.
+        pad = int(sidebar.styles.padding.left)
+        assert sidebar._set_asks_hover(span[0] + pad, y) is True
+        assert sidebar._asks_hover is True
+        # One cell past the note, and on a row, the affordance goes off again.
+        # `_set_asks_hover` reports whether the state CHANGED, so the second
+        # call is True-as-in-changed and the state is what says it is off.
+        assert sidebar._set_asks_hover(span[1] + pad, y) is True
+        assert sidebar._asks_hover is False
+        assert sidebar._set_asks_hover(2, 0) is False

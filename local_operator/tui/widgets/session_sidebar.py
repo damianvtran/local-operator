@@ -470,6 +470,24 @@ class SessionSidebar(Widget, can_focus=True):
         # this, so nothing it displaces becomes stale — and the footer ladder
         # reranks it as the primary pin route (`f10` stays as compatibility).
         Binding("ctrl+k", "toggle_pin", show=False),
+        # `ctrl+f` — THE FLEET DOOR'S KEYBOARD ROUTE (review round 2, U2), the
+        # fourth chord of the same sidebar-scoped family as the three above and
+        # safe HERE for their measured reason: in F9 mode the sidebar owns the
+        # focus chain and the composer is not in it. Before this the fleet scope
+        # had exactly ONE way in — open the sidebar with f9, then press a
+        # footnote with the mouse — which made a mouse a requirement for a
+        # keyboard-driven TUI, and left the picker's own `asks: N` (the only
+        # fleet surface a user sees under the default `tui.sidebar_visible =
+        # False`) a statement with no door.
+        #
+        # THE SHADOW, stated because it is real and bounded: at APP level
+        # `ctrl+f` is `fork_aside`, and a widget-level binding only outranks it
+        # while this list holds focus. So outside F9 mode the key still forks an
+        # aside as it always did — and with no aside open that action is already
+        # a stated refusal, not a silent no-op, which is why the shadow costs
+        # nothing: from the default state the footer teaches `f9 focus` first,
+        # and `f9` → `ctrl+f` is a complete keyboard route to the fleet queue.
+        Binding("ctrl+f", "fleet_asks", show=False),
     ]
 
     class Selected(Message):
@@ -616,6 +634,10 @@ class SessionSidebar(Widget, can_focus=True):
         #: painted as a STYLE on the chip's cells — never new text — so the
         #: count keeps its place in the ladder.
         self._chip_hover: bool = False
+        #: The ask note's own hover affordance, on the same press-event-repaint
+        #: discipline as the chip's (round 2: U11). Separate state because the
+        #: two are different controls a few cells apart.
+        self._asks_hover: bool = False
         #: The pointer's last position, kept so `set_entries` can re-derive
         #: `_chip_hover` under a RESTING pointer: the ladder can move the
         #: chip's cells when the count, the paging facts or focus change.
@@ -1262,6 +1284,7 @@ class SessionSidebar(Widget, can_focus=True):
         # refreshes, and the paint-state check below carries the flag) — but
         # the flag must tell the truth about the NEXT painted frame.
         self._set_chip_hover(self._hover_x, self._hover_y)
+        self._set_asks_hover(self._hover_x, self._hover_y)
         self._sync_animation()
         # Polling must still adopt fresh summaries (including tooltip-only
         # status), but an unchanged frame must not invalidate Rich's content
@@ -1448,6 +1471,7 @@ class SessionSidebar(Widget, can_focus=True):
             self._subagent_total,
             self._asks_total,
             self._chip_hover,
+            self._asks_hover,
         )
 
     def refresh(
@@ -1800,6 +1824,17 @@ class SessionSidebar(Widget, can_focus=True):
         # there would hand the cursor to an unrelated poll that happens to be
         # the one a delegated run first appears in.
         self._pending_jump_until = time.monotonic() + PENDING_SUBAGENT_JUMP_S if revealed else 0.0
+
+    def action_fleet_asks(self) -> None:
+        """`ctrl+f` — open the ONE ask list on the FLEET scope (round 2: U2).
+
+        The same destination and the same message as the footer note's press:
+        one door, two gestures, and the app's `action_open_fleet_asks` behind
+        both — so the scope seam, its kill-switch gate and its idempotence are
+        stated once. Inert under the kill switch, exactly as the note is (A8):
+        the app's action returns without mounting anything.
+        """
+        self.post_message(self.FleetAsksRequested())
 
     def action_toggle_pin(self) -> None:
         """`ctrl+k` — pin/unpin through the app's ONE pin path.
@@ -2202,6 +2237,19 @@ class SessionSidebar(Widget, can_focus=True):
         self._chip_hover = hovered
         return True
 
+    def _set_asks_hover(self, x: int | None, y: int | None) -> bool:
+        """Point the ask note's affordance at the pointer, reporting any change.
+
+        The chip's own rule (round 2: U11 extends it to this control): the
+        affordance is painted on the HOVER event, so it is seen before it is
+        pressed, and only the footer line is repainted.
+        """
+        hovered = x is not None and y is not None and self._asks_hit(x, y)
+        if hovered == self._asks_hover:
+            return False
+        self._asks_hover = hovered
+        return True
+
     def _refresh_rows(self, *rows: int | None) -> None:
         """Repaint just these row lines, skipping any outside the widget.
 
@@ -2223,6 +2271,8 @@ class SessionSidebar(Widget, can_focus=True):
         # painted on the hover event, so it is seen before it is pressed — and
         # only its own line is repainted, not the list.
         if self._set_chip_hover(event.x, event.y):
+            self._refresh_rows(self.size.height - 1)
+        if self._set_asks_hover(event.x, event.y):
             self._refresh_rows(self.size.height - 1)
         if row_changed:
             # Only the two rows whose ground changes, not all 38: a hover move
@@ -2570,20 +2620,30 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n")
         footer, chip_span = self._footer_line(width)
         footer_style = theme_mod.semantic_color("warning" if self.error else "dim")
+        # THE UNDERLINED SPAN IS WHICHEVER CONTROL THE POINTER IS ON (round 2:
+        # U11): the chip's own measured rationale extends to the ask note, which
+        # is a control too — and until now the one control on this line that was
+        # reachable by mouse ALONE, painted in the same `dim` ink as the key
+        # hints beside it with no affordance at all. Same mechanism (a style on
+        # its own cells, never new text), same reason (accent means "a turn is
+        # live" and the focus ground is near-iso-luminance, so no ink is the
+        # pointer's to spend). `footer[end:]` is appended rather than dropped:
+        # with the note in the tail, the chip is no longer the line's last span,
+        # and the resting bytes are unchanged because the underline branch only
+        # fires under the pointer.
+        hovered: tuple[int, int] | None = None
         if chip_span is not None and self._chip_hover:
-            # The chip's affordance is a STYLE on its own cells, never new
-            # text: the count stays on the frame in every state — a hover must
-            # not steal it — and the ladder's arithmetic is untouched (`f9
-            # focus · ctrl+b hide · ⌥1k+` still measures 29). Underline rather
-            # than an ink step: the accent already means "a turn is live" and
-            # the focus ground sits at near-iso-luminance, so neither ink is
-            # the pointer's to spend. The resting path appends the SAME single
-            # span it always did, so an un-hovered frame's bytes are unchanged.
-            start, end = chip_span
+            hovered = chip_span
+        note_span = self._asks_span_in(footer)
+        if note_span is not None and self._asks_hover:
+            hovered = note_span
+        if hovered is not None:
+            start, end = hovered
             result.append("\n" + footer[:start], style=footer_style)
             result.append(
                 footer[start:end], style=Style(color=footer_style) + Style(underline=True)
             )
+            result.append(footer[end:], style=footer_style)
         else:
             result.append("\n" + footer, style=footer_style)
         return result
@@ -2690,16 +2750,30 @@ class SessionSidebar(Widget, can_focus=True):
         if self.has_focus:
             pin = f"{lead} · ctrl+k pin"
             layer = " · ctrl+a ⌥" if chip else ""
+            # THE FLEET DOOR'S KEY (round 2: U2), spent like every other fact on
+            # this line — whole or not at all, and only while the note it teaches
+            # about is on screen. It costs 14 cells and is tried AFTER the pin's
+            # own rung, before the pin: the pin and the note are facts, this is
+            # the ROUTE to one of them, and the mouse already has that route.
+            key = " · ctrl+f asks" if ask_note else ""
             candidates: list[str] = []
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
                 if chip:
+                    candidates.append(f"{position} · {pin}{key}{layer}{tail}")
+                candidates.append(f"{position} · {pin}{key}{tail}")
+                if chip:
                     candidates.append(f"{position} · {pin}{layer}{tail}")
                 candidates.append(f"{position} · {pin}{tail}")
             if chip:
-                candidates.append(f"{pin}{layer}{tail}")
-            candidates += [f"{pin}{tail}", f"{lead}{tail}", lead]
+                candidates.append(f"{pin}{key}{layer}{tail}")
+            candidates += [
+                f"{pin}{key}{tail}",
+                f"{pin}{tail}",
+                f"{lead}{tail}",
+                lead,
+            ]
         else:
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
@@ -2710,6 +2784,16 @@ class SessionSidebar(Widget, can_focus=True):
                 ]
             else:
                 candidates = [f"{base}{tail}"]
+                if tail:
+                    # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round
+                    # 2: U3). At 80x24 an unfocused sidebar has 29 content cells
+                    # and `f9 focus · ctrl+b hide · asks: 4` is 32, so the
+                    # ladder used to fall all the way to `f9 focus · ctrl+b hide`
+                    # — dropping the total, the only fleet surface on the frame,
+                    # while keeping a hint about hiding a panel. `ctrl+b hide`
+                    # is discovered by pressing ctrl+b and is also on the frame
+                    # that toggles it; the count is discovered from nowhere else.
+                    candidates.append(f"{lead}{tail}")
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(
@@ -2756,10 +2840,24 @@ class SessionSidebar(Widget, can_focus=True):
         if not note or y != self.size.height - 1:
             return False
         painted = self._footer_line(max(1, self.size.width))[0]
-        at = painted.rfind(note)
-        if at < 0 or not painted[:at].endswith(" · "):
-            # Only a note the ladder actually PAINTED opens anything: a
-            # truncated line that happens to contain the words is not a target.
+        span = self._asks_span_in(painted)
+        if span is None:
             return False
         column = x - self.styles.padding.left
-        return at <= column < at + len(note)
+        return span[0] <= column < span[1]
+
+    def _asks_span_in(self, painted: str) -> tuple[int, int] | None:
+        """The note's painted cell span, or ``None`` when it is not on the line.
+
+        ONE resolution shared by the press target, the hover affordance and the
+        paint itself, so the three can never disagree about where the door is.
+        Only a note the ladder actually PAINTED counts: a truncated line that
+        happens to contain the words is not a target.
+        """
+        note = self._asks_note()
+        if not note:
+            return None
+        at = painted.rfind(note)
+        if at < 0 or not painted[:at].endswith(" · "):
+            return None
+        return (at, at + len(note))

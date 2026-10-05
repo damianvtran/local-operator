@@ -184,6 +184,11 @@ STACK_BELOW_COLS = 165
 #:
 #: THIS CAP IS WHAT MAKES THE BREAKPOINT SOUND. It is not cosmetic, and
 #: removing it reopens round 2's BLOCKER. Uncapped, the fields are
+#: The sentinel the picker dismisses with when its chrome row's `asks: N` is
+#: pressed (round 2: U2). Distinct from every session id, which is a directory
+#: name — the results this screen can otherwise return.
+PICKER_FLEET_ASKS = "\x00fleet-asks"
+
 #: ``stacked = W − chrome`` and ``side-by-side = split×W − chrome``, so stacked
 #: gains a full cell per terminal column while side-by-side gains only
 #: ``split``: their gap DIVERGES without limit (at split 0.6, −64 cells at
@@ -1791,9 +1796,22 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._digests = dict(digests or {})
         #: The FLEET ask total (amendment A2/A4): every session's outstanding
         #: asks, added up. Painted on the footer's chrome row only while it is
-        #: > 0, and only ever as the marks' arithmetic rather than as a control
-        #: of its own — the picker's door is a row, not the note.
+        #: > 0 — never as a chip of its own, because the fleet total is the
+        #: marks' arithmetic and a second affordance beside them is what A2
+        #: forbids.
+        #:
+        #: IT IS ALSO THE PICKER'S FLEET DOOR (round 2: U2). With the sidebar
+        #: hidden — the default — this count is the only fleet surface a user
+        #: sees, and it used to be a dead end: a number stating that another
+        #: conversation is waiting on them, with nothing to press. Pressing it
+        #: now opens the ONE list on the fleet scope, the same destination the
+        #: sidebar's note has.
         self._asks_total = max(0, int(asks_total or 0))
+        #: The note's painted cell span (``start``, ``end``) within the chrome
+        #: row, recorded by `_filter_text` from the bytes it appends. `None`
+        #: whenever the note is not painted — nothing outstanding, or a width
+        #: that shed it — which is exactly when there is no door to press.
+        self._asks_span: tuple[int, int] | None = None
         # Soft matching reruns on every keystroke; a per-screen index caches each
         # digest's token set (and a deduplicated vocabulary over them) so the
         # bounded edit-distance search costs ~13 ms per query change at real
@@ -2008,6 +2026,51 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # The toggle is the FIRST line of that pane; the rows start one line
         # below it (``_header_rows``).
         return event.screen_y - region.y == 0
+
+    def set_asks_total(self, total: int) -> None:
+        """Restate the fleet total after an OFF-THREAD read (round 2: F5).
+
+        The screen opens on the poll's last answer — reading the whole index on
+        the keypress that pushed it put a session-store walk between the user and
+        their own screen — and the correction lands a beat later. Repainting the
+        chrome row alone, like every other single-line change here.
+        """
+        total = max(0, int(total or 0))
+        if total == self._asks_total:
+            return
+        self._asks_total = total
+        if self.is_mounted:
+            self._repaint()
+
+    def _clicked_asks_note(self, event) -> bool:  # type: ignore[no-untyped-def]
+        """Whether a mouse event landed on the chrome row's `asks: N` (U2).
+
+        THE NOTE'S OWN CELLS, not the whole line: the archived toggle can claim
+        its entire row because the row exists for one purpose, but this one
+        carries a counter, legends and the way out, and a click on any of those
+        means nothing about asks. The span comes from `_filter_text` — the same
+        bytes that are painted — and the column is resolved against the pane's
+        CONTENT region, so neither the target nor the leading padding can drift
+        from what the user sees.
+        """
+        span = self._asks_span
+        if span is None:
+            return False
+        # THE FILTER ROW is where this note is painted (`_filter_text`), the
+        # bottom line of the picker — not the results pane's first line, which
+        # carries the archived toggle. Both are single-line chrome and both
+        # resolve their column against their own CONTENT region, so neither the
+        # target nor the leading padding can drift from what the user sees.
+        filter_row = getattr(self, "_filter", None)
+        if filter_row is None or not filter_row.is_mounted:
+            return False
+        region = filter_row.region
+        if not region.contains(event.screen_x, event.screen_y):
+            return False
+        content = getattr(filter_row, "content_region", None)
+        left = int(content.x) if content is not None else int(region.x)
+        column = event.screen_x - left
+        return span[0] <= column < span[1]
 
     def _drawable_rows(self) -> int:
         """The list pane's row budget, after the chrome drawn above the rows.
@@ -2276,6 +2339,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
             return
         if self._over_preview(event):
             event.stop()
+            return
+        if self._clicked_asks_note(event):
+            # Stopped like every other hit this handler resolves: one gesture
+            # owns the viewport. Dismissing with the sentinel is how this screen
+            # returns anything other than a session — the app opens the fleet
+            # list on it.
+            event.stop()
+            self._dismiss_result(PICKER_FLEET_ASKS)
             return
         if self._clicked_toggle(event):
             # Stopped like every other hit this handler resolves: one gesture
@@ -3635,6 +3706,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # Only the SEPARATORS (" · ", the three-cell lead) stay `faint`: those
         # are the "meta separators" the step is named for.
         tail = Text(no_wrap=True, overflow="ellipsis")
+        # Cleared before the tail is composed: a paint that sheds the note must
+        # not leave the PREVIOUS paint's press target behind (U2).
+        self._asks_span = None
         # THE FLEET ASK TOTAL (amendment A2/A4), stated on this screen's own
         # chrome row while it is > 0 and NOT as a chip of its own: the fleet
         # total is the marks' arithmetic, and a second affordance beside them
@@ -3780,7 +3854,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
             keys = key_row(0, budget=max(0, width - cell_len(out.plain)))
             room = width - cell_len(out.plain) - cell_len(keys.plain)
         if cell_len(tail.plain) <= room:
+            # THE NOTE'S HIT BOX IS RECORDED FROM THE BYTES IT PAINTS (U2).
+            # Re-deriving it in the click handler would drift the first time the
+            # tail's own lead changed; this cannot. A width that sheds the tail
+            # leaves `None` — no note on screen, no door to press.
+            tail_start = cell_len(out.plain)
             out.append_text(tail)
+            if self._asks_total > 0:
+                note = f"asks: {self._asks_total}"
+                start = tail_start + len("   ")
+                self._asks_span = (start, start + len(note))
 
         # THE WAY OUT IS SHED LAST, AND THE QUERY YIELDS TO IT. Everything
         # above trims the row from the right, but the ECHO on the left grows
@@ -3795,6 +3878,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if cell_len(out.plain) + keys_cells > width:
             room_for_echo = max(0, width - keys_cells)
             out = Text(truncate_cells(out.plain, room_for_echo), style=out.style)
+            # The row was cut from the RIGHT, so the note survives only if its
+            # span still fits inside what is left. A stale span would leave a
+            # press target over cells the user cannot see.
+            span = self._asks_span
+            if span is not None and span[1] > cell_len(out.plain):
+                self._asks_span = None
         out.append_text(keys)
         # The row is `no_wrap` with ellipsis overflow, but Textual only applies
         # that against the widget's REAL width — and this text is also read
