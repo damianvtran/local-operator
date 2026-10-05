@@ -282,6 +282,107 @@ async def test_a_failed_bookkeeping_append_does_not_move_the_clock_either(tmp_pa
     assert session_activity(transcript.directory) == pytest.approx(before, abs=1e-6)
 
 
+def test_is_bookkeeping_entry_splits_the_per_row_question_for_the_reader():
+    """``is_pristine`` asks the same vocabulary one row at a time.
+
+    Split out of ``_is_bookkeeping_batch`` on 2026-10-05 so the pristine probe
+    can exempt bookkeeping rows without re-deriving the classification: a
+    fresh phone session journals an MCP card at boot, and counting it as
+    "work or history" refused the composer's own directory change. Both
+    spellings are pinned here — the ``append_custom`` form has no ``kind`` —
+    plus the forged-``Message`` boundary that keeps real work out.
+    """
+    from local_operator.session.transcript import (
+        CUSTOM_KIND_MESSAGE,
+        ENTRY_CUSTOM,
+        ENTRY_MESSAGE,
+        is_bookkeeping_entry,
+    )
+
+    custom_spelling = TranscriptEntry(
+        "c1", PAST, ENTRY_CUSTOM, {"custom_type": SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE}
+    )
+    message_spelling = TranscriptEntry(
+        "m1",
+        PAST,
+        ENTRY_MESSAGE,
+        {"kind": "custom", "custom_type": SESSION_INCIDENT_MESSAGE_TYPE},
+    )
+    real_row = TranscriptEntry(
+        "r1", PAST, ENTRY_MESSAGE, {"kind": "message", "role": "user", "content": "hi"}
+    )
+    forged = TranscriptEntry(
+        "f1",
+        PAST,
+        ENTRY_MESSAGE,
+        {"kind": CUSTOM_KIND_MESSAGE, "custom_type": SESSION_INCIDENT_MESSAGE_TYPE},
+    )
+
+    assert is_bookkeeping_entry(custom_spelling) is True
+    assert is_bookkeeping_entry(message_spelling) is True
+    assert is_bookkeeping_entry(real_row) is False
+    assert is_bookkeeping_entry(forged) is False
+
+    # The message-level spelling of the same question (the
+    # ``session.history()`` leg of the probe): customs are exempt by their
+    # type, plain messages and foreign customs are not.
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.session.transcript import is_bookkeeping_message
+
+    assert is_bookkeeping_message(_mcp_unavailable()) is True
+    assert (
+        is_bookkeeping_message(
+            CustomMessage(
+                custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                attribution="system",
+                details={"text": "a quiet-dial note"},
+            )
+        )
+        is False
+    )
+    assert is_bookkeeping_message(Message.user("hello")) is False
+
+
+@pytest.mark.asyncio
+async def test_transcript_is_bookkeeping_only_keeps_the_old_verdict_on_every_doubt(tmp_path):
+    """The file half of the probe, conservative by construction.
+
+    True only when the file exists AND at least one row parses AND every row
+    is bookkeeping; absent, empty and unparseable files all answer False so
+    ``is_pristine`` keeps its fail-closed direction. The bookkeeping-only case
+    is written through a real ``Transcript`` append, so the file the helper
+    reads is the same artifact the runtime writes.
+    """
+    from local_operator.session.transcript import (
+        Transcript,
+        transcript_is_bookkeeping_only,
+    )
+
+    # A real append of an MCP card: the operator's exact file shape.
+    directory = tmp_path / "sess-a"
+    transcript = Transcript(directory)
+    await transcript.append_message(_mcp_unavailable(), preserve_mtime=True)
+    assert transcript_is_bookkeeping_only(transcript.path) is True
+
+    # One real row among the cards flips it, and it stays flipped.
+    await transcript.append_message(Message.user("now the user is here"))
+    assert transcript_is_bookkeeping_only(transcript.path) is False
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert transcript_is_bookkeeping_only(empty) is False, "an empty file is not a verdict"
+
+    blank = tmp_path / "blank.jsonl"
+    blank.write_text("\n\n", encoding="utf-8")
+    assert transcript_is_bookkeeping_only(blank) is False
+
+    garbage = tmp_path / "garbage.jsonl"
+    garbage.write_text("{not json\n", encoding="utf-8")
+    assert transcript_is_bookkeeping_only(garbage) is False, "doubt keeps the runtime alive"
+
+    assert transcript_is_bookkeeping_only(tmp_path / "absent.jsonl") is False
+
+
 def test_the_mcp_unavailable_warning_is_a_bookkeeping_type() -> None:
     """Pinned as membership, because the flag alone is not the mechanism.
 
