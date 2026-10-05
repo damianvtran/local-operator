@@ -127,7 +127,7 @@ def test_danger_reads_on_its_own_tint(name: str) -> None:
     )
 
 
-def test_the_ask_panel_reads_on_its_own_ground() -> None:
+def test_the_ask_panel_reads_on_its_own_ground(name: str | None = None) -> None:
     """The ask drawer's state inks pair with ITS ground, not with `bg`/`surface`.
 
     Review round 2 (D1) measured the gap this closes: the state floors above
@@ -144,7 +144,12 @@ def test_the_ask_panel_reads_on_its_own_ground() -> None:
     so every ramp clears this by construction — this test is what keeps it true
     if the derivation or a curated palette changes.
     """
-    for name in _ALL_THEMES:
+    # ``name`` is OPTIONAL for the reason this suite's other per-palette checks
+    # take one: `test_host_theme.py`'s agreement gate calls every check in here
+    # with a DERIVED ramp's name, and a check that cannot be called that way has
+    # to be exempted by hand (and then it is not checked for the ramps the host
+    # probe admits at all). Called bare it walks the curated ramps.
+    for name in ([name] if name else _ALL_THEMES):
         tokens = theme.theme_spec(name).tokens
         for token in ("chip-live", "chip-success", "chip-warning"):
             for ground in ("overlay", "tint-select"):
