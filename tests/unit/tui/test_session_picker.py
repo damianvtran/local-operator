@@ -4792,11 +4792,17 @@ async def test_the_picker_ask_total_can_be_restated_after_an_off_thread_read() -
         assert screen._asks_span is None
 
 
-def _painted_span_style(text, index: int):
-    """The style of the span covering ``index`` in ``text``, or None."""
+def _painted_span_style(text, index: int) -> Style | None:
+    """The ``Style`` of the span covering ``index``, or None.
+
+    ``Text.spans`` carries ``Style | str`` — the string form is a style NAME and
+    has no colour or underline to read — so anything that is not a ``Style``
+    answers None rather than being returned to a caller that would attribute-error
+    on it (pyright is what caught this).
+    """
     for span in text.spans:
         if span.start <= index < span.end:
-            return span.style
+            return span.style if isinstance(span.style, Style) else None
     return None
 
 
