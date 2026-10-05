@@ -805,6 +805,49 @@ def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
     assert _payload(result)["code"] == "unhealthy"
 
 
+def test_the_agent_digest_reads_a_non_gating_row_as_warn_not_fail() -> None:
+    """F8 residual: the digest is one of the surfaces the ruling touched.
+
+    A failed non-gating equipment row reads ``warn … — not required for
+    onboarding`` here exactly as on the CLI — never ``FAIL`` — while
+    still-gating equipment keeps its honest FAIL. The clause is the receipt's
+    own literal, so the two surfaces cannot drift.
+    """
+    checks: list[dict[str, Any]] = [
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "no_credential",
+            "detail": (
+                "this device has no MCP login for https://mcp.slack.com/mcp; " "sign in here first"
+            ),
+            "remedies": [],
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "class": "equipment",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "detail": "no operator authority is installed on cloud-node-1",
+            "remedies": [],
+        },
+    ]
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "ready", {"ok": False, "identity_present": True, "checks": checks}
+    )
+    body = "\n".join(lines)
+    assert "warn readiness mcp_credential cloud-node-1" in body
+    assert "— not required for onboarding" in body
+    assert "FAIL readiness mcp_credential" not in body
+    assert "FAIL readiness operator_authority cloud-node-1" in body
+
+
 def test_a_read_on_an_empty_store_reports_rather_than_raises() -> None:
     result = _call("ls")
     assert not result.is_error

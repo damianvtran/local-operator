@@ -6476,6 +6476,17 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
+    # THE ROW'S OWN STATE, ON THE ROW (F8 residual): `ready --json` is the
+    # drill's acceptance surface, and a reader there scans ROWS, not the
+    # aggregate — a reported-but-non-gating row must not read failure-shaped
+    # to it. The cell is the same register the human column prints
+    # (`readiness.row_state`), so the two readings cannot drift; the raw `ok`
+    # stays as reported (a warn row keeps `ok: false` — reported, not failed)
+    # and a genuine admission/operator failure keeps `FAIL`. Stamped here, the
+    # one point both producers (the live relay report and the no-dial local
+    # fallback) pass through.
+    for check in checks:
+        check["state"] = readiness_mod.row_state(check)
     lines = _ready_lines(checks)
     if not lines:
         lines.append(readiness_mod.NOTHING_TO_CHECK_LINE)

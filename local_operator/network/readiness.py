@@ -2704,6 +2704,63 @@ def non_gating_clause(row: Mapping[str, Any]) -> str:
     return "" if row.get("ok") or not _non_gating_equipment(row) else NON_GATING_NOTE
 
 
+#: The row-state register (F8 residual, 2026-10-04): the ONE cell that answers
+#: what a row's reading is, for machines and people alike. The human renderer
+#: prints these four tokens (``ok``/``n/a`` padded to its column) and the row
+#: facts the ``ready`` JSON carries hold them verbatim — ``ready --json`` is
+#: the drill's acceptance surface, and a reader there scans ROWS, not the
+#: aggregate, so a reported-but-non-gating row must say so ON itself
+#: (``warn``) instead of reading failure-shaped (a bare ``ok: false``). One
+#: register, so the printed line and the JSON cannot disagree.
+ROW_STATE_OK = "ok"
+ROW_STATE_WARN = "warn"
+ROW_STATE_FAIL = "FAIL"
+ROW_STATE_NOT_APPLICABLE = "n/a"
+
+
+def row_state(row: Mapping[str, Any]) -> str:
+    """This row's state cell — the classification, computed once for every reader.
+
+    Precedence, the renderer's historic one:
+
+    - ``n/a`` — excluded from the decision, visible in the reading (the F9
+      out-of-scope flip): not a failure, and not a verification either;
+    - ``ok`` — the row's own positive fact;
+    - ``warn`` — failed equipment that cannot hold the onboarding verdict
+      (exactly the rows :func:`onboarding_failures` excludes): named and NOT
+      fatal, the same reading the verify receipt gives it, so the row the
+      operator is sent to read cannot contradict the flow;
+    - ``FAIL`` — everything else that failed: admission rows and still-gating
+      equipment.
+
+    ADDITIVE, never a rewrite: the row keeps every fact it had (``ok`` stays
+    the raw reported result — the fail is REPORTED, not rewritten) so a
+    row-scanner can branch on this cell without misreading the facts beneath
+    it. An unknown shape falls through to ``FAIL``: absence of classification
+    never excuses a failure.
+    """
+    observed = row.get("observed")
+    observed = observed if isinstance(observed, Mapping) else {}
+    if observed.get("out_of_scope"):
+        return ROW_STATE_NOT_APPLICABLE
+    if row.get("ok"):
+        return ROW_STATE_OK
+    if _non_gating_equipment(row):
+        return ROW_STATE_WARN
+    return ROW_STATE_FAIL
+
+
+#: The renderer's column forms of the register: ``ok``/``n/a`` carry the pad,
+#: ``warn``/``FAIL`` fill the four cells. PRESENTATION ONLY — keyed by the
+#: register above so the column and the machine cell are one spelling.
+_STATE_COLUMN: dict[str, str] = {
+    ROW_STATE_OK: "ok ",
+    ROW_STATE_WARN: "warn",
+    ROW_STATE_FAIL: "FAIL",
+    ROW_STATE_NOT_APPLICABLE: "n/a ",
+}
+
+
 def onboarding_failures(checks: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """The rows that hold the ONBOARDING verdict (F8 ruling, 2026-10-04).
 
@@ -2796,30 +2853,19 @@ def render_check_lines(checks: Iterable[Mapping[str, Any]]) -> list[str]:
     its row the way the membership lines do. A failed non-gating equipment row
     reads ``warn`` with its clause (design round 1, D1) instead of ``FAIL`` —
     the state that must not read as a blocker on the very surface the operator
-    is sent to.
+    is sent to. The column reads :func:`row_state`, one register with the
+    ``state`` cell the machine row facts carry (F8 residual): a reader and a
+    row-scanner cannot disagree about whether a row gates.
     """
     from local_operator.resume import doctor_detail_words
 
     lines: list[str] = []
     for check in checks:
-        observed = check.get("observed")
-        observed = observed if isinstance(observed, Mapping) else {}
-        if observed.get("out_of_scope"):
-            # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING: not a failure
-            # (nothing failed — the question cannot be asked from here) and not
-            # a verification either.
-            state = "n/a "
-        elif check.get("ok"):
-            state = "ok "
-        elif _non_gating_equipment(check):
-            # A FOURTH DISTINCTION BESIDE ok/FAIL/n-a (design round 1, D1):
-            # equipment that cannot hold the onboarding verdict reads as named
-            # and NOT fatal here — the same reading the verify receipt gives it
-            # — so the row the operator is sent to read cannot contradict the
-            # flow. The clause below says why in so many words.
-            state = "warn"
-        else:
-            state = "FAIL"
+        # The state column comes from the ONE register (:func:`row_state`) —
+        # the same computation stamps the ``state`` cell the machine row facts
+        # carry (F8 residual), so the column a person reads and the cell a
+        # scanner branches on cannot disagree about whether a row gates.
+        state = _STATE_COLUMN[row_state(check)]
         kind = str(check.get("check") or "")
         label = str(check.get("device_name") or check.get("device_id") or "")
         if kind == "readiness":
