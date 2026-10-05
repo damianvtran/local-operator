@@ -3,7 +3,9 @@
 WHY THIS MODULE EXISTS (design ``docs/design/ask-nonblocking.md`` §2.3/§2.5).
 A queued ask produces three kinds of prose: the RECEIPT the model reads the
 moment it asks, the RESPONSE text injected when an answer (or a decline)
-settles the ask, and the TIMEOUT notice injected at the deadline. Every surface
+settles the ask, and the TIMEOUT notice injected at the deadline — plus, since
+§12, the agent-side settle's own receipt and its OP-level refusals (which
+answer the MODEL, not the user; see below). Every surface
 shows the same words — the model's turn, the transcript row, the desktop card,
 the phone card — and the design's rule is that no surface re-derives Q&A from
 the text: one function produces the string, the structured payload rides beside
@@ -242,10 +244,110 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         return "this ask expired 7 days ago — ask again if it is still needed."
     if status in (store.STATUS_DECLINED, store.STATUS_DISMISSED):
         return "you already declined this."
+    if status == store.STATUS_WITHDRAWN:
+        # DESIGN §12's sentence, verbatim: a withdrawn ask is not answerable
+        # from any surface (its box hides everywhere — ``withdrawn`` is not
+        # outstanding), and a stale tap reads the ONE route left — say it in
+        # chat, where the agent can record it with `ask_withdraw`.
+        return (
+            "the agent withdrew this question — if you have an answer, send it "
+            "as a chat message."
+        )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
         return f"already answered by {by}." if by else "already answered."
     return "this ask is no longer open."
+
+
+#: The tool result an agent-side WITHDRAWAL returns (design §12). Written to the
+#: MODEL — `ask_withdraw` is the asker's own op, unlike every other settle a
+#: surface authors for the user — so it states what is now true and what will
+#: (not) happen next: nothing more is delivered for a moot ask, and a chat
+#: answer still gets its standard response row.
+WITHDRAWN_RECEIPT = (
+    "Ask {ask_id} withdrawn — no longer waiting on an answer and nothing will be "
+    "delivered for it."
+)
+ANSWERED_IN_CHAT_RECEIPT = (
+    "Ask {ask_id} answered from the user's chat message — their words are recorded "
+    "as its answer; the response arrives as an ask response turn."
+)
+
+
+#: The reasons `ask_withdraw` refuses BEFORE any state is consulted, and the
+#: one conditional reason rule (design §12): ``answers`` belongs to
+#: ``answered_in_chat`` alone, and refusing the mismatch is what keeps a model
+#: that meant to record the user's words from silently losing them to a
+#: ``moot`` withdrawal.
+WITHDRAW_BAD_REASON = "reason must be 'moot' or 'answered_in_chat'."
+WITHDRAW_MOOT_TAKES_NO_ANSWERS = (
+    "reason 'moot' takes no answers — to record the user's words use reason " "'answered_in_chat'."
+)
+
+#: `answered_in_chat`'s secret refusal (design §12): there is no masked-entry
+#: hop from chat text and there must not be one, so the card remains the only
+#: secret path. Nothing is written, and the sentence says so.
+WITHDRAW_SECRET_REFUSAL = (
+    "this ask has a secret question — only its card can answer it; nothing was recorded."
+)
+
+
+def withdraw_receipt(ask_id: str, reason: str) -> str:
+    """The receipt a successful ``AskQueue.withdraw`` hands back (design §12)."""
+    template = ANSWERED_IN_CHAT_RECEIPT if reason == "answered_in_chat" else WITHDRAWN_RECEIPT
+    return template.format(ask_id=ask_id)
+
+
+def withdraw_refusal(record: Mapping[str, Any] | None, reason: str) -> str:
+    """Why ``AskQueue.withdraw`` refused, in the MODEL's voice (design §12).
+
+    THE §10 OP-VS-STATE SPLIT, applied to a second op. :func:`refusal_copy`
+    answers a SURFACE's question — "why is this ask not answerable here" — in
+    the user's voice ("you already declined this"), and every surface shows it.
+    ``withdraw`` answers the MODEL that tried to settle the ask, and telling it
+    "you already declined this" would be false about who declined. So the
+    op carries its own sentences, emitted by the op path exactly as §10's
+    delivered sentence is; the state table keeps its rows byte-for-byte.
+
+    One sentence per (reason, state): ``moot`` explains why nothing can be
+    retracted, ``answered_in_chat`` says whether anything was recorded. Both
+    are agent-facing only — no surface renders them.
+    """
+    from local_operator.asks import store
+
+    if record is None:
+        return refusal_copy(None)
+    status = str(record.get("status") or "")
+    chat = reason == "answered_in_chat"
+    if status in (store.STATUS_ANSWERED, store.STATUS_LATE):
+        return (
+            "this ask already has the user's answer — the chat message was not recorded."
+            if chat
+            else "this ask already has the user's answer — it cannot be withdrawn."
+        )
+    if status == store.STATUS_DECLINED:
+        return (
+            "the user already declined this ask — the chat message was not recorded."
+            if chat
+            else "the user already declined this ask — there is nothing to withdraw."
+        )
+    if status == store.STATUS_DISMISSED:
+        return (
+            "the user already dismissed this ask — the chat message was not recorded."
+            if chat
+            else "the user already dismissed this ask — there is nothing to withdraw."
+        )
+    if status == store.STATUS_WITHDRAWN:
+        return "this ask was already withdrawn."
+    if status == store.STATUS_EXPIRED:
+        return (
+            "this ask expired — nothing was recorded; ask again if it is still needed."
+            if chat
+            else "this ask expired — there is nothing to withdraw."
+        )
+    # Not a state the op refuses on — callers only reach here for a settled ask,
+    # and the fall-through keeps a future fold status from ever answering empty.
+    return refusal_copy(record)
 
 
 def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:

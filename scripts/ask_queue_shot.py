@@ -58,6 +58,13 @@ THE ROUND-2 MODES (the fixes the reviews asked for):
     list-nocolor   the `list` state on a colour-less render (`NO_COLOR`), the
                  D10 coverage frame — re-asserted above the app import, since
                  the harness pops NO_COLOR by design (design round 2: D11)
+    bar-withdrawn  MINIMIZED over a queue whose log holds a WITHDRAWN ask: the
+                 bar counts only what is still answerable, so the count drops
+                 past it — and on a pre-§12 build the same log folds the ask
+                 open and it is counted (design §12)
+    list-withdrawn the list on the SETTLED half with a withdrawn row in it:
+                 the asker's own retraction wears `· withdrawn` in the muted
+                 register, and the header's waiting count excludes it
 
 WHY THE TRANSCRIPT IS SEEDED FIRST. Every frame here has to answer "can the
 user still read the conversation behind this surface?" — the bar is one row in
@@ -332,6 +339,91 @@ TIMEOUT = {
 }
 
 
+def _withdrawn_fixture_rows() -> list[dict[str, Any]]:
+    """The wire rows for [a1 open, a4 open, a2 WITHDRAWN, a3 declined] — a REAL fold.
+
+    The withdrawn frames must differ between a build without §12 and this one,
+    so the queue cannot be a hand-made wire list: it is the real ``store.fold``
+    over a real, seeded log, exactly the fold the rule lives in. On a pre-§12
+    build the fold skips the unknown kind, so a2 folds ``open`` and the surface
+    counts a question nobody will answer; on this one it is settled.
+
+    TWO asks stay open on BOTH builds on purpose: ``_expand_asks`` sends a
+    queue with one outstanding ask straight to its card, so a fixture that only
+    kept a1 open would paint the list on ``main`` (where a2 still counts as
+    outstanding) and a card here — the frame pair would compare two surfaces
+    instead of one rule.
+
+    ``EVENT_WITHDRAWN`` is read through a getattr fallback ON PURPOSE: this
+    script must run on BOTH builds it captures (the before half is a detached
+    worktree of ``main``, which has neither the constant nor the branch).
+    """
+    from local_operator.asks import store
+    from local_operator.asks.queue import AskQueue
+    from local_operator.paths import config_dir as _resolve_config_dir
+
+    withdrawn_kind = getattr(store, "EVENT_WITHDRAWN", "withdrawn")
+    config = Path(_resolve_config_dir())
+    session_directory = store.session_dir(config, "shot-withdraw")
+    session_directory.mkdir(parents=True, exist_ok=True)
+    now = int(time.time() * 1000)
+
+    def queued(ask_id: str, question: str, *, expires_in_min: int) -> None:
+        store.append_event(
+            session_directory,
+            {
+                "v": store.EVENT_SCHEMA,
+                "kind": store.EVENT_QUEUED,
+                "ask_id": ask_id,
+                "at": now - 60_000,
+                "expires_at": now + expires_in_min * 60_000,
+                "timeout_s": 3600,
+                "urgent": False,
+                "tool_call_id": f"call-{ask_id}",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": question,
+                        "options": [],
+                        "multi": False,
+                        "secret": False,
+                        "persist": False,
+                        "recommended": None,
+                    }
+                ],
+            },
+        )
+
+    queued("a1", "Which rollout should the stale-row migration take?", expires_in_min=42)
+    queued("a4", "Which alert channel should the cutover page?", expires_in_min=25)
+    queued("a2", "Rotate the deploy key before the cutover?", expires_in_min=30)
+    store.append_event(
+        session_directory,
+        {
+            "v": store.EVENT_SCHEMA,
+            "kind": withdrawn_kind,
+            "ask_id": "a2",
+            "at": now - 10_000,
+            "by": {"surface": "agent"},
+        },
+    )
+    queued("a3", "Backfill from the audit log or drop the column?", expires_in_min=20)
+    store.append_event(
+        session_directory,
+        {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_DECLINED,
+            "ask_id": "a3",
+            "at": now - 5_000,
+            "by": {"surface": "terminal"},
+        },
+    )
+    queue = AskQueue(
+        _AnswerableSession(), config_dir=config, session_id="shot-withdraw", cwd=str(Path.cwd())
+    )
+    return [dict(row) for row in queue.projection()]
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -445,6 +537,19 @@ async def main() -> None:
             # The next snapshot: the answered ask is gone, so this is also what
             # proves the highlight survives the wire dropping the row under it.
             app._sync_ask_surface(ask_rows([THREE[0], THREE[2]]))
+        elif mode in ("bar-withdrawn", "list-withdrawn"):
+            # DESIGN §12: the agent-side settle's surfaces over a queue whose
+            # log really holds a `withdrawn` row (the fixture folds the log;
+            # see `_withdrawn_fixture_rows`). The before half of the frame pair
+            # runs THIS script on a detached `main` worktree, where the fold
+            # skips the unknown kind — so the same log paints a2 as still
+            # waiting there and as settled here.
+            app._sync_ask_surface(ask_rows(_withdrawn_fixture_rows()))
+            if mode == "list-withdrawn":
+                await pilot.pause()
+                app._expand_asks()
+                await pilot.pause()
+                app.query_one(AskQueueList).set_filter(FILTER_SETTLED)
         elif mode in (
             "list-settled",
             "filter-all",

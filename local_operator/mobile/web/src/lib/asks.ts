@@ -2,13 +2,13 @@
  * The queued-ask vocabulary — the phone's half of the shared copy contract.
  *
  * WHY ONE MODULE. Every ask state (open / answered / timed out / late /
- * declined / dismissed / expired) is spelled in exactly one string per state,
- * and four different places on this surface need to say it: the minimized bar
- * above the composer, the ask card in the sheet, a session row's outstanding
- * chip, and the response card in the transcript. Four call sites each composing
- * its own sentence is how one state grows two wordings — and the wording is the
- * whole feature here, because the user's next action depends on whether an ask
- * is still waiting, already answered, or past its deadline.
+ * declined / dismissed / withdrawn / expired) is spelled in exactly one string
+ * per state, and four different places on this surface need to say it: the
+ * minimized bar above the composer, the ask card in the sheet, a session row's
+ * outstanding chip, and the response card in the transcript. Four call sites
+ * each composing its own sentence is how one state grows two wordings — and
+ * the wording is the whole feature here, because the user's next action depends
+ * on whether an ask is still waiting, already answered, or past its deadline.
  *
  * THE WORDS COME FROM `docs/design/ask-nonblocking.md` §5, verbatim, and that
  * is deliberate rather than lazy: the TUI and the desktop card show the same
@@ -42,6 +42,8 @@ export type AskStatus =
 	| "timed_out"
 	| "late"
 	| "dismissed"
+	/* The agent retracted the question (design §12): settled, never outstanding. */
+	| "withdrawn"
 	| "expired";
 
 /** The ink a state line is drawn in. Four states, five readings: `waiting` is
@@ -53,8 +55,8 @@ export type AskTone = "waiting" | "settled" | "gone" | "attention";
  *
  *  `timed_out` IS answerable and that is the point of the state: the agent moved
  *  on, but the user's answer still reaches it as a `late` response. Everything
- *  already settled (answered/late/declined/dismissed) and everything too old to
- *  carry (expired) is not.
+ *  already settled (answered/late/declined/dismissed/withdrawn) and everything
+ *  too old to carry (expired) is not.
  */
 export function isAnswerable(status: string): boolean {
 	return status === "open" || status === "timed_out";
@@ -182,6 +184,11 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 			return { text: "Declined — the agent was told", tone: "settled" };
 		case "dismissed":
 			return { text: "Dismissed — no reply was sent", tone: "gone" };
+		case "withdrawn":
+			/* DESIGN §12's word, verbatim — the ONE new copy this status needs on
+			   this surface. Like `dismissed`, the ask is over with nothing to send;
+			   unlike it, the asker retracted the question rather than the user. */
+			return { text: "Withdrawn — no longer needed", tone: "gone" };
 		case "expired":
 			return {
 				text: "Expired — this ask is too old to answer; ask the agent again",

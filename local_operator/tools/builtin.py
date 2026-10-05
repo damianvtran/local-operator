@@ -26156,3 +26156,148 @@ async def execute_ask(
         _ask_report(params.questions, reported),
         details={"answers": {key: list(value) for key, value in reported.items()}},
     )
+
+
+# ---------------------------------------------------------------------------
+# ask_withdraw (design docs/design/ask-nonblocking.md §12)
+# ---------------------------------------------------------------------------
+#
+# Why this tool exists: every write to the ask log used to be authored by a
+# SURFACE on the user's behalf, so the ASKER had no path — an ask whose answer
+# stopped mattering sat open → timed_out → expiry as a question nobody will
+# answer, and a user who simply replied in the transcript left the ask reading
+# "waiting" although the agent already had the answer. The only safe detector of
+# "that message WAS the answer" is the model itself, and moot detection is the
+# model's judgment too; this is the recording tool those judgments needed.
+#
+# Footprint (AGENTS.md ladder, rung 3): the builder returns None wherever the
+# queued engine is absent, so the blocking arm, headless hosts and subagents pay
+# zero schema for an op whose log cannot hold a "withdrawn" row. Appended at the
+# END of TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason the
+# sessions/monitor rows state.
+
+
+class AskWithdrawParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ask_id: str = Field(
+        description=(
+            "The queued ask to settle, e.g. 'a-3f9c' — the id its receipt (or an "
+            "ask card) named."
+        )
+    )
+
+    reason: Literal["moot", "answered_in_chat"] = Field(
+        description=(
+            "moot: the question stopped mattering. answered_in_chat: the user's "
+            "latest message IS the answer — record their words in `answers`."
+        )
+    )
+
+    # ``message_id`` is deliberately NOT a field here: the model cannot see
+    # chat message ids, and a schema slot it cannot fill is an invitation to
+    # fabricate one — the queue and the session still accept it for callers
+    # that DO know it (the design's `by: {surface: "chat", message_id?}`).
+    answers: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "answered_in_chat only: the user's words verbatim, one cell per "
+            "question the message answers and an empty list for a question it "
+            "does not cover. Every question id must appear."
+        ),
+    )
+
+
+#: The description keeps to the facts a model cannot infer, in the order it
+#: needs them (the ask receipt's prose is the budget precedent): what settles,
+#: the two reasons with their one-line consequences, the DETECTION RULE — which
+#: is what makes the tool reachable at all, because both reasons are the model's
+#: judgment call — and the one thing it must never be used for.
+_ASK_WITHDRAW_DESCRIPTION = (
+    "Close a queued ask you no longer need answered — the asker's own settle. "
+    "reason='moot': the question stopped mattering (you found the answer "
+    "yourself, the work moved on); it settles as withdrawn and nothing more is "
+    "delivered for it. reason='answered_in_chat': the user's latest chat "
+    "message IS the answer — record their words VERBATIM in `answers`; the "
+    "standard response arrives as usual. If the user's message answers a "
+    "queued ask, settle it with this tool rather than leaving the ask reading "
+    "as waiting. A secret question cannot be settled from chat — its card is "
+    "the only path. A settled ask is refused with its own words; do not retry."
+)
+
+
+def build_ask_withdraw_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: the agent-side settle exists only where the queue does.
+
+    Gated on the ``withdraw_ask`` callable ALONE. The session binds it under the
+    queued engine's own two conditions (the flag on and a host that can show
+    asks), so its presence IS the mode — the same one-fact rule ``build_ask_tool``
+    follows with the hook. Absent, not merely inert, on the blocking arm, on a
+    headless host and inside a subagent (a child is built without an ask
+    handler), which is exactly footprint rung 3 (design §12).
+
+    ``approval_tier="read"`` for the same reason ``todo`` takes it: this writes
+    session-local bookkeeping — the ask log the session owns — not the world, so
+    an approval prompt would put a second question in front of the operator's
+    own answer. ``exclusive`` because two concurrent settles could otherwise
+    race the fold check against the append; the call is cheap and blocks nobody.
+    """
+    if getattr(context, "withdraw_ask", None) is None:
+        return None
+    return AgentTool(
+        name="ask_withdraw",
+        label="Withdraw ask",
+        description=_ASK_WITHDRAW_DESCRIPTION,
+        parameters=AskWithdrawParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_ask_withdraw,
+    )
+
+
+@_guard("ask_withdraw")
+async def execute_ask_withdraw(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Settle a queued ask: retract it, or record the user's chat answer as one."""
+    try:
+        params = AskWithdrawParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "ask_withdraw", exc)
+    withdraw = getattr(context, "withdraw_ask", None) if context is not None else None
+    if not callable(withdraw):
+        # Unreachable through the advertised tool (the builder above refuses to
+        # create it without the callable), so this is a host wiring fault and is
+        # reported as one — never as a settled ask, which would tell the model
+        # its withdrawal succeeded when nothing was written.
+        return _error(
+            tool_call_id,
+            "ask_withdraw",
+            "this host has no queued-ask engine wired into this session — no ask "
+            "was settled; decide without this call.",
+        )
+    # ``Any`` for the same reason ``execute_ask`` needs it above: ``callable()``
+    # narrows an untyped callable to ``Callable[..., object]``, which would make
+    # every ``outcome.get`` below a type error on a value whose real shape is a
+    # mapping.
+    outcome: Any = withdraw(params.ask_id, reason=params.reason, answers=params.answers)
+    if not outcome.get("ok"):
+        # The refusals are the queue's sentences by design (the op-vs-state
+        # split §10/§12 keep): the model must read "already withdrawn" or "the
+        # user already declined this ask" as written, never a paraphrase.
+        return _error(
+            tool_call_id,
+            "ask_withdraw",
+            str(outcome.get("error") or "this ask could not be settled."),
+        )
+    return _text(
+        tool_call_id,
+        "ask_withdraw",
+        str(outcome.get("text") or ""),
+        details=dict(outcome.get("details") or {}),
+    )
