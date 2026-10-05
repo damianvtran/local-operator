@@ -24634,8 +24634,23 @@ async def execute_jobs(
             return _error(tool_call_id, "jobs", f"unknown job {params.job_id}")
         effective_id = job.id
         if params.op == "cancel":
+            # Attribute a stop issued through the tool, but only for a TASK row:
+            # a bash/eval job has no comms record and must gain no attribution
+            # clause (it would be an invented actor). Staged BEFORE the cancel;
+            # withdrawn if the manager refuses (already settled).
+            receipt: str | None = None
+            comms_for_stop = context.subagent_comms if context else None
+            if getattr(job, "type", "") == "task" and comms_for_stop is not None:
+                try:
+                    receipt = comms_for_stop.begin_stop(
+                        effective_id, by="jobs-tool", reason="", mechanism="cancel"
+                    )
+                except Exception:  # noqa: BLE001 — a stop must not fail over evidence
+                    receipt = None
             cancelled = await jobs.cancel(effective_id)
             if not cancelled:
+                if receipt is not None and comms_for_stop is not None:
+                    comms_for_stop.abandon_stop(receipt)
                 # cancel() refuses a job that already settled, which is not a
                 # failure worth erroring on: the caller wanted it stopped and
                 # it is stopped. Report the terminal status so the caller does
@@ -24712,7 +24727,27 @@ async def execute_jobs(
         # was fixed to stop printing. Both branches are nine cells, so the
         # grid holds either way.
         age = f"{max(now - reference, 0.0):8.1f}s" if reference else f"{'unknown':>9}"
-        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<4}  {job.label}")
+        # THE IDLE CLAUSE. Beside a RUNNING row, how long since this job last
+        # reported progress — the reading a caller uses to tell a working job
+        # from a wedged one, which the age column cannot (a six-minute child and
+        # one launched a second ago looked identical before). Silent when the
+        # job never reported (no fact) or is not running (the status/age column
+        # already says what happened): see ``idle_clause`` for the rule.
+        idle = ""
+        if running:
+            # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary and must
+            # not put ``local_operator.session`` on the tool layer's import path
+            # (see the denied-module note above); the module is stdlib-only and
+            # already imported by the time any job exists.
+            from local_operator.session import subagent_ledger
+
+            bound = subagent_ledger.lane_bound_s() if getattr(job, "type", "") == "task" else None
+            clause = subagent_ledger.idle_clause(
+                getattr(job, "last_progress_at", None), now, bound_s=bound
+            )
+            if clause:
+                idle = f"  {clause}"
+        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<4}  {job.label}{idle}")
     return _text(
         tool_call_id,
         "jobs",
@@ -24909,8 +24944,8 @@ class HubParams(BaseModel):
     message: str | None = Field(
         default=None,
         description=(
-            "The body. Required for send/ask/steer, and for resume (what to do next); "
-            "ignored by list/peek/pause/cancel."
+            "Body. Required for send/ask/steer/resume; recorded as the stop reason "
+            "for pause/cancel; ignored by list/peek."
         ),
     )
     timeout_ms: int = Field(
@@ -25104,10 +25139,35 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             useless=True,
         )
     lines = [f"{len(rows)} subagent(s):"]
+    # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary (see the note
+    # above); the module is stdlib-only and cheap.
+    from local_operator.session import subagent_ledger
+
+    now = time.time()
+    bound = subagent_ledger.lane_bound_s()
     for row in rows:
         age = f", {row.age_s:.0f}s" if row.age_s is not None else ""
+        # THE IDLE CLAUSE — the reading this workstream exists for. A running
+        # child that stopped reporting is indistinguishable from a busy one on
+        # every surface today; beside ``running`` its silence is now stated, and
+        # once it exceeds the lane bound the clause prints the bound it applied.
+        # Emitted only for a RUNNING row with a real stamp (see ``idle_clause``):
+        # a child that never reported has no stall reading to show.
+        idle = ""
+        if row.status == "running":
+            clause = subagent_ledger.idle_clause(row.last_progress_at, now, bound_s=bound)
+            if clause:
+                idle = f", {clause}"
         extras = "resumable" if row.resumable else (row.detail or "not resumable")
-        lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
+        lines.append(f"- {row.label} ({row.job_id}): {row.status}{age}{idle} — {extras}")
+        # WHO stopped it, and why. The field the old ``del reason`` discarded:
+        # without this line a cancelled child read as a bare ``cancelled`` with
+        # no actor anywhere, which is the second half of the complaint.
+        if row.ended_by:
+            attribution = f"    stopped by {row.ended_by}"
+            if row.cancel_reason:
+                attribution += f": {row.cancel_reason}"
+            lines.append(attribution)
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
         # WHY it stopped, when it was not a clean completion: a child the loop
@@ -25156,6 +25216,10 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
                     "status": row.status,
                     "resumable": row.resumable,
                     "session_id": row.session_id,
+                    # Mirrored into the details payload too (not only the
+                    # rendered line) so the mobile/desktop projection can show
+                    # WHO stopped a child without re-deriving it from prose.
+                    "ended_by": row.ended_by,
                 }
                 for row in rows
             ],
@@ -25453,9 +25517,13 @@ async def _execute_hub_parent(
         elif params.op == "steer":
             deliveries.append(comms.steer(job_id, message))
         elif params.op == "pause":
-            deliveries.append(await comms.pause(job_id))
+            # ``message`` was previously ignored for pause/cancel; it now carries
+            # the caller's own words into the durable stop receipt and the
+            # record, so a pause/cancel is attributable and explained on the
+            # roster. ``by`` names the surface that issued it.
+            deliveries.append(await comms.pause(job_id, by="parent-hub", reason=message))
         else:
-            deliveries.append(await comms.cancel(job_id))
+            deliveries.append(await comms.cancel(job_id, by="parent-hub", reason=message))
 
     acted = [delivery for delivery in deliveries if delivery.outcome != "failed"]
     header = (
