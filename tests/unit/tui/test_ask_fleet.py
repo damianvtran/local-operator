@@ -1090,3 +1090,141 @@ async def test_a_fleet_row_names_the_conversation_the_sidebar_names(
         # this is a tail.
         assert "Enrichment backfill rev" in painted
         assert "s-other" not in painted
+
+
+# -- round 2: the residuals the reviewer's delta pass found -------------------
+
+
+async def test_a_frontend_snapshot_keeps_the_capped_fleets_backend_tally(enabled, isolated_index):
+    """F12: F6's truncation honesty has to survive the list's OTHER writer.
+
+    The door mounts the list with the index's own tally and cap-detection;
+    ``_sync_ask_surface``'s fleet branch is the writer that fires on every
+    frontend snapshot, and it called ``set_rows`` without either — so the first
+    snapshot after the door opened reset them (``set_rows`` assigns both
+    unconditionally) and the header fell back to a row-derived split on a capped
+    index. The frame is driven through the app, which is where the revert was
+    visible in live use.
+    """
+    _seed(isolated_index, "s-big", [_row(f"c{i}") for i in range(policy.PROJECTION_CAP)])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app.action_open_fleet_asks()
+        await _settle(pilot, 6)
+        listing = app.query_one(AskQueueList)
+        assert f"{policy.PROJECTION_CAP} outstanding" in listing.header_text(200)
+
+        # THE SNAPSHOT THE WIRE SENDS while the fleet list is up: the current
+        # session's rows, which is a different queue entirely.
+        app._sync_ask_surface(ask_rows([_row("s1")]))
+        await _settle(pilot)
+        after = listing.header_text(200)
+        assert f"{policy.PROJECTION_CAP} outstanding" in after, (
+            "the snapshot reset the fleet's backend tally — the header is now "
+            "reading a row-derived split over an index it cannot see the end of"
+        )
+        clause = after.split("   All ·")[0]
+        assert "moved on" not in clause and "settled" not in clause
+
+
+async def test_a_fleet_list_arms_the_countdown_clock_with_no_current_asks(enabled, isolated_index):
+    """F14: the deadline clock reads the ACTIVE scope's rows.
+
+    ``_sync_ask_tick`` armed on ``self._ask_rows`` — the CURRENT session's rows —
+    and was called only from the frontend snapshot. At the fleet door the
+    ordinary case is a session with NO asks of its own (the note counts other
+    conversations'), so nothing armed and the fleet rows' ``expires in 41m``
+    stayed frozen at the ``now_ms`` they were mounted with.
+    """
+    _seed(isolated_index, "s-other", [_row("o1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        assert app._ask_rows == []
+        assert app._ask_tick is None
+        app.action_open_fleet_asks()
+        await _settle(pilot, 6)
+        assert app._ask_rows == [], "the fleet door must not need current-session rows"
+        assert app._ask_fleet_rows, "the door read the index"
+        assert app._ask_tick is not None, "a fleet list with deadlines on screen has no clock"
+
+        # ...and it stops again when the active scope has nothing. The clock is
+        # stopped, never merely paused: a surface with no deadline carries none.
+        app._ask_scope = SCOPE_SESSION
+        app._ask_fleet_rows = []
+        app._sync_ask_tick()
+        assert app._ask_tick is None
+
+
+async def test_the_fleet_submit_path_drops_the_cards_draft(enabled, isolated_index, monkeypatch):
+    """F18: the two settle routes have to agree about an answered ask's draft.
+
+    The BACK-OUT (a partial map) deliberately keeps it — the user is returning
+    to the list and may re-pick the row — while a submitted answer is terminal,
+    which is why the session-scope path pops. The fleet path did not, so the
+    two routes differed; the pop is asserted on both, one line apart.
+    """
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b1"), _row("b2")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._ask_scope = SCOPE_FLEET
+        rows = ask_rows([_row("b1", session_id="s-other"), _row("b2", session_id="s-other")])
+        app._ask_fleet_rows = rows
+
+        # The BACK-OUT keeps the draft: the user is coming back to this row. A
+        # PARTIAL map on a two-question ask is the shape that reaches it (§5.0's
+        # D5: Escape mid-walk resolves with what was answered so far).
+        two = _row("b1", session_id="s-other")
+        two["questions"] = [
+            *two["questions"],
+            {**two["questions"][0], "id": "q2", "question": "And the other one?"},
+        ]
+        back_out = ask_rows([two])[0]
+        app._ask_fleet_rows = [back_out, rows[1]]
+        app._ask_drafts["b1"] = "half-typed"
+        app._on_fleet_ask_settle(back_out, {"q1": ["Yes"]})
+        assert app._ask_drafts.get("b1") is not None, "the back-out must keep the draft"
+
+        # The SUBMIT drops it: the ask is answered and cannot be picked again.
+        app._ask_drafts["b2"] = "typed"
+        app._on_fleet_ask_settle(rows[1], {"q1": ["Yes"]})
+        await _settle(pilot, 4)
+        assert "b2" not in app._ask_drafts
+        assert record["respond"] == ("b2", {"q1": ["Yes"]}, "terminal")
+
+
+async def test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width(
+    enabled, isolated_index
+):
+    """U14: at 100x30 the scope tell is the ROW HANDLES, not the header.
+
+    The door's own path is `f9` (the sidebar docks) on a 100-column terminal,
+    which leaves the list ~63 cells — narrow enough that the header's two-rung
+    ladder drops the SUBJECT as well as the drawer clause, so the fleet list and
+    the session list are textually identical above the rows. This pins the fact
+    the amendment records instead of the claim it used to make: the handles are
+    what tells the scopes apart there.
+    """
+    _seed(isolated_index, "s-pergamon", [_row("p1")])
+    _seed(isolated_index, "s-tools", [_row("t1")])
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        app._set_sidebar_open(True)
+        await _settle(pilot)
+        app.action_open_fleet_asks()
+        await _settle(pilot, 6)
+        listing = app.query_one(AskQueueList)
+        width = int(listing.content_size.width)
+        painted = listing.render().plain.splitlines()
+        row_lines = [line for line in painted if "expires in" in line]
+        assert row_lines, painted
+        assert all(
+            "s-pergamon" in line or "s-tools" in line for line in row_lines
+        ), f"the handles are the scope tell at {width} cells: {row_lines}"
+        # And the subject is what yields there — recorded, not claimed away.
+        assert "All conversations" not in listing.header_text(width)

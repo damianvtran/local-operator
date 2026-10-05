@@ -487,8 +487,34 @@ class SessionSidebar(Widget, can_focus=True):
         # a stated refusal, not a silent no-op, which is why the shadow costs
         # nothing: from the default state the footer teaches `f9 focus` first,
         # and `f9` → `ctrl+f` is a complete keyboard route to the fleet queue.
+        #
+        # AND WITH AN ASIDE OPEN IT COSTS THE ADVERTISED FOLD (review round 2,
+        # F15): the aside's own copy says `ctrl+f` folds it, so with the sidebar
+        # focused that route was unreachable until the user left the sidebar.
+        # `check_action` below declines the action in exactly that state, which
+        # is Textual's own fall-through — a declined binding is skipped and the
+        # app's `fork_aside` runs, i.e. the behaviour the aside advertises.
         Binding("ctrl+f", "fleet_asks", show=False),
     ]
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Decline the fleet door while an aside is open, so `ctrl+f` folds it.
+
+        The ONE state where this widget's shadow of the app's `fork_aside`
+        binding changes an existing gesture's meaning rather than overriding a
+        refusal (review round 2, F15). Returning ``None`` is Textual's "not
+        mine": the binding chain skips to the next candidate — the app's
+        `fork_aside` — which is what the aside's own copy promises. Narrow on
+        purpose: every other action this widget declares stays enabled, and the
+        check reads the panel through the app rather than caching a flag that
+        could go stale against it.
+        """
+        if action == "fleet_asks":
+            panel_reader = getattr(self.app, "_aside_panel", None)
+            panel = panel_reader() if callable(panel_reader) else None
+            if panel is not None and getattr(panel, "is_open", False):
+                return None
+        return True
 
     class Selected(Message):
         def __init__(self, session_id: str) -> None:
@@ -870,7 +896,19 @@ class SessionSidebar(Widget, can_focus=True):
             return None
         if entry.row.pending:
             return None
-        return ASK_MARKER, "accent"
+        # `chip-live`, NOT `accent` (review round 2, D12). The round-1 remedy
+        # moved the panel's marker to the derived family for one reason: on the
+        # LIGHT ramp the raw hue does not clear the ground it is painted on. The
+        # SIDEBAR's marker has the same defect and one extra ground — a focused
+        # cursor row paints `tint-select-hi`, which is in neither `accent`'s
+        # derivation (bg/surface) nor the derived family's (overlay/tint-select).
+        # MEASURED across the 54 ramps: raw `accent` on that ground is 3.96:1 on
+        # the light ramp, under the repo's own 4.0 state-hue floor, 14 ramps are
+        # under it and 2 under the 3:1 non-text floor (duskfox 2.78,
+        # kanagawa-lotus 2.91) — where a meaning-carrying glyph stops being
+        # reliably there. The derived ink clears ALL FOUR grounds on every ramp
+        # (`test_the_ask_marker_reads_on_every_sidebar_ground` is the pin).
+        return ASK_MARKER, "chip-live"
 
     def _special_mark(self, entry: CatalogEntry) -> tuple[str, str] | None:
         """``(glyph, ink)`` for a row whose mark is NOT its live state, else None.
@@ -2755,7 +2793,26 @@ class SessionSidebar(Widget, can_focus=True):
             # about is on screen. It costs 14 cells and is tried AFTER the pin's
             # own rung, before the pin: the pin and the note are facts, this is
             # the ROUTE to one of them, and the mouse already has that route.
+            #
+            # THE ROUTE OUTLIVES THE PIN (round 2: U13). The rung above is 46
+            # cells and this footer's content width saturates at 43, so the
+            # teacher rendered NOWHERE — the chord U2 added was taught at no
+            # width a sidebar can reach, and `/help`'s only `ctrl+f` line names
+            # the ASIDE fold (the opposite meaning in this state). Verified
+            # rather than assumed: the candidate below is 34 cells at the
+            # saturated width and renders from a 100-column terminal, where the
+            # door's own path (f9 docks the sidebar) is what a user is walking.
+            # The pin yields to it because the pin has a second teacher on this
+            # frame's own help (`/help`'s f9 row names `ctrl+k`) and the ask
+            # chord has none anywhere else.
+            # Two lengths of the same fact, because the ladder spends whole
+            # rungs: at the sidebar's 29-cell floor there is room for the chord
+            # but not for its object, and the note it sits beside carries the
+            # object (`ctrl+f   asks: 4` reads as one statement). MEASURED: 34
+            # cells with the object, 29 without, and 29 is exactly the floor a
+            # 100-column terminal gives this panel.
             key = " · ctrl+f asks" if ask_note else ""
+            key_short = " · ctrl+f" if ask_note else ""
             candidates: list[str] = []
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
@@ -2770,6 +2827,13 @@ class SessionSidebar(Widget, can_focus=True):
                 candidates.append(f"{pin}{key}{layer}{tail}")
             candidates += [
                 f"{pin}{key}{tail}",
+                # The ask door's teacher outranks the pin's rung (U13): both are
+                # whole-or-nothing facts, and this one is the only teacher the
+                # chord has. Inserted BEFORE the pin-only candidate, so at a
+                # width where the pin cannot ride beside it the pin is what
+                # yields — never the note or the lead.
+                f"{lead}{key}{tail}",
+                f"{lead}{key_short}{tail}",
                 f"{pin}{tail}",
                 f"{lead}{tail}",
                 lead,

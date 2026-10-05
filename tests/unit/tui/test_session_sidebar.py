@@ -5396,3 +5396,93 @@ async def test_the_fleet_note_lights_under_the_pointer():
         assert sidebar._set_asks_hover(span[1] + pad, y) is True
         assert sidebar._asks_hover is False
         assert sidebar._set_asks_hover(2, 0) is False
+
+
+@pytest.mark.asyncio
+async def test_ctrl_f_folds_an_open_aside_even_with_the_sidebar_focused():
+    """F15: the shadow costs the aside's own advertised fold, so it is declined.
+
+    The aside's copy says ``ctrl+f`` folds it, and with the sidebar focused this
+    binding outranks the app's ``fork_aside`` — so the advertised fold was
+    unreachable until the user left the sidebar. ``check_action`` declines the
+    action in exactly that state, which is Textual's own fall-through: the
+    binding chain skips to the app's, i.e. the behaviour the aside promises.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(130, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.check_action("fleet_asks", ()) is True
+        panel = app._open_aside()
+        await pilot.pause()
+        assert panel is not None and panel.is_open
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.check_action("fleet_asks", ()) is None
+        # ...and the KEY reaches the app's fold rather than this widget's door.
+        door: list[int] = []
+        fold: list[int] = []
+        app.action_open_fleet_asks = lambda: door.append(1)  # type: ignore[method-assign]
+        app.action_fork_aside = lambda: fold.append(1)  # type: ignore[method-assign]
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        assert door == [] and fold == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_ask_chord_is_taught_at_the_width_the_door_uses():
+    """U13: the teacher needed 46 cells and this footer saturates at 43.
+
+    Measured by the UX round: the rung never rendered at ANY width — 100 through
+    400 columns all render a 43-cell content width — so the chord U2 added was
+    taught nowhere, and ``/help``'s only ``ctrl+f`` line names the aside fold
+    (the opposite meaning where this door lives). The ladder now ranks the
+    chord's own rung above the pin's, which has a second teacher.
+
+    Asserted against the RENDERED footer rather than a hypothetical width, so a
+    future ladder edit that re-buries the chord fails here.
+    """
+    # The exact painted line at each of the two widths that matter, so a future
+    # ladder edit that re-buries the chord (or re-orders it behind the pin)
+    # fails here rather than in a frame. 130 columns is the saturated content
+    # width (43 cells, reached from ~120); 100 columns is the door's own path
+    # and the sidebar's 29-cell floor, where the rung loses its object — the
+    # note beside it supplies the object.
+    for size, expected in (
+        ((130, 30), "esc return · ctrl+f asks · asks: 4"),
+        ((100, 30), "esc return · ctrl+f · asks: 4"),
+    ):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+            sidebar.set_asks_total(4)
+            sidebar.focus()
+            await pilot.pause()
+            footer = sidebar.render().plain.splitlines()[-1]
+            assert "ctrl+f" in footer, (size, footer)
+            assert footer == expected, (size, footer, expected)
+
+
+@pytest.mark.asyncio
+async def test_the_ask_mark_paints_the_derived_ink():
+    """D12: the panel's marker moved off raw `accent`; the sidebar's did not.
+
+    On the light ramp the cursor row's focused ground (`tint-select-hi`) puts raw
+    `accent` at 3.96:1 — under the repo's own 4.0 state floor — and across the
+    registry 14 of 54 ramps are under it, two under 3:1. The derived `chip-live`
+    family is the repo's remedy (the panel already paints it), and this pins the
+    SIDEBAR's use of it; `test_palette_contrast` pins the ground.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.set_asking({"a": 2})
+        await pilot.pause()
+        entry = sidebar.entries[0]
+        from local_operator.tui.widgets.ask_queue import ASK_MARKER
+
+        assert sidebar._asking_mark(entry) == (ASK_MARKER, "chip-live")

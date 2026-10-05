@@ -162,6 +162,35 @@ def test_the_ask_panel_reads_on_its_own_ground(name: str | None = None) -> None:
                 )
 
 
+def test_the_ask_marker_reads_on_every_sidebar_ground(name: str | None = None) -> None:
+    """The sidebar's ask marker paints on FOUR grounds, one of which nobody solved for.
+
+    Review round 2 (D12): the round-1 remedy moved the panel's marker to the
+    derived `chip-live` and left the sidebar's on raw `accent`. A cursor row in
+    the focused sidebar paints `tint-select-hi` — a ground in neither `accent`'s
+    derivation (`bg`/`surface`) nor the derived family's (`overlay`/
+    `tint-select`) — and raw `accent` there is 3.96:1 on the brand light ramp,
+    under the repo's own 4.0 state-hue floor; 14 of 54 ramps are under it and 2
+    under 3:1 (duskfox 2.78, kanagawa-lotus 2.91), which is where a
+    meaning-carrying glyph stops being reliably there.
+
+    The floor is 4.0, not AA: this glyph is a state hue, like `danger` on
+    `tint-danger` above. MEASURED worst case after the fix: 4.66:1
+    (`everforest` on `tint-select-hi`).
+    """
+    for name in ([name] if name else _ALL_THEMES):
+        tokens = theme.theme_spec(name).tokens
+        ink = tokens["chip-live"]
+        for ground in ("bg", "surface", "tint-select", "tint-select-hi"):
+            if ground not in tokens:
+                continue
+            ratio = contrast(ink, tokens[ground])
+            assert ratio >= 4.0, (
+                f"{name}: the ask marker {ink} on {ground} {tokens[ground]}: "
+                f"{ratio:.2f} < 4.0 — a meaning-carrying glyph on a row ground"
+            )
+
+
 def test_the_legend_card_reads_on_its_ground() -> None:
     """The `? Keys` card's copy rides the `overlay` ground — AA there (D3), measured.
 

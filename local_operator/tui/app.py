@@ -25851,8 +25851,24 @@ class OperatorApp(App[None]):
             # conversations) and takes the backend tally with them — the wire's
             # snapshot is about the CURRENT session, and dropping it over a
             # fleet list would silently swap the scope under the reader.
+            #
+            # THE FLEET'S OWN FACTS RIDE WITH ITS ROWS (round 2: F12). F6's
+            # truncation honesty used to hold for exactly one frame: this branch
+            # called `set_rows` without ``open_count``/``truncated``, and
+            # ``set_rows`` assigns both unconditionally, so the first snapshot
+            # after the door opened reset them and the header fell back to a
+            # row-derived split on a capped index — the defect F6 named. The
+            # fleet tally and its cap-detection are read once per index read
+            # (``_refresh_fleet_count_facts``) and re-stated here, which is what
+            # makes the header a function of the index rather than of which
+            # writer ran last.
             if self._ask_scope == SCOPE_FLEET:
-                self._ask_list.set_rows(self._ask_fleet_rows, now_ms=self._ask_now_ms())
+                self._ask_list.set_rows(
+                    self._ask_fleet_rows,
+                    now_ms=self._ask_now_ms(),
+                    open_count=self._ask_fleet_open_count,
+                    truncated=self._ask_fleet_truncated,
+                )
             else:
                 self._ask_list.set_rows(
                     self._ask_rows,
@@ -26245,7 +26261,14 @@ class OperatorApp(App[None]):
         """
         from local_operator.asks import policy
 
-        if policy.enabled() and self._ask_rows:
+        # THE ACTIVE SCOPE'S ROWS ARM THE CLOCK (round 2: F14). This read
+        # ``self._ask_rows`` — the CURRENT session's rows — so a FLEET list with
+        # no current-session asks (the ordinary case at that door: the note
+        # counts OTHER sessions) armed nothing, and its `expires in 41m` stayed
+        # frozen at the ``now_ms`` the rows were mounted with. F1 gave the two
+        # teardown checks this same treatment; the clock is the third reader.
+        active_rows = self._ask_fleet_rows if self._ask_scope == SCOPE_FLEET else self._ask_rows
+        if policy.enabled() and active_rows:
             if self._ask_tick is None and self.is_running:
                 self._ask_tick = self.set_interval(ASK_COUNTDOWN_TICK_S, self._on_ask_tick)
             return
@@ -26392,6 +26415,12 @@ class OperatorApp(App[None]):
         self._ask_scope = SCOPE_FLEET
         self._ask_fleet_rows = rows
         self._refresh_fleet_count_facts(raw)
+        # The countdown clock is armed on the ACTIVE SCOPE's rows (round 2:
+        # F14), and this is the call that starts it for a fleet list whose rows
+        # are not the current session's — the snapshot that follows would
+        # otherwise be the first chance the gate had to notice, which never
+        # comes when the wire is quiet.
+        self._sync_ask_tick()
         await self._refresh_fleet_titles()
         self._mount_ask_list(scope=SCOPE_FLEET)
 
@@ -26408,6 +26437,7 @@ class OperatorApp(App[None]):
         rows = ask_rows(raw)
         self._ask_fleet_rows = rows
         self._refresh_fleet_count_facts(raw)
+        self._sync_ask_tick()
         if self._ask_list is not None and self._ask_scope == SCOPE_FLEET:
             self._ask_list.set_rows(
                 rows,
@@ -26515,6 +26545,12 @@ class OperatorApp(App[None]):
             self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
             return
         self._run_fleet_ask_op(row, "respond", answers=answers)
+        # The answered ask's card no longer has a draft to come back to (round
+        # 2: F18). The BACK-OUT path above deliberately keeps it — the user is
+        # returning to the list and may re-pick the row — but a submitted answer
+        # is terminal, and the session-scope settle path pops for the same
+        # reason: the two routes should not differ.
+        self._ask_drafts.pop(row.ask_id, None)
         # FEEDBACK, IMMEDIATELY (round 2: F2/U5). The card latches once it has
         # settled (`AskPickerScreen.settle` hands its callback back exactly
         # once), so leaving it up for the engage window — engage 30 s + ack 15 s
@@ -48698,7 +48734,14 @@ class OperatorApp(App[None]):
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).
         lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
-        lines.append(_key_row("F8", "open an aside; ctrl+f forks it in"))
+        # NAMES BOTH MEANINGS OF `ctrl+f`, because until now this row named the
+        # one that is NOT what the key does where the fleet door lives (round 2:
+        # U13). The f9 row above is exactly at the 74-cell ceiling and carries
+        # the door's own teacher; this row is where `ctrl+f` already lived, and
+        # it had 21 cells of headroom, so the collision is stated here rather
+        # than by spending a second row this frame does not have. MEASURED: 50
+        # description cells (70 composed) against the 74-cell ceiling.
+        lines.append(_key_row("F8", "open an aside; ctrl+f forks or folds it (f9: asks)"))
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
         # inside the description, which keeps the gutter reading as one gesture
