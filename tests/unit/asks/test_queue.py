@@ -450,6 +450,26 @@ def test_answered_in_chat_refuses_a_missing_key_before_writing(tmp_path: Path):
     assert store.EVENT_ANSWERED not in kinds
 
 
+def test_answered_in_chat_refuses_an_empty_map_before_writing(tmp_path: Path):
+    """The §2.4 completeness contract on the EMPTY map (review round 1, NIT 5):
+    `{}` covers no question — and a missing map is the same `{}` after
+    defaulting — so both are refused by name before anything is written: an
+    `answered` row whose cells attribute nothing would be a lie about what the
+    user said."""
+    queue = _queue(tmp_path, FakeSession())
+    ask_id = queue.enqueue(_questions(2), None)["details"]["ask_id"]
+    refusals = [
+        queue.withdraw(ask_id, reason="answered_in_chat", answers={}),
+        queue.withdraw(ask_id, reason="answered_in_chat", answers=None),
+    ]
+    for outcome in refusals:
+        assert outcome["ok"] is False
+        assert "q0" in outcome["error"] and "q1" in outcome["error"]
+        assert "has no entry" in outcome["error"]
+    kinds = [event["kind"] for event in store.read_events(queue.session_dir)]
+    assert store.EVENT_ANSWERED not in kinds
+
+
 def test_answering_a_withdrawn_ask_in_words_is_refused_not_dropped(tmp_path: Path):
     """The refused surfaces read the same sentence §12 puts in the state table:
     the state and the op agree about the one route left."""

@@ -83,12 +83,13 @@ EVENT_REVISED = "revised"
 
 #: THE WITHDRAWAL EVENT (design §12). Agent-authored: the asker retracting a
 #: question it no longer needs answered. Terminal-on-write like ``dismissed``,
-#: with ONE carve-out spelled in :func:`fold`: an ``answered`` row always wins
-#: over a later ``withdrawn``, because the operator's real answer must never be
-#: swallowed by the asker's retraction. Unknown to builds older than this one,
-#: deliberately: an old fold skips a kind it does not branch on (the store's
-#: "corrupt or unknown ⇒ tolerated" contract), so a log carrying these rows
-#: stays readable everywhere.
+#: with ONE carve-out spelled in :func:`fold`: every user-act terminal row
+#: present (``answered``, ``declined``, ``dismissed``) outranks a later
+#: ``withdrawn`` — the user's own acts are never overridden by the asker's
+#: retraction. Unknown to builds older than this one, deliberately: an old fold
+#: skips a kind it does not branch on (the store's "corrupt or unknown ⇒
+#: tolerated" contract), so a log carrying these rows stays readable
+#: everywhere.
 EVENT_WITHDRAWN = "withdrawn"
 
 #: Every status a folded ask can hold (design §2.2, §4).
@@ -441,12 +442,12 @@ def fold(
     first.
 
     ``withdrawn`` (design §12) is terminal-on-write from the moment it appears,
-    with ONE carve-out: an ``answered`` row ALWAYS wins, in either write order.
-    The asker retracts; the operator's real answer is never swallowed by that
-    retraction — a racing withdrawal loses, and only a withdrawn row with NO
-    ``answered`` sibling folds to ``withdrawn``. The check sits below every
-    answered branch (and above the deadline branches, which must never judge a
-    retracted ask).
+    with ONE carve-out: every user-act terminal row present (``answered``,
+    ``declined``, ``dismissed``) outranks it, in either write order. The asker
+    retracts; the user's own acts are never overridden by that retraction — a
+    racing withdrawal loses, and only a withdrawn row with no such sibling
+    folds to ``withdrawn``. The check sits below every user-act branch (and
+    above the deadline branches, which must never judge a retracted ask).
     """
     records: list[dict[str, Any]] = []
     for ask_id in _asks_in_order(events):
@@ -479,8 +480,9 @@ def fold(
             status = STATUS_LATE if now <= window_end else STATUS_EXPIRED
         elif withdrawn is not None:
             # THE ONE CARVE-OUT IS ABOVE, BY CONSTRUCTION (design §12): every
-            # answered branch outranks this one, so a withdrawn row folds to
-            # ``withdrawn`` only when no ``answered`` row exists — in either
+            # user-act branch (answered in-window, declined, dismissed,
+            # answered-late) outranks this one, so a withdrawn row folds to
+            # ``withdrawn`` only when the log holds no such row — in either
             # write order. Below it, the deadline branches never run for a
             # retracted ask: ``withdrawn`` is terminal-on-write.
             status = STATUS_WITHDRAWN
@@ -855,6 +857,7 @@ __all__ = [
     "EVENT_DECLINED",
     "EVENT_DISMISSED",
     "EVENT_QUEUED",
+    "EVENT_WITHDRAWN",
     "INJECTING_STATUSES",
     "LATE_WINDOW_S",
     "OUTSTANDING_STATUSES",
@@ -865,6 +868,7 @@ __all__ = [
     "STATUS_LATE",
     "STATUS_OPEN",
     "STATUS_TIMED_OUT",
+    "STATUS_WITHDRAWN",
     "append_event",
     "ask_ids",
     "asks_dir",
