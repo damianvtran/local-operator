@@ -340,6 +340,8 @@ from local_operator.tui.widgets.aside_panel import (
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.ask_queue import (
     ASK_TOGGLE_KEY,
+    SCOPE_FLEET,
+    SCOPE_SESSION,
     STATUS_OPEN,
     STATUS_TIMED_OUT,
     AskBar,
@@ -2434,6 +2436,14 @@ PREWARM_PER_REFRESH = 2
 
 #: Polls between footer-chip population reads. 15 * 2 s = 30 s.
 SUBAGENT_POLL_EVERY = 15
+
+#: Polls between FLEET ASK TALLY reads on the same 2 s sidebar tick: 5 * 2 s =
+#: 10 s, matching the desktop's own cadence for the same source
+#: (``FLEET_ASKS_POLL_MS``). The read is a whole-index scan, so it belongs on
+#: the slow rung of the poll rather than on every tick — and never on the
+#: 2 s timer itself (design §2, D2: the rows are read separately, once, when
+#: the fleet scope opens).
+ASK_INDEX_POLL_EVERY = 5
 
 #: How long a parked sidebar source may keep its runtime attachment.
 #:
@@ -5583,8 +5593,30 @@ class OperatorApp(App[None]):
         #: routing, the placeholder and the bar all read, so they cannot
         #: disagree about which channel Enter is aimed at.
         self._ask_mode: bool = False
-        #: The wire's open asks, flattened, as of the last snapshot.
+        #: The wire's asks, flattened, as of the last snapshot — SETTLED ROWS
+        #: INCLUDED since design §4: the list filters them, the bar and the
+        #: sidebar mark read `_open_ask_rows()` so a settled row never inflates a
+        #: count of what is still owed.
         self._ask_rows: list[AskRow] = []
+        #: Which queue the ONE expanded list is reading: this conversation's, or
+        #: every conversation's. Set by the DOOR the user came through — the bar
+        #: (session) or the sidebar's fleet note (fleet) — and never by the list
+        #: itself: one surface, one affordance, and the door already knows.
+        self._ask_scope: str = SCOPE_SESSION
+        #: The rows a FLEET list is showing, read once from the cross-session
+        #: index when that scope is opened. Kept apart from `_ask_rows` because
+        #: the wire's snapshot is about the CURRENT session and must not replace
+        #: another scope's rows under the reader.
+        self._ask_fleet_rows: list[AskRow] = []
+        #: ``session_id -> outstanding count`` from the index, for the sidebar's
+        #: marks (amendment A3: the OUTSTANDING set, over every session). The
+        #: fleet TOTAL is derived from this map at paint time rather than stored
+        #: beside it (A4): two fields for one number is how a footer and the
+        #: marks on screen drift apart.
+        self._ask_marks: dict[str, int] = {}
+        #: Poll counter for the index read: the sidebar ticks every 2 s and this
+        #: read is throttled off it (see `_read_fleet_asks`).
+        self._ask_index_poll: int = 0
         #: The ask whose picker is mounted, or None while the LIST is up (or
         #: nothing is). Kept beside the card because the card alone cannot say
         #: which ask it belongs to, and the answer has to be routed to THAT ask —
@@ -10918,6 +10950,8 @@ class OperatorApp(App[None]):
             list[tuple[str, str]],
             tuple[SessionRow, ...],
             tuple[UnansweredPeer, ...],
+            dict[str, int],
+            int,
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import (
@@ -10970,13 +11004,34 @@ class OperatorApp(App[None]):
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
                 total = subagent_population(root)
             self._subagent_population_poll += 1
-            return entries, pins, total, silent, peer_rows, unanswered
+            # THE FLEET ASK TALLY (design §2, D2). Read on the same slow cadence
+            # as the subagent population and for the same reason: it is a
+            # whole-index scan whose answer changes when an ask is queued or
+            # settled, not when the list repaints. The ROWS are not read here at
+            # all — `index_asks` has no cross-session cap and its own comment
+            # says a cap belongs before it "ever feeds a frame"; the fleet list
+            # fetches them once, off-thread, when that scope is opened (D2).
+            ask_marks: dict[str, int] = {}
+            ask_total = 0
+            from local_operator.asks import policy
+
+            if self._ask_index_poll % ASK_INDEX_POLL_EVERY == 0 and policy.enabled():
+                ask_marks, ask_total = self._read_fleet_asks()
+            self._ask_index_poll += 1
+            return entries, pins, total, silent, peer_rows, unanswered, ask_marks, ask_total
 
         async def refresh() -> None:
             try:
-                entries, pins, total, silent, peer_rows, unanswered = await asyncio.to_thread(
-                    collect
-                )
+                (
+                    entries,
+                    pins,
+                    total,
+                    silent,
+                    peer_rows,
+                    unanswered,
+                    ask_marks,
+                    ask_total,
+                ) = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
@@ -10989,6 +11044,12 @@ class OperatorApp(App[None]):
                 self._session_sidebar.set_silent_peers(silent)
                 if total is not None:
                     self._session_sidebar.set_subagent_total(total)
+                # THE FLEET ASK TALLY, from the same throttled read that fed the
+                # subagent population above. The marks go through the app's own
+                # painter so the CURRENT session's live wire count is unioned in
+                # (A3) rather than being overwritten by an index that lags it.
+                self._ask_marks = dict(ask_marks)
+                self._paint_sidebar_asks()
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
                 # THE SAME READ THAT PAINTS THE PEER TIER IS THE PARK DETECTOR
                 # (design note §1 A1): edges off rows this poll already holds,
@@ -12260,7 +12321,11 @@ class OperatorApp(App[None]):
         # settle or expire an ask. The read is `getattr`-guarded because a
         # reduced facade in the tests carries no `asks` field at all, which is
         # also the flag-off shape.
-        self._sync_ask_surface(ask_rows(getattr(state, "asks", None)))
+        self._sync_ask_surface(
+            ask_rows(getattr(state, "asks", None)),
+            open_count=getattr(state, "asks_open", None),
+            truncated=bool(getattr(state, "asks_truncated", False)),
+        )
 
     def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
@@ -16669,6 +16734,12 @@ class OperatorApp(App[None]):
                     # rows does the refresh, so there is one definition of what
                     # each marker means.
                     refresh_live_state=self._overlay_live_state,
+                    # The FLEET ask total, read FRESH on open (amendment A2: the
+                    # fleet surfaces refresh on the picker's own open rather
+                    # than trusting the 10 s poll's last answer). Read here, on
+                    # the same path that already walked the session store, so
+                    # the picker never opens with a stale total.
+                    asks_total=self._fleet_ask_total_now(),
                 ),
                 _resume_choice,
             )
@@ -25664,13 +25735,25 @@ class OperatorApp(App[None]):
     #   goes quiet, which is how "expires in 42m" outlived its own deadline on
     #   a surface the user was looking at.
 
-    def _sync_ask_surface(self, rows: list[AskRow]) -> None:
+    def _sync_ask_surface(
+        self,
+        rows: list[AskRow],
+        *,
+        open_count: int | None = None,
+        truncated: bool = False,
+    ) -> None:
         """Reconcile the bar, the card and the drafts with the wire's asks.
 
         The ONE writer of the queued-ask interaction state, called from the
         frontend snapshot (``_apply_frontend_state``) — so the surfaces follow
         the same fold every other widget in the dock already follows, rather
         than a second subscription that could disagree with it.
+
+        ``open_count``/``truncated`` are the WIRE's own tally and its marker
+        (``asks_open``/``asks_truncated``, design §4): the list header states the
+        backend's number and withholds the waiting/moved-on split when the frame
+        is a prefix of the queue (amendment A6), so the fold's two extra facts
+        have to reach the surface that prints them.
 
         Ordering is load-bearing in two places:
 
@@ -25703,9 +25786,18 @@ class OperatorApp(App[None]):
             # composer is today's. Return BEFORE the bar is touched, so a
             # machine that never set ``LOP_ASK_NONBLOCKING`` cannot render a
             # surface for a feature its runtime does not have.
+            #
+            # A8: the FLEET surfaces are absent too — no total, no extra marks,
+            # no fleet scope — which is why the tally and the sidebar map are
+            # cleared HERE rather than left to go stale on a switch flipped
+            # mid-session.
             self._ask_rows = []
+            self._ask_fleet_rows = []
+            self._ask_marks = {}
+            self._ask_scope = SCOPE_SESSION
             self._ask_bar.set_state(count=0, expanded=False, present=False)
             self._sync_ask_tick()
+            self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
         self._sync_ask_tick()
@@ -25718,7 +25810,20 @@ class OperatorApp(App[None]):
             # (round 1: QA Q3 / design D4 — the frame showed "3 open asks" over
             # the bar's "1 question waiting"). Same rows, same snapshot, one
             # writer: the two surfaces cannot disagree about the queue.
-            self._ask_list.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
+            #
+            # A FLEET list is fed by ITS OWN rows (the index read, which spans
+            # conversations) and takes the backend tally with them — the wire's
+            # snapshot is about the CURRENT session, and dropping it over a
+            # fleet list would silently swap the scope under the reader.
+            if self._ask_scope == SCOPE_FLEET:
+                self._ask_list.set_rows(self._ask_fleet_rows, now_ms=self._ask_now_ms())
+            else:
+                self._ask_list.set_rows(
+                    self._ask_rows,
+                    now_ms=self._ask_now_ms(),
+                    open_count=open_count,
+                    truncated=truncated,
+                )
         if self._ask_card is not None and self._ask_mounted_id is not None:
             # The CARD's title is derived from the row's STATUS, and a status is
             # exactly what a snapshot can change under a mounted card (an ask
@@ -25741,7 +25846,7 @@ class OperatorApp(App[None]):
             # Nothing left to answer at all: a list of zero rows is dead chrome
             # holding the composer hostage.
             self._collapse_asks()
-        self._sync_sidebar_asks(len(self._open_ask_rows()))
+        self._paint_sidebar_asks()
 
     @staticmethod
     def _ask_now_ms() -> int:
@@ -25801,22 +25906,101 @@ class OperatorApp(App[None]):
         interaction = getattr(self, "_interaction", None)
         return getattr(interaction, "session", None)
 
-    def _sync_sidebar_asks(self, count: int) -> None:
-        """Paint the outstanding-asks mark on the current session's sidebar row.
+    def _paint_sidebar_asks(self) -> None:
+        """Paint the outstanding-asks marks, unioned across the fleet and the wire.
+
+        THE MARK PREDICATE (amendment A3) is the OUTSTANDING set — ``open`` and
+        ``timed_out``, exactly what ``session_sidebar.set_asking``'s docstring
+        argues — over EVERY session, not only the current one. The source is the
+        index tally (``asks.store.read_index``), refreshed by the sidebar's own
+        poll; the CURRENT session's live wire count is unioned in so an ask
+        queued a moment ago marks immediately, before any index write.
 
         Guarded and best-effort like every other sidebar push: the sidebar is
-        optional (``tui.sidebar_visible`` defaults off) and a session with no
-        row in the catalogue is normal, so an absent widget or an unknown id is
-        not an error.
+        optional (``tui.sidebar_visible`` defaults off) and a session with no row
+        in the catalogue is normal, so an absent widget or an unknown id is not
+        an error.
         """
         sidebar = getattr(self, "_session_sidebar", None)
-        if sidebar is None:
+        from local_operator.asks import policy
+
+        if sidebar is None or not policy.enabled():
             return
-        session_id = str(getattr(self._session, "session_id", "") or "")
+        # A4: the total is the SUM of the per-session outstanding counts, and
+        # the marks it sums are the same map the rows are painted from — so a
+        # current session whose ask is not yet in the index still counts. Summing
+        # the raw index instead would leave the footer one short of the marks on
+        # screen, which is two surfaces disagreeing about one queue.
+        marks = self._fleet_marks()
         try:
-            sidebar.set_asking(session_id, count)
+            sidebar.set_asking(marks)
+            sidebar.set_asks_total(sum(marks.values()))
         except Exception:  # noqa: BLE001 — a sidebar never breaks an ask
             logger.debug("could not paint the sidebar ask mark", exc_info=True)
+
+    def _fleet_marks(self, index: dict[str, int] | None = None) -> dict[str, int]:
+        """``session_id -> outstanding count`` over the fleet, unioned with the wire.
+
+        Amendment A3's mark predicate: the OUTSTANDING set, every session. The
+        index supplies what other conversations hold; the CURRENT session's live
+        wire count is unioned in so a just-queued ask marks (and counts) before
+        any index write lands — ``max``, never replace, because the index lags.
+        """
+        marks = dict(self._ask_marks if index is None else index)
+        session_id = str(getattr(getattr(self, "_session", None), "session_id", "") or "")
+        live = len(self._open_ask_rows())
+        if session_id and live:
+            marks[session_id] = max(live, int(marks.get(session_id, 0)))
+        return marks
+
+    def _fleet_ask_total_now(self) -> int:
+        """The fleet ask total, read on the spot for a surface that is opening.
+
+        The poll's answer is up to ``ASK_INDEX_POLL_EVERY`` ticks old, and a
+        surface that OPENS is exactly the moment the operator looks — so the
+        picker reads rather than trusts (A2). Best-effort: a broken index means
+        no note, never a failed open.
+        """
+        from local_operator.asks import policy
+
+        if not policy.enabled():
+            return 0
+        try:
+            counts, _total = self._read_fleet_asks()
+        except Exception:  # noqa: BLE001 — a total is not worth a failed open
+            logger.debug("could not read the fleet ask total", exc_info=True)
+            return 0
+        # The same union the sidebar paints (A4): the picker's note and the
+        # sidebar's note must state one number for one fleet.
+        return sum(self._fleet_marks(counts).values())
+
+    def _read_fleet_asks(self) -> tuple[dict[str, int], int]:
+        """``(per-session outstanding counts, fleet total)`` from the index.
+
+        One read of the derived index and no session-directory walk, which is
+        what the index exists for (``asks/store.py``). It runs in the sidebar's
+        own poll worker (``asyncio.to_thread``), throttled by
+        ``ASK_INDEX_POLL_EVERY`` — NOT every 2 s tick, because this is disk I/O
+        whose answer changes on the scale of an ask's life, and the desktop polls
+        the same source at 10 s (``FLEET_ASKS_POLL_MS``).
+
+        Frozen, deliberately: the read does not touch the operator's live
+        sessions. A failure answers ``({}, 0)`` rather than raising into the poll
+        — absence is not emptiness, and no fleet surface is what a broken index
+        should look like.
+        """
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        counts: dict[str, int] = {}
+        total = 0
+        for session_id, entry in store.read_index(config_dir()).items():
+            asks = entry.get("asks")
+            outstanding = len(store.outstanding_asks(asks if isinstance(asks, list) else []))
+            if outstanding:
+                counts[session_id] = outstanding
+                total += outstanding
+        return counts, total
 
     def _expand_asks(self, ask_id: str | None = None) -> None:
         """Enter the EXPANDED state: the list when several are open, else the card.
@@ -25825,13 +26009,29 @@ class OperatorApp(App[None]):
         click between the user and the only thing there is to answer. The list
         exists for the case it is needed in — choosing WHICH of several asks to
         answer — which is §5.1's "list" and this path's ``ask_id is None``.
+
+        THE COUNT IS THE OUTSTANDING ONE, not the row count. ``ask_rows`` keeps
+        settled rows now (design §4), so counting rows would send a queue of one
+        open ask over three answered ones to the LIST — a page of history stood
+        between the user and the only thing they can act on. With nothing
+        outstanding but history to show, the list IS the right surface, which is
+        why ``0`` deliberately falls through to it.
         """
+        if self._ask_scope == SCOPE_FLEET or self._ask_fleet_rows:
+            # The door decides the scope (design §4): opening the session's own
+            # asks from the bar leaves the fleet list and returns to this one.
+            self._ask_scope = SCOPE_SESSION
+            self._ask_fleet_rows = []
         if not self._ask_rows:
             return
-        if ask_id is None and len(self._ask_rows) > 1:
-            self._mount_ask_list()
+        outstanding = self._open_ask_rows()
+        if ask_id is None:
+            if len(outstanding) == 1:
+                self._mount_ask_card(outstanding[0])
+            else:
+                self._mount_ask_list()
             return
-        target = ask_id or self._ask_rows[0].ask_id
+        target = ask_id
         row = next((item for item in self._ask_rows if item.ask_id == target), None)
         if row is None:  # pragma: no cover - the id came from this list
             return
@@ -25911,6 +26111,11 @@ class OperatorApp(App[None]):
         # A collapse forgets which surface the user came from, so a later card
         # opened fresh does not inherit a stale "Esc returns to the list".
         self._ask_from_list = False
+        # Leaving the surface leaves the SCOPE with it (design §4): the fleet
+        # list is a place a door opens, not a mode that survives a collapse and
+        # silently makes the next f4 open every conversation's queue.
+        self._ask_scope = SCOPE_SESSION
+        self._ask_fleet_rows = []
         if self._ask_mode:
             self._ask_mode = False
             self._sync_ask_composer(restore_draft=restore_draft)
@@ -26058,25 +26263,199 @@ class OperatorApp(App[None]):
             return ASK_ANSWER_PLACEHOLDER
         return "Draft a message…" if connection else editor.resting_placeholder
 
-    def _mount_ask_list(self, highlight: str | None = None) -> None:
+    def _ask_current_rows(self) -> list[AskRow]:
+        """The rows the ONE list is reading, for the scope its door opened.
+
+        A single reader, so every walk over the open list — the highlight, the
+        settle, the next-row search — is over the same rows the user sees. A
+        FLEET list's rows come from the cross-session index and carry their own
+        ``session_id``; a session list's come from the wire.
+        """
+        return self._ask_fleet_rows if self._ask_scope == SCOPE_FLEET else self._ask_rows
+
+    def on_session_sidebar_fleet_asks_requested(
+        self, message: SessionSidebar.FleetAsksRequested
+    ) -> None:
+        """The sidebar footer's fleet-ask note was pressed: open the fleet list."""
+        self.action_open_fleet_asks()
+
+    def action_open_fleet_asks(self) -> None:
+        """Open the ask list on the FLEET scope — every conversation's queue.
+
+        The rows come from the cross-session index, read ONCE and off the UI
+        thread (design §2, D2): ``index_asks`` has no cross-session cap and the
+        store's own comment puts the cap before it "ever feeds a frame", so
+        this is deliberately not on the 2 s poll — the TALLY is polled, the rows
+        are fetched when this scope is opened.
+
+        Under the kill switch there is no fleet scope at all (amendment A8):
+        the surfaces are absent, so the door must be inert rather than open a
+        list the flag says this build does not have.
+        """
+        from local_operator.asks import policy
+
+        if not policy.enabled():
+            return
+        self.run_worker(self._load_fleet_asks(), group="ask-fleet", exclusive=True)
+
+    async def _load_fleet_asks(self) -> None:
+        """Read the index off-thread, then mount the ONE list on it."""
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        try:
+            raw = await asyncio.to_thread(store.index_asks, config_dir())
+        except Exception:  # noqa: BLE001 — a broken index is not a crash
+            logger.warning("could not read the fleet ask index", exc_info=True)
+            raw = []
+        self._ask_scope = SCOPE_FLEET
+        self._ask_fleet_rows = ask_rows(raw)
+        self._mount_ask_list(scope=SCOPE_FLEET)
+
+    async def _reload_fleet_rows(self) -> None:
+        """Re-read the fleet rows after an answer, keeping the list on them."""
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        try:
+            raw = await asyncio.to_thread(store.index_asks, config_dir())
+        except Exception:  # noqa: BLE001 — a broken index is not a crash
+            logger.warning("could not read the fleet ask index", exc_info=True)
+            return
+        self._ask_fleet_rows = ask_rows(raw)
+        if self._ask_list is not None and self._ask_scope == SCOPE_FLEET:
+            self._ask_list.set_rows(self._ask_fleet_rows, now_ms=self._ask_now_ms())
+
+    def _fleet_answer_starts_here(self, row: AskRow) -> bool:
+        """Whether answering ``row`` needs the ENGAGE seam rather than the owner.
+
+        The memo's DECISION 3 split: a row of the ADOPTED session is answered
+        through the owner contract this app already holds (the cheap, synchronous
+        path the session list uses), and every other row — a runtime owned
+        elsewhere, a stopped session, a cold one — goes through
+        ``engage_session_client``. ``session_id`` empty means a session list,
+        which is the owner's by construction.
+        """
+        current = str(getattr(getattr(self, "_session", None), "session_id", "") or "")
+        return bool(row.session_id) and row.session_id != current
+
+    def _ask_settle_callback(self, row: AskRow):
+        """The card's settle handler for ``row``, routed by the ROW's OWN session.
+
+        The operator's ask 2, verbatim: "an answer from either scope addressed
+        to the ROW's own session (ask_id), not to whatever is on screen". A row
+        of the ADOPTED session is the owner contract's — the cheap synchronous
+        path the session list has always used — and every other row goes through
+        the engage seam (``_fleet_answer_starts_here``).
+
+        A closed-over ``row`` is deliberate: the card is bound to the ask it was
+        mounted for, so a wire snapshot that reorders or drops rows while the
+        picker is open cannot redirect the answer to a neighbour.
+        """
+        if self._ask_scope == SCOPE_FLEET and self._fleet_answer_starts_here(row):
+            return lambda answers, row=row: self._on_fleet_ask_settle(row, answers)
+        return lambda answers, ask_id=row.ask_id: self._on_queue_ask_settle(ask_id, answers)
+
+    def _on_fleet_ask_settle(self, row: AskRow, answers: dict[str, list[str]] | None) -> None:
+        """A fleet row's card settled: submit through the engage seam (A7)."""
+        expected = {str(q.get("id") or "") for q in row.questions}
+        submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
+        if not submitted:
+            # §5.0's D5: a partial map is a back-out, never an answer. Return
+            # to the list the user came from rather than collapsing.
+            self._clear_ask_surface()
+            self._mount_ask_list(highlight=row.ask_id, scope=SCOPE_FLEET)
+            return
+        self._run_fleet_ask_op(row, "respond", answers=answers)
+
+    def _run_fleet_ask_op(
+        self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
+    ) -> None:
+        """Send ``op`` for ``row`` through the engage seam, in a worker (A7).
+
+        The chain is the phone daemon's cold arm exactly — engage with an
+        ``AskErrand``, send the op, close in a ``finally`` — and it runs in a
+        Textual worker because the window it must live with is the phone's own
+        (engage 30 s + ack 15 s). The row is marked IN FLIGHT for that window so
+        a second gesture cannot send the same answer twice.
+        """
+        if self._ask_list is not None and any(
+            item.ask_id == row.ask_id for item in self._ask_list.visible_rows
+        ):
+            self._ask_list.set_in_flight(row.ask_id, True)
+        self.run_worker(
+            self._fleet_ask_worker(row, op, answers),
+            group=f"ask-fleet-{row.ask_id}",
+            exclusive=True,
+        )
+
+    async def _fleet_ask_worker(
+        self, row: AskRow, op: str, answers: dict[str, list[str]] | None
+    ) -> None:
+        """The engage-and-dial, off the UI thread's critical path (A7)."""
+        from local_operator.mobile.attach_client import engage_session_client
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.launch import AskErrand
+
+        failed = ""
+        try:
+            client, _detail = await engage_session_client(
+                config_dir(), row.session_id, AskErrand(ask_id=row.ask_id)
+            )
+            try:
+                if op == "respond":
+                    await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                elif op == "decline":
+                    await client.ask_decline(row.ask_id, by="terminal")
+                else:
+                    await client.ask_dismiss(row.ask_id, by="terminal")
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 — the refusal is the message
+            # `AttachClient` raises with `asks/render.refusal_copy`'s own
+            # sentence, so the ask says why in its own words rather than in a
+            # generic notice; anything else (a dial that timed out) is passed
+            # through as it came.
+            failed = str(exc) or "the answer could not be delivered"
+            logger.warning("could not deliver a fleet answer", exc_info=True)
+        finally:
+            if self._ask_list is not None:
+                self._ask_list.set_in_flight(row.ask_id, False)
+            await self._reload_fleet_rows()
+        if failed:
+            self._ask_gesture_refusal(failed)
+        elif self._ask_scope == SCOPE_FLEET:
+            # Hand the user back to the fleet list — the queue is a place, and
+            # the answered row has left it.
+            self._mount_ask_list(scope=SCOPE_FLEET)
+
+    def _mount_ask_list(self, highlight: str | None = None, *, scope: str | None = None) -> None:
         """Put the open-ask list in the prompt host, replacing any card.
 
         ``highlight`` names the ask the cursor should start on, which is how a
         card hands the user back to the row they came from: Escaping a card
         used to drop them to the ministate with the highlight reset to row 1,
         so with three asks they had to re-expand and re-hunt (UX round 1, U6).
+
+        ``scope`` is the door's promise: the bar opens THIS conversation's
+        queue, the sidebar's fleet note opens every conversation's. The list
+        paints the subject of the scope it was given and offers no toggle, so
+        one surface serves both queues without becoming two affordances.
         """
+        scope = scope or self._ask_scope
+        rows = self._ask_fleet_rows if scope == SCOPE_FLEET else self._ask_rows
         # `_clear_ask_surface` and NOT `_collapse_asks`: the swap keeps ask mode
         # on and the stash intact (review round 1, BLOCKER-1).
         self._clear_ask_surface()
-        widget = AskQueueList(self._ask_rows, widget_id="ask-queue-list", now_ms=self._ask_now_ms())
+        widget = AskQueueList(
+            rows, widget_id="ask-queue-list", now_ms=self._ask_now_ms(), scope=scope
+        )
+        self._ask_list = widget
         if highlight:
-            widget.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
-            for index, item in enumerate(self._ask_rows):
+            for index, item in enumerate(rows):
                 if item.ask_id == highlight:
                     widget.select(index)
                     break
-        self._ask_list = widget
         self._enter_ask_mode()
         self._mount_prompt(widget)
         # The list owns its own keys (arrows, Enter, d, x), so it must take the
@@ -26116,7 +26495,7 @@ class OperatorApp(App[None]):
             return
         card = AskPickerScreen(
             questions,
-            lambda answers, ask_id=row.ask_id: self._on_queue_ask_settle(ask_id, answers),
+            self._ask_settle_callback(row),
             widget_id=f"ask-queue-card-{row.ask_id}",
             title=self._ask_card_title(row),
             exit_hint=("esc", "collapse"),
@@ -26186,7 +26565,7 @@ class OperatorApp(App[None]):
         good), but a refusal copy on a plain Escape would read as a failure when
         the user was merely closing the card.
         """
-        row = next((item for item in self._ask_rows if item.ask_id == ask_id), None)
+        row = next((item for item in self._ask_current_rows() if item.ask_id == ask_id), None)
         expected = {str(q.get("id") or "") for q in (row.questions if row else ())}
         submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
         if submitted:
@@ -26254,7 +26633,7 @@ class OperatorApp(App[None]):
         two awaits. ``ids.index`` is therefore the honest lookup — a fallback
         for a missing row would be a branch no caller can reach.
         """
-        rows = self._ask_rows
+        rows = self._ask_current_rows()
         ids = [row.ask_id for row in rows]
         at = ids.index(ask_id)
         candidates = [*rows[at + 1 :], *reversed(rows[:at])]
@@ -26278,6 +26657,13 @@ class OperatorApp(App[None]):
 
     def _decline_ask(self, ask_id: str) -> None:
         """Decline a queued ask explicitly — today's Esc, made an action (§D5)."""
+        fleet_row = self._fleet_row_for(ask_id)
+        if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
+            # The row belongs to ANOTHER conversation, so the op goes through the
+            # engage seam (A7) — addressing the ROW's session, never the one on
+            # screen. Everything else falls through to the owner contract.
+            self._run_fleet_ask_op(fleet_row, "decline")
+            return
         session = self._queued_ask_session()
         # THE RESULT is annotated, not the callable, and that is the whole
         # subtlety: ``callable()`` is a TypeGuard for ``Callable[..., object]``,
@@ -26351,6 +26737,10 @@ class OperatorApp(App[None]):
 
     def _dismiss_ask(self, ask_id: str) -> None:
         """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+        fleet_row = self._fleet_row_for(ask_id)
+        if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
+            self._run_fleet_ask_op(fleet_row, "dismiss")
+            return
         session = self._queued_ask_session()
         reader: Any = getattr(session, "dismiss_ask", None)
         if not callable(reader):
@@ -26366,10 +26756,24 @@ class OperatorApp(App[None]):
         else:
             self._expand_asks()
 
+    def _fleet_row_for(self, ask_id: str) -> AskRow | None:
+        """The FLEET row carrying ``ask_id``, or ``None`` for a session scope.
+
+        The routing question this feature turns on: with the fleet list open,
+        the same id can name a row of the adopted session (the owner answers it)
+        or one belonging elsewhere (the engage seam does), and the row itself —
+        not the screen — says which.
+        """
+        if self._ask_scope != SCOPE_FLEET:
+            return None
+        return next((item for item in self._ask_fleet_rows if item.ask_id == ask_id), None)
+
     def on_ask_queue_list_picked(self, message: AskQueueList.Picked) -> None:
         """Enter on a list row: mount that ask's card, which takes the keyboard."""
         message.stop()
-        row = next((item for item in self._ask_rows if item.ask_id == message.ask_id), None)
+        row = next(
+            (item for item in self._ask_current_rows() if item.ask_id == message.ask_id), None
+        )
         if row is not None:
             self._mount_ask_card(row, from_list=True)
 
