@@ -287,6 +287,31 @@ async def test_the_filter_keys_and_the_segments_scope_the_visible_rows(enabled):
         assert listing.filter_value == FILTER_SETTLED
 
 
+async def test_a_truncated_frame_MOUNTS_with_the_backend_tally(enabled):
+    """A6 reaches the list the moment it is built, not only on the next snapshot.
+
+    The wire's ``asks_open``/``asks_truncated`` have to ride the MOUNT as well as
+    the reconcile: a list built without them states the visible split from rows
+    that are a prefix of the queue, which is the claim the truncated form exists
+    to avoid — and it would keep claiming it until some later snapshot happened
+    to land.
+    """
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a1"), _row("a2", status="timed_out")]),
+            open_count=7,
+            truncated=True,
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        header = app.query_one(AskQueueList).render().plain.splitlines()[0]
+        assert "7 outstanding" in header, header
+        assert "waiting, " not in header, header
+
+
 async def test_a_filtered_empty_half_still_names_the_half_holding_the_rows(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
