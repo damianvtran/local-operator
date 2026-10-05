@@ -3149,14 +3149,18 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # WHERE THE SESSION LIVES, and it is compared because a link CAN flap while
         # a list is open: a peer's relay going down or answering again is an event
         # this machine observes without the user doing anything, and it changes
-        # what the row says — the sidebar's `⇄` mark, its `(unreachable)` heading
-        # and its tooltip's clause are all read off these fields. Two rows
-        # differing only here are therefore not the same row on screen. Seven
-        # fields' worth of repaint is one tuple compare over ~200 rows, and the
-        # only thing that changes it is a device's state rather than a clock.
+        # what the row says — the sidebar's locality mark and its tooltip's clause are
+        # read off these fields. The NETWORK name rides with them because a
+        # membership can be renamed on this device while the list is open, and a
+        # tooltip still naming the old network would be one surface disagreeing
+        # with `/network` about the same record. Two rows differing only here are
+        # therefore not the same row on screen. Eight fields' worth of repaint is
+        # one tuple compare over ~200 rows, and the only thing that changes them
+        # is a device's state or a rename rather than a clock.
         "locality",
         "owner_device",
         "owner_device_name",
+        "owner_network_name",
         "reachable",
         "unreachable_reason",
         "placement_stale",

@@ -1,29 +1,40 @@
-"""The sidebar's REMOTE rows: the `⇄` slot, the peer sections, the tooltip.
+"""The sidebar's REMOTE rows: the `↗` slot, the merged bins, the tooltip.
 
-R6's TUI half (``docs/design/mesh-ui.md`` §1.3) is one list with a local/remote
-annotation, and the design makes two claims this file holds:
+R6's TUI half (``docs/design/mesh-ui.md`` §1.3, revised by the operator's
+convergence report, 2026-10-05, and by design round 1 of this change) is one
+list with a local/remote annotation, and the design makes these claims this
+file holds:
 
-1. **The mark lives in the cursor slot's locality cell**, never in the mark
-   column — that column belongs to ``row_state_mark``'s urgency ladder, and
-   locality is a durable property of the same kind the pin is. So the pin's own
-   docstring's rule ("a durable property must not displace the ladder") applies
-   here too, and the mark costs the title nothing: a remote row and a local row
-   start their titles at the same column (ahead of both, the pin cell's own two
-   columns sit since issue #1357 slice 2a).
-2. **A device with no peers paints byte-identically to before.** The rows are
+1. **The marks live in the cursor slot's locality cell** — `↗` on a remote
+   row, `↛` on a remote row that is UNREACHABLE (design round 1, D2/D5: the
+   pair must be decodable AT REST, because a Textual tooltip needs a mouse;
+   `↗` reads "elsewhere", the external-link convention, where `⇄` read as
+   exchange/sync) — never in the mark column: that column belongs to
+   ``row_state_mark``'s urgency ladder, and locality is a durable property of
+   the same kind the pin is. So the pin's own docstring's rule ("a durable
+   property must not displace the ladder") applies here too, and the mark
+   costs the title nothing: a remote row and a local row start their titles at
+   the same column (ahead of both, the pin cell's own two columns sit since
+   issue #1357 slice 2a).
+2. **REMOTE ROWS ARE FIRST-CLASS**: they file into the ordinary bins
+   (``SessionSidebar._unpinned_rank`` — the place that carries the SHARED
+   CONVENTION sentence the desktop sidebar's ``feat/sidebar-remote-rows`` names)
+   under the ordinary ordering rule, interleaved with this device's own rows by
+   the same ``rank`` key — no per-device section, no heading, no rank of their
+   own.
+3. **A device with no peers paints byte-identically to before.** The rows are
    local, they carry no mark, no peer heading exists, and the four tier headings
    are the same four strings. That is the *before* frame of the visual pair, and
-   it is asserted here as well as by pixels because a regression in it is the one
-   this change must not cause.
+   it is asserted here as well as by pixels.
 
 WHY THE FIXTURES CARRY THE FIELDS BY HAND: these rows are driven the way the
 design's evidence plan drives them — stamped with the mobility fields — which is
 the contract the producer has to satisfy, and it keeps the rendering half of the
 test independent of the read half.
 
-THE PRODUCER NOW EXISTS (``local_operator/session/peer_rows.py``, review round 4
+THE PRODUCER EXISTS (``local_operator/session/peer_rows.py``, review round 4
 MINOR 3): the sidebar's poll appends what it returns, which is what this file's
-last test drives. ``network/projection.py``'s catalogue is still a live relay
+wiring test drives. ``network/projection.py``'s catalogue is still a live relay
 read the sidebar may not make from a frame, which is why that producer caches and
 bounds it and why the rows here are still hand-stamped for everything that is
 about RENDERING.
@@ -39,7 +50,12 @@ from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
-from tests.unit.tui.test_session_sidebar import _plain, _sidebar_with, _sub
+from tests.unit.tui.test_session_sidebar import (
+    _plain,
+    _section_of_line,
+    _sidebar_with,
+    _sub,
+)
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -51,25 +67,36 @@ def _remote(
     *,
     device: str = "d_aaaa",
     label: str = "damian-mbp",
+    network: str = "devmesh",
     active: bool = False,
+    born_min_ago: float | None = None,
     reachable: bool = True,
     reason: str = "",
     stale: bool = False,
     name: str = "",
 ) -> CatalogEntry:
-    """A row on ANOTHER device: the field set the projection must supply."""
+    """A row on ANOTHER device: the field set the projection must supply.
+
+    ``born_min_ago`` stamps ``created_at`` the way the producer does — from the
+    peer's ``started`` claim (``session/peer_rows.py``'s row construction) —
+    because ordering a remote row among local ones is one of the claims below.
+    ``None`` leaves the zero the pre-convergence producer emitted.
+    """
+    now = time.time()
     return CatalogEntry(
         SessionRow(
             sid,
-            time.time(),
+            now,
             name or f"Session {sid}",
             live_state="busy" if active else "",
             locality="remote",
             owner_device=device,
             owner_device_name=label,
+            owner_network_name=network,
             reachable=reachable,
             unreachable_reason=reason,
             placement_stale=stale,
+            created_at=0.0 if born_min_ago is None else now - born_min_ago * 60.0,
         )
     )
 
@@ -77,21 +104,12 @@ def _remote(
 TIER_HEADINGS = {"★ Pinned", "Active Sessions", "Previous Sessions", "⌥ Subagent Runs"}
 
 
-def _section_headings(sidebar) -> list[str]:
-    """The section headings the painter would emit, in order, with their keys."""
-    return [
-        kind.removeprefix("header:")
-        for kind, _entry in sidebar._display_rows()
-        if kind.startswith("header:")
-    ]
+def _tier_headings(lines: list[str]) -> list[str]:
+    return [line.strip() for line in lines if line.strip() in TIER_HEADINGS]
 
 
-def _headings(lines: list[str]) -> list[str]:
-    return [
-        line.strip()
-        for line in lines
-        if line.strip() in TIER_HEADINGS or line.strip().startswith("⇄")
-    ]
+def _header_kinds(sidebar) -> list[str]:
+    return [kind for kind, _entry in sidebar._display_rows() if kind.startswith("header:")]
 
 
 def _line_with(lines: list[str], needle: str) -> str:
@@ -108,7 +126,7 @@ def _line_with(lines: list[str], needle: str) -> str:
 
 @pytest.mark.asyncio
 async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> None:
-    """Claim 1: `⇄` sits in the locality cell, and both titles start together."""
+    """Claim 1: `↗` sits in the locality cell, and both titles start together."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -122,13 +140,48 @@ async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> No
         # blank (this row is neither the cursor nor pinned). Design round 1,
         # D4: the mark keeps its own cell at EVERY state, so the row the user
         # is about to act on is not the one row that stops saying it is remote.
-        assert remote[:4] == "   ⇄"
+        assert remote[:4] == "   ↗", repr(remote)
         assert local[:4] == "    "
         # Same column for the title on both rows: the mark is not paid for by
         # narrowing the title relative to a local row, which is what the
         # "costs zero new cells" claim means (the pin cell ahead of both is
         # issue #1357 slice 2a's own two columns, priced once for every row).
         assert remote.index("Remote work") == local.index("Session mine") == 6
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_remote_row_carries_the_struck_mark_at_rest() -> None:
+    """Design round 1, D2: unreachable is decodable WITHOUT a hover.
+
+    A Textual tooltip needs a mouse, so the row itself must say it: the
+    locality cell paints `↛` — the same arrow family as `↗` with the stroke
+    that says "does not get there" — in the same cell, so the unreachable row
+    is not byte-identical to a live one and nothing reflows between the two
+    states. The tooltip's `unreachable · <reason>` line (D4) remains the
+    available expansion; this is the at-rest half.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [
+            _remote("live", name="Live elsewhere"),
+            _remote(
+                "gone",
+                name="Gone elsewhere",
+                reachable=False,
+                reason="connect_failed:ConnectionRefusedError",
+                stale=True,
+            ),
+        ]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        lines = sidebar.render().plain.splitlines()
+        live = _line_with(lines, "Live elsewhere")
+        gone = _line_with(lines, "Gone elsewhere")
+        assert live[:4] == "   ↗", repr(live)
+        assert gone[:4] == "   ↛", repr(gone)
+        # One cell, one column, no reflow: the two states differ in the glyph
+        # alone, and the title starts at the same place on both.
+        assert live.index("Live elsewhere") == gone.index("Gone elsewhere") == 6
 
 
 @pytest.mark.asyncio
@@ -154,7 +207,8 @@ async def test_a_local_row_gains_no_mark() -> None:
         ]
         sidebar = await _sidebar_with(pilot, app, entries)
         lines = sidebar.render().plain.splitlines()
-        assert "⇄" not in "\n".join(lines)
+        assert "↗" not in "\n".join(lines)
+        assert "↛" not in "\n".join(lines)
         first = _line_with(lines, "Session mine")
         second = _line_with(lines, "Session stated")
         # The pin cell and the caret cell are blank on BOTH rows — the mark's
@@ -196,124 +250,134 @@ async def test_the_pin_and_the_caret_ride_their_own_cells_and_never_the_mark() -
         lines = sidebar.render().plain.splitlines()
         pinned = _line_with(lines, "Pinned remote")
         plain = _line_with(lines, "Plain remote")
-        assert pinned[:4] == "★  ⇄", repr(pinned)
-        assert plain[:4] == "  ›⇄", repr(plain)
+        assert pinned[:4] == "★  ↗", repr(pinned)
+        assert plain[:4] == "  ›↗", repr(plain)
         # THE STATE THE OLD SHARED CELL COULD NOT DRAW: pinned AND the cursor.
         sidebar.cursor_id = "pinned-remote"
         await pilot.pause()
         both = _line_with(sidebar.render().plain.splitlines(), "Pinned remote")
-        assert both[:4] == "★ ›⇄", repr(both)
+        assert both[:4] == "★ ›↗", repr(both)
         # Nothing moved: the title starts at the same column on every state —
         # the pin cell's two columns, then the caret and locality cells.
         assert plain.index("Plain remote") == both.index("Pinned remote") == 6
 
 
 # ---------------------------------------------------------------------------
-# the sections
+# the bins (the convention this change exists for)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_each_peer_forms_one_section_after_previous_and_before_subagent() -> None:
-    """Claim 1's ordering, and contiguity for each device separately."""
-    from local_operator.tui.widgets.session_sidebar import _SECTION_PEER_RANK
+async def test_remote_rows_file_into_the_ordinary_bins_by_their_own_state() -> None:
+    """Claim 2: a remote row is binned by ``active``, exactly like a local row.
 
+    One remote row busy (active) and one cold (previous), beside local rows in
+    the same two bins, and the frame's headings are the tier names ALONE — no
+    per-device ``↗ <device>`` section (the retired heading's glyph was `⇄`),
+    which is the segregation the convergence report
+    removed. The two remote rows are on DIFFERENT devices and still share the
+    ordinary bins, so nothing per-device is left anywhere.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         entries = [
             _plain("mine", active=True),
-            _sub("run1", label="ship it", agent="coder"),
-            _remote("a1", device="d_aaaa", label="damian-mbp", name="Peer A one"),
+            _remote("a1", label="damian-mbp", name="Peer A busy", active=True),
             _plain("old"),
-            _remote("b1", device="d_bbbb", label="radiant-m4", name="Peer B one"),
-            _remote("a2", device="d_aaaa", label="damian-mbp", name="Peer A two"),
+            _remote("b1", device="d_bbbb", label="radiant-m4", name="Peer B cold"),
         ]
-        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True, total=1)
+        sidebar = await _sidebar_with(pilot, app, entries)
+        lines = sidebar.render().plain.splitlines()
+        assert _tier_headings(lines) == ["Active Sessions", "Previous Sessions"]
+        # The chrome IS the tier list: a kind outside the table would be a
+        # section the names do not own — which is exactly what the per-device
+        # peer headings were.
+        assert _header_kinds(sidebar) == ["header:active", "header:previous"]
+        active = lines.index(_line_with(lines, "Active Sessions"))
+        previous = lines.index(_line_with(lines, "Previous Sessions"))
+        # Busy files with busy; cold with cold — each by its OWN state, and the
+        # remote busy row sits INSIDE the active run rather than in a block of
+        # its own.
+        assert active < lines.index(_line_with(lines, "Peer A busy")) < previous
+        assert previous < lines.index(_line_with(lines, "Peer B cold"))
+        # Every painted section is one contiguous run (nothing is split).
         ranks = [
             sidebar._section_of(entry)
             for _kind, entry in sidebar._display_rows()
             if entry is not None
         ]
-        # Ranks are ordered, so no section is split by another.
         assert ranks == sorted(ranks)
-        assert set(ranks) == {1, _SECTION_PEER_RANK, 2, 4}
-        lines = sidebar.render().plain.splitlines()
-        # Two devices are two sections, each heading naming its own device, and
-        # each pair of rows sitting under its own heading.
-        headings = _headings(lines)
-        assert "⇄ damian-mbp" in headings
-        assert "⇄ radiant-m4" in headings
-        a_one = lines.index(_line_with(lines, "Peer A one"))
-        a_two = lines.index(_line_with(lines, "Peer A two"))
-        heading = lines.index(_line_with(lines, "⇄ damian-mbp"))
-        # Peer A's rows are contiguous BELOW its heading and above Peer B's.
-        assert heading < a_one < a_two
-        assert a_two < lines.index(_line_with(lines, "⇄ radiant-m4"))
 
 
 @pytest.mark.asyncio
-async def test_the_peer_heading_stacks_in_the_rows_own_mark_column() -> None:
-    """Design round 2, D18: one mark column for a heading and the rows under it.
+async def test_remote_rows_interleave_with_local_rows_by_the_same_ordering_key() -> None:
+    """The SAME ordering rule: position inside a bin comes from ``rank``'s
+    ``-created_at`` key, so a remote row born BETWEEN two local rows sorts
+    between them rather than below both.
 
-    Rows paint the locality glyph in the slot's locality cell — after the pin
-    cell and the caret — and the heading once painted it at the start of the
-    line, so the one glyph that says "everything under this line is another
-    device" started at a different x from every mark it governed and the column
-    did not stack. The heading has neither a caret nor a pin, so those columns
-    are empty on it by definition: indent it (`_peer_heading_text`), and the
-    tier headings above (which DO own the pin column's star) stay where they are.
+    ``-created_at`` is the contested half of this: the pre-convergence producer
+    stamped remote rows with no birth, which parked every one of them at the
+    BOTTOM of its bin — the soft form of the same segregation. The producer now
+    stamps the peer's ``started`` claim (``session/peer_rows.py``), and this is
+    what that buys on the frame.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
-        entries = [_remote("a1", label="damian-mbp", name="Peer A one")]
-        sidebar = await _sidebar_with(pilot, app, entries)
-        lines = sidebar.render().plain.splitlines()
-        heading = _line_with(lines, "⇄ damian-mbp")
-        row = _line_with(lines, "Peer A one")
-        assert heading.index("⇄") == row.index("⇄") == 3, (heading, row)
-
-
-@pytest.mark.asyncio
-async def test_an_unreachable_peer_says_so_in_the_heading() -> None:
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        now = time.time()
         entries = [
-            _remote(
-                "a1",
-                label="damian-mbp",
-                name="Peer A one",
-                reachable=False,
-                reason="connect_failed:ConnectionRefusedError",
-            )
+            CatalogEntry(
+                SessionRow(
+                    "mine-new",
+                    now,
+                    "Newest local",
+                    live_state="busy",
+                    created_at=now - 60,
+                )
+            ),
+            _remote("theirs-mid", name="Middle remote", active=True, born_min_ago=30),
+            CatalogEntry(
+                SessionRow(
+                    "mine-old",
+                    now,
+                    "Oldest local",
+                    live_state="busy",
+                    created_at=now - 5400,
+                )
+            ),
         ]
         sidebar = await _sidebar_with(pilot, app, entries)
         lines = sidebar.render().plain.splitlines()
-        assert "⇄ damian-mbp (unreachable)" in _headings(lines)
+        first = lines.index(_line_with(lines, "Newest local"))
+        second = lines.index(_line_with(lines, "Middle remote"))
+        third = lines.index(_line_with(lines, "Oldest local"))
+        assert first < second < third, "\n".join(lines)
 
 
 @pytest.mark.asyncio
-async def test_a_nameless_peer_gets_a_heading_from_its_id() -> None:
-    """An unnamed device must not produce a heading with nothing after the glyph."""
+async def test_a_pinned_remote_row_lifts_into_pinned_and_keeps_its_mark() -> None:
+    """First-class includes the pin: a pinned remote row paints under
+    ``★ Pinned`` with its `↗` mark kept — the pin's lift is the ordinary one."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        entries = [_remote("a1", device="d_9f2c1a4b", label="", name="Peer A one")]
-        sidebar = await _sidebar_with(pilot, app, entries)
+        entries = [_plain("mine", active=True), _remote("a1", name="Peer A one")]
+        sidebar = await _sidebar_with(pilot, app, entries, pins=("a1",))
         lines = sidebar.render().plain.splitlines()
-        assert "⇄ d_9f2c1a" in _headings(lines)
+        assert _section_of_line(lines, "Peer A one") == "★ Pinned"
+        assert "↗" in _line_with(lines, "Peer A one")
 
 
 @pytest.mark.asyncio
-async def test_the_page_never_overruns_with_several_peer_sections() -> None:
-    """``_header_lines`` counts each peer SECTION, not the peer RANK.
+async def test_several_remote_devices_add_no_chrome() -> None:
+    """Three devices, two sections: the per-device heading cost is gone.
 
-    Two peers share a rank and each has a heading of its own, so counting distinct
-    ranks would charge one heading for two sections and the painted frame would be
-    a line taller than the height it was computed for — the overrun this
-    accounting exists to prevent.
+    The old accounting charged ONE heading per device, so this asserted
+    ``len(headings) == 4`` for three peers plus a tier. There is nothing per
+    device to charge now — the section count is the tier count — and the same
+    invariant as before still holds: the frame fits the height it was computed
+    for.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -325,12 +389,10 @@ async def test_the_page_never_overruns_with_several_peer_sections() -> None:
         ]
         sidebar = await _sidebar_with(pilot, app, entries)
         rows = sidebar._display_rows()
-        headings = [kind for kind, _entry in rows if kind.startswith("header:")]
-        # THREE peer headings and one tier heading. Counting distinct RANKS would
-        # see two (active + peer), which is the bug this asserts against.
-        assert len(headings) == 4, headings
-        # Chrome = headings + blanks, per section, and the painted frame fits.
-        assert sidebar._header_lines() == 4 * 2 + 3
+        assert _header_kinds(sidebar) == ["header:active", "header:previous"]
+        # Chrome = headings + blanks, per section — exact, because every
+        # section has rows.
+        assert sidebar._header_lines() == 2 * 2 + 1
         assert len(rows) <= sidebar.size.height
 
 
@@ -340,7 +402,7 @@ async def test_the_page_never_overruns_with_several_peer_sections() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_tooltip_names_the_device_and_the_reason() -> None:
+async def test_the_tooltip_names_the_device_the_network_and_the_reason() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -353,15 +415,30 @@ async def test_the_tooltip_names_the_device_and_the_reason() -> None:
                 reason="asked, and it did not answer",
                 stale=True,
             ),
+            _remote("a3", device="d_9f2c1a4b", label="", network="", name="Peer A three"),
             _plain("mine"),
         ]
         sidebar = await _sidebar_with(pilot, app, entries)
         by_id = {entry.id: entry for entry in entries}
         reachable = sidebar._describe(by_id["a1"])
-        assert "on damian-mbp" in reachable
+        # DEVICE AND NETWORK, in one clause: this is the TUI half of the pair
+        # whose sentence `_unpinned_rank` records — the desktop sidebar's
+        # `feat/sidebar-remote-rows` reads the same two facts on its hover and
+        # accessible name.
+        assert "on damian-mbp · devmesh" in reachable
+        # THE REASON GETS ITS OWN TERSE LINE (design round 1, D4): the device
+        # clause stays intact, and the unreachable fact keeps the same `·`
+        # separator and the shared gloss (`peer_reason_words`) as its own line
+        # under it — the fused `— unreachable: <prose>` sentence is gone.
         unreachable = sidebar._describe(by_id["a2"])
-        assert "on damian-mbp — unreachable: asked, and it did not answer" in unreachable
-        assert "(last known state)" in unreachable
+        assert unreachable.splitlines()[2] == "on damian-mbp · devmesh (last known state)"
+        assert unreachable.splitlines()[3] == "unreachable · asked, and it did not answer"
+        assert unreachable.splitlines()[4] == "a2"
+        # DEGRADED, NOT GUESSED: a nameless device falls back to the id's tail
+        # (`owner_label`) and an unreadable membership omits the network clause
+        # rather than printing an id or a placeholder.
+        nameless = sidebar._describe(by_id["a3"])
+        assert nameless.splitlines()[2] == "on d_9f2c1a"
         local = sidebar._describe(by_id["mine"])
         # No device clause at all: the local row's tooltip is exactly the three
         # lines it has always been (name, state, id).
@@ -370,10 +447,11 @@ async def test_the_tooltip_names_the_device_and_the_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_a_device_with_no_peers_paints_exactly_as_before() -> None:
-    """Claim 2, the R9/R16 invariant: no peer, no mark, no peer heading.
+    """Claim 3, the R9/R16 invariant: no peer, no mark, no peer heading.
 
     Asserted on the headless four-tier fixture: the headings are the four tier
-    names, the rows carry only the pin/caret/mark columns, and no ``⇄`` appears
+    names, the rows carry only the pin/caret/mark columns, and no ``↗`` or
+    ``↛`` appears
     anywhere. This is the same frame the *before* capture must be byte-identical
     to (§4.1).
     """
@@ -388,14 +466,17 @@ async def test_a_device_with_no_peers_paints_exactly_as_before() -> None:
         ]
         sidebar = await _sidebar_with(pilot, app, entries, pins=("pin1",), show_subagents=True)
         lines = sidebar.render().plain.splitlines()
-        assert _headings(lines) == [
+        assert _tier_headings(lines) == [
             "★ Pinned",
             "Active Sessions",
             "Previous Sessions",
             "⌥ Subagent Runs",
         ]
-        assert "⇄" not in "\n".join(lines)
-        # And `_section_of` is unchanged for every row: 0/1/2/4, never the peer rank.
+        assert "↗" not in "\n".join(lines)
+        assert "↛" not in "\n".join(lines)
+        # And `_section_of` is unchanged for every row: 0/1/2/4. Rank 3 is
+        # UNASSIGNED — the retired peer axis held it — and `subagent` keeps 4
+        # rather than renumbering for a hole nothing reads.
         ranks = {sidebar._section_of(entry) for entry in entries}
         assert ranks == {0, 1, 2, 4}
 
@@ -406,10 +487,12 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
 
     The rendering half is pinned above against hand-stamped rows. This pins the
     other end of the same claim — `_refresh_sidebar` appends what
-    `session.peer_rows` returns — so the `⇄` mark and the per-device heading have
-    a live source rather than only a contract fixture, which is what review round
-    4's MINOR 3 was about (the session `/new remote <peer>` creates had no surface
-    that could see it).
+    `session.peer_rows` returns — so the `↗` mark has a live source rather than
+    only a contract fixture, which is what review round 4's MINOR 3 was about
+    (the session `/new remote <peer>` creates had no surface that could see it).
+    The row is ``idle``, which is an ACTIVE state, so it must adopt into the
+    ordinary ``Active Sessions`` bin: the bins claim, end to end, from producer
+    to painted frame.
     """
     import local_operator.session.peer_rows as peer_rows_mod
 
@@ -425,6 +508,7 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
                 locality="remote",
                 owner_device="d_radiant",
                 owner_device_name="radiant-m4",
+                owner_network_name="devmesh",
             ),
         ),
     )
@@ -442,158 +526,12 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
                 break
         lines = sidebar.render().plain.splitlines()
         joined = "\n".join(lines)
-        assert "⇄ radiant-m4" in joined, joined
+        # No device heading exists, and the row files under the ordinary bin
+        # for its state — the two halves of claim 2, through the REAL poll.
+        assert "↗ radiant-m4" not in joined, joined
+        assert _header_kinds(sidebar) == ["header:active"]
         row = next(line for line in lines if "Federated catalogue" in line)
         # The mark rides the locality cell — after the pin cell's two columns
         # and the caret's — and the title starts after the mark column.
-        assert row[3] == "⇄", repr(row)
+        assert row[3] == "↗", repr(row)
         assert row[6] == "F", repr(row)
-
-
-@pytest.mark.asyncio
-async def test_a_peer_that_stopped_answering_keeps_a_heading_with_no_rows() -> None:
-    """UX round 3, U16: "my peer has nothing" and "my peer is gone" must differ.
-
-    §8.3 says a peer that does not answer contributes NO ROWS rather than stale
-    ones — right, and not what was filed. The section was built from rows, so the
-    tier went with them: six sessions the user had been looking at simply
-    vanished, and the list read as complete. The heading is the one sentence that
-    explains the frame, and it must be the SAME string a live section carries with
-    ``reachable`` false, because the state is the same state.
-    """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
-        assert "⇄ damian-mbp" not in _headings(sidebar.render().plain.splitlines())
-        sidebar.set_silent_peers([("damian-mbp", "connect_failed:ConnectionRefusedError")])
-        await pilot.pause()
-        lines = sidebar.render().plain.splitlines()
-        assert "⇄ damian-mbp (unreachable)" in _headings(lines)
-        # THE REASON IS NOT PAINTED. It is the relay's wire token
-        # (``connect_failed:ConnectionRefusedError``), which UX round 3 filed as
-        # U23 on the listing surface; a heading is not where it gets a second,
-        # unlocalised spelling.
-        assert "ConnectionRefusedError" not in "\n".join(lines)
-        # ...and the peer answering again takes it away, so the line cannot
-        # outlive the state it describes.
-        sidebar.set_silent_peers([])
-        await pilot.pause()
-        assert "⇄ damian-mbp" not in _headings(sidebar.render().plain.splitlines())
-
-
-@pytest.mark.asyncio
-async def test_a_silent_peer_keeps_the_peer_rank_on_both_sides_of_answering() -> None:
-    """Design round 4, D27: the peer axis' rank is not a function of liveness.
-
-    ``mesh-ui.md`` decision 1 puts the peer axis after `previous` and BEFORE
-    `subagent`, and a live peer's section obeys it. Built at the END of the row
-    list instead, a silent peer's heading sat below `⌥ Subagent Runs` and moved
-    above it the moment the peer recovered — so the list re-ordered itself around
-    an event the user did not cause, and two devices stacked in one order
-    re-ordered themselves.
-
-    Asserted BOTH ways round, which is what makes it a claim about place rather
-    than about one frame: the silent heading and the equivalent answering one
-    (a remote row for the same device, ``reachable=False``) put the peer section
-    in the same position relative to the subagent tier.
-    """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 45)) as pilot:
-        await pilot.pause()
-        entries = [_plain("mine", active=True), _sub("s1")]
-        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
-        sidebar.set_silent_peers([("radiant-m4", "connect_failed:ConnectionRefusedError")])
-        await pilot.pause()
-        silent = _section_headings(sidebar)
-        silent_at = silent.index("peer:   ⇄ radiant-m4 (unreachable)")
-        assert silent_at < silent.index("subagent"), silent
-
-        sidebar.set_silent_peers([])
-        sidebar.set_entries([*entries, _remote("p1", label="radiant-m4", reachable=False)])
-        await pilot.pause()
-        answering = _section_headings(sidebar)
-        answering_at = answering.index("peer:   ⇄ radiant-m4 (unreachable)")
-        assert answering_at < answering.index("subagent"), answering
-
-        # AND THE TWO DEVICES STAY IN ONE ORDER. A second peer's section is
-        # placed by its NAME, not by when it was last heard from, so two peers do
-        # not swap places when one of them comes back.
-        sidebar.set_silent_peers([("radiant-m4", "connect_failed:ConnectionRefusedError")])
-        sidebar.set_entries(
-            [
-                *entries,
-                _remote("p1", device="d_aaaa", label="radiant-m4", reachable=False),
-                _remote("p2", device="d_bbbb", label="pixel-8", reachable=False),
-            ]
-        )
-        await pilot.pause()
-        both = _section_headings(sidebar)
-        assert both.index("peer:   ⇄ pixel-8 (unreachable)") < both.index(
-            "peer:   ⇄ radiant-m4 (unreachable)"
-        ), both
-
-
-@pytest.mark.asyncio
-async def test_two_row_less_sections_are_separated_by_one_blank() -> None:
-    """Design round 4, D28: every boundary in the list is ONE blank row.
-
-    The per-section chrome is `blank, heading, blank`, which is right for a
-    section with rows under it and one blank too many between two that have
-    none: two unreachable peers came out three rows apart where every other
-    boundary is two. The rule is now the builder's — a section declines its
-    leading blank when the previous row is already a blank — so the frame a user
-    with several lost devices actually gets is the same shape as every other.
-
-    The invariant is asserted over the WHOLE row list, not just the pair, because
-    "never two blanks in a row" is what the rule is; the pair is the case that
-    exposed it.
-    """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 45)) as pilot:
-        await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
-        sidebar.set_silent_peers(
-            [
-                ("radiant-m4", "connect_failed:ConnectionRefusedError"),
-                ("pixel-8", "connect_failed:ConnectionRefusedError"),
-            ]
-        )
-        await pilot.pause()
-        kinds = [kind for kind, _entry in sidebar._display_rows()]
-        doubled = [
-            index
-            for index, (first, second) in enumerate(zip(kinds, kinds[1:]))
-            if first == second == "blank"
-        ]
-        assert doubled == [], f"two blank rows in a row at {doubled}: {kinds}"
-        first = kinds.index("header:peer:   ⇄ pixel-8 (unreachable)")
-        second = kinds.index("header:peer:   ⇄ radiant-m4 (unreachable)")
-        assert second - first == 2, kinds[first : second + 1]
-        assert kinds[first + 1] == "blank", kinds[first : second + 1]
-        # The headers are chrome the frame still fits: the page size is computed
-        # from the same model, so a silent section cannot overrun the height.
-        assert len(sidebar._display_rows()) <= sidebar.size.height
-
-
-@pytest.mark.asyncio
-async def test_the_silent_peers_heading_is_chrome_the_keyboard_cannot_land_on() -> None:
-    """A heading-only section must stay OUT of ``entries``.
-
-    ``action_move``, ``_cursor_index`` and ``_switch_session_from`` all index
-    ``self.entries``, so a chrome row that leaked into it would let
-    ``ctrl+shift+down`` "switch" to a device and desync open-from-closed
-    navigation — the exact hazard ``_display_rows`` documents for every header.
-    """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
-        sidebar.set_silent_peers([("damian-mbp", "connect_failed:ConnectionRefusedError")])
-        await pilot.pause()
-        lines = sidebar.render().plain.splitlines()
-        heading_y = next(
-            y for y, line in enumerate(lines) if line.strip() == "⇄ damian-mbp (unreachable)"
-        )
-        assert sidebar._entry_at(heading_y) is None, "the silent-peer heading is a click target"
-        assert all(entry.id != "" for entry in sidebar.entries)

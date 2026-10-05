@@ -10969,7 +10969,6 @@ class OperatorApp(App[None]):
             list[CatalogEntry],
             list[str],
             int | None,
-            list[tuple[str, str]],
             tuple[SessionRow, ...],
             tuple[UnansweredPeer, ...],
             dict[str, int],
@@ -10993,14 +10992,16 @@ class OperatorApp(App[None]):
                 pinned_hidden_ids=tuple(pins),
             )
             # THE PEER TIER (``mesh-ui.md`` §1.3, review round 4 MINOR 3): the
-            # sessions other devices hold, appended to this device's own listing,
-            # which is what gives the sidebar's locality mark and its per-device
-            # heading a live producer instead of the fixture the rendering slice
-            # landed against. Bounded and cached inside `peer_session_rows` (one
-            # relay call per TTL, never a dial per row, and NO call at all on a
-            # device with no relay) — this poll runs every two seconds, so an
-            # uncached listing here would be the one thing on the sidebar's
-            # path that talks to the network. A device in no mesh adds no rows.
+            # sessions other devices hold, appended to this device's own
+            # listing, which is what gives the sidebar's locality mark a live
+            # producer instead of the fixture the rendering slice landed
+            # against. Bounded and cached inside `peer_session_rows` (one relay
+            # call per TTL, never a dial per row, and NO call at all on a device
+            # with no relay) — this poll runs every two seconds, so an uncached
+            # listing here would be the one thing on the sidebar's path that
+            # talks to the network. A device in no mesh adds no rows. The
+            # BINS are the sidebar's own rule (`_unpinned_rank`): a remote row
+            # takes an ordinary section by its own state, on purpose.
             #
             # The tuple is returned WHOLE as well as painted: the app's park
             # detector (`_note_remote_parks`) reads edges off these same rows,
@@ -11008,14 +11009,15 @@ class OperatorApp(App[None]):
             peer_rows = peer_session_rows(root)
             unanswered = unanswered_peers(root)
             entries = [*entries, *(CatalogEntry(row) for row in peer_rows)]
-            # AND THE PEERS THAT SAID NOTHING (UX round 3, U16). The relay names
-            # them in the same answer the rows came from — `unanswered_peers`
-            # reads the cache entry `peer_session_rows` just filled, so this is
-            # not a second fan-out and the two halves cannot disagree about a
-            # mesh that moved between them. Without it a peer that stopped
-            # answering lost its whole section silently: §8.3 drops its ROWS,
-            # and a section built from rows dropped the fact with them.
-            silent = [(peer.name, peer.reason) for peer in unanswered]
+            # The peers that said NOTHING are read but NOT painted: the
+            # per-device (and heading-only) sections retired with the operator's
+            # convergence, and §8.3 still drops a silent peer's ROWS — so the
+            # read rides the tuple for the PARK DETECTOR alone
+            # (`_note_remote_parks`), which needs the roster to tell "the park
+            # cleared" from "nobody answered". `unanswered_peers` reads the
+            # cache entry `peer_session_rows` just filled, so this is not a
+            # second fan-out and the two halves cannot disagree about a mesh
+            # that moved between them.
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -11042,7 +11044,7 @@ class OperatorApp(App[None]):
             # SUMMING the marks at paint time, and the current session's live
             # wire count is unioned in there (round 2: F9 — the second return
             # value used to ride this tuple and be unpacked unused).
-            return entries, pins, total, silent, peer_rows, unanswered, ask_marks
+            return entries, pins, total, peer_rows, unanswered, ask_marks
 
         async def refresh() -> None:
             try:
@@ -11050,7 +11052,6 @@ class OperatorApp(App[None]):
                     entries,
                     pins,
                     total,
-                    silent,
                     peer_rows,
                     unanswered,
                     ask_marks,
@@ -11064,7 +11065,6 @@ class OperatorApp(App[None]):
                 self._session_sidebar.set_current(str(getattr(session, "session_id", "")))
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
-                self._session_sidebar.set_silent_peers(silent)
                 if total is not None:
                     self._session_sidebar.set_subagent_total(total)
                 # THE FLEET ASK TALLY, from the same throttled read that fed the
@@ -11080,8 +11080,8 @@ class OperatorApp(App[None]):
                 # is never delayed by a notice about it, and never raising (see
                 # the method's own contract) because this runs in the sidebar's
                 # refresh worker where an exception reads as a failed catalog.
-                # The silent peers ride along so a non-answer cannot be read as
-                # the park clearing (agent review round 1, MINOR-1).
+                # The non-answering peers ride along so a non-answer cannot be
+                # read as the park clearing (agent review round 1, MINOR-1).
                 self._note_remote_parks(peer_rows, unanswered)
             except Exception:
                 if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
@@ -18368,16 +18368,23 @@ class OperatorApp(App[None]):
         # NO `--name` HERE, and its absence is the fix rather than an omission
         # (UX round 3, U19). This used to pass ``peer.label``, so the session the
         # user created from a device row was TITLED with the device's own name:
-        # the sidebar then painted a session row reading `pixel-8` underneath the
+        # the sidebar then painted a session row reading `pixel-8` under the
         # `⇄ pixel-8` heading that already said which device holds it — two
         # adjacent lines, one a device and one a session, and a name no user
         # typed. It also survived a restart, because the name was on disk.
+        #
+        # (The heading retired with the merged bins — operator
+        # convergence, 2026-10-05 — but the doubled name it exposed is why this
+        # stays: the row carries the `↗` mark (and `↛` when it is gone) and the
+        # tooltip's device · network
+        # clause, and a name on the row would still read as two rows saying one
+        # thing.)
         #
         # Unnamed is the honest state and it is the one the LOCAL path already
         # has: a bare `/new` starts an untitled session, the row paints the shared
         # `Untitled conversation` string, and the session is named when the user
         # names it or the owner's own auto-namer titles the first substantive
-        # turn. Nothing is lost by it — the peer tier's heading carries the
+        # turn. Nothing is lost by it — the `↗` mark and the tooltip carry the
         # device, which is what the bogus name was duplicating.
         argv = ["sessions", "--peer", addressing, "--create"]
         if prompt:

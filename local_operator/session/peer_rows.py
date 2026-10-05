@@ -1,15 +1,17 @@
 """Sessions OTHER devices hold, as rows THIS device's list can render.
 
 WHY THIS MODULE EXISTS, and why it is not a second projection. ``mesh-ui.md``
-§1.3 landed the sidebar's ``⇄`` locality mark, its per-device heading and the
-picker's ``locality``/``owner_*`` columns against a CONTRACT FIXTURE, because the
+§1.3 landed the sidebar's ``⇄`` locality mark and the picker's
+``locality``/``owner_*`` columns against a CONTRACT FIXTURE, because the
 producer was not in that slice — the review recorded it twice (round 4 MINOR 3:
 "the ``⇄`` has no remote-row producer"; design round 1: "the producer is not
 merely a rendering follow-up; it is what makes the slice's own action
 observable"). ``/new remote <peer>`` is the one WRITE the slice ships, and
 without this module the session it creates exists nowhere the user can see it.
 This is the missing producer: the relay's peer projection, turned into the
-``SessionRow``s every surface already knows how to paint.
+``SessionRow``s every surface already knows how to paint. (The per-device
+HEADING those rows once filed under retired with the operator's convergence: a
+remote row takes the ordinary bins — see ``tui/session_sidebar._unpinned_rank``.)
 
 READ-ONCE, BOUNDED, AND NEVER A DIAL FROM A FRAME. The rows come from
 ``RelayPeerCatalog``, which is ONE control call to THIS device's own relay (the
@@ -28,6 +30,13 @@ NOTHING HERE RAISES. A listing that cannot read the projection is a listing
 without peer rows, not a broken sidebar: the failure this file must not repeat is
 a swallowed read rendering as "there is nothing there", which is why an empty
 result is the honest answer and the caller has no error path to forget.
+
+TWO FIELDS ARE RESOLVED HERE, at the producer, so every surface that paints a
+remote row gets one answer: the membership's network NAME
+(``owner_network_name``, for the tooltip's device-AND-network clause —
+``_network_names`` carries its why) and the row's ordering birth
+(``created_at``, stamped from the peer's ``started`` claim — the row
+construction carries that why).
 """
 
 from __future__ import annotations
@@ -320,6 +329,12 @@ def _read(
         return (), ()
     if not peers:
         return (), ()
+    # The membership names for the tooltip's device-AND-network clause, read
+    # ONCE per listing (this whole read is TTL-cached above). Guarded on
+    # ``root`` because a root-less call is a test's injected-catalogue call and
+    # must not wander into the developer's real store; production always names
+    # its root.
+    network_names = _network_names(root) if root is not None else {}
     rows: list[SessionRow] = []
     # KEYED BY ``(owner_device, session_id)``, AND THE FIRST ROW FOR A KEY WINS (review
     # round 1, MINOR 2). The duplicates this collapses are one device's own answer
@@ -362,8 +377,19 @@ def _read(
                 locality="remote",
                 owner_device=facts.device_id,
                 owner_device_name=facts.name,
+                owner_network_name=network_names.get((facts.device_id, facts.network_id), ""),
                 reachable=bool(facts.reachable),
                 unreachable_reason=str(facts.reason or ""),
+                # THE START IT CLAIMS IS ALSO ITS ORDERING BIRTH (operator
+                # convergence, 2026-10-05). The federated row carries no
+                # conversation birth, and ranking every remote row at
+                # ``created_at=0`` parked each one at the BOTTOM of its bin —
+                # a soft form of the per-device segregation the merged bins
+                # exist to remove. ``started`` is the only per-row time the
+                # wire has, it is already this row's ``mtime`` (its age
+                # column), and an unknown start sorts last — the honest
+                # direction. See ``resume.SessionRow.created_at``.
+                created_at=float(getattr(peer_row, "started", 0.0) or 0.0),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than
@@ -379,6 +405,36 @@ def _read(
         if not facts.reachable and device_id not in answered
     )
     return tuple(rows), unanswered
+
+
+def _network_names(root: Path) -> dict[tuple[str, str], str]:
+    """``(device_id, network_id)`` → the membership's network NAME.
+
+    WHY THE READER RESOLVES IT. The federated row carries the network's ID
+    only, and a 32-hex id is not a name a person reads — the tooltip's location
+    clause reads "the device AND the network" (operator convergence,
+    2026-10-05), so a name has to come from somewhere. This device's own
+    membership records are the only store that can answer, and they are read
+    through ``known_peers`` (``network/peers.py``), the module that already
+    resolves "a peer device as a person sees it" for ``/new remote``'s
+    autofill, rather than by re-deriving the record layout here. A device in
+    two networks yields one entry per membership, which is why the key carries
+    the network as well as the device.
+
+    THE FAILURE IS AN EMPTY ANSWER, as everywhere in this module: an unreadable
+    store contributes no names (the clause is then omitted), never a broken
+    listing.
+    """
+    try:
+        from local_operator.network.peers import known_peers
+
+        return {
+            (peer.device_id, peer.network_id): peer.network_name
+            for peer in known_peers(root)
+            if peer.network_name
+        }
+    except Exception:  # noqa: BLE001 — a listing never raises for a name it lacks
+        return {}
 
 
 def _live_state(peer_row: object) -> str:

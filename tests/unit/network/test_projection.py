@@ -10,8 +10,8 @@ was the one boundary nothing crossed. It WAS wrong: ``_call`` handed back the
 reply ENVELOPE (``{"op", "req", "detail"}``) while its two readers asked the
 envelope for ``peers``/``sessions``. Both were ``None`` on every call, so
 ``peer_session_rows()`` returned ``()`` on a device whose peer was answering —
-the ``⇄`` tier, the per-device heading, the README's screenshot and the
-``/resume`` guard all inert, with a green suite.
+the ``↗`` rows, the README's screenshot and the ``/resume`` guard all inert,
+with a green suite.
 
 So the load-bearing test here is the one that stands up TWO real relays, pairs
 them through the product's own ceremony, and asks the catalogue for the peer's

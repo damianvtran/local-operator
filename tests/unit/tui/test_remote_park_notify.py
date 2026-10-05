@@ -337,7 +337,7 @@ async def test_the_sidebar_poll_is_the_detector(
 
     ``peer_session_rows`` is what ``_refresh_sidebar`` already calls; the park
     detector reads edges off its return value, so a listing that paints the
-    peer tier is also what announces its park. This cell drives the REAL
+    peer rows is also what announces its park. This cell drives the REAL
     refresh (the method the 2 s timer calls) rather than ``_note_remote_parks``
     directly, which is the wiring a rename or a return-shape change would
     break silently.

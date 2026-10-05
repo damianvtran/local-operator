@@ -518,10 +518,10 @@ TIPS: tuple[str, ...] = (
     #
     # WHY THE MESH EARNS ONE, by the pool's own test: it is a capability with no
     # second discovery route. Nothing else in the app says it exists until you
-    # are already in a network — the sidebar grows its `⇄` group only once a peer
-    # does, and `/network` is a word you must know in order to type — so a device
-    # that has never paired has no surface that mentions pairing, while this row
-    # is the one thing every launch crosses.
+    # are already in a network — the sidebar paints its first `↗` row only once a
+    # peer does, and `/network` is a word you must know in order to type — so a
+    # device that has never paired has no surface that mentions pairing, while
+    # this row is the one thing every launch crosses.
     #
     # IT IS A COMMAND, like the rest of the slash group, and it names the FIRST
     # step rather than describing the feature: the panel `/network new <name>`
