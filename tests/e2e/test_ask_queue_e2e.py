@@ -491,3 +491,121 @@ async def test_a_secret_answer_never_reaches_disk(
 
 def _session(config_dir: Path, name: str, stream: ScriptedStream) -> Session:
     return build_session(config_dir / "sessions" / name, stream, cwd=config_dir)
+
+
+# ---------------------------------------------------------------------------
+# The FLEET read (design §4/§11): what the TUI's fleet scope reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_aggregate_read_the_fleet_scope_uses_reports_a_real_sessions_ask(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cross-session INDEX is the only source a fleet view has, so it has to
+    carry a real session's ask — with the two facts a row for another
+    conversation needs (``session_id``, ``cwd``) — and then carry its
+    SETTLEMENT, because the TUI's halves and the sidebar's mark are computed
+    from exactly this read and no wire."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    directory = headless_tui_env / "sessions" / "fleet-read"
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-f",
+                arguments=_ask_args("did the fleet see it?"),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "fleet-read", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "the aggregate read sees a real session's ask"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+            rows = store.index_asks(headless_tui_env)
+            row = next(r for r in rows if r["ask_id"] == ask_id)
+            assert row["session_id"] == "fleet-read"
+            assert row["cwd"] == str(headless_tui_env)
+            assert store.is_outstanding(row["status"])
+            # The MARK predicate (open ∪ timed_out) agrees with the row.
+            assert len(store.outstanding_asks(rows)) == 1
+            # And the answer settles it, so the halves and the mark both move.
+            assert session.ask_queue().respond(ask_id, {"q0": ["yes"]}, by="terminal")["ok"] is True
+            await session.reconcile_asks()
+            settled = next(
+                r for r in store.index_asks(headless_tui_env) if r["ask_id"] == ask_id
+            )
+            assert settled["status"] == store.STATUS_ANSWERED
+            # The DELIVERY is the transcript row, and it is asserted there rather
+            # than on the index's `delivered` hint: the index is derived and is
+            # rewritten on the owner's next publish, so it may lag one write —
+            # which is exactly why the SESSION scope reads the wire first and the
+            # fleet scope (no wire to read) is the one that falls back to it.
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the delivered response row for the fleet read",
+            )
+            assert store.outstanding_asks(store.index_asks(headless_tui_env)) == []
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_fleet_scope_sees_a_stopped_sessions_ask_and_can_answer_it_by_id(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row whose runtime is GONE is still readable and still answerable — the
+    property the fleet scope is built on, asserted through the store the TUI
+    reads: the index keeps the row after the runtime is disposed, and the ask
+    log still accepts the answer, which the next runtime's reconcile delivers."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    directory = headless_tui_env / "sessions" / "fleet-cold"
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-c",
+                arguments=_ask_args("answer me later?"),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "fleet-cold", stream)
+    session.set_ask_handler(_never_answers)
+    with bounded(BOUND_S, "a stopped session's ask stays in the fleet read"):
+        await session.prompt("go")
+        (ask_id,) = _ask_ids(directory)
+    await dispose_quietly(session)
+
+    # The runtime is disposed; the row the fleet scope would draw is still there,
+    # with nothing live behind it.
+    rows = store.index_asks(headless_tui_env)
+    assert [r["ask_id"] for r in rows] == [ask_id]
+    assert rows[0]["session_id"] == "fleet-cold"
+
+    # Answering by ask_id settles it at the LOG (the TUI's fleet path sends the
+    # op through an engaged runtime; the durability underneath is this).
+    assert store.append_event(directory, {
+        "kind": store.EVENT_ANSWERED,
+        "v": store.EVENT_SCHEMA,
+        "ask_id": ask_id,
+        "at": store.now_ms(),
+        "answers": {"q0": ["yes"]},
+        "by": {"surface": "terminal"},
+    }) is True
+    revived = _session(headless_tui_env, "fleet-cold", ScriptedStream([text_turn("got it")]))
+    revived.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "the cold answer is delivered on boot"):
+            await revived.reconcile_asks()
+            await _wait_until(
+                lambda: revived.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the delivered response row for a cold fleet answer",
+            )
+    finally:
+        await dispose_quietly(revived)
