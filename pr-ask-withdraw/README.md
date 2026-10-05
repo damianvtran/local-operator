@@ -12,7 +12,7 @@ counts a question nobody will answer; on the after build it is settled.
 
 | frame | before (main) | after (branch) |
 |---|---|---|
-| `bar-withdrawn` | `3 questions waiting` | `2 questions waiting` — the withdrawn ask is out of the answerable set, so the bar's count and head question drop past it |
+| `bar-withdrawn` | `3 questions waiting` | `2 questions waiting` — the withdrawn ask is out of the answerable set, so the count drops; the head question is unchanged (the withdrawn ask `a2` is not the head — `a1` is, and it stays open) |
 | `list-withdrawn` (settled half) | header `3 questions waiting · All 4 · Waiting or moved on 3 · Settled 1`; the settled half shows only `Backfill from the audit log or drop the column? · declined` | header `2 questions waiting · All 4 · Waiting or moved on 2 · Settled 2`; the settled half shows `Rotate the deploy key before the cutover? · withdrawn` above `· declined` |
 
 **Numbers beside the stills.** The partition stays total after the change:
