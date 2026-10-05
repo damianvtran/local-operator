@@ -30,6 +30,21 @@ always the state its filename claims):
                  deadline — the receipt that must read as warning, not dim
     timeout      the ask_timeout card collapsed, then opened with ROW=1
 
+THE FLEET-SCOPE MODES (design §4/§11: settled rows, the three-way filter):
+
+    list-settled       the list with the SETTLED half showing — newest-first
+                 chips in place of the countdown, no answerable row at all
+    filter-all         the list, All selected, a mixed queue
+    filter-outstanding the middle half selected: only what is still owed
+    filter-settled     the third half selected
+    empty-outstanding  the middle half selected over a queue with nothing in it
+    empty-settled      the third half selected over a queue with nothing in it
+    list-fleet         the ONE list reading All conversations (rows from two
+                 sessions, the scope subject in the header)
+    list-fleet-empty   the fleet scope over an index with nothing outstanding
+    truncated          the header stating the BACKEND tally and withholding the
+                 waiting/moved-on split (a capped wire frame)
+
 WHY THE TRANSCRIPT IS SEEDED FIRST. Every frame here has to answer "can the
 user still read the conversation behind this surface?" — the bar is one row in
 a dock that also carries the composer, and the list/card are panels above it.
@@ -56,7 +71,14 @@ isolate_capture()
 
 from local_operator.asks import policy  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.widgets.ask_queue import AskQueueList, ask_rows  # noqa: E402
+from local_operator.tui.widgets.ask_queue import (  # noqa: E402
+    FILTER_ALL,
+    FILTER_OUTSTANDING,
+    FILTER_SETTLED,
+    SCOPE_FLEET,
+    AskQueueList,
+    ask_rows,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     AskResponseBlock,
@@ -80,6 +102,8 @@ def _row(
     status: str = "open",
     urgent: bool = False,
     expires_at: int | None = None,
+    delivered: bool = False,
+    **extra: Any,
 ) -> dict[str, Any]:
     return {
         "ask_id": ask_id,
@@ -95,7 +119,7 @@ def _row(
         "timeout_s": 3600,
         "urgent": urgent,
         "status": status,
-        "delivered": False,
+        "delivered": delivered,
         "questions": [
             {
                 "id": "q1",
@@ -163,6 +187,53 @@ THREE = [
         expires_at=_deadline(_URGENT_MIN),
     ),
     _row("a3", "Which region do we fail over to?", status="timed_out"),
+]
+
+#: The MIXED queue the filter frames draw: two halves with something in each,
+#: so `All` / `Waiting or moved on` / `Settled` are three different views of one
+#: list rather than three names for the same rows.
+MIXED = [
+    THREE[0],
+    THREE[2],
+    _row(
+        "a4",
+        "Backfill from the audit log or drop the column?",
+        status="answered",
+        delivered=True,
+    ),
+    _row("a5", "Should the retry budget double?", status="declined"),
+]
+
+#: The two single-half queues the empty-state frames need: each shows what the
+#: OTHER half's sentence looks like over a queue that plainly has rows.
+OPEN_ONLY = [
+    _row(
+        "a1",
+        "Which rollout should the stale-row migration take?",
+        expires_at=_deadline(_DEADLINE_MIN),
+    ),
+    _row(
+        "a2",
+        "Rotate the deploy key before the cutover?",
+        urgent=True,
+        expires_at=_deadline(_URGENT_MIN),
+    ),
+]
+SETTLED_ONLY = [
+    _row(
+        "a4",
+        "Backfill from the audit log or drop the column?",
+        status="answered",
+        delivered=True,
+    ),
+    _row("a5", "Should the retry budget double?", status="declined"),
+]
+
+#: The FLEET rows: two conversations' queues, each row carrying its own session
+#: (which is what an answer is addressed by — never the session on screen).
+FLEET = [
+    dict(THREE[0], session_id="s-aida", cwd="/Users/damian/aida"),
+    dict(THREE[2], ask_id="a9", session_id="s-pergamon", cwd="/Users/damian/pergamon"),
 ]
 
 RESPONSE = {
@@ -338,6 +409,56 @@ async def main() -> None:
             # The next snapshot: the answered ask is gone, so this is also what
             # proves the highlight survives the wire dropping the row under it.
             app._sync_ask_surface(ask_rows([THREE[0], THREE[2]]))
+        elif mode in (
+            "list-settled",
+            "filter-all",
+            "filter-outstanding",
+            "filter-settled",
+            "empty-outstanding",
+            "empty-settled",
+        ):
+            # The filter frames (design §4 / §11). One queue each, chosen so the
+            # still is the state its filename claims: a MIXED queue for the three
+            # half views, and a single-half queue for each empty-state sentence
+            # ("No asks are waiting or moved on..." is only honest over a queue
+            # that visibly has settled rows in it).
+            queue = {
+                "list-settled": SETTLED_ONLY,
+                "filter-all": MIXED,
+                "filter-outstanding": MIXED,
+                "filter-settled": MIXED,
+                "empty-outstanding": SETTLED_ONLY,
+                "empty-settled": OPEN_ONLY,
+            }[mode]
+            app._sync_ask_surface(ask_rows(queue))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            picked = {
+                "filter-all": FILTER_ALL,
+                "filter-outstanding": FILTER_OUTSTANDING,
+                "filter-settled": FILTER_SETTLED,
+                "empty-outstanding": FILTER_OUTSTANDING,
+                "empty-settled": FILTER_SETTLED,
+            }.get(mode)
+            if picked is not None:
+                app.query_one(AskQueueList).set_filter(picked)
+        elif mode in {"list-fleet", "list-fleet-empty"}:
+            # THE FLEET SCOPE. Set the way the door sets it (`_ask_scope` +
+            # `_ask_fleet_rows`, then the mount) rather than through a click:
+            # the frame is about what the LIST paints for a scope, and the
+            # sidebar's own door is captured by `scripts/ask_fleet_shot.py`.
+            app._ask_scope = SCOPE_FLEET
+            app._ask_fleet_rows = ask_rows(FLEET if mode == "list-fleet" else [])
+            app._mount_ask_list(scope=SCOPE_FLEET)
+        elif mode == "truncated":
+            # A CAPPED wire frame: the backend says seven are outstanding while
+            # the rows are a prefix. The header states the tally and WITHHOLDS
+            # the waiting/moved-on split (A6) — a prefix must not pass for the
+            # whole queue.
+            app._sync_ask_surface(ask_rows(THREE), open_count=7, truncated=True)
+            await pilot.pause()
+            app._expand_asks()
         elif mode == "card-timeout":
             # Round 1 (UX U9): the card kept saying the agent was waiting after
             # the ask's own deadline had fired. The status changes UNDER the
