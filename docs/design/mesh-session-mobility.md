@@ -288,7 +288,12 @@ the phases of the two op names that document reserves (`net_session_move`,
 | `net_session_move` phases *(name is the transport's)* | `move` | `phase: "status"｜"prepare"｜"ready"｜"commit"｜"done"｜"fork"｜"copy"`, `mode: "move"｜"copy"` (§6.3, §6.2) | see §6.3's literals |
 
 `net_session_lifecycle` (`delete`) carries `action: "archive"｜"restore"｜"delete"`
-(§8); `net_sync` (`view`) carries `phase: "plan"｜"fetch"｜"flush"` (§7).
+(§8); `net_sync` (`view`) carries `phase: "plan"｜"fetch"｜"flush"` (§7);
+`net_session_receipt` (`view`) carries `{session_id, token}`: one visible-read
+receipt, cleared on the OWNER's own attention store (`session/attention.py`) —
+the unread mark is written by the owner's runtime and lives nowhere else, so a
+front end's receipt for a peer's row routes there rather than replicating a
+write it could not make truthfully.
 
 Two properties of that vocabulary this design depends on, both already stated there:
 
@@ -2116,8 +2121,8 @@ Sibling designs, consumed by name: `mesh-transport-identity.md` — §2.3 (modul
 layout, `projection.py` reserved for this document), §2.5 (`stream_open` /
 `stream_send` / `stream_close`, and the relay's keyed loopback control socket), §2.6
 (`run/peers`), §4.2 (`MemberRecord.kind` / `lifecycle`), §6.4 (`net_forward`,
-`net_catalog`, `net_session_move`, `net_session_lifecycle`, `net_sync`,
-`MESH_PROTOCOL_VERSION`, the `caps` strings), §7.1 (the capability model and
+`net_catalog`, `net_session_move`, `net_session_lifecycle`, `net_session_receipt`,
+`net_sync`, `MESH_PROTOCOL_VERSION`, the `caps` strings), §7.1 (the capability model and
 `ROLE_CAPABILITIES`), §7.2 (`Authorizer.check` / `dial_local`, the session-scope and
 locality rules, the totality test), §7.4 (locality on both sides), §9.2/§9.3/§9.4
 (the catalogue row, the aggregation payload, the 24 h cache), §9.5 (the desktop

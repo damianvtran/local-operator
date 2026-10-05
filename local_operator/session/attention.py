@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -1259,6 +1260,42 @@ def _import_transcript_outcome(
         identity, token, final.id, "complete", baseline_seen=seen is None or seen >= entry.ts
     )
     return None
+
+
+#: The session-id shape a receipt may name (``uuid4().hex[:12]``).
+#:
+#: Spelled here because the two ends that acknowledge a receipt — the desktop
+#: daemon's cold ``/seen`` path and the mesh's owner-side ``net_session_receipt``
+#: handler — run the SAME acknowledgement below, and a validation copy that
+#: drifted would let one end accept an id the other refuses.
+_SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
+
+
+def acknowledge_session_receipt(root: Path, session_id: str, token: str) -> dict[str, Any]:
+    """Acknowledge ONE session's read receipt, on the root that holds the session.
+
+    THE ONE IMPLEMENTATION, shared by the two ends that can run it: the desktop
+    daemon's cold path (``DesktopSessions.acknowledge_attention``) and the relay's
+    owner-side handler. The mesh hop exists to be "as if the owner ran its own
+    acknowledgement", so neither the validation here — id shape, a real session
+    directory that is a USER session in THIS root — nor the store write may be
+    two copies free to drift.
+
+    Validation is the durable user-session namespace, deliberately NOT the
+    bridge's acquire path: a completed cold conversation is readable even when
+    its runtime and the mobile daemon are both stopped. ``KeyError`` is the
+    unknown-session verdict both callers map to their own 404/refusal.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise KeyError("Unknown session")
+    path = Path(root) / "sessions" / session_id
+    # Imported lazily: ``resume`` is a heavy module and this file is imported by
+    # every surface that reads a completion, including the TUI's hot paths.
+    from local_operator.resume import is_user_session
+
+    if not path.is_dir() or not is_user_session(path):
+        raise KeyError("Unknown session")
+    return AttentionStore(root / "attention.db").acknowledge(f"session/{session_id}", token)
 
 
 class AttentionStore:

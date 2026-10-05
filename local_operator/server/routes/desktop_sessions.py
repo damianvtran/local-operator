@@ -92,7 +92,10 @@ from local_operator.server.utils.store_failures import (
     store_failure,
 )
 from local_operator.session.attached import RuntimeUnresponsiveError
-from local_operator.session.attention import SupersededCompletionToken
+from local_operator.session.attention import (
+    SUPERSEDED_TOKEN_CODE,
+    SupersededCompletionToken,
+)
 from local_operator.session.catalog import (
     SCOPE_KINDS,
     SCOPE_NAME_MAX_LENGTH,
@@ -1418,6 +1421,106 @@ async def _remote_lifecycle(
         message = f"{device_name or device_id} refused that and said nothing further"
     raise HTTPException(
         404 if code == "session_not_found" else 409, {"code": code, "message": message}
+    )
+
+
+async def _remote_receipt(request: Request, session_id: str, token: str) -> dict[str, Any] | None:
+    """Clear a read receipt on the OWNER when the row is a peer's, else ``None``.
+
+    ``None`` means "this device's session", and the caller keeps its existing cold
+    path, byte for byte: the owner lookup is cache-first and reads no relay for a
+    local id (``remote_owner``'s own contract), so the branch is free on the
+    ordinary path.
+
+    THE RECEIPT LIVES ON THE OWNER — the operator-reported defect this exists for.
+    The unread mark is written by the owner's runtime into the owner's own
+    attention store, so a cold local write here could only answer the shared
+    ladder's 404 about a conversation the user can see. Success returns the
+    owner's own state, the same shape the local success returns; the owner's
+    superseded/unknown-token verdicts are re-raised as the LOCAL exceptions, so
+    one condition gets one answer on both paths.
+
+    AN UNREACHABLE OR REFUSING OWNER IS A 409 ``session_is_remote`` NAMING THE
+    DEVICE: never the shared 404 ("not found" would be a lie about the user's own
+    conversation, whose row is on their screen), and never the older clause ("this
+    desktop cannot open a conversation on another device yet") — opening works now
+    — that clause's ``_remote_open_refusal`` has zero callers — and the action
+    here is a receipt, not an open.
+    """
+    from local_operator.server.utils.desktop_mesh import receipt_on_owner, remote_owner
+
+    host_root = host(request).root
+    owner = await asyncio.to_thread(remote_owner, host_root, session_id)
+    if owner is None:
+        return None
+    device_id, device_name = owner
+    result = await asyncio.to_thread(
+        receipt_on_owner, host_root, session_id, token=token, peer=device_id
+    )
+    if result.get("ok"):
+        state = result.get("state")
+        return dict(state) if isinstance(state, dict) else {}
+    code = str(result.get("code") or "")
+    if code == SUPERSEDED_TOKEN_CODE:
+        raise SupersededCompletionToken()
+    if code == "unknown_completion_token":
+        raise ValueError("unknown completion token")
+    label = device_name or device_id
+    # ONE USER-FACING NOUN: "the unread mark" is what the operator's own copy
+    # names; "read receipt" stays in code and docs (design round 1, D3).
+    if code == "unreachable":
+        # The reason this branch gets is mobility's sentence for the failed DIAL
+        # ("{label} is unreachable …; nothing was changed") and would restate
+        # this clause twice over. The family's shared diagnostic pointer takes
+        # its place (see ``session/remote_open.unreachable_peer_sentence``), so
+        # the branch keeps a next step instead of dead-ending (D1, D2).
+        message = (
+            f"The unread mark for {session_id} lives on {label}, and it could not be "
+            f"cleared there right now. /network doctor {label} diagnoses the link."
+        )
+    else:
+        # The owner's (or this relay's) sentence may end with its own period;
+        # joining it into this one must not produce "..".
+        reason = str(result.get("message") or "").strip().rstrip(".")
+        message = (
+            f"The unread mark for {session_id} lives on {label}, and it could not be "
+            f"cleared there right now{(': ' + reason) if reason else ''}."
+        )
+    raise HTTPException(409, {"code": "session_is_remote", "message": message})
+
+
+async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) -> None:
+    """Refuse a peer's row IN WORDS for writes this build cannot forward yet.
+
+    The pin index and the delivery watermark live on the owner exactly as the
+    read receipt does, but only the receipt has an owner-side verb in this build;
+    forwarding for these two is deferred. What must not survive is the lie they
+    used to answer with — the shared 404 ("not found") about a row the user can
+    see — and a silent 200-no-op is the other lie (it would report a write that
+    did not happen). So the answer is the family's 409: the state lives on the
+    named device, this device cannot write it there yet, and nothing here
+    changed.
+
+    ``_remote_open_refusal`` beside the snapshot route is NOT what this reuses:
+    it has zero callers since peer conversations became openable (mesh slice
+    DB2), and its sentence about "opening" is about a different act.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_owner
+
+    owner = await asyncio.to_thread(remote_owner, host(request).root, session_id)
+    if owner is None:
+        return
+    device_id, device_name = owner
+    label = device_name or device_id
+    raise HTTPException(
+        409,
+        {
+            "code": "session_is_remote",
+            "message": (
+                f"The {noun} for {session_id} lives on {label}, and this desktop "
+                "cannot write it there yet; nothing was changed here."
+            ),
+        },
     )
 
 
@@ -3706,6 +3809,12 @@ async def seen(session_id: str, body: Seen, request: Request):
     # about both (review round 4, M1 — this route is the shipped ``sessions.seen``
     # contract and was left on the classifier's copy).
     async with errors(request, receipts_refusal):
+        # A PEER'S ROW IS CLEARED ON THE OWNER — the operator-reported defect this
+        # branch exists for (see ``_remote_receipt``) — and the local cold path
+        # below stays byte-identical for local ids.
+        forwarded = await _remote_receipt(request, session_id, body.completion_token)
+        if forwarded is not None:
+            return reply(forwarded)
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
@@ -3790,6 +3899,7 @@ async def notified(session_id: str, body: Notified, request: Request):
     Notifying is not reading.
     """
     async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="notification")
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
 
@@ -3851,6 +3961,7 @@ async def pin(session_id: str, body: Pin, request: Request):
     distinction with no remedy behind it.
     """
     async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="pin")
         return reply(await host(request).set_pin(session_id, body.pinned))
 
 

@@ -1,9 +1,9 @@
-"""Session mobility across the mesh: move, recall, and archive/delete on a peer.
+"""Session mobility across the mesh: move, recall, archive/delete and receipts on a peer.
 
 WHAT THIS MODULE OWNS. One peer op carries the whole protocol — ``net_session_move``,
 discriminated by ``phase`` (``status``/``prepare``/``ready``/``done``/``invite``) —
-plus the local verbs ``session_move`` and ``session_lifecycle`` that ``lop sessions
-move``, the TUI's ``/move --to`` and the desktop transfer route drive.
+plus the local verbs ``session_move``, ``session_lifecycle`` and ``session_receipt``
+that ``lop sessions move``, the TUI's ``/move --to`` and the desktop routes drive.
 
 THE PROTOCOL IN ONE PARAGRAPH (§6.3). The DESTINATION pulls; the OWNER decides.
 ``D`` asks ``O`` to ``prepare``; ``O`` refuses if the session is busy, otherwise
@@ -72,6 +72,17 @@ MOVE_OP_DEADLINE_S = 90.0
 #: small JSON write; a delete is an in-use probe (which forks ``ps`` and ``lsof``
 #: for the keep-alive guards) plus an ``rmtree``. 30 s is those two with room.
 LIFECYCLE_OP_DEADLINE_S = 30.0
+
+#: The LOCAL control-socket budget for one ``session_receipt`` hop (seconds).
+#:
+#: The forwarded ``net_session_receipt`` is a single store write on the owner
+#: (the attention store's own retry rides out writer contention), so it rides
+#: INLINE on the link rather than in the slow pool — see ``install`` — and the
+#: hop itself is bounded by the wire's inline request wait (10 s,
+#: ``wire.OP_WAIT_S``). This is twice that bound, so the control transport that
+#: carries the answer back cannot make the caller give up first and report a
+#: bare timeout where the wire was about to answer.
+RECEIPT_CONTROL_TIMEOUT_S = 20.0
 
 #: How often ``--wait N`` re-asks a busy owner (§6.4). Always a FRESH idle probe:
 #: a session that stays busy for the whole wait produces a refusal carrying the
@@ -3395,6 +3406,54 @@ def _lifecycle_on_owner(
     }
 
 
+def _receipt_on_owner(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """Clear one read receipt THIS device holds, at a peer's request.
+
+    The same routing rule the lifecycle verbs run (design §8): the unread mark
+    lives in the OWNER's own attention store, so the device that shows the row
+    asks here and the owner acknowledges it through
+    ``acknowledge_session_receipt`` — the SAME function the owner's desktop
+    daemon runs locally, so the two ends cannot drift.
+
+    The verdicts a caller ACTS on travel inside the ack as data, like the
+    lifecycle refusals: ``superseded_completion_token`` and the store's unknown
+    token are the receipt's own vocabulary (a renderer re-arms on them), and a
+    session this device does not hold is a refusal document rather than a
+    protocol error — the projection that named this device can be a minute
+    stale.
+    """
+    from local_operator.session.attention import (
+        SupersededCompletionToken,
+        acknowledge_session_receipt,
+    )
+
+    session_id = str(frame.get("session_id") or "")
+    token = str(frame.get("token") or "")
+    if not session_id:
+        # SAME RULE AS THE MOVE AND LIFECYCLE OPS: a frame this device cannot
+        # understand is a protocol error (the family's MeshRefusal), while the
+        # refusals a caller acts on - a stale token, an id this device does not
+        # hold - travel as documents whose codes a front end branches on.
+        raise _peer_error("bad_request", "a receipt needs a conversation id")
+    try:
+        state = acknowledge_session_receipt(server.root, session_id, token)
+    except KeyError:
+        return {
+            "refused": True,
+            "code": "session_receipt_refused",
+            "message": f"this device does not hold {session_id}",
+        }
+    except SupersededCompletionToken as refusal:
+        return {"refused": True, "code": refusal.code, "message": str(refusal)}
+    except ValueError as refusal:
+        # The store's own unknown-token verdict ("unknown completion token") and
+        # nothing else: the write path raises ValueError for exactly that.
+        return {"refused": True, "code": "unknown_completion_token", "message": str(refusal)}
+    return {"ok": True, "session_id": session_id, "state": state}
+
+
 # ---------------------------------------------------------------------------
 # Resolving the owner, and the peer plumbing the local verbs share
 # ---------------------------------------------------------------------------
@@ -3901,7 +3960,11 @@ def _peer_error(code: str, message: str) -> Exception:
 def make_handler(
     server: "RelayServer",
 ) -> Any:
-    """``net_session_move`` and ``net_session_lifecycle`` for one relay.
+    """``net_session_move``, ``net_session_lifecycle`` and ``net_session_receipt``.
+
+    ``net_session_receipt`` rides beside them: it is the same routing rule (the
+    owner runs its own store write), so it is built and registered here rather
+    than growing a second slice for one verb.
 
     Registering the lifecycle op HERE is how the relay's own stale refusal retires
     without editing ``relay.py`` (its module docstring still lists
@@ -3957,7 +4020,14 @@ def make_handler(
     def _lifecycle(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
         return _lifecycle_on_owner(server, link, frame)
 
-    return {"net_session_move": _move, "net_session_lifecycle": _lifecycle}
+    def _receipt(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
+        return _receipt_on_owner(server, link, frame)
+
+    return {
+        "net_session_move": _move,
+        "net_session_lifecycle": _lifecycle,
+        "net_session_receipt": _receipt,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4686,6 +4756,67 @@ def local_lifecycle_handler(server: "RelayServer") -> Any:
     return _handle
 
 
+def local_receipt_handler(server: "RelayServer") -> Any:
+    """The ``session_receipt`` local op: clear one read receipt on its owner.
+
+    The same three-step shape as ``local_lifecycle_handler`` beside it: resolve
+    the peer the caller typed, dial its link, ask ``net_session_receipt``. The
+    receipt's own verdicts (superseded / unknown token) are documents inside the
+    ack; a genuinely refused frame crosses as this module's ``Moved``.
+    """
+
+    def _handle(frame: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(frame.get("session_id") or "")
+        token = str(frame.get("token") or "")
+        peer = str(frame.get("peer") or "")
+        try:
+            device_id, name = _resolve_typed_peer(server, peer)
+        except Moved as refusal:
+            return {
+                "ok": False,
+                "code": refusal.code,
+                "message": refusal.message,
+                "session_id": session_id,
+            }
+        try:
+            link = _link_for_move(server, device_id, name)
+        except Moved as refusal:
+            return {
+                "ok": False,
+                "code": "unreachable",
+                "message": refusal.message,
+                "session_id": session_id,
+            }
+        request: dict[str, Any] = {
+            "op": "net_session_receipt",
+            "session_id": session_id,
+            "token": token,
+        }
+        try:
+            detail = LinkTransport(server, link, session_id).ask(request)
+        except Moved as refusal:
+            return {
+                "ok": False,
+                "code": refusal.code or "unreachable",
+                "message": refusal.message,
+                "session_id": session_id,
+            }
+        if detail.get("refused"):
+            return {
+                "ok": False,
+                "code": str(detail.get("code") or "session_receipt_refused"),
+                # Name the device rather than a bare "the owner": this sentence
+                # is composed next to the device's own name, and an
+                # antecedentless "owner" reads as a second party (design round
+                # 1, D4).
+                "message": str(detail.get("message") or f"{name or device_id} did not clear it"),
+                "session_id": session_id,
+            }
+        return dict(detail)
+
+    return _handle
+
+
 # ---------------------------------------------------------------------------
 # The CLI's entry points
 # ---------------------------------------------------------------------------
@@ -4903,6 +5034,46 @@ def lifecycle(
     return dict(detail)
 
 
+def receipt(
+    session_id: str,
+    *,
+    token: str,
+    peer: str,
+    root: Path | None = None,
+) -> dict[str, object]:
+    """Clear one read receipt on ``peer``, where the conversation (and its mark) lives.
+
+    Runs the OWNER's own acknowledgement over ``net_session_receipt``; returns
+    ``{"ok", ...}`` in the family's shape (``state`` on success, the refusal's
+    code and sentence otherwise). ``peer`` is a name or a device id, exactly as
+    ``lifecycle`` takes it.
+    """
+    from local_operator.network import relay, store
+
+    resolved = Path(root) if root is not None else None
+    record = store.find_own_relay(resolved)
+    if record is None:
+        return {"ok": False, "code": "relay_unavailable", "message": _relay_message()}
+    reply = relay.control_request(
+        record,
+        "session_receipt",
+        timeout=RECEIPT_CONTROL_TIMEOUT_S,
+        session_id=session_id,
+        token=token,
+        peer=peer,
+    )
+    if reply is None:
+        return {"ok": False, "code": "relay_unavailable", "message": _relay_message()}
+    detail = reply.get("detail")
+    if reply.get("op") != "ack" or not isinstance(detail, dict):
+        return {
+            "ok": False,
+            "code": str(reply.get("code") or "relay_refused"),
+            "message": str(reply.get("message") or "this device's relay refused that"),
+        }
+    return dict(detail)
+
+
 def _age_words(seconds: float) -> str:
     """A duration a person reads, for the one sentence that names an age."""
     if seconds < 90:
@@ -4937,6 +5108,7 @@ def install(server: "RelayServer") -> None:
         local_handlers={
             "session_move": local_move_handler(server),
             "session_lifecycle": local_lifecycle_handler(server),
+            "session_receipt": local_receipt_handler(server),
         },
         slow={
             "net_session_move": MOVE_OP_DEADLINE_S,
