@@ -1357,6 +1357,7 @@ session-plane handlers belong to doc 2 and are listed for completeness):
 | `net_sync` | both | `view` | **reserved** for R22's cadence / pre-spin-down sync (§12.4) |
 | `net_broker` | both | `broker_credential` | credential brokering (doc 3) |
 | `net_session_lifecycle` | both | `delete` | archive/delete/restore on the peer (doc 2; PR #1328's local design) |
+| `net_session_receipt` | both | `view` | clear one read receipt on the owner: the desktop's `/seen` for a peer's row (doc 2) |
 | `net_session_move` | both | `move` | move/fork across the link (doc 2) |
 | `net_session_create` | both | `prompt` | create a session **on** the peer (R8): mint the id, claim the directory, stamp `mesh.json`, engage, admit an optional first prompt (doc 2) |
 | `net_session_engage` | both | `view` | make an owner exist on the peer (warm a cold session so it can be viewed or acted on); carries no prompt (doc 2) |

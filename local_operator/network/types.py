@@ -288,6 +288,7 @@ NET_OPS: tuple[str, ...] = (
     "net_sync",
     "net_broker",
     "net_session_lifecycle",
+    "net_session_receipt",
     "net_session_move",
     "net_session_create",
     "net_session_engage",
@@ -391,6 +392,7 @@ LOCAL_OPS: tuple[str, ...] = (
     "session_move",
     "session_sync",
     "session_lifecycle",
+    "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
     "credential_grant",
     "credential_report",
@@ -521,6 +523,13 @@ OP_CAPABILITY: dict[str, str | None] = {
     "net_sync": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
+    # ``view``, the same row the stream plane's ``acknowledge_attention`` carries
+    # (see :data:`INNER_OP_CAPABILITY`): clearing the OWNER's own read receipt is
+    # a session-scoped write whose narrowest words are viewing — the
+    # 36-character completion token is what bounds who may do it, not the
+    # capability — and it deletes nothing, so the ``delete`` row its lifecycle
+    # sibling holds would be false about it.
+    "net_session_receipt": "view",
     "net_session_move": "move",
     # The three the mobility design adds (§2.2): creating a session IS a prompt
     # (it admits one), warming a cold one is a read, and the kill switch is its
