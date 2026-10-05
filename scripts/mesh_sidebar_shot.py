@@ -373,15 +373,22 @@ def _require_caret_on_a_remote_row(path: Path) -> None:
     not.
     """
     caret = "›"
-    locality = "⇄"
+    # The TWO locality states (design round 1, D2/D5): a reachable row paints
+    # `↗`, an unreachable one `↛`. Either satisfies "the row says it lives
+    # elsewhere"; the caret row this frame pins happens to be reachable, but
+    # accepting both keeps the guard about the MARK rather than about the
+    # state of one fixture row, and any future rename still refuses.
+    locality_marks = ("↗", "↛")
     svg = path.read_text(encoding="utf-8")
     for runs in svg_text_runs_by_row(svg):
-        if any(caret in run for run in runs) and any(locality in run for run in runs):
+        if any(caret in run for run in runs) and any(
+            mark in run for run in runs for mark in locality_marks
+        ):
             return
     raise SystemExit(
-        f"no row in {path.name} carries both the caret ({caret!r}) and the locality "
-        f"mark ({locality!r}): the remote row, or the caret on it, is outside the "
-        "drawn page — which is this frame's whole subject. Re-capture."
+        f"no row in {path.name} carries both the caret ({caret!r}) and a locality "
+        f"mark ({locality_marks!r}): the remote row, or the caret on it, is "
+        "outside the drawn page — which is this frame's whole subject. Re-capture."
     )
 
 

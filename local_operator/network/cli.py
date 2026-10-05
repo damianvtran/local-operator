@@ -5584,7 +5584,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # THE STATE IN WORDS (UX round 5, U29). This printed the catalogue's raw
         # token — ``stored`` — in a headerless row of CLI columns, so a reader had
         # to infer three of the four columns from shape alone and read a token no
-        # other surface uses (the sidebar paints that session with a ``⇄`` mark
+        # other surface uses (the sidebar paints that session with a locality mark
         # and its state in the tooltip, and the words the app has for the
         # condition are in ``resume.session_state_words``).
         cells.append(

@@ -18375,7 +18375,8 @@ class OperatorApp(App[None]):
         #
         # (The heading retired with the merged bins — operator
         # convergence, 2026-10-05 — but the doubled name it exposed is why this
-        # stays: the row carries the `⇄` mark and the tooltip's device · network
+        # stays: the row carries the `↗` mark (and `↛` when it is gone) and the
+        # tooltip's device · network
         # clause, and a name on the row would still read as two rows saying one
         # thing.)
         #
@@ -18383,7 +18384,7 @@ class OperatorApp(App[None]):
         # has: a bare `/new` starts an untitled session, the row paints the shared
         # `Untitled conversation` string, and the session is named when the user
         # names it or the owner's own auto-namer titles the first substantive
-        # turn. Nothing is lost by it — the `⇄` mark and the tooltip carry the
+        # turn. Nothing is lost by it — the `↗` mark and the tooltip carry the
         # device, which is what the bogus name was duplicating.
         argv = ["sessions", "--peer", addressing, "--create"]
         if prompt:

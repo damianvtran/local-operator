@@ -76,8 +76,26 @@ _ROW_PREFIX_CELLS = 4 + PIN_CELL_WIDTH
 #: and the one cell `_advance_spinner` patches in place on its fast path.
 _ROW_MARK_COLUMN = 2 + PIN_CELL_WIDTH
 
-#: The locality mark's column — where a remote row paints `⇄`, after the pin
-#: cell and the caret.
+#: The locality marks: the glyphs a REMOTE row paints in the slot the caret run
+#: reserved, after the pin cell and the caret — one cell, in every state.
+#:
+#: WHY `↗` AND NOT `⇄` (design round 1, D5; operator convergence 2026-10-05):
+#: `⇄` reads as exchange/sync — two-way transfer between equals — while the fact
+#: is "this session runs ELSEWHERE", a direction, not a swap. `↗` is the
+#: external/opened-elsewhere convention, crisp at one cell, and present in more
+#: monospace fonts than `⇄` (SF Mono carries it; `⇄` it does not); it also keeps
+#: clear of the state column beside it, whose delegating mark `⇉` an `⇢` would
+#: visually collide with. `↛` — the rightwards arrow WITH STROKE, "does not get
+#: there" — is the UNREACHABLE state (design round 1, D2): Textual tooltips are
+#: mouse-only, so a dead remote may not be decodable only by hover; the stroke
+#: in the same cell, same ink, says it AT REST with no layout shift between the
+#: two states. The pair carries the same meaning on the desktop sibling, in its
+#: own glyph register (the sibling names no glyph of its own).
+REMOTE_MARK = "↗"
+UNREACHABLE_REMOTE_MARK = "↛"
+
+#: The locality mark's column — where a remote row paints `REMOTE_MARK` (or its
+#: `UNREACHABLE_REMOTE_MARK` variant), after the pin cell and the caret.
 _LOCALITY_COLUMN = PIN_CELL_WIDTH + 1
 
 #: The widest the list may grow on a roomy terminal, in the same units as
@@ -2078,22 +2096,28 @@ class SessionSidebar(Widget, can_focus=True):
         # clause — "on this device" on every row is the noise the mark's
         # absence already avoids.
         location = ""
+        unreachable = ""
         if entry.row.is_remote or entry.row.owner_device:
             location = f"on {entry.row.owner_label or UNNAMED_DEVICE}"
             if entry.row.owner_network_name:
                 location += f" · {entry.row.owner_network_name}"
-            if not entry.row.reachable:
-                # THE WORDS, NOT THE TOKEN (design round 1, D3; UX round 3, U23).
-                # This tooltip used to print the relay's raw reason —
-                # ``connect_failed:ConnectionRefusedError`` — on a line a user
-                # reads, while the panel beside it said the same fact in words.
-                # One gloss, shared, so the sibling surfaces read as one voice.
-                location += f" — unreachable: {peer_reason_words(entry.row.unreachable_reason)}"
             if entry.row.placement_stale:
                 location += " (last known state)"
+            if not entry.row.reachable:
+                # THE WORDS, NOT THE TOKEN (design round 1, D3; UX round 3, U23),
+                # and ITS OWN LINE, NOT A SUFFIX (design round 1, D4): the device
+                # clause stays a terse noun phrase like the rest of the
+                # family — `Working`, `on <device> · <network>` — while the
+                # reason keeps the same `·` separator and the SAME shared gloss
+                # (`peer_reason_words` — what the panel and the listing print,
+                # so the sibling surfaces read as one voice). See
+                # `UNREACHABLE_REMOTE_MARK` for the at-rest half of this state.
+                unreachable = f"unreachable · {peer_reason_words(entry.row.unreachable_reason)}"
         lines = [entry.row.name, status]
         if location:
             lines.append(location)
+        if unreachable:
+            lines.append(unreachable)
         # An AGENT-OPENED row names its opener here, the one TUI place with room
         # for it: the row itself is width-bound and otherwise identical to the
         # operator's own (PR #1436 design review round 1, D2). Same vocabulary
@@ -2439,11 +2463,19 @@ class SessionSidebar(Widget, can_focus=True):
             else:
                 line.append(" ")
             if entry.row.is_remote:
-                # The LOCALITY mark: `⇄` occupies one cell of the slot the
-                # caret run reserved, and it never displaces the caret. Muted,
-                # like the other prefixes: it is a durable property, never a
-                # state — it does not spin and never turns `danger`.
-                line.append("⇄", style=theme_mod.semantic_color("muted"))
+                # The LOCALITY mark: `↗` (or `↛` when unreachable) occupies one
+                # cell of the slot the caret run reserved, and it never
+                # displaces the caret. Muted, like the other prefixes: it is a
+                # durable property, never a state — it does not spin and never
+                # turns `danger`. The unreachable variant is the AT-REST half of
+                # that state (design round 1, D2): the tooltip needs a mouse, so
+                # the row itself must carry the fact, in the same cell and ink
+                # so nothing reflows or shouts (see the marks' own rationale at
+                # `REMOTE_MARK`).
+                line.append(
+                    UNREACHABLE_REMOTE_MARK if not entry.row.reachable else REMOTE_MARK,
+                    style=theme_mod.semantic_color("muted"),
+                )
             else:
                 # Nothing to say: this row is a session on THIS machine, which is
                 # what the list has always shown. The blank keeps the title at

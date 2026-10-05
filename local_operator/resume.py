@@ -2609,10 +2609,10 @@ class SessionRow(NamedTuple):
     #: ``""`` (unknown), ``"local"`` or ``"remote"``. **Unknown renders as
     #: local**: a row read from THIS machine's store is a session on this machine
     #: by construction, and a mark for the ordinary case would be a glyph on
-    #: every row that says nothing (design D6/D9 — the ``⇄`` is painted only on
-    #: remote rows). The empty string is therefore the honest default for the
-    #: sites that never learned about the mesh, not a claim that a session is
-    #: local-and-verified.
+    #: every row that says nothing (design D6/D9 — the locality mark is painted
+    #: only on remote rows). The empty string is therefore the honest default
+    #: for the sites that never learned about the mesh, not a claim that a
+    #: session is local-and-verified.
     locality: str = ""
     #: The owning device's member id. Empty for a local session.
     owner_device: str = ""
@@ -3332,7 +3332,7 @@ def session_state_words(state: str) -> str:
     device with NO runtime behind it right now. It is also the token
     ``/network sessions`` printed in its STATE column (UX round 5, U29), where it
     was a third vocabulary for a state the rest of the app already shows: the
-    sidebar paints that same session behind a ``⇄`` mark, and
+    sidebar paints that same session behind a locality mark, and
     the listing's reader had to infer three of its four columns from shape alone.
 
     "not running" is the app's own phrase for exactly this condition rather than

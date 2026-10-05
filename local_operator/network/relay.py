@@ -7033,7 +7033,7 @@ class RelayServer:
         The mesh's name first, because that is the name every surface the user
         is looking at puts on this device (see :meth:`_member_name`): a receipt
         that answered ``damians-MacBook-Pro`` about a session the sidebar's
-        ``⇄`` row and tooltip attribute to ``pixel-8`` reads as a SECOND device
+        ``↗`` row and tooltip attribute to ``pixel-8`` reads as a SECOND device
         being involved. UX round 4's U25 measured exactly that on the stop
         receipt.
 

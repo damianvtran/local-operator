@@ -363,10 +363,11 @@ this order after the state sentence: `on <peer label>` (or
 `on <peer label> — unreachable: <reason>`). This is where a peer's *name* is
 readable when the user has scrolled past the heading, and it costs no cells.
 
-*(Revised 2026-10-05 — §1.3.1: the clause reads `on <device> · <network>`, and
-with the per-device heading retired the tooltip is no longer a fallback for a
-title-less fact — it is the ONE place the device and its network are readable,
-which is why both are in it.)*
+*(Revised 2026-10-05 — §1.3.1: the clause reads `on <device> · <network>`; an
+unreachable row puts its reason on its own terse line under the clause (design
+review D4), and with the per-device heading retired the tooltip is no longer a
+fallback for a title-less fact — it is the ONE place the device and its
+network read as a pair, which is why both are in it.)*
 
 **Fields the sidebar needs, and where they come from.** `resume.SessionRow`
 (`resume.py:1826`) gains, defaulted exactly like its existing live-state fields
@@ -441,13 +442,22 @@ row-normalisation point, `SessionSidebar._unpinned_rank`, and the sibling
   at the bottom of its bin, a soft form of the same segregation.
   `session/peer_rows.py` stamps the federated row's `started` claim, the only
   per-row time the wire carries.
-* *The mark:* unchanged — `⇄` in the locality cell on every remote row — and
-  now the only statement of remoteness on the frame, which is why its test says
-  so.
+* *The marks:* `↗` on every remote row, `↛` on an unreachable one — the
+  locality cell in both cases, the same muted ink, one cell either way. Design
+  review D5: `⇄` read as exchange/sync, two-way transfer between equals, where
+  the fact is direction — "this session runs elsewhere"; `↗` is the
+  external/opened-elsewhere convention. Design review D2: a Textual tooltip
+  needs a mouse, so the unreachable state must be decodable AT REST — the
+  stroke in the same cell says it, with no layout shift between the two
+  states. The mark is the only statement of remoteness on the frame, which is
+  why its own tests say so.
 * *The tooltip:* `on <device> · <network>`, the network by NAME resolved by the
   reader (`peer_rows._network_names`) from this device's own membership record,
   because the wire carries only the id. `SessionRow.owner_network_name` is the
-  field.
+  field. An unreachable row adds its own terse line under the clause —
+  `unreachable · <glossed reason>` — keeping the device clause intact (design
+  review D4: the fused `— unreachable: <prose>` sentence broke the family's
+  noun-phrase register).
 * *Silent peers:* a peer that does not answer still contributes no rows (§8.3),
   and it no longer contributes a heading — there is no heading-only state left.
   The `unanswered_peers` read stays on the poll because the park detector

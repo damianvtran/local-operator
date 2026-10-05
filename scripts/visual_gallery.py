@@ -82,6 +82,19 @@ def cases() -> list[dict[str, Any]]:
                     # to a small window is refused rather than shipped
                     # (`_require_hover_device_clause`).
                     args += ["peers-hover", "100x45"]
+                elif variant == "peers-hover-unreachable":
+                    # The D4 frame: an unreachable row's tooltip carries the
+                    # reason on its own `unreachable · …` line under an intact
+                    # device clause (guard `_require_unreachable_tooltip_line`).
+                    args += ["peers-hover-unreachable", "100x45"]
+                elif variant == "peers-hover-local":
+                    # The N1 scoping frame: a LOCAL row's tooltip gains no device
+                    # clause (guard `_require_local_hover_no_clause`).
+                    args += ["peers-hover-local", "100x45"]
+                elif variant == "peers-pinned":
+                    # The N1 lift frame: a remote row inside `★ Pinned` with its
+                    # mark kept (guard `_require_pinned_remote`).
+                    args += ["peers-pinned", "100x45"]
                 elif variant == "peers":
                     args += ["peers", "100x30"]
                 else:

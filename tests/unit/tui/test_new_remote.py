@@ -403,7 +403,7 @@ async def test_remote_creates_the_session_on_the_peer(
         # AND NO ``--name``, which is the fix rather than an omission (UX round 3,
         # U19). It used to pass the peer's own label, so the session was TITLED
         # after the device: the sidebar then painted a session row reading
-        # ``pixel-8`` beside the ``⇄`` mark saying the row lived on another
+        # ``pixel-8`` beside the ``↗`` mark saying the row lived on another
         # device, and it survived a restart because the name went
         # to disk. An unnamed session is named by the owner's own auto-namer on
         # its first substantive turn — exactly what a bare local ``/new`` gives.

@@ -1,12 +1,12 @@
-"""The producer that gives the sidebar's ``⇄`` rows something to paint.
+"""The producer that gives the sidebar's ``↗`` rows something to paint.
 
 What these pin, in the order the design cares about:
 
 1. **The zero-peer property is measured, not asserted.** A device with no relay
    record issues NO call at all — the spy counts them, because "no rows appeared"
    is satisfied by a producer that dials every two seconds and finds nothing.
-2. **The row carries the mobility fields**, so the ordinary bins, the ``⇄`` mark,
-   the tooltip's device · network clause and the unreachable reason all have a
+2. **The row carries the mobility fields**, so the ordinary bins, the ``↗``/``↛``
+   locality marks, the tooltip's device · network clause and the unreachable reason all have a
    producer rather than a fixture — including the two the reader resolves
    (``owner_network_name`` from this device's own membership record, and
    ``created_at`` from the peer's ``started`` claim, which is what orders a

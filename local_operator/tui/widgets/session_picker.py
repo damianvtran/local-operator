@@ -3149,7 +3149,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # WHERE THE SESSION LIVES, and it is compared because a link CAN flap while
         # a list is open: a peer's relay going down or answering again is an event
         # this machine observes without the user doing anything, and it changes
-        # what the row says — the sidebar's `⇄` mark and its tooltip's clause are
+        # what the row says — the sidebar's locality mark and its tooltip's clause are
         # read off these fields. The NETWORK name rides with them because a
         # membership can be renamed on this device while the list is open, and a
         # tooltip still naming the old network would be one surface disagreeing

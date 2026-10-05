@@ -1,16 +1,21 @@
-"""The sidebar's REMOTE rows: the `⇄` slot, the merged bins, the tooltip.
+"""The sidebar's REMOTE rows: the `↗` slot, the merged bins, the tooltip.
 
 R6's TUI half (``docs/design/mesh-ui.md`` §1.3, revised by the operator's
-convergence report, 2026-10-05) is one list with a local/remote annotation, and
-the design makes three claims this file holds:
+convergence report, 2026-10-05, and by design round 1 of this change) is one
+list with a local/remote annotation, and the design makes these claims this
+file holds:
 
-1. **The mark lives in the cursor slot's locality cell**, never in the mark
-   column — that column belongs to ``row_state_mark``'s urgency ladder, and
-   locality is a durable property of the same kind the pin is. So the pin's own
-   docstring's rule ("a durable property must not displace the ladder") applies
-   here too, and the mark costs the title nothing: a remote row and a local row
-   start their titles at the same column (ahead of both, the pin cell's own two
-   columns sit since issue #1357 slice 2a).
+1. **The marks live in the cursor slot's locality cell** — `↗` on a remote
+   row, `↛` on a remote row that is UNREACHABLE (design round 1, D2/D5: the
+   pair must be decodable AT REST, because a Textual tooltip needs a mouse;
+   `↗` reads "elsewhere", the external-link convention, where `⇄` read as
+   exchange/sync) — never in the mark column: that column belongs to
+   ``row_state_mark``'s urgency ladder, and locality is a durable property of
+   the same kind the pin is. So the pin's own docstring's rule ("a durable
+   property must not displace the ladder") applies here too, and the mark
+   costs the title nothing: a remote row and a local row start their titles at
+   the same column (ahead of both, the pin cell's own two columns sit since
+   issue #1357 slice 2a).
 2. **REMOTE ROWS ARE FIRST-CLASS**: they file into the ordinary bins
    (``SessionSidebar._unpinned_rank`` — the place that carries the SHARED
    CONVENTION sentence the desktop sidebar's ``feat/sidebar-remote-rows`` names)
@@ -121,7 +126,7 @@ def _line_with(lines: list[str], needle: str) -> str:
 
 @pytest.mark.asyncio
 async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> None:
-    """Claim 1: `⇄` sits in the locality cell, and both titles start together."""
+    """Claim 1: `↗` sits in the locality cell, and both titles start together."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -135,13 +140,48 @@ async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> No
         # blank (this row is neither the cursor nor pinned). Design round 1,
         # D4: the mark keeps its own cell at EVERY state, so the row the user
         # is about to act on is not the one row that stops saying it is remote.
-        assert remote[:4] == "   ⇄"
+        assert remote[:4] == "   ↗", repr(remote)
         assert local[:4] == "    "
         # Same column for the title on both rows: the mark is not paid for by
         # narrowing the title relative to a local row, which is what the
         # "costs zero new cells" claim means (the pin cell ahead of both is
         # issue #1357 slice 2a's own two columns, priced once for every row).
         assert remote.index("Remote work") == local.index("Session mine") == 6
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_remote_row_carries_the_struck_mark_at_rest() -> None:
+    """Design round 1, D2: unreachable is decodable WITHOUT a hover.
+
+    A Textual tooltip needs a mouse, so the row itself must say it: the
+    locality cell paints `↛` — the same arrow family as `↗` with the stroke
+    that says "does not get there" — in the same cell, so the unreachable row
+    is not byte-identical to a live one and nothing reflows between the two
+    states. The tooltip's `unreachable · <reason>` line (D4) remains the
+    available expansion; this is the at-rest half.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [
+            _remote("live", name="Live elsewhere"),
+            _remote(
+                "gone",
+                name="Gone elsewhere",
+                reachable=False,
+                reason="connect_failed:ConnectionRefusedError",
+                stale=True,
+            ),
+        ]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        lines = sidebar.render().plain.splitlines()
+        live = _line_with(lines, "Live elsewhere")
+        gone = _line_with(lines, "Gone elsewhere")
+        assert live[:4] == "   ↗", repr(live)
+        assert gone[:4] == "   ↛", repr(gone)
+        # One cell, one column, no reflow: the two states differ in the glyph
+        # alone, and the title starts at the same place on both.
+        assert live.index("Live elsewhere") == gone.index("Gone elsewhere") == 6
 
 
 @pytest.mark.asyncio
@@ -167,7 +207,8 @@ async def test_a_local_row_gains_no_mark() -> None:
         ]
         sidebar = await _sidebar_with(pilot, app, entries)
         lines = sidebar.render().plain.splitlines()
-        assert "⇄" not in "\n".join(lines)
+        assert "↗" not in "\n".join(lines)
+        assert "↛" not in "\n".join(lines)
         first = _line_with(lines, "Session mine")
         second = _line_with(lines, "Session stated")
         # The pin cell and the caret cell are blank on BOTH rows — the mark's
@@ -209,13 +250,13 @@ async def test_the_pin_and_the_caret_ride_their_own_cells_and_never_the_mark() -
         lines = sidebar.render().plain.splitlines()
         pinned = _line_with(lines, "Pinned remote")
         plain = _line_with(lines, "Plain remote")
-        assert pinned[:4] == "★  ⇄", repr(pinned)
-        assert plain[:4] == "  ›⇄", repr(plain)
+        assert pinned[:4] == "★  ↗", repr(pinned)
+        assert plain[:4] == "  ›↗", repr(plain)
         # THE STATE THE OLD SHARED CELL COULD NOT DRAW: pinned AND the cursor.
         sidebar.cursor_id = "pinned-remote"
         await pilot.pause()
         both = _line_with(sidebar.render().plain.splitlines(), "Pinned remote")
-        assert both[:4] == "★ ›⇄", repr(both)
+        assert both[:4] == "★ ›↗", repr(both)
         # Nothing moved: the title starts at the same column on every state —
         # the pin cell's two columns, then the caret and locality cells.
         assert plain.index("Plain remote") == both.index("Pinned remote") == 6
@@ -232,7 +273,8 @@ async def test_remote_rows_file_into_the_ordinary_bins_by_their_own_state() -> N
 
     One remote row busy (active) and one cold (previous), beside local rows in
     the same two bins, and the frame's headings are the tier names ALONE — no
-    ``⇄ <device>`` section, which is the segregation the convergence report
+    per-device ``↗ <device>`` section (the retired heading's glyph was `⇄`),
+    which is the segregation the convergence report
     removed. The two remote rows are on DIFFERENT devices and still share the
     ordinary bins, so nothing per-device is left anywhere.
     """
@@ -316,7 +358,7 @@ async def test_remote_rows_interleave_with_local_rows_by_the_same_ordering_key()
 @pytest.mark.asyncio
 async def test_a_pinned_remote_row_lifts_into_pinned_and_keeps_its_mark() -> None:
     """First-class includes the pin: a pinned remote row paints under
-    ``★ Pinned`` with its `⇄` mark kept — the pin's lift is the ordinary one."""
+    ``★ Pinned`` with its `↗` mark kept — the pin's lift is the ordinary one."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -324,7 +366,7 @@ async def test_a_pinned_remote_row_lifts_into_pinned_and_keeps_its_mark() -> Non
         sidebar = await _sidebar_with(pilot, app, entries, pins=("a1",))
         lines = sidebar.render().plain.splitlines()
         assert _section_of_line(lines, "Peer A one") == "★ Pinned"
-        assert "⇄" in _line_with(lines, "Peer A one")
+        assert "↗" in _line_with(lines, "Peer A one")
 
 
 @pytest.mark.asyncio
@@ -384,9 +426,14 @@ async def test_the_tooltip_names_the_device_the_network_and_the_reason() -> None
         # `feat/sidebar-remote-rows` reads the same two facts on its hover and
         # accessible name.
         assert "on damian-mbp · devmesh" in reachable
+        # THE REASON GETS ITS OWN TERSE LINE (design round 1, D4): the device
+        # clause stays intact, and the unreachable fact keeps the same `·`
+        # separator and the shared gloss (`peer_reason_words`) as its own line
+        # under it — the fused `— unreachable: <prose>` sentence is gone.
         unreachable = sidebar._describe(by_id["a2"])
-        assert "on damian-mbp · devmesh — unreachable: asked, and it did not answer" in unreachable
-        assert "(last known state)" in unreachable
+        assert unreachable.splitlines()[2] == "on damian-mbp · devmesh (last known state)"
+        assert unreachable.splitlines()[3] == "unreachable · asked, and it did not answer"
+        assert unreachable.splitlines()[4] == "a2"
         # DEGRADED, NOT GUESSED: a nameless device falls back to the id's tail
         # (`owner_label`) and an unreadable membership omits the network clause
         # rather than printing an id or a placeholder.
@@ -403,7 +450,8 @@ async def test_a_device_with_no_peers_paints_exactly_as_before() -> None:
     """Claim 3, the R9/R16 invariant: no peer, no mark, no peer heading.
 
     Asserted on the headless four-tier fixture: the headings are the four tier
-    names, the rows carry only the pin/caret/mark columns, and no ``⇄`` appears
+    names, the rows carry only the pin/caret/mark columns, and no ``↗`` or
+    ``↛`` appears
     anywhere. This is the same frame the *before* capture must be byte-identical
     to (§4.1).
     """
@@ -424,7 +472,8 @@ async def test_a_device_with_no_peers_paints_exactly_as_before() -> None:
             "Previous Sessions",
             "⌥ Subagent Runs",
         ]
-        assert "⇄" not in "\n".join(lines)
+        assert "↗" not in "\n".join(lines)
+        assert "↛" not in "\n".join(lines)
         # And `_section_of` is unchanged for every row: 0/1/2/4. Rank 3 is
         # UNASSIGNED — the retired peer axis held it — and `subagent` keeps 4
         # rather than renumbering for a hole nothing reads.
@@ -438,7 +487,7 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
 
     The rendering half is pinned above against hand-stamped rows. This pins the
     other end of the same claim — `_refresh_sidebar` appends what
-    `session.peer_rows` returns — so the `⇄` mark has a live source rather than
+    `session.peer_rows` returns — so the `↗` mark has a live source rather than
     only a contract fixture, which is what review round 4's MINOR 3 was about
     (the session `/new remote <peer>` creates had no surface that could see it).
     The row is ``idle``, which is an ACTIVE state, so it must adopt into the
@@ -479,10 +528,10 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
         joined = "\n".join(lines)
         # No device heading exists, and the row files under the ordinary bin
         # for its state — the two halves of claim 2, through the REAL poll.
-        assert "⇄ radiant-m4" not in joined, joined
+        assert "↗ radiant-m4" not in joined, joined
         assert _header_kinds(sidebar) == ["header:active"]
         row = next(line for line in lines if "Federated catalogue" in line)
         # The mark rides the locality cell — after the pin cell's two columns
         # and the caret's — and the title starts after the mark column.
-        assert row[3] == "⇄", repr(row)
+        assert row[3] == "↗", repr(row)
         assert row[6] == "F", repr(row)

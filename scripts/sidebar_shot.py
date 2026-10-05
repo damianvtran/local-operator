@@ -325,6 +325,13 @@ class _AttachedFixtureSession(FakeSession):
 
 
 def _entries(show_subagents: bool = SHOW_SUBAGENTS, peers: bool = False) -> list[CatalogEntry]:
+    # EVERY row carries a birth, local ones included (QA round 1, Q-1): the
+    # product stamps every candidate's ``created_at`` from the store
+    # (`session_catalog.load_catalog` / `session_created_at`), and the fixture
+    # left it at zero — so a same-tier remote row with a claim sorted ABOVE
+    # newer local rows in these frames, an interleaving artifact the merged-bins
+    # claim must not be judged on. Same clock as ``mtime``: the label and the
+    # position then agree by construction.
     entries = [
         CatalogEntry(
             SessionRow(
@@ -335,13 +342,20 @@ def _entries(show_subagents: bool = SHOW_SUBAGENTS, peers: bool = False) -> list
                 pending=pending,
                 wakes=wakes,
                 wakes_dormant=dormant,
+                created_at=NOW - age * 60,
             )
         )
         for session_id, name, age, state, pending, wakes, dormant in ROWS
     ]
     entries += [
         CatalogEntry(
-            SessionRow(id=session_id, mtime=NOW - age * 60, name=name, live_state=state),
+            SessionRow(
+                id=session_id,
+                mtime=NOW - age * 60,
+                name=name,
+                live_state=state,
+                created_at=NOW - age * 60,
+            ),
             unseen=True,
             completion_kind=kind,
         )
@@ -356,7 +370,7 @@ def _entries(show_subagents: bool = SHOW_SUBAGENTS, peers: bool = False) -> list
     subagent_rows = [row for row in SUBAGENT_ROWS if show_subagents or row[0] in PINS]
     entries += [
         CatalogEntry(
-            SessionRow(id=session_id, mtime=NOW - age * 60, name=""),
+            SessionRow(id=session_id, mtime=NOW - age * 60, name="", created_at=NOW - age * 60),
             subagent=True,
             label=label,
             agent=agent,
@@ -581,6 +595,123 @@ def _widget_state(sidebar: SessionSidebar) -> tuple[object, ...]:
     )
 
 
+#: The locality marks the sidebar paints, SPELLED rather than imported (the
+#: failure direction the sibling guard documents: a rename makes a guard REFUSE
+#: a frame rather than pass one it should not). `↗` = remote, `↛` = remote and
+#: unreachable — the AT-REST cue (design round 1, D2), which is exactly the kind
+#: of fact that fails quietly in a frame (a missing glyph still looks like a
+#: list). See `session_sidebar.REMOTE_MARK` for the pairing's rationale.
+REMOTE_GLYPH = "↗"
+UNREACHABLE_GLYPH = "↛"
+
+
+def _require_unreachable_cue(sidebar: Any) -> None:
+    """Refuse a mesh frame whose drawn rows do not carry the locality marks.
+
+    One glyph per DRAWN remote row, read off the painted line (`render`) —
+    `↗` when reachable, `↛` when not — so the unreachable state is decodable at
+    REST (design round 1, D2: Textual tooltips are mouse-only, so hover may not
+    be the only channel) and so a regression that drops the mark state cannot
+    ship a frame that still looks like a list. An off-page row is not charged;
+    a drawn one cannot be skipped.
+    """
+    drawn = sidebar._display_rows()
+    lines = sidebar.render().plain.splitlines()
+    offset = 0 if sidebar._draws_section_headers(drawn) else 1
+    charged = 0
+    for index, (kind, entry) in enumerate(drawn):
+        if kind != "entry" or entry is None or not entry.row.is_remote:
+            continue
+        charged += 1
+        painted = lines[index + offset] if index + offset < len(lines) else ""
+        wanted = UNREACHABLE_GLYPH if not entry.row.reachable else REMOTE_GLYPH
+        if wanted not in painted:
+            raise SystemExit(
+                f"the drawn remote row {entry.id!r} reads {painted!r}: {wanted!r} "
+                "is not in its cell — the at-rest locality cue this frame exists "
+                "to show is missing or wrong"
+            )
+    if not charged:
+        raise SystemExit(
+            "no remote row is on the drawn page: the marks this guard reads have "
+            "nothing to paint — the merged-bins guard should have caught this"
+        )
+
+
+def _require_unreachable_tooltip_line(sidebar: Any) -> None:
+    """Refuse an unreachable-hover frame whose tooltip lacks the reason line.
+
+    DESIGN ROUND 1, D4: the reason is its own terse line (`unreachable · <why>`)
+    under an intact device clause. The failure is quiet — a tooltip that
+    dropped the line still looks like a tooltip — so the guard reads the
+    widget's own description for the prefix.
+    """
+    description = sidebar.tooltip or ""
+    if "unreachable · " not in description:
+        raise SystemExit(
+            f"the tooltip reads {description!r}: no `unreachable · ` line — the "
+            "reason the case exists to show is missing or fused into another line"
+        )
+
+
+def _require_local_hover_no_clause(sidebar: Any) -> None:
+    """Refuse a LOCAL-row hover frame whose tooltip gained a device clause.
+
+    N1's scoping claim: `on <device> · <network>` is for rows that live
+    elsewhere; a local row's tooltip is the three lines it has always been.
+    Read off the widget's own description, the same source the remote hover
+    guard reads.
+    """
+    description = sidebar.tooltip or ""
+    stray = [
+        line for line in description.splitlines() if line.startswith("on ") or "unreachable" in line
+    ]
+    if stray:
+        raise SystemExit(
+            f"the LOCAL row's tooltip reads {description!r}: {stray!r} — the "
+            "device clause belongs to remote rows only, and this case exists to "
+            "show that it stays off local ones"
+        )
+    from textual.widgets import Tooltip
+
+    tooltip_widget = sidebar.screen.get_child_by_type(Tooltip)
+    if tooltip_widget is None or not tooltip_widget.display:
+        raise SystemExit(
+            "the description is set but the Tooltip widget is not displayed: the "
+            "frame would show the bare row the case exists to explain"
+        )
+
+
+def _require_pinned_remote(sidebar: Any, pinned_id: str) -> None:
+    """Refuse a frame in which the pinned REMOTE row is not on the Pinned tier.
+
+    N1's other half of "first-class": the pin's lift is the ordinary one, so a
+    pinned remote row paints under `★ Pinned` WITH its locality mark — the
+    row-kind and the section both read off the frame's own state, not off the
+    seed.
+    """
+    ranks = {entry.id: sidebar._section_of(entry) for entry in sidebar.entries}
+    if ranks.get(pinned_id) != 0:
+        raise SystemExit(
+            f"the pinned remote row {pinned_id!r} ranks {ranks.get(pinned_id)!r}: "
+            "the pin placed it outside `★ Pinned`"
+        )
+    lines = sidebar.render().plain.splitlines()
+    for index, line in enumerate(lines):
+        entry = sidebar._entry_at(index)
+        if entry is not None and entry.id == pinned_id:
+            if "★" not in line or REMOTE_GLYPH not in line:
+                raise SystemExit(
+                    f"the pinned remote row reads {line!r}: the pin's `★` and/or "
+                    f"the `{REMOTE_GLYPH}` mark are not on its painted line"
+                )
+            return
+    raise SystemExit(
+        f"the pinned remote row {pinned_id!r} is not on any painted line: the "
+        "frame cannot show what the case exists for"
+    )
+
+
 def _require_hover_device_clause(sidebar: Any, entry: Any) -> None:
     """Refuse a hover frame whose tooltip does not read the device AND network.
 
@@ -598,11 +729,13 @@ def _require_hover_device_clause(sidebar: Any, entry: Any) -> None:
     description = sidebar.tooltip or ""
     label = entry.row.owner_label
     network = entry.row.owner_network_name
-    if f"on {label}" not in description or (network and f"· {network}" not in description):
+    if not network or f"on {label}" not in description or f"· {network}" not in description:
         raise SystemExit(
             f"the tooltip reads {description!r}: the device · network clause this "
-            "case exists for is missing (or the network fell back to nothing), "
-            "and a shorter tooltip still looks like a tooltip"
+            "case exists for is missing — and an EMPTY network field is refused "
+            "too (review round 1, MINOR-2): the check used to short-circuit when "
+            "the row carried no network, which is exactly the regression "
+            "(fixture stops stamping) this guard exists to catch"
         )
     tooltip_widget = sidebar.screen.get_child_by_type(Tooltip)
     if tooltip_widget is None or not tooltip_widget.display:
@@ -646,7 +779,8 @@ async def main() -> None:
     global CURSOR_ID, FOCUS_LIST
     if len(sys.argv) < 2:
         raise SystemExit(
-            "usage: sidebar_shot.py OUT.svg [COLSxROWS] " "[peers|peers-focus|peers-hover]"
+            "usage: sidebar_shot.py OUT.svg [COLSxROWS] "
+            "[peers|peers-focus|peers-hover|peers-hover-unreachable|peers-hover-local|peers-pinned]"
         )
     # Before it is used as a path: a mistyped flag here writes a file called
     # ``--help.svg`` into the working directory (see the helper's docstring).
@@ -658,7 +792,8 @@ async def main() -> None:
     # containing an `x` is a size; anything else names the variant.
     peers = False
     focus = FOCUS_LIST
-    hover = False
+    hover = ""
+    pin_remote = False
     for arg in sys.argv[2:]:
         refuse_flag_shaped_argument(arg, what="argument")
         if "x" in arg:
@@ -687,11 +822,30 @@ async def main() -> None:
             # case the clause had no durable frame at all, and a guard
             # (`_require_hover_device_clause`) refuses one that lacks it.
             peers = True
-            hover = True
+            hover = "remote"
+        elif arg == "peers-hover-unreachable":
+            # DESIGN ROUND 1, D4: the unreachable tooltip in its own register —
+            # the device clause intact, the reason on its own line — which is
+            # the frame the fused-sentence critique was written against.
+            peers = True
+            hover = "unreachable"
+        elif arg == "peers-hover-local":
+            # DESIGN ROUND 1, N1: the tooltip's SCOPING is the claim — a LOCAL
+            # row must NOT gain the device · network clause — and a frame that
+            # never hovers one cannot show that it doesn't.
+            peers = True
+            hover = "local"
+        elif arg == "peers-pinned":
+            # DESIGN ROUND 1, N1: a REMOTE row inside the `★ Pinned` bin, which
+            # is half of "first-class": the pin's lift works on a remote row
+            # exactly as on a local one, and no other case shows it.
+            peers = True
+            pin_remote = True
         else:
             raise SystemExit(
-                f"unknown argument {arg!r}: expected a WxH size, "
-                "'peers', 'peers-focus' or 'peers-hover'"
+                f"unknown argument {arg!r}: expected a WxH size, 'peers', 'peers-focus', "
+                "'peers-hover', 'peers-hover-unreachable', 'peers-hover-local' or "
+                "'peers-pinned'"
             )
     FOCUS_LIST = focus
     if focus and peers:
@@ -699,13 +853,32 @@ async def main() -> None:
         # and the locality mark on one row — whichever source supplied them.
         remote = _remote_rows()
         CURSOR_ID = remote[0].id if remote else CURSOR_ID
+    pins = PINS
+    pinned_remote_id = ""
+    if pin_remote:
+        remote = _remote_rows()
+        if not remote:
+            raise SystemExit(
+                "peers-pinned: no remote rows to pin — a frame without one cannot "
+                "show the pin's lift on a remote row"
+            )
+        pinned_remote_id = remote[0].id
+        pins = (*PINS, pinned_remote_id)
 
     if NEUTRAL_CWD:
         os.environ["HOME"] = str(Path(os.environ["HOME"]).resolve())
         os.chdir(os.environ["HOME"])
 
+    # THE NO_COLOR MODALITY (design round 1, N1): Textual reads NO_COLOR at App
+    # CONSTRUCTION (`app.no_color`, which installs its monochrome filter), and
+    # `isolate_capture` pops the variable precisely so ordinary captures keep
+    # their colour — so the knob re-adds it INSIDE the isolated world and the
+    # marks and bins get a frame with colour stripped. Visual only; nothing
+    # about layout changes.
+    if os.environ.get("LO_SIDEBAR_SHOT_NO_COLOR") == "1":
+        os.environ["NO_COLOR"] = "1"
     app = OperatorApp(lambda: _factory(_AttachedFixtureSession()))
-    async with app.run_test(size=size, tooltips=hover) as pilot:
+    async with app.run_test(size=size, tooltips=bool(hover)) as pilot:
         await pilot.pause()
         app._sidebar_settings = SidebarSettings(False, "left")
         # Seed a conversation so the frame shows the list BESIDE something,
@@ -736,7 +909,7 @@ async def main() -> None:
         # rows are handed in directly (as every other row here is) rather than
         # loaded, so this never touches the developer's real store.
         sidebar.show_subagents = SHOW_SUBAGENTS
-        sidebar.set_pins(PINS)
+        sidebar.set_pins(pins)
         sidebar.set_subagent_total(SUBAGENT_TOTAL)
         sidebar.set_entries(_entries(peers=peers))
         sidebar.current_id = CURRENT_ID
@@ -749,24 +922,30 @@ async def main() -> None:
 
         hovered = None
         if hover:
-            # The pointer rests on the first remote row the frame DRAWS (an
-            # off-page one cannot be hovered), and the tooltip is taken up
-            # through the same two-step every other tooltip capture uses: the
-            # app's own delay, then the widget's restore for the in-row move
-            # Textual's clock cannot complete headlessly (see
+            # The pointer rests on the first row of the kind the case is about
+            # that the frame DRAWS (an off-page one cannot be hovered), and the
+            # tooltip is taken up through the same two-step every other tooltip
+            # capture uses: the app's own delay, then the widget's restore for
+            # the in-row move Textual's clock cannot complete headlessly (see
             # `_show_tooltip_now`).
             drawn = sidebar._display_rows()
+            predicates = {
+                "remote": lambda row: row.is_remote and row.reachable,
+                "unreachable": lambda row: row.is_remote and not row.reachable,
+                "local": lambda row: not row.is_remote,
+            }
+            wanted = predicates[hover]
             found = next(
                 (
                     i
                     for i, (kind, entry) in enumerate(drawn)
-                    if kind == "entry" and entry is not None and entry.row.is_remote
+                    if kind == "entry" and entry is not None and wanted(entry.row)
                 ),
                 None,
             )
             if found is None:
                 raise SystemExit(
-                    "no remote row on the drawn page: the hover this case exists "
+                    f"no {hover} row on the drawn page: the hover this case exists "
                     "for has nothing to land on. Capture at 100x45 or taller."
                 )
             hovered = drawn[found][1]
@@ -892,10 +1071,19 @@ async def main() -> None:
         if peers:
             # BEFORE the write, so a frame that is not the state it claims is
             # never on disk to be read as evidence (the census `new_remote_shot`
-            # grew for the splash mark, applied to the merged bins).
+            # grew for the splash mark, applied to the merged bins and the
+            # at-rest locality cues).
             _require_merged_bins(sidebar)
-        if hover and hovered is not None:
+            _require_unreachable_cue(sidebar)
+        if hover == "remote" and hovered is not None:
             _require_hover_device_clause(sidebar, hovered)
+        if hover == "unreachable" and hovered is not None:
+            _require_hover_device_clause(sidebar, hovered)
+            _require_unreachable_tooltip_line(sidebar)
+        if hover == "local":
+            _require_local_hover_no_clause(sidebar)
+        if pin_remote and pinned_remote_id:
+            _require_pinned_remote(sidebar, pinned_remote_id)
         save_capture(app, out)
         conversation = app.query_one("#session-conversation")
         # THE LIST STATE, as a number rather than something to infer from pixels

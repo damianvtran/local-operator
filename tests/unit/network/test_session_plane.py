@@ -1028,7 +1028,7 @@ def test_a_devices_own_receipts_use_the_name_the_mesh_knows(
 
     The owner's own sentence read ``… is not running on damians-MacBook-Pro``
     about a session every other surface in the same session attributes to
-    ``pixel-8`` — the sidebar's ``⇄`` row and its tooltip — a receipt that
+    ``pixel-8`` — the sidebar's ``↗`` row and its tooltip — a receipt that
     invents a second device. ``relay._own_label`` answered from
     the identity while the member table is what the sidebar, the listing, the
     picker and the create receipt all resolve, and the two diverge exactly when
@@ -1200,7 +1200,8 @@ def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
     for the reader to infer from shape alone, and the STATE it printed was the
     catalogue's own token — ``stored`` — which is a third vocabulary for a state
     the rest of the app already shows (the sidebar paints that session with a
-    ``⇄`` mark and its state in the tooltip; ``resume.session_state_words`` owns
+    locality mark and its state in the tooltip; ``resume.session_state_words``
+    owns
     the words, and ``--json`` keeps the token).
 
     Driven through ``cli._cmd_sessions`` over a real peer link, because the header
