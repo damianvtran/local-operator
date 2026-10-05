@@ -1,0 +1,639 @@
+{
+  "grid": [
+    130,
+    30
+  ],
+  "native_pixels": [
+    1040.0,
+    510.0
+  ],
+  "profile": {
+    "cell_width": 8.0,
+    "cell_height": 17.0,
+    "font_size": 13.0,
+    "font_family": "Menlo, DejaVu Sans Mono, monospace"
+  },
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
+  "css_path": [
+    "local_operator.tcss"
+  ],
+  "screen": {
+    "class": "TranscriptScreen",
+    "size": [
+      128,
+      28
+    ],
+    "virtual_size": [
+      128,
+      28
+    ],
+    "region": [
+      0,
+      0,
+      130,
+      30
+    ],
+    "scrollbar": [
+      false,
+      false
+    ]
+  },
+  "widgets": [
+    {
+      "widget": "SessionWorkspace",
+      "id": "session-workspace",
+      "region": [
+        1,
+        1,
+        128,
+        28
+      ],
+      "content_region": [
+        1,
+        1,
+        128,
+        28
+      ],
+      "size": [
+        128,
+        28
+      ],
+      "virtual_size": [
+        128,
+        28
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "session-conversation",
+      "region": [
+        1,
+        1,
+        128,
+        28
+      ],
+      "content_region": [
+        1,
+        1,
+        128,
+        28
+      ],
+      "size": [
+        128,
+        28
+      ],
+      "virtual_size": [
+        128,
+        28
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "TranscriptView",
+      "id": "transcript",
+      "region": [
+        1,
+        1,
+        128,
+        17
+      ],
+      "content_region": [
+        2,
+        2,
+        127,
+        15
+      ],
+      "size": [
+        127,
+        15
+      ],
+      "virtual_size": [
+        126,
+        15
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        2,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        2,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        4,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        4,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        6,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        6,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        8,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        8,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        10,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        10,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        12,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        12,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        14,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        14,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        16,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        16,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-dock",
+      "region": [
+        1,
+        18,
+        128,
+        11
+      ],
+      "content_region": [
+        1,
+        18,
+        128,
+        11
+      ],
+      "size": [
+        128,
+        11
+      ],
+      "virtual_size": [
+        128,
+        11
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "prompt-host",
+      "region": [
+        1,
+        18,
+        128,
+        6
+      ],
+      "content_region": [
+        1,
+        18,
+        128,
+        5
+      ],
+      "size": [
+        128,
+        5
+      ],
+      "virtual_size": [
+        128,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AskQueueList",
+      "id": "ask-queue-list",
+      "region": [
+        1,
+        18,
+        128,
+        5
+      ],
+      "content_region": [
+        2,
+        19,
+        126,
+        3
+      ],
+      "size": [
+        126,
+        3
+      ],
+      "virtual_size": [
+        128,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-shell",
+      "region": [
+        1,
+        24,
+        128,
+        5
+      ],
+      "content_region": [
+        2,
+        25,
+        126,
+        3
+      ],
+      "size": [
+        126,
+        3
+      ],
+      "virtual_size": [
+        126,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Band",
+      "id": "status-band",
+      "region": [
+        2,
+        26,
+        126,
+        2
+      ],
+      "content_region": [
+        2,
+        27,
+        125,
+        1
+      ],
+      "size": [
+        125,
+        1
+      ],
+      "virtual_size": [
+        126,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": "input-row",
+      "region": [
+        2,
+        25,
+        126,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        126,
+        1
+      ],
+      "size": [
+        126,
+        1
+      ],
+      "virtual_size": [
+        126,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Chrome",
+      "id": "prompt-chevron",
+      "region": [
+        2,
+        25,
+        2,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        2,
+        1
+      ],
+      "size": [
+        2,
+        1
+      ],
+      "virtual_size": [
+        2,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Editor",
+      "id": null,
+      "region": [
+        4,
+        25,
+        124,
+        1
+      ],
+      "content_region": [
+        5,
+        25,
+        122,
+        1
+      ],
+      "size": [
+        122,
+        1
+      ],
+      "virtual_size": [
+        0,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    }
+  ]
+}
