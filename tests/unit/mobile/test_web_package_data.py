@@ -132,7 +132,7 @@ def _resolve(importer: Path, spec: str) -> Path | None:
     if base.is_file():
         return base.resolve()
     candidates = [
-        *(base.with_name(base.name + suffix) for suffix in ('.ts', '.tsx', '.css')),
+        *(base.with_name(base.name + suffix) for suffix in (".ts", ".tsx", ".css")),
         base / "index.ts",
         base / "index.tsx",
     ]
