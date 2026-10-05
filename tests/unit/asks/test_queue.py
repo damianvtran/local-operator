@@ -298,9 +298,11 @@ def test_a_moot_withdraw_is_allowed_on_a_timed_out_ask(tmp_path: Path):
     queue._now = lambda: BASE
     ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
     queue._now = lambda: BASE + 300_000  # past the deadline, inside the window
-    assert queue.find(ask_id)["status"] == store.STATUS_TIMED_OUT
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_TIMED_OUT
     assert queue.withdraw(ask_id, reason="moot")["ok"] is True
-    assert queue.find(ask_id)["status"] == store.STATUS_WITHDRAWN
+    settled = queue.find(ask_id)
+    assert settled is not None and settled["status"] == store.STATUS_WITHDRAWN
 
 
 def test_a_recorded_answer_refuses_both_withdraw_reasons_and_writes_nothing(
@@ -387,6 +389,7 @@ def test_answered_in_chat_records_verbatim_cells_and_names_the_chat_surface(
     assert outcome["ok"] is True
     assert "answered from the user's chat message" in outcome["text"]
     record = queue.find(ask_id)
+    assert record is not None
     assert record["status"] == store.STATUS_ANSWERED
     assert record["answers"] == {"q0": ["the audit-log one", "keep it"], "q1": []}
     assert record["answered_by"] == {"surface": "chat", "message_id": "m-7"}
@@ -398,7 +401,8 @@ def test_answered_in_chat_without_a_message_id_carries_the_surface_alone(tmp_pat
     queue = _queue(tmp_path, FakeSession())
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
     assert queue.withdraw(ask_id, reason="answered_in_chat", answers={"q0": ["yes"]})["ok"] is True
-    assert queue.find(ask_id)["answered_by"] == {"surface": "chat"}
+    record = queue.find(ask_id)
+    assert record is not None and record["answered_by"] == {"surface": "chat"}
 
 
 def test_answered_in_chat_on_a_timed_out_ask_folds_late(tmp_path: Path):
@@ -413,7 +417,8 @@ def test_answered_in_chat_on_a_timed_out_ask_folds_late(tmp_path: Path):
         ask_id, reason="answered_in_chat", answers={"q0": ["after the deadline"]}
     )
     assert outcome["ok"] is True
-    assert queue.find(ask_id)["status"] == store.STATUS_LATE
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_LATE
 
 
 def test_answered_in_chat_refuses_a_secret_question_with_its_own_sentence(tmp_path: Path):
