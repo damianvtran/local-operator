@@ -44,6 +44,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import sync
+from local_operator.session import subagent_ledger
 
 # ---------------------------------------------------------------------------
 # The entry types, imported from their owners
@@ -886,6 +887,21 @@ def _every_entry_directory(root: Path, session_id: str) -> Path:
     (tree / "nested").mkdir(parents=True, exist_ok=True)
     (tree / "notes.md").write_text("notes\n", encoding="utf-8")
     (tree / "nested" / "run.txt").write_text("nested content\n", encoding="utf-8")
+    # THE ATTRIBUTION RECEIPT FAMILIES, written through their OWN path builders so
+    # this tree cannot drift from the writer, and with distinct bytes per file so a
+    # copy that arrives is proven by a byte comparison rather than by presence
+    # (reviewer round 2, MINOR 2: enumeration coverage is not transfer proof — the
+    # carry spans ``_member_stamps``/``_item_path``/``_destination_for``/``copy_set``).
+    for job_id, payload in (
+        ("j1", {"version": 1, "artifact": "subagent-lane", "job_id": "j1"}),
+        ("j1", {"version": 1, "artifact": "subagent-stop", "job_id": "j1", "deliberate": True}),
+    ):
+        builder = (
+            subagent_ledger.lane_receipt_path
+            if payload["artifact"] == "subagent-lane"
+            else subagent_ledger.stop_receipt_path
+        )
+        builder(directory, job_id).write_text(json.dumps(payload) + "\n", encoding="utf-8")
     return directory
 
 
@@ -932,6 +948,21 @@ def test_a_directory_of_every_entry_type_round_trips(tmp_path: Path) -> None:
     )
     assert (dest / "attachments" / f"{'a' * 32}.bin").is_file()
     assert (dest / "attachments" / f"{'a' * 32}.json").is_file()
+
+    # THE RECEIPTS ARRIVE BYTE-IDENTICAL (reviewer round 2, MINOR 2). The three
+    # enumeration cells above prove the classification accepts these names; this
+    # proves the COPY agrees with it. The wiring spans four functions, so an
+    # enumeration-only assertion would survive a change to any of the three that
+    # actually move the bytes. ``assert_complete`` runs first so a regression to the
+    # refuse path fails HERE with the refusal rather than as a missing file.
+    sync.assert_complete(directory)
+    for path in (
+        subagent_ledger.lane_receipt_path(directory, "j1"),
+        subagent_ledger.stop_receipt_path(directory, "j1"),
+    ):
+        landed = dest / path.name
+        assert landed.is_file(), f"{path.name} was classified but did not transfer"
+        assert landed.read_bytes() == path.read_bytes(), path.name
 
 
 # ---------------------------------------------------------------------------

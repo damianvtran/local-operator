@@ -483,14 +483,16 @@ def idle_clause(
     is honest and carries nothing (design round 1, N2): below
     :data:`IDLE_FLOOR_S` the clause is omitted entirely rather than printed.
 
-    THE OVERDUE FORM IS STRICTLY GREATER, AND NAMES THE BOUND (design round 1,
-    D1/D6). Rendering both sides through :func:`format_duration` made the
-    crossing INVISIBLE and self-contradictory: at 899 s and 901 s against a
-    900 s bound both read ``15m``, so the form changed while the numbers did not
-    and ``no progress for 15m (bound 15m)`` asserted a violation in the same
-    breath as the threshold it violated. Hence the ``>`` — read as "strictly
-    more than this" — and the bound names what it bounds, because a reader who
-    does not already know the lane stall bound exists cannot supply the noun.
+    THE OVERDUE FORM CARRIES THE IDLE ITSELF, and names the bound (design round 1
+    D1/D6, round 2 D8). Printing the BOUND in both slots made every stall past
+    the threshold read identically — 901 s, 47 min and 3 h all rendered ``no
+    progress for >15m (stall bound 15m)`` — so the clause stopped saying the one
+    thing a reader triages on: how long the child has actually been quiet. It now
+    reads ``no progress for 47m (stall bound 15m)``: the magnitude is the idle,
+    the parenthetical names WHAT the threshold is, and the two cannot collide
+    because they are different measurements. The crossing stays visible at the
+    boundary because the under-bound form is a different SENTENCE (``idle 15m``),
+    even where minute-rounding makes the two numbers equal.
     """
     if last_progress_at is None:
         return None
@@ -499,6 +501,6 @@ def idle_clause(
         return None
     if bound_s is not None and idle > float(bound_s):
         return (
-            f"no progress for >{format_duration(bound_s)} (stall bound {format_duration(bound_s)})"
+            f"no progress for {format_duration(idle)}" f" (stall bound {format_duration(bound_s)})"
         )
     return f"idle {format_duration(idle)}"

@@ -9269,7 +9269,19 @@ class Session:
         """
         comms = self._subagent_comms
         stamp: Any = None
-        if comms is not None:
+        # THE SAME GATE THE JOBS TOOL USES (reviewer round 2, NIT 1). The jobs
+        # tool asks ``job.status == "running"`` before it stages anything, so it
+        # never creates a window in which ``stopped by …`` is rendered for a job
+        # nothing stopped. This path staged first and rolled back after a
+        # refusal, which left that window open for one ``await`` (observable by a
+        # concurrent roster render). Asking the question up front removes the
+        # window outright; the rollback below STAYS, because the row can still
+        # settle between this check and the cancel, and the rollback is what
+        # covers that race. ``jobs`` is guarded because the manager is optional
+        # on a reduced host and the cancel below already tolerates its absence.
+        job = self.jobs.get(job_id) if self.jobs is not None else None
+        running = job is not None and getattr(job, "status", None) == "running"
+        if comms is not None and running:
             try:
                 stamp = comms.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
             except Exception:  # noqa: BLE001 — a stop must not fail over evidence
