@@ -1,0 +1,84 @@
+{
+	"project": {
+		"id": "07d28913c91d40a5a5ec372eeeda76db",
+		"name": "payments-migration",
+		"description": "Q4 card-scheme migration for the payments service.",
+		"owner": null,
+		"team": null,
+		"title": null,
+		"status": "active",
+		"progress": "cutover done",
+		"progress_updated_at": 1791209087.232966,
+		"progress_reported_by": "operator",
+		"progress_refreshed_at": null,
+		"progress_refreshed_by": "",
+		"progress_stale": false,
+		"tags": [
+			"payments",
+			"q4"
+		],
+		"sessions": [
+			"4e92693767fa"
+		],
+		"coordination_sessions": [],
+		"created_at": 1791209087.122427,
+		"updated_at": 1791209087.597866,
+		"start_date": "2026-09-01",
+		"target_date": "2026-10-31",
+		"completed_at": null,
+		"estimate": 5.0,
+		"estimate_unit": "points",
+		"milestones": [
+			{
+				"name": "schema frozen",
+				"target_date": null,
+				"completed_at": "2026-10-05",
+				"status": "completed"
+			},
+			{
+				"name": "beta cut",
+				"target_date": "2026-09-30",
+				"completed_at": null,
+				"status": "overdue"
+			},
+			{
+				"name": "GA",
+				"target_date": "2026-11-15",
+				"completed_at": null,
+				"status": "upcoming"
+			},
+			{
+				"name": "sign-off",
+				"target_date": "2026-10-10",
+				"completed_at": null,
+				"status": "upcoming"
+			}
+		],
+		"updates": [
+			{
+				"at": "2026-10-05T14:04:47Z",
+				"text": "cutover done",
+				"by": "operator",
+				"attachments": []
+			}
+		]
+	},
+	"links": [
+		{
+			"session_id": "4e92693767fa",
+			"role": "work",
+			"exists": false,
+			"title": null,
+			"created_at": null,
+			"archived": false,
+			"runtime": {
+				"state": "live",
+				"busy": false,
+				"heartbeat_age_s": 0.7164831161499023,
+				"pid": 84829
+			},
+			"subagents": null,
+			"todos": null
+		}
+	]
+}

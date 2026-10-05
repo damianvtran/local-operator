@@ -876,6 +876,12 @@ export function SessionListScreen() {
 	/* The pin action itself, so a wait that ends with the sheet still open can give
 	   focus back to the control the reader pressed. */
 	const pinActionRef = useRef<HTMLButtonElement>(null);
+	/* The footer's Projects entry, so closing that sheet hands focus back to the
+	   control that opened it — the `returnFocusRef` contract `ui/sheet.tsx`
+	   implements, and which the agents sheet already passes. Without it the
+	   sheet fell back to `document.activeElement`, which on a phone is usually
+	   `<body>`: closing dropped the reader at the top of the document. */
+	const projectsButtonRef = useRef<HTMLButtonElement>(null);
 	const wasPinBusy = useRef(false);
 	/* THE ONE-TAP START (mobile new-session streamline). The footer control used
 	   to open a `#/new` screen that asked for a working directory; the operator's
@@ -1315,6 +1321,7 @@ export function SessionListScreen() {
 				</button>
 				<button
 					type="button"
+					ref={projectsButtonRef}
 					onClick={() => setProjectsOpen(true)}
 					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
 				>
@@ -1336,7 +1343,11 @@ export function SessionListScreen() {
 				<WideViewButton />
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
-			<ProjectsSheet open={projectsOpen} onClose={() => setProjectsOpen(false)} />
+			<ProjectsSheet
+				open={projectsOpen}
+				onClose={() => setProjectsOpen(false)}
+				returnFocusRef={projectsButtonRef}
+			/>
 			{/* THE PIN ACTION SHEET. Long-press opened it, so it is where the gesture's
 			    meaning is spelled out rather than left to be discovered — the row shows
 			    a ★ once pinned, and this sheet is how a reader learns the gesture that

@@ -117,12 +117,25 @@ def _directories(relative: str) -> list[str]:
 
 
 def _resolve(importer: Path, spec: str) -> Path | None:
-    """The file a relative import names, or None when nothing resolves."""
+    """The file a relative import names, or None when nothing resolves.
+
+    Probing is decided by whether the spec AS WRITTEN is a file, never by
+    ``Path(spec).suffix``: this tree ships ``src/projects-status.generated.ts``,
+    whose import spec is ``./projects-status.generated``, and ``suffix`` reads
+    that last dot as ``.generated`` — so a suffix-gated probe reported a file
+    that IS in the tree as missing (review round 7, Q2). The relaxation still
+    resolves nothing that is not there: every probed candidate is checked with
+    ``is_file()``, and a spec with no file at all — with or without a dot in
+    its name — comes back None, which is what the asset check turns into a
+    failure."""
     base = importer.parent / spec
-    candidates = [base]
-    if not base.suffix:
-        candidates += [base.with_name(base.name + suffix) for suffix in (".ts", ".tsx", ".css")]
-        candidates += [base / "index.ts", base / "index.tsx"]
+    if base.is_file():
+        return base.resolve()
+    candidates = [
+        *(base.with_name(base.name + suffix) for suffix in (".ts", ".tsx", ".css")),
+        base / "index.ts",
+        base / "index.tsx",
+    ]
     # `resolve()` collapses the `../` a sibling import carries, so the path that
     # comes back is the one package-data globs are matched against.
     return next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
@@ -176,6 +189,47 @@ def test_every_asset_the_sources_import_is_shipped() -> None:
     ), "an import the installed tree resolves has to resolve there too. Uncovered: " + "; ".join(
         problems
     )
+
+
+def test_the_relaxed_resolver_still_reports_a_missing_asset(tmp_path: Path) -> None:
+    """`_resolve` is SHARED by both asset checks, so the relaxation for a
+    dotted basename is proven in BOTH directions: the shape it exists for
+    resolves, and everything genuinely absent still comes back None. A resolver
+    that answered for files that are not there would make the asset check a
+    formality — which is the failure mode a relaxed helper invites."""
+    (tmp_path / "present.ts").write_text("", encoding="utf-8")
+    (tmp_path / "present.generated.ts").write_text("", encoding="utf-8")
+    importer = tmp_path / "importer.tsx"
+
+    assert _resolve(importer, "./present") is not None
+    assert _resolve(importer, "./present.generated") is not None
+    assert _resolve(importer, "./absent") is None
+    assert _resolve(importer, "./absent.generated") is None
+    assert _resolve(importer, "./absent.json") is None
+    assert _resolve(importer, "../outside/either") is None
+
+    # The real tree, in the shape the relaxation was added for, and the same
+    # shape when it names nothing.
+    status = WEB_SRC / "projects-status.test.tsx"
+    assert _resolve(status, "./projects-status.generated") is not None
+    assert _resolve(status, "./projects-status.absent") is None
+
+
+def test_the_shipping_checks_are_sensitive_to_the_files_they_watch() -> None:
+    """A check is only as good as its ability to fail. Pin that the glob match
+    rejects a name no glob covers, and that the `.d.mts` this round added is
+    the glob — not the assertion — doing the work."""
+    globs = _package_data_globs()
+    # Package-relative: the globs are matched against the path BELOW
+    # `local_operator/`, which is the shape `_tree_files()` and the asset check
+    # both feed `_shipped`.
+    declaration = "mobile/web/scripts/generate-projects-status.d.mts"
+    assert _shipped("mobile/web/scripts/generate-projects-status.mjs", globs)
+    assert _shipped(declaration, globs)
+    assert not _shipped("mobile/web/scripts/build.log", globs)
+    assert not _shipped("local_operator/mobile/web/scripts/generate-projects-status.mjs", globs)
+    # Remove the glob this round added and the check must catch the file again.
+    assert not _shipped(declaration, [glob for glob in globs if not glob.endswith(".d.mts")])
 
 
 def test_the_checks_still_see_the_shape_that_broke() -> None:
