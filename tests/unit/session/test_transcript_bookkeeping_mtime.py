@@ -323,6 +323,25 @@ def test_is_bookkeeping_entry_splits_the_per_row_question_for_the_reader():
     assert is_bookkeeping_entry(real_row) is False
     assert is_bookkeeping_entry(forged) is False
 
+    # The message-level spelling of the same question (the
+    # ``session.history()`` leg of the probe): customs are exempt by their
+    # type, plain messages and foreign customs are not.
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.session.transcript import is_bookkeeping_message
+
+    assert is_bookkeeping_message(_mcp_unavailable()) is True
+    assert (
+        is_bookkeeping_message(
+            CustomMessage(
+                custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                attribution="system",
+                details={"text": "a quiet-dial note"},
+            )
+        )
+        is False
+    )
+    assert is_bookkeeping_message(Message.user("hello")) is False
+
 
 @pytest.mark.asyncio
 async def test_transcript_is_bookkeeping_only_keeps_the_old_verdict_on_every_doubt(tmp_path):

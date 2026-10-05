@@ -104,6 +104,7 @@ from local_operator.session.runtime.types import (
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     is_bookkeeping_entry,
+    is_bookkeeping_message,
     transcript_is_bookkeeping_only,
 )
 
@@ -1839,7 +1840,15 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("pristine probe: monitor index unreadable", exc_info=True)
             return False
         try:
-            if session.history():
+            # ``history()`` is the context window — the transcript replayed as
+            # messages for the model — and it is the LAST place a fresh
+            # session's own records can masquerade as a conversation: the MCP
+            # card a boot journals is a ``CustomMessage`` and it is IN here
+            # (measured live 2026-10-05: the leg that kept refusing an empty
+            # phone session after the transcript legs were fixed). Same
+            # vocabulary, third spelling: a plain message — or any custom type
+            # outside the set — is work and refuses.
+            if any(not is_bookkeeping_message(message) for message in session.history()):
                 return False
         except Exception:  # noqa: BLE001
             logger.debug("pristine probe: history unreadable", exc_info=True)
