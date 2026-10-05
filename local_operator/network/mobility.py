@@ -4778,7 +4778,11 @@ def local_receipt_handler(server: "RelayServer") -> Any:
             return {
                 "ok": False,
                 "code": str(detail.get("code") or "session_receipt_refused"),
-                "message": str(detail.get("message") or "the owner refused that"),
+                # Name the device rather than a bare "the owner": this sentence
+                # is composed next to the device's own name, and an
+                # antecedentless "owner" reads as a second party (design round
+                # 1, D4).
+                "message": str(detail.get("message") or f"{name or device_id} did not clear it"),
                 "session_id": session_id,
             }
         return dict(detail)

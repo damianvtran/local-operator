@@ -323,8 +323,8 @@ class Authorizer:
         """A session-scoped op must name a session THIS device owns.
 
         ``net_forward`` carries the session id in its inner frame; the network-scope
-        ops that name one (``net_session_move``, ``net_session_lifecycle``) carry it
-        on the outer frame.
+        ops that name one (``net_session_move``, ``net_session_lifecycle``,
+        ``net_session_receipt``) carry it on the outer frame.
         """
         if op == "net_session_create":
             # A create names no EXISTING session: the device that will own it mints

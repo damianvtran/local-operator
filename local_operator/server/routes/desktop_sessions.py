@@ -1466,20 +1466,27 @@ async def _remote_receipt(request: Request, session_id: str, token: str) -> dict
     if code == "unknown_completion_token":
         raise ValueError("unknown completion token")
     label = device_name or device_id
-    # The owner's sentence may end with its own period; joining it into this one
-    # must not produce "..".
-    reason = str(result.get("message") or "").strip().rstrip(".")
-    raise HTTPException(
-        409,
-        {
-            "code": "session_is_remote",
-            "message": (
-                f"The read receipt for {session_id} lives on {label}, and it could "
-                f"not be written there right now{(': ' + reason) if reason else ''}. "
-                "The unread mark was not cleared."
-            ),
-        },
-    )
+    # ONE USER-FACING NOUN: "the unread mark" is what the operator's own copy
+    # names; "read receipt" stays in code and docs (design round 1, D3).
+    if code == "unreachable":
+        # The reason this branch gets is mobility's sentence for the failed DIAL
+        # ("{label} is unreachable …; nothing was changed") and would restate
+        # this clause twice over. The family's shared diagnostic pointer takes
+        # its place (see ``session/remote_open.unreachable_peer_sentence``), so
+        # the branch keeps a next step instead of dead-ending (D1, D2).
+        message = (
+            f"The unread mark for {session_id} lives on {label}, and it could not be "
+            f"cleared there right now. /network doctor {label} diagnoses the link."
+        )
+    else:
+        # The owner's (or this relay's) sentence may end with its own period;
+        # joining it into this one must not produce "..".
+        reason = str(result.get("message") or "").strip().rstrip(".")
+        message = (
+            f"The unread mark for {session_id} lives on {label}, and it could not be "
+            f"cleared there right now{(': ' + reason) if reason else ''}."
+        )
+    raise HTTPException(409, {"code": "session_is_remote", "message": message})
 
 
 async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) -> None:
@@ -3885,7 +3892,7 @@ async def notified(session_id: str, body: Notified, request: Request):
     Notifying is not reading.
     """
     async with errors(request):
-        await _refuse_remote_write(request, session_id, noun="delivery claim")
+        await _refuse_remote_write(request, session_id, noun="notification")
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
 

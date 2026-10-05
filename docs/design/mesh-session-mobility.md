@@ -2121,8 +2121,8 @@ Sibling designs, consumed by name: `mesh-transport-identity.md` — §2.3 (modul
 layout, `projection.py` reserved for this document), §2.5 (`stream_open` /
 `stream_send` / `stream_close`, and the relay's keyed loopback control socket), §2.6
 (`run/peers`), §4.2 (`MemberRecord.kind` / `lifecycle`), §6.4 (`net_forward`,
-`net_catalog`, `net_session_move`, `net_session_lifecycle`, `net_sync`,
-`MESH_PROTOCOL_VERSION`, the `caps` strings), §7.1 (the capability model and
+`net_catalog`, `net_session_move`, `net_session_lifecycle`, `net_session_receipt`,
+`net_sync`, `MESH_PROTOCOL_VERSION`, the `caps` strings), §7.1 (the capability model and
 `ROLE_CAPABILITIES`), §7.2 (`Authorizer.check` / `dial_local`, the session-scope and
 locality rules, the totality test), §7.4 (locality on both sides), §9.2/§9.3/§9.4
 (the catalogue row, the aggregation payload, the 24 h cache), §9.5 (the desktop

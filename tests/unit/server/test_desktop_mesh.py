@@ -1429,7 +1429,7 @@ async def test_a_local_read_receipt_still_runs_here(
 async def test_an_unreachable_owner_answers_in_words_not_the_shared_404(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An undeliverable receipt names the device and the act; it is never "not found"."""
+    """An undeliverable receipt names the device, then points at the doctor."""
     client, _root = mesh_api
     sentence = "build-box is unreachable (no answer on its link); nothing was changed"
     monkeypatch.setattr(
@@ -1446,9 +1446,13 @@ async def test_an_unreachable_owner_answers_in_words_not_the_shared_404(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote", detail
-    assert "build-box" in detail["message"], detail
-    assert "unreachable" in detail["message"], detail
-    assert "The unread mark was not cleared." in detail["message"], detail
+    # The clause names the device once and the doctor command once — the failed
+    # dial's own sentence ("…is unreachable…; nothing was changed") is NOT
+    # appended, because it restated both facts (design round 1, D2).
+    assert detail["message"].count("build-box") == 2, detail
+    assert "could not be cleared there right now" in detail["message"], detail
+    assert "/network doctor build-box diagnoses the link" in detail["message"], detail
+    assert "nothing was changed" not in detail["message"], detail
     assert "not found" not in detail["message"], detail
 
 
@@ -1563,7 +1567,7 @@ async def test_a_peers_delivery_claim_is_refused_in_words_not_a_404(
     assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
     assert detail["code"] == "session_is_remote", detail
-    assert "build-box" in detail["message"] and "delivery claim" in detail["message"], detail
+    assert "build-box" in detail["message"] and "notification" in detail["message"], detail
 
     # AND A LOCAL CLAIM STILL RUNS: an unknown token on a local session answers
     # the ordinary false rather than a refusal.
