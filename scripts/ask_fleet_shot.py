@@ -150,7 +150,9 @@ def _entries(*, gate: bool = False) -> list[CatalogEntry]:
                 id=session_id,
                 mtime=NOW - age * 60,
                 name=name,
-                pending=gate and session_id == GATED_ID,
+                # ``pending`` is the GATE's own token ("approval" / "ask"), not
+                # a bool: the row's needs-you marker, which is what `!` paints.
+                pending="approval" if gate and session_id == GATED_ID else None,
             )
         )
         for session_id, name, age in ROWS
