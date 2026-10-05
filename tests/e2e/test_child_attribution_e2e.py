@@ -62,12 +62,29 @@ def _provider(*, child_marker: str):
     The marker keeps the two roles apart on one scripted stream — the child is
     recognised by its own prompt reaching the provider, exactly as the existing
     accounting e2e does.
+
+    THE CHILD MUST ACTUALLY PARK, and that is a correctness requirement of this
+    cell, not decoration (reviewer MAJOR 1 / QA Q2). A bare ``sleep 3600`` is
+    REFUSED by the sleep guard — six identical refusals then trip the loop's
+    no-progress guard, so the child settles itself about 50 ms after attaching
+    and the cell only passed when ``abort()`` won that race (3/3 red at load
+    20-33, 6/6 green at load ~11.5). On the green runs it also passed for the
+    wrong reason: it asserted the torn-down race rather than the shape this
+    workstream exists for. The guard's OWN inline escape is used instead, so the
+    child sits in a real, blocking ``bash`` call until something stops it —
+    which is what a wedged lane looks like in the field.
     """
 
     def stream(request, signal=None):
         is_child = any(child_marker in getattr(message, "text", "") for message in request.messages)
         if is_child:
-            return _tool_call("bash", {"command": "sleep 3600", "i": "working"})
+            return _tool_call(
+                "bash",
+                {
+                    "command": "LOCAL_OPERATOR_ALLOW_LONG_SLEEP=1 sleep 3600",
+                    "i": "working",
+                },
+            )
         return _text("parent acknowledged")
 
     return stream
@@ -111,6 +128,24 @@ async def test_a_cancelled_childs_attribution_survives_a_parent_restart(
             if child_dir is not None:
                 break
         assert child_dir is not None, "the child never attached"
+
+        # WAIT UNTIL IT IS GENUINELY PARKED, and assert it is: a lane receipt on
+        # disk (staged at attach) and a runner still in flight. Without this the
+        # cell can pass on a child that had already settled itself, which is the
+        # failure mode the reviewer reproduced.
+        from local_operator.session import subagent_ledger as ledger
+
+        for _ in range(200):
+            job = owner.jobs.get(job_id)
+            if job is not None and job.status == "running" and ledger.read_lane_receipts(child_dir):
+                break
+            await asyncio.sleep(0.05)
+        parked = owner.jobs.get(job_id)
+        assert parked is not None and parked.status == "running", (
+            f"the child did not stay parked (status={getattr(parked, 'status', None)}); "
+            "a child that settles itself makes this cell assert a race, not a wedge"
+        )
+        assert ledger.read_lane_receipts(child_dir), "the lane receipt was never staged"
 
         # The MOBILE path: this is ``serving._cancel_children``, whose actor token
         # this PR adds. It cancels every running child of the session.

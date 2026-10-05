@@ -1059,7 +1059,13 @@ class RosterPass:
             if record.error_text:
                 detail = f"never started ({record.error_text}), so it has no transcript"
         elif not self.transcript_present(record):
-            resumable, detail = False, "transcript is gone from disk"
+            # "no transcript on disk", not "transcript is gone from disk": the
+            # status word for this shape is ``gone`` (the ladder's last rung, fixed
+            # in round 1), so the old wording echoed the status twice in one row
+            # ("gone — transcript is gone from disk"; design round 2 N3). This
+            # detail is also carried on ``interrupted`` rows, where it reads
+            # "interrupted — no transcript on disk".
+            resumable, detail = False, "no transcript on disk"
         else:
             live = self.live_twin(record)
             if live is not None:

@@ -24684,7 +24684,15 @@ async def execute_jobs(
     if not rows:
         return _text(tool_call_id, "jobs", "no background jobs", details={"count": 0})
     now = time.time()
-    lines = []
+    # TWO PASSES. The idle clause is variable-width, and printing it as an
+    # ordinary column BEFORE the label sheared the label column: a row carrying a
+    # clause pushed its label far right of rows that did not, so no two labels
+    # started at one column (design round 2 D9, measured). The clause is collected
+    # first, the listing is padded to the widest clause it actually has, and the
+    # labels then align. A listing with no live clause pads to nothing and renders
+    # byte-identically to before, which keeps settled rows and the golden-line
+    # tests untouched.
+    rows_out: list[tuple[str, str, str]] = []
     for job in rows:
         # A settled job is reported by when it SETTLED (the useful fact: "it
         # finished N seconds ago"); a running one by how long it has been going.
@@ -24744,7 +24752,7 @@ async def execute_jobs(
         # one launched a second ago looked identical before). Silent when the
         # job never reported (no fact) or is not running (the status/age column
         # already says what happened): see ``idle_clause`` for the rule.
-        idle = ""
+        clause = None
         if running:
             # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary and must
             # not put ``local_operator.session`` on the tool layer's module-scope
@@ -24759,19 +24767,23 @@ async def execute_jobs(
             clause = subagent_ledger.idle_clause(
                 getattr(job, "last_progress_at", None), now, bound_s=bound
             )
-            if clause:
-                idle = f"  {clause}"
         # THE CLAUSE SITS WITH THE COLUMNS, NOT AFTER THE LABEL (design round 1,
         # D7). It used to be appended past ``job.label``, i.e. the furthest cell
         # from where a scanning eye tracks status/age — for a multi-job list the
-        # reading the feature exists for was the hardest to find. A label is
-        # variable-width and unaligned anyway, so nothing was gained by putting
-        # it last. Rows with no clause are byte-identical to before, which keeps
-        # settled rows and the golden-line tests untouched.
-        cells = f"{job.id}  {job.status:<9}  {age} {sense:<4}"
-        if idle:
-            cells += idle
-        lines.append(f"{cells}  {job.label}")
+        # reading the feature exists for was the hardest to find. Emitting it here
+        # as its own FIXED-WIDTH cell keeps that emphasis while leaving every
+        # label in the grid starting at one column.
+        rows_out.append((f"{job.id}  {job.status:<9}  {age} {sense:<4}", clause or "", job.label))
+    cell_width = max((len(clause) for _, clause, _ in rows_out if clause), default=0)
+    lines = []
+    for cells, clause, label in rows_out:
+        if cell_width:
+            # Two spaces either side of the widest clause, so a row WITHOUT one
+            # occupies the same width and every label starts at one column.
+            pad = (f"  {clause}" if clause else "  ").ljust(cell_width + 4)
+            lines.append(f"{cells}{pad}{label}")
+        else:
+            lines.append(f"{cells}  {label}")
     return _text(
         tool_call_id,
         "jobs",
@@ -25146,7 +25158,9 @@ _ACTOR_LABELS: dict[str, str] = {
     "parent-hub": "the parent",
     "user-escape": "you (Esc)",
     "mobile-stop": "the phone",
-    "parent-teardown": "session teardown",
+    # "the session teardown", not "session teardown": the label is spliced into
+    # "ended by …", which needs the article (design round 2 N4).
+    "parent-teardown": "the session teardown",
     "jobs-tool": "the jobs tool",
 }
 

@@ -219,9 +219,17 @@ def test_idle_clause_is_none_without_a_stamp() -> None:
 
 def test_idle_clause_recent_and_over_bound() -> None:
     assert ledger.idle_clause(997.0, now=1000.0) == "idle 3s"
-    # The overdue form names the bound and marks the crossing (D1/D6).
+    # The overdue form names the bound AND carries the idle magnitude (D1/D6, and
+    # the round-2 D8 fix: printing the bound in both slots made every stall past
+    # the threshold read identically, so a reader could not triage which child to
+    # act on).
     over = ledger.idle_clause(1000.0 - 47 * 60, now=1000.0, bound_s=900.0)
-    assert over == "no progress for >15m (stall bound 15m)"
+    assert over == "no progress for 47m (stall bound 15m)"
+    # The magnitude is what makes two overdue rows distinguishable — the property
+    # the round-1 form lost.
+    assert ledger.idle_clause(1000.0 - 3 * 3600, now=1000.0, bound_s=900.0) == (
+        "no progress for 3h (stall bound 15m)"
+    )
     # Exactly at the bound is NOT over it.
     assert ledger.idle_clause(1000.0 - 900, now=1000.0, bound_s=900.0) == "idle 15m"
     # D1's measured collision: 899 s and 901 s against a 900 s bound must not
@@ -229,7 +237,10 @@ def test_idle_clause_recent_and_over_bound() -> None:
     under = ledger.idle_clause(1000.0 - 899, now=1000.0, bound_s=900.0)
     just_over = ledger.idle_clause(1000.0 - 901, now=1000.0, bound_s=900.0)
     assert under != just_over, (under, just_over)
-    assert under == "idle 15m" and just_over == "no progress for >15m (stall bound 15m)"
+    # The crossing stays visible even where minute-rounding makes the idle equal the
+    # bound's own text: the under form is a different SENTENCE (``idle 15m``), so
+    # the two are never confusable.
+    assert under == "idle 15m" and just_over == "no progress for 15m (stall bound 15m)"
     # N2's floor: a row that reported a fraction of a second ago says nothing.
     assert ledger.idle_clause(999.9, now=1000.0) is None
     assert ledger.idle_clause(999.0, now=1000.0) == "idle 1s"
@@ -363,6 +374,47 @@ async def test_jobs_ops_list_renders_the_idle_clause(iso) -> None:
     # finds it in the same region as status/age rather than past a variable label.
     row = next(line for line in text.splitlines() if "hung-lane" in line)
     assert row.index("idle 5s") < row.index("hung-lane")
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_jobs_list_keeps_labels_aligned_when_a_clause_is_present(iso) -> None:
+    """D9, design round 2: a variable-width clause sheared the label column.
+
+    Printing the clause as an ordinary cell before the label pushed a row that
+    carried one far right of a row that did not, so labels no longer started at
+    one column. Two rows in ONE listing, only one of them overdue, is exactly the
+    comparison that failed; the fixed-width cell makes both labels start together.
+    """
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    overdue = parent._launch_subagent(label="hung-lane", prompt="do a long thing")
+    fresh = parent._launch_subagent(label="fresh-lane", prompt="do a short thing")
+    await wait_until(lambda: (job_of(parent, overdue).last_progress_at or 0) > 0)
+    await wait_until(lambda: (job_of(parent, fresh).last_progress_at or 0) > 0)
+
+    # Only ONE row ages past the floor; the other keeps a fresh stamp and so
+    # renders no clause at all.
+    job_of(parent, overdue).last_progress_at -= 5.0
+    job_of(parent, fresh).last_progress_at = time.time()
+
+    result = await execute_jobs("c", {"op": "list"}, None, None, ctx_for(parent))
+    lines = [line for line in body(result).splitlines() if "lane" in line]
+    assert len(lines) == 2, lines
+    assert any("idle 5s" in line for line in lines), lines
+    assert any("idle" not in line for line in lines), lines
+    # Compare the LABEL starts themselves: "lane" sits at a different offset inside
+    # "hung-lane" and "fresh-lane", so searching for it would compare the wrong
+    # columns and hide exactly the shear this cell exists to catch.
+    starts = {
+        next(ln for ln in lines if label in ln).index(label)
+        for label in ("hung-lane", "fresh-lane")
+    }
+    assert len(starts) == 1, lines
+    # D7 is still satisfied on the row that has one: the clause sits before the
+    # label, by exactly the cell's own gap.
+    overdue_line = next(ln for ln in lines if "hung-lane" in ln)
+    assert overdue_line.index("hung-lane") - overdue_line.index("idle 5s") == len("idle 5s") + 2
     await asyncio.wait_for(parent.dispose(), timeout=30)
 
 
@@ -710,17 +762,32 @@ async def test_a_refused_cancel_through_the_jobs_tool_leaves_no_attribution(iso)
 
 
 @pytest.mark.asyncio
-async def test_a_refused_cancel_on_the_escape_path_leaves_no_attribution(iso) -> None:
+async def test_a_refused_cancel_on_the_escape_path_leaves_no_attribution(iso, monkeypatch) -> None:
     """Esc-Esc on a child that has already settled: the receipt AND the record
-    stamp must both roll back."""
+    stamp must both roll back — and, since round 2, nothing is staged at all."""
     parent = make_parent(iso, CompletingChild())
     await parent.async_init()
     job_id = parent._launch_subagent(label="settle-escape", prompt="quick")
     await wait_until(lambda: job_of(parent, job_id).status == "completed", timeout=20)
     child_dir = await wait_child_dir(parent, job_id)
 
+    # NIT 1: the escape path now asks the same question the jobs tool does and
+    # returns early for a row that is not running, so the staging window is gone
+    # rather than merely rolled back. The rollback below still covers the settle
+    # that can land BETWEEN the check and the cancel; this records that the
+    # settled-row case never reaches the staging code.
+    staged: list[str] = []
+    real_begin = parent.subagent_comms.begin_stop
+
+    def spy(job_id: str, **kwargs: Any):
+        staged.append(job_id)
+        return real_begin(job_id, **kwargs)
+
+    monkeypatch.setattr(parent.subagent_comms, "begin_stop", spy)
+
     await parent._cancel_job_quietly(job_id, "esc-esc", by="user-escape")
 
+    assert staged == [], "a settled row must not be staged for a stop at all"
     assert _no_stamp(parent.subagent_comms._record(job_id))
     assert ledger.read_stop_receipts(child_dir) == []
     await asyncio.wait_for(parent.dispose(), timeout=30)
