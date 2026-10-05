@@ -85,6 +85,14 @@ _AMBIENT_VARS = (
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
     # the command's own assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_SLOW_QUERY",
+    # The subagent lane stall bound's override
+    # (``session/subagent_ledger.LANE_BOUND_ENV``). An ESCAPE HATCH, and the same
+    # class as the three above: an inherited value would WAIVE or move the lane
+    # bound, so a machine carrying one would quietly disable the stall reading the
+    # attribution cells assert (and the cells that mean to exercise a bound set it
+    # deliberately, per test, which is the visible opt-in). Scrub it for every test
+    # at once rather than trusting each cell to remember.
+    "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
