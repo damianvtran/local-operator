@@ -187,18 +187,21 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
 STT_TRANSCRIPT_CUSTOM_TYPE = "stt_transcript_v1"
 
 
-def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
-    """Whether EVERY row in ``entries`` is a :data:`BOOKKEEPING_CUSTOM_TYPES`
-    record, and the batch is therefore safe to write without moving the clock.
+def is_bookkeeping_entry(entry: "TranscriptEntry") -> bool:
+    """Whether ``entry`` is a :data:`BOOKKEEPING_CUSTOM_TYPES` record.
 
-    ``all``, not ``any``, and that is the whole point: one real user message in
-    the batch means the append IS work, and freezing the clock over it would
-    hide that turn from ``retention.session_activity`` — the ONE RANKING CLOCK,
-    shared with ``session.cleanup``, so the session would rank as older than it
-    is on the picker AND age toward deletion. An empty batch answers False: a
-    write with nothing bookkeeping in it has earned no exemption.
+    The per-row half of :func:`_is_bookkeeping_batch`, split out for the one
+    reader that asks the question a row at a time: ``is_pristine``'s transcript
+    probes (``session/runtime/serving.py``). A session whose whole transcript is
+    records ABOUT it — the MCP-unavailable cards a boot writes, the spend and
+    binding ledgers — has nothing the user would call a conversation, and the
+    composer's own directory change must not be refused as "work or history"
+    (measured 2026-10-05: a fresh phone session carrying three MCP cards was
+    told "This session already has messages, so its working directory can't
+    change"). Keeping ONE predicate for both callers is what stops the batch
+    exemption and the per-row one from drifting apart.
     """
-    return bool(entries) and all(
+    return bool(
         # The type is checked FIRST and for both spellings: the exemption is a
         # property of the TYPE, and the type is what the allow-list names.
         # ``append_custom`` writes ``{custom_type, details}`` with NO ``kind``,
@@ -211,8 +214,70 @@ def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
             (entry.type == ENTRY_MESSAGE and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM)
             or entry.type == ENTRY_CUSTOM
         )
-        for entry in entries
     )
+
+
+def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
+    """Whether EVERY row in ``entries`` is a :data:`BOOKKEEPING_CUSTOM_TYPES`
+    record, and the batch is therefore safe to write without moving the clock.
+
+    ``all``, not ``any``, and that is the whole point: one real user message in
+    the batch means the append IS work, and freezing the clock over it would
+    hide that turn from ``retention.session_activity`` — the ONE RANKING CLOCK,
+    shared with ``session.cleanup``, so the session would rank as older than it
+    is on the picker AND age toward deletion. An empty batch answers False: a
+    write with nothing bookkeeping in it has earned no exemption.
+    """
+    return bool(entries) and all(is_bookkeeping_entry(entry) for entry in entries)
+
+
+def transcript_is_bookkeeping_only(path: str | Path) -> bool:
+    """Whether the transcript FILE at ``path`` exists and holds only bookkeeping rows.
+
+    The file half of :func:`is_bookkeeping_entry`, for ``is_pristine``'s second
+    transcript leg: the probe has already asked the in-memory entries, and this
+    asks the same question of what is actually on disk, because "a transcript
+    file that exists at all" stopped being sufficient the moment the first
+    bookkeeping card could create one on a session nobody has typed in.
+
+    Deliberately conservative, and every edge keeps the OLD "a write happened"
+    verdict: ``True`` only when at least one row parses AND every row is a
+    :data:`BOOKKEEPING_CUSTOM_TYPES` record. An absent file, an empty file, a
+    blank or unparseable line, or any row this module cannot classify answers
+    ``False`` — the direction that keeps a session alive, matching the
+    fail-closed contract ``is_pristine`` documents.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    saw_row = False
+    for line in lines:
+        if not line.strip():
+            continue
+        # ``from_json`` drops malformed lines with a warning; a row this
+        # probe cannot read is exactly the "a write happened" verdict it must
+        # keep, not a bookkeeping one it may not.
+        entry = TranscriptEntry.from_json(line)
+        if entry is None or not is_bookkeeping_entry(entry):
+            return False
+        saw_row = True
+    return saw_row
+
+
+def is_bookkeeping_message(message: object) -> bool:
+    """Whether ``message`` is a :data:`BOOKKEEPING_CUSTOM_TYPES` custom record.
+
+    The third spelling of the same question, for the one reader that sees the
+    conversation as MESSAGES rather than rows: ``is_pristine``'s
+    ``session.history()`` leg. The context window is seeded from the
+    transcript, so a fresh session's own MCP card is IN it as a
+    ``CustomMessage`` — measured live on 2026-10-05, the leg that kept
+    refusing a pristine move for an empty phone session after the transcript
+    legs were fixed. A plain message, or any custom type outside the set, is
+    work; only the records a session writes ABOUT itself pass.
+    """
+    return isinstance(message, CustomMessage) and message.custom_type in BOOKKEEPING_CUSTOM_TYPES
 
 
 #: Rewrite the file only once this many bytes are provably reclaimable. A

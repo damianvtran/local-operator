@@ -101,7 +101,12 @@ from local_operator.session.runtime.types import (
     SIGNAL_DRAIN_CAUSE,
     runtime_must_complete,
 )
-from local_operator.session.transcript import TRANSCRIPT_FILENAME
+from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
+    is_bookkeeping_entry,
+    is_bookkeeping_message,
+    transcript_is_bookkeeping_only,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1730,7 +1735,14 @@ class ServingSessionHandle(SessionHandle):
         answers *may this exit later*, which a runtime carrying a whole
         finished conversation satisfies the moment its last turn lands. This
         answers *did this session ever exist as far as the user is concerned*,
-        and a single durable row anywhere is enough to say yes. Getting that
+        and a single durable row of WORK anywhere is enough to say yes. The
+        refinement that keeps the phone usable: the records a session writes
+        ABOUT itself (``transcript.BOOKKEEPING_CUSTOM_TYPES`` — the
+        MCP-unavailable cards a boot journals, the spend and binding ledgers)
+        are not that row. A fresh phone session now journals an MCP card
+        before the user has typed anything, and refusing the composer's own
+        directory change over one is the bug this distinction fixes
+        (measured 2026-10-05; see the transcript legs below). Getting that
         backwards deletes a conversation, so every probe below fails CLOSED:
         anything unreadable reports "not pristine" and the runtime lives on to
         be reaped by the ordinary residency drain instead.
@@ -1754,13 +1766,25 @@ class ServingSessionHandle(SessionHandle):
                 return False
             # The durable row count, not the model-facing window: compaction
             # shrinks what the model sees and must never make a real
-            # conversation look like a fresh one.
-            if transcript.entries():
+            # conversation look like a fresh one. The count is of rows of
+            # WORK: the records a session writes ABOUT itself — the
+            # ``session_mcp_unavailable`` cards a boot journals when a
+            # configured server needs a login, the spend and binding ledgers —
+            # are not a conversation, and counting them refused the composer's
+            # own directory change on exactly the fresh session the operator
+            # had just started (measured 2026-10-05, three MCP cards:
+            # "This session already has messages, so its working directory
+            # can't change"). ``BOOKKEEPING_CUSTOM_TYPES`` is the transcript
+            # module's ONE vocabulary for that distinction.
+            if any(not is_bookkeeping_entry(entry) for entry in transcript.entries()):
                 return False
-            # A transcript file that exists at all means a write happened, even
-            # if every row was since compacted away.
+            # The same judgement about what is on disk: a file whose every row
+            # is bookkeeping must not refuse here either, while anything the
+            # helper cannot vouch for — absent, empty, unparseable, or holding
+            # even one real row — keeps the old "a write happened" verdict.
             directory = Path(getattr(transcript, "directory", "") or "")
-            if (directory / TRANSCRIPT_FILENAME).exists():
+            transcript_path = directory / TRANSCRIPT_FILENAME
+            if transcript_path.exists() and not transcript_is_bookkeeping_only(transcript_path):
                 return False
             # The attachment sidecar is durable state the user asked for with
             # no transcript row to show for it: a routed `/team <name>` or
@@ -1816,7 +1840,15 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("pristine probe: monitor index unreadable", exc_info=True)
             return False
         try:
-            if session.history():
+            # ``history()`` is the context window — the transcript replayed as
+            # messages for the model — and it is the LAST place a fresh
+            # session's own records can masquerade as a conversation: the MCP
+            # card a boot journals is a ``CustomMessage`` and it is IN here
+            # (measured live 2026-10-05: the leg that kept refusing an empty
+            # phone session after the transcript legs were fixed). Same
+            # vocabulary, third spelling: a plain message — or any custom type
+            # outside the set — is work and refuses.
+            if any(not is_bookkeeping_message(message) for message in session.history()):
                 return False
         except Exception:  # noqa: BLE001
             logger.debug("pristine probe: history unreadable", exc_info=True)
