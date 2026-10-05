@@ -1,12 +1,16 @@
-"""The producer that gives the sidebar's ``⇄`` rows something to paint.
+"""The producer that gives the sidebar's ``↗`` rows something to paint.
 
 What these pin, in the order the design cares about:
 
 1. **The zero-peer property is measured, not asserted.** A device with no relay
    record issues NO call at all — the spy counts them, because "no rows appeared"
    is satisfied by a producer that dials every two seconds and finds nothing.
-2. **The row carries the mobility fields**, so the section heading, the ``⇄`` mark
-   and the unreachable reason all have a producer rather than a fixture.
+2. **The row carries the mobility fields**, so the ordinary bins, the ``↗``/``↛``
+   locality marks, the tooltip's device · network clause and the unreachable reason all have a
+   producer rather than a fixture — including the two the reader resolves
+   (``owner_network_name`` from this device's own membership record, and
+   ``created_at`` from the peer's ``started`` claim, which is what orders a
+   remote row among local ones).
 3. **The read is cached and bounded**, because the sidebar polls every two
    seconds and this is the only thing on that path that talks to the network.
 4. **Nothing raises.** A refused, timed-out or unreadable projection is an empty
@@ -33,11 +37,20 @@ from local_operator.session.peer_rows import (
 
 
 class _Facts:
-    def __init__(self, device_id: str, name: str, *, reachable: bool, reason: str = "") -> None:
+    def __init__(
+        self,
+        device_id: str,
+        name: str,
+        *,
+        reachable: bool,
+        reason: str = "",
+        network_id: str = "",
+    ) -> None:
         self.device_id = device_id
         self.name = name
         self.reachable = reachable
         self.reason = reason
+        self.network_id = network_id
 
 
 class _Row:
@@ -85,6 +98,32 @@ class _Catalog:
         if self._boom:
             raise RuntimeError("the relay went away")
         return list(self._rows)
+
+
+class _Member:
+    """One member row of a ``NetworkRecord``, as ``known_peers`` reads it."""
+
+    def __init__(self, device_id: str, name: str = "", *, active: bool = True) -> None:
+        self.device_id = device_id
+        self.name = name
+        self.role = "drive"
+        self.kind = "device"
+        self.active = active
+
+
+class _Record:
+    """One network record, as ``store.list_networks`` answers it."""
+
+    def __init__(
+        self, network_id: str, name: str, self_device_id: str, members: list[_Member]
+    ) -> None:
+        self.network_id = network_id
+        self.name = name
+        self.self_device_id = self_device_id
+        self.members = members
+
+    def active_members(self) -> list[_Member]:
+        return [member for member in self.members if member.active]
 
 
 @pytest.fixture(autouse=True)
@@ -168,11 +207,67 @@ def test_rows_carry_every_field_the_surfaces_read() -> None:
     assert first.live_state == "busy"
     assert first.reachable is True
     # The unreachable half: the reason travels WITH the row, which is what the
-    # sidebar's tooltip and the section heading read.
+    # sidebar's tooltip reads.
     second = rows[1]
     assert second.reachable is False
     assert second.unreachable_reason == "connect_failed"
     assert second.owner_label == "d_bb"[:8], "an unnamed device falls back to its id's tail"
+
+
+def test_a_remote_row_orders_by_the_peers_started_claim() -> None:
+    """The row's ordering birth is the only per-row time the wire carries.
+
+    ``session/catalog`` ranks by ``-created_at``; a remote row left at zero
+    parked at the BOTTOM of its bin — the soft form of the per-device
+    segregation the merged bins removed (operator convergence, 2026-10-05) —
+    so the producer stamps ``started``. ``started`` is ALSO the row's ``mtime``
+    (its age column), so the two cannot disagree about when the peer says this
+    session began.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", started=4242.0)],
+    )
+    row = peer_session_rows(catalog=catalog)[0]
+    assert row.created_at == 4242.0
+    assert row.mtime == 4242.0
+
+
+def test_the_membership_name_rides_the_row_for_the_tooltips_device_clause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DEVICE AND NETWORK on the hover: the reader resolves the network's NAME.
+
+    The federated row carries the network's id only, and an id is not a name a
+    person reads — the tooltip's clause is "the device AND the network", so the
+    producer resolves it (``_network_names``) from THIS device's own membership
+    record, through the same ``known_peers`` the ``/new remote`` autofill reads.
+    A membership that cannot be read leaves the clause empty — no name is no
+    claim, never a guessed one.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True, network_id="n_1")],
+        [_Row("s_1", "d_aa")],
+    )
+    monkeypatch.setattr(
+        store,
+        "list_networks",
+        lambda root=None: [
+            _Record("n_1", "devmesh", "d_self", [_Member(device_id="d_aa", name="radiant-m4")])
+        ],
+    )
+    # A real (temporary) root: the resolution reads THIS device's own store, and
+    # the guard exists so a root-less call — a test's injected-catalogue call —
+    # never wanders into the developer's real one.
+    row = peer_session_rows(root=tmp_path, catalog=catalog)[0]
+    assert row.owner_network_name == "devmesh"
+    # The same row through a store that knows no membership: the clause is
+    # omitted rather than guessed. ``clear_cache`` because the read above is
+    # TTL-cached under the same root.
+    monkeypatch.setattr(store, "list_networks", lambda root=None: [])
+    clear_cache()
+    row = peer_session_rows(root=tmp_path, catalog=catalog)[0]
+    assert row.owner_network_name == ""
 
 
 def test_a_peer_answer_vocabulary_is_mapped_not_invented() -> None:

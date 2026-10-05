@@ -166,8 +166,10 @@
       "wide",
       "peers",
       "peers-focus",
-      "silent",
-      "silent-two"
+      "peers-hover",
+      "peers-hover-unreachable",
+      "peers-hover-local",
+      "peers-pinned"
     ],
     "mesh_sidebar_shot.py": [
       "default"

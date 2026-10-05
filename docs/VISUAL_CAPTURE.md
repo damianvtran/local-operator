@@ -53,13 +53,35 @@ unit-test hosts. They validate rendering, not live provider authentication.
 Two additions to that matrix are worth naming here, because each was a state a
 review round had to rebuild a rig to look at (design round 4, D26/D29):
 
-- `sidebar_shot.py silent` and `silent-two` — a peer that answered nothing, so
-  its whole section is the heading `⇄ <device> (unreachable)` with no rows under
-  it. Neither is a fixture the row producer can express, because the state is
-  precisely the ABSENCE of rows: the script calls `set_silent_peers` itself and
-  refuses to write a frame whose headings are missing or painted below
-  `⌥ Subagent Runs`. Capture at **100x45** — at 100x30 the frame stops before the
-  subagent tier, and the tier is half of what the case asserts.
+- `sidebar_shot.py peers`, `peers-focus`, `peers-hover`, `peers-hover-unreachable`,
+  `peers-hover-local` and `peers-pinned` — the mesh tier from hand-stamped
+  remote rows, MERGED into the ordinary bins (operator convergence, 2026-10-05:
+  the per-device `⇄ <device>` sections retired; remote rows are first-class).
+  `peers-focus` puts the caret ON a remote row, the only frame showing the
+  caret and the locality mark on one row, at **100x45** so the second device's
+  row is on screen beside the first's. The three hovers rest the pointer with
+  the tooltip up (the captures with `tooltips=True`), all at **100x45**: on a
+  remote row (`peers-hover` — the clause `on <device> · <network>`), on an
+  UNREACHABLE one (`peers-hover-unreachable` — the reason on its own
+  `unreachable · …` line), and on a LOCAL one (`peers-hover-local` — which
+  must gain no clause). `peers-pinned` shows the pin's lift on a remote row.
+  The rig refuses to write a mesh frame whose sections leave the four tier
+  names, or one with no remote row on the drawn page (`_require_merged_bins`),
+  or one whose drawn remote rows lack the at-rest locality marks
+  (`_require_unreachable_cue` — `↗`/`↛`), or a hover frame whose tooltip lacks
+  the device · network clause (`_require_hover_device_clause`), or the
+  unreachable reason line (`_require_unreachable_tooltip_line`), or a local
+  hover that gained a clause (`_require_local_hover_no_clause`). Without them a
+  frame could silently regress to the old grouping, or to a shorter tooltip
+  that still looks like a tooltip, and be read as the new state. The
+  `LO_SIDEBAR_SHOT_NO_COLOR=1` knob re-adds `NO_COLOR` inside the isolated
+  world (Textual reads it at App construction) for a colour-stripped frame —
+  and it must ride INSIDE the isolation wrapper, `env -i PATH=… HOME=…
+  TERM=xterm-256color LO_SIDEBAR_SHOT_NO_COLOR=1 .venv/bin/python
+  scripts/sidebar_shot.py OUT.svg peers 100x30`: a knob set on the shell side
+  of `env -i` is stripped before the script runs and the "NO_COLOR" frame
+  silently comes back in colour (review round 2, MAJOR-2 — an uploaded frame
+  was byte-identical to a plain run because of exactly that).
 - `mesh_sidebar_shot.py` — the ONE capture built from a real mesh (two config
   roots, two identities, two relays on loopback, a live link) rather than from
   hand-stamped rows, which is what makes a row-producer regression fail here
@@ -71,11 +93,16 @@ review round had to rebuild a rig to look at (design round 4, D26/D29):
   are stated. It also refuses a frame whose model chip is still `connecting…`,
   the mid-connect transient one run in three produced (D30).
 
-Both `silent` cases and the mesh case are in the committed inventory, so the
+Both `peers` cases and the mesh case are in the committed inventory, so the
 next round re-derives them with `visual_gallery.py --case …` instead of writing
 another rig. Pairing in the mesh case is written into both stores rather than
 negotiated (no pty, no second human), so it is evidence about the transport and
 the rendering, never about the pairing ceremony.
+
+*(The `silent`/`silent-two` cases retired with the per-device peer sections —
+operator convergence, 2026-10-05; there is no heading-only state left, and
+`_require_merged_bins` is what keeps the surviving `peers` frames honest about
+the merge.)*
 
 ### A fresh capture against a committed PNG: state the zoom, or the check lies
 

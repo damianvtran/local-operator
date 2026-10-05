@@ -5584,9 +5584,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # THE STATE IN WORDS (UX round 5, U29). This printed the catalogue's raw
         # token — ``stored`` — in a headerless row of CLI columns, so a reader had
         # to infer three of the four columns from shape alone and read a token no
-        # other surface uses (the sidebar paints that session under ``⇄`` with a
-        # row mark, and the words the app has for the condition are in
-        # ``resume.session_state_words``).
+        # other surface uses (the sidebar paints that session with a locality mark
+        # and its state in the tooltip, and the words the app has for the
+        # condition are in ``resume.session_state_words``).
         cells.append(
             (
                 str(row.get("session_id") or ""),
@@ -5774,9 +5774,10 @@ def _peer_line(row: Any) -> str:
     stage token plus a Python class name where the sibling create arm says
     "cannot be reached from this device right now", and a peer addressed by the
     id every other surface replaces with its NAME (``mesh-ui.md`` §1.2 gives the
-    id a column of its own, eight characters of it; the sidebar's heading is
-    ``⇄ <label>``; a peer with no name is ``resume.UNNAMED_DEVICE`` on all of
-    them, design round 1 D8). The gloss is the SHARED one
+    id a column of its own, eight characters of it; the sidebar's tooltip names
+    the device and its network on the row; a peer with no name is
+    ``resume.UNNAMED_DEVICE`` on all of them, design round 1 D8). The gloss is
+    the SHARED one
     (``resume.peer_reason_words``, design round 1 D3) — the same function the
     ``--all-peers`` listing and the sidebar's tooltip read, so this line cannot
     drift into a second vocabulary for ``connect_failed:ConnectionRefusedError``.

@@ -208,16 +208,14 @@ def _start_hosts(
 
     WHY THE ROWS HAVE TO BE LIVE AT ALL, because this is what puts the tier on
     the page rather than merely what makes it read better (QA round 12,
-    Q-R12-1). ``_SECTION_PEER_RANK`` puts a peer's section AFTER ``Previous
-    Sessions``, and a peer's STORED rows rank with THIS device's cold rows — so
-    at 100x30, over ``sidebar_shot.py``'s own fixture, the whole tier AND the
-    caret ``peers-focus`` exists to put on a remote row opened ONE ENTRY BELOW the
-    drawn page: the frame showed this device's own four sections and no mesh
-    anywhere, which is the opposite of what it is for. No ordering tweak reaches
-    it either — two of that fixture's cold rows carry an armed and a dormant
-    wake, and a wake outranks a plain cold row whatever its clock says. A session
-    that is RUNNING ranks with the live rows instead, which is where a user sees
-    one.
+    Q-R12-1). The rows rank into the ordinary bins now (operator convergence,
+    2026-10-05 — the retired peer axis put a peer's section AFTER ``Previous
+    Sessions``), but the older measurement still holds for the frames this rig
+    captures: a STORED peer row ranks with THIS device's cold rows, and at
+    100x30, over ``sidebar_shot.py``'s own fixture, cold rows can sit below the
+    drawn page — the caret ``peers-focus`` exists to put on a remote row would
+    be painted on no row at all. A session that is RUNNING ranks with the live
+    rows instead, which is where a user sees one.
 
     ONE PROCESS PER RECORD, which is the product's own invariant and was measured
     the hard way. A discovery record is keyed ``<pid>.json`` because a process
@@ -361,12 +359,13 @@ def _require_caret_on_a_remote_row(path: Path) -> None:
 
     THAT COMBINATION IS WHAT ``peers-focus`` EXISTS FOR (design round 1, D4), and
     it is the one property a reader can check in the bytes the artifact actually
-    carries: the caret owns cell 0 and the locality mark cell 1, so a row holding
-    both is exactly "the cursor is on another device's session, and the row says
-    so". Read off the exported SVG the way ``_require_settled_chip`` reads the
-    model chip, and for the same reason — the failure it catches (the peer tier,
-    or the caret on it, falling below the drawn page) is invisible in the script's
-    own state and plain in the artifact.
+    carries: the caret and the locality mark sit in ADJACENT cells of the same
+    row (after the pin cell's two columns — issue #1357 slice 2a), so a row
+    holding both is exactly "the cursor is on another device's session, and the
+    row says so". Read off the exported SVG the way ``_require_settled_chip``
+    reads the model chip, and for the same reason — the failure it catches (the
+    remote row, or the caret on it, falling below the drawn page) is invisible
+    in the script's own state and plain in the artifact.
 
     Both glyphs are spelled here rather than imported: the widget paints them as
     literals in ``SessionSidebar.render``, and the failure direction is the safe
@@ -374,15 +373,22 @@ def _require_caret_on_a_remote_row(path: Path) -> None:
     not.
     """
     caret = "›"
-    locality = "⇄"
+    # The TWO locality states (design round 1, D2/D5): a reachable row paints
+    # `↗`, an unreachable one `↛`. Either satisfies "the row says it lives
+    # elsewhere"; the caret row this frame pins happens to be reachable, but
+    # accepting both keeps the guard about the MARK rather than about the
+    # state of one fixture row, and any future rename still refuses.
+    locality_marks = ("↗", "↛")
     svg = path.read_text(encoding="utf-8")
     for runs in svg_text_runs_by_row(svg):
-        if any(caret in run for run in runs) and any(locality in run for run in runs):
+        if any(caret in run for run in runs) and any(
+            mark in run for run in runs for mark in locality_marks
+        ):
             return
     raise SystemExit(
-        f"no row in {path.name} carries both the caret ({caret!r}) and the locality "
-        f"mark ({locality!r}): the peer tier, or the caret on it, is outside the "
-        "drawn page — which is this frame's whole subject. Re-capture."
+        f"no row in {path.name} carries both the caret ({caret!r}) and a locality "
+        f"mark ({locality_marks!r}): the remote row, or the caret on it, is "
+        "outside the drawn page — which is this frame's whole subject. Re-capture."
     )
 
 

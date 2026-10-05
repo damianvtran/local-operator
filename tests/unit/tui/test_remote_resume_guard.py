@@ -245,7 +245,7 @@ async def test_picking_a_peer_row_from_the_sidebar_names_the_device_not_the_loca
     """UX round 5, U27: the LIST PICK asks the same guard ``/resume`` asks.
 
     Measured on the branch, in ONE frame and two lines apart: with the sidebar
-    focused on a row under the ``⇄ pixel-8`` heading, ``enter`` printed
+    focused on a ``↗`` row for ``pixel-8``, ``enter`` printed
 
         ! Could not open conversation: This conversation is no longer available
 
