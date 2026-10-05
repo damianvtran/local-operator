@@ -1026,6 +1026,31 @@ describe("round-6 remediation", () => {
 		expect(screen.getByRole("button", { name: "unlink aa11bb22cc33" })).toBeTruthy();
 	});
 
+	it("M1c: a slash-named EXISTING milestone is still editable — only its removal is impossible", async () => {
+		/* The add/set route carries the name in its body, so the phone was
+		   refusing work it could do (review round 7, M1 narrowed). The name field
+		   is fixed while editing; the date is not. */
+		setProjectMilestone.mockResolvedValue({ ok: true, project: view() });
+		getProject.mockResolvedValue({ project: view(), links: [] });
+		await openDetail({
+			milestones: [
+				{ name: "ship/v2", target_date: null, completed_at: null, status: "upcoming" },
+			],
+		});
+		fireEvent.click(await screen.findByRole("button", { name: "edit ship/v2" }));
+		fireEvent.change(screen.getByLabelText("target date (optional)"), {
+			target: { value: "2026-12-01" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+		await waitFor(() =>
+			expect(setProjectMilestone).toHaveBeenCalledWith("p1", {
+				name: "ship/v2",
+				target_date: "2026-12-01",
+			}),
+		);
+	});
+
 	it("D7: the link cap is stated before the tap", async () => {
 		const many = Array.from({ length: SESSION_LINK_CAP }, (_, index) =>
 			String(index).padStart(12, "0"),

@@ -14,9 +14,12 @@ name: Mobile web
 # Paths-gated as a separate workflow, matching extension.yml, because that is
 # how this repo already gates a pnpm subproject: ci.yml gates nothing by path
 # and would make every Python-only PR pay a Node toolchain install for a bundle
-# it cannot affect. The gate keys on the web sources only — the TS build does
-# not read Python, so widening it to projection.py would spend a job for no
-# signal.
+# it cannot affect. The gate keys on the web sources, PLUS the Python modules
+# this job reads — the `paths:` list below names them, and each one is there
+# because a test in this job pins a value out of it. The TS BUILD reads no
+# Python at all; the web TEST SUITE does, and a value it pins is exactly the
+# change the gate has to see. Modules no web test reads (`projection.py`) stay
+# out, since listing one would spend a job for no signal.
 
 on:
   push:

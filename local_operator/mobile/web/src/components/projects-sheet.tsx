@@ -625,9 +625,10 @@ export function ProjectsSheet({
 		if (busy || !milestoneDraft) return;
 		const milestoneName = (editing ?? milestoneDraft.name).trim();
 		if (!milestoneName) return;
-		/* The button is inert on a slash, but the rule is enforced here too: a
-		   name the delete route could never address must not be created. */
-		if (milestoneName.includes("/")) {
+		/* Only CREATING a slash name is refused: the add/set route carries the name
+		   in its BODY, so an existing one stays editable — it is the DELETE route
+		   that cannot address it (review round 6/7, M1). */
+		if (editing === null && milestoneName.includes("/")) {
 			setFormError(SLASH_IN_MILESTONE);
 			return;
 		}
@@ -751,12 +752,16 @@ export function ProjectsSheet({
 	const editingMilestone = view.name === "milestone" ? view.editing : null;
 
 	/* The milestone editor's own rules, as one usable flag: a name is needed to
-	   ADD (an existing one is the key), and a name containing a slash can never
-	   be removed through the relay's route — so it must not be created
-	   (review round 6, M1). */
+	   ADD (an existing one is the key), and a name being CREATED must not carry
+	   a slash — the route that REMOVES a milestone is the one that cannot
+	   address it (`{name:str}`, i.e. `[^/]+`). Only the create path is bound by
+	   that: the set/add body carries the name, so an existing slash-named
+	   milestone can still have its target date saved (review round 7, M1
+	   narrowed — refusing that would refuse work the phone CAN do). */
 	const milestoneName = (editingMilestone ?? milestoneDraft?.name ?? "").trim();
 	const nameHasSlash = milestoneName.includes("/");
-	const milestoneNameUsable = milestoneName !== "" && !nameHasSlash;
+	const creatingSlashName = editingMilestone === null && nameHasSlash;
+	const milestoneNameUsable = milestoneName !== "" && !creatingSlashName;
 
 	/* The link picker's rows: the daemon's sessions minus the ones this project
 	   already carries — and minus the ones it carries as COORDINATION links. The
@@ -1483,7 +1488,7 @@ export function ProjectsSheet({
 					{/* Said WHILE the name is typed, on the add path: the button below is
 					    inert until the slash goes, and a reader should not have to wonder
 					    why (review round 6, M1). */}
-					{editingMilestone === null && nameHasSlash ? (
+					{creatingSlashName ? (
 						<p role="alert" className="text-body-sm break-words text-danger">
 							{SLASH_IN_MILESTONE}
 						</p>
