@@ -606,3 +606,35 @@ async def test_a_restart_recovers_stop_attribution_and_flags_a_never_settled_lan
     text = body(listed)
     assert "stopped by mobile-stop: user stopped it from the phone" in text
     assert ledger.LANE_NEVER_SETTLED_DETAIL in text
+
+
+# --- settle-item (i): does dispose await child runner-settle? ----------------
+
+
+@pytest.mark.asyncio
+async def test_dispose_awaits_child_settle_so_the_lane_receipt_is_withdrawn(iso) -> None:
+    """Settle-item (i), answered with evidence rather than prose.
+
+    The design left open whether ``jobs.dispose`` awaits each child runner's
+    settle before process exit — which decides whether the settle arm that
+    withdraws the lane receipt reliably runs on a dispose-time cancel, or
+    whether the leftover receipt is the NORMAL outcome for that path.
+
+    Evidence: after ``Session.dispose()`` returns, the hanging child's lane
+    receipt is GONE (its runner's finally ran) and a stop receipt naming
+    ``parent-teardown`` is present (attribution was stamped before the cancel).
+    If dispose did not await settle, a lane receipt would survive every clean
+    quit and the never-settled reading would be worthless.
+    """
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="teardown-lane", prompt="do a long thing")
+    await wait_until(lambda: (job_of(parent, job_id).last_progress_at or 0) > 0)
+    child_dir = await wait_child_dir(parent, job_id)
+    assert ledger.read_lane_receipts(child_dir)  # staged while running
+
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+    assert ledger.read_lane_receipts(child_dir) == []  # settle arm ran
+    stops = ledger.read_stop_receipts(child_dir)
+    assert stops and stops[0]["actor"] == "parent-teardown"
