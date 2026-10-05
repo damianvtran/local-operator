@@ -721,3 +721,51 @@ def test_importing_the_rescue_pass_pulls_no_heavy_modules() -> None:
     # the young-session rule's constants.
     assert "local_operator.session.runtime.registry" in pulled
     assert "local_operator.session.retention" in pulled
+
+
+# --- The child-attribution ledger --------------------------------------------
+
+_SUBAGENT_LEDGER_LEAF_MODULES = frozenset(
+    {
+        "local_operator",
+        "local_operator.paths",
+        "local_operator.session",
+        "local_operator.session.subagent_ledger",
+    }
+)
+
+
+def test_subagent_ledger_is_stdlib_plus_paths_only() -> None:
+    """The child-attribution ledger must stay import-light.
+
+    ``session/subagent_ledger.py`` is imported by heavyweight writers
+    (``harness/subagent.py``, ``harness/comms.py`` via the runner, and
+    ``session/session.py``) and carries ``subagent.py``'s module-scope import,
+    which runs on every child build. Its whole value is that importing it cannot
+    widen that closure — so this cell imports it in a FRESH interpreter and
+    reads the module set that came with it, because the absence tests above only
+    prove the CLI and the composition root do not REACH it. A future
+    module-scope ``from local_operator.harness.x import y`` (or a pydantic /
+    asyncio dependency) added here would pass every other cell and silently put
+    the harness on the child-build path, which is exactly what this pin exists
+    to make loud.
+    """
+    modules = _imported_modules("local_operator.session.subagent_ledger")
+    for banned, why in (
+        ("asyncio", "the ledger is synchronous; the callers own the loop"),
+        ("pydantic", "the ledger is deliberately pydantic-free (stdlib + paths)"),
+        ("local_operator.harness", "the harness must not load just for an artifact write"),
+        ("local_operator.session.session", "the session package must not load for a write"),
+        ("local_operator.tui", "no surface loads for an artifact write"),
+        ("local_operator.server", "the backend service is not a ledger dependency"),
+        ("local_operator.model", "no provider/model layer loads for an artifact write"),
+    ):
+        _assert_absent(modules, banned, why)
+    pulled = {m for m in modules if m == "local_operator" or m.startswith("local_operator.")}
+    unexpected = sorted(pulled - _SUBAGENT_LEDGER_LEAF_MODULES)
+    assert not unexpected, (
+        "the child-attribution ledger grew a module-scope import outside its "
+        f"stated leaf set ({', '.join(unexpected)}); the module must stay "
+        "stdlib + local_operator.paths, so import anything else lazily inside "
+        "the function that needs it"
+    )
