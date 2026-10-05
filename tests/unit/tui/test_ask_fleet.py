@@ -1096,36 +1096,62 @@ async def test_a_fleet_row_names_the_conversation_the_sidebar_names(
 
 
 async def test_a_frontend_snapshot_keeps_the_capped_fleets_backend_tally(enabled, isolated_index):
-    """F12: F6's truncation honesty has to survive the list's OTHER writer.
+    """F12, on a LIVE surface (round 3: Q6 corrected this cell's vacuity).
 
     The door mounts the list with the index's own tally and cap-detection;
     ``_sync_ask_surface``'s fleet branch is the writer that fires on every
-    frontend snapshot, and it called ``set_rows`` without either — so the first
-    snapshot after the door opened reset them (``set_rows`` assigns both
-    unconditionally) and the header fell back to a row-derived split on a capped
-    index. The frame is driven through the app, which is where the revert was
-    visible in live use.
+    frontend snapshot, and before F12 it called ``set_rows`` without either — so
+    the first snapshot after the door opened reset them and the header fell back
+    to a row-derived split on a capped index.
+
+    WHY THIS CELL HAS TO SEED ``_ask_session``. ``_sync_ask_surface`` distinguishes
+    a session SWAP by comparing the app's session with ``_ask_session``, which
+    only it writes — and the adopt-time snapshot that sets it runs from
+    ``subscribe_frontend``, which the harness session does not implement. Without
+    the seed, the cell's own first snapshot LOOKED like a swap, collapsed the
+    list, and the assertion then read a DETACHED widget: QA reproduced it passing
+    with the fleet branch's facts removed entirely. Modelled here the way
+    production does it, and asserted against the widget the app registry holds
+    (``query_one`` raises if the surface is gone). The pre-fix writer is replayed
+    at the end so the cell fails if the mechanism it guards stops mattering.
     """
     _seed(isolated_index, "s-big", [_row(f"c{i}") for i in range(policy.PROJECTION_CAP)])
-    app = _app()
+    session = _RecordingSession()
+    app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
+        # The adopt-time snapshot's effect: a real Session implements
+        # `subscribe_frontend` (`local_operator/session/session.py`), so by the
+        # time a user can press anything this is already the live session.
+        app._ask_session = session
         app.action_open_fleet_asks()
         await _settle(pilot, 6)
-        listing = app.query_one(AskQueueList)
-        assert f"{policy.PROJECTION_CAP} outstanding" in listing.header_text(200)
+        live = app.query_one(AskQueueList)  # raises if the surface is not mounted
+        assert f"{policy.PROJECTION_CAP} outstanding" in live.header_text(200)
 
         # THE SNAPSHOT THE WIRE SENDS while the fleet list is up: the current
         # session's rows, which is a different queue entirely.
         app._sync_ask_surface(ask_rows([_row("s1")]))
         await _settle(pilot)
-        after = listing.header_text(200)
+        live = app.query_one(AskQueueList)
+        after = live.header_text(200)
         assert f"{policy.PROJECTION_CAP} outstanding" in after, (
             "the snapshot reset the fleet's backend tally — the header is now "
             "reading a row-derived split over an index it cannot see the end of"
         )
         clause = after.split("   All ·")[0]
         assert "moved on" not in clause and "settled" not in clause
+
+        # THE PRE-FIX WRITER, REPLAYED — the same call WITHOUT the two facts,
+        # which is exactly what the fleet branch did before F12: the header
+        # reverts to a row-derived split. If this stops holding, the assertion
+        # above is no longer discriminating either.
+        live.set_rows(app._ask_fleet_rows, now_ms=app._ask_now_ms())
+        reverted = live.header_text(200)
+        assert f"{policy.PROJECTION_CAP} outstanding" not in reverted
+        # ...and the row-derived clause is what it falls back to: 20 rows read as
+        # "20 questions waiting", the exact sentence F6/F12 exist to prevent.
+        assert f"{policy.PROJECTION_CAP} questions waiting" in reverted
 
 
 async def test_a_fleet_list_arms_the_countdown_clock_with_no_current_asks(enabled, isolated_index):
@@ -1228,3 +1254,26 @@ async def test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width(
         ), f"the handles are the scope tell at {width} cells: {row_lines}"
         # And the subject is what yields there — recorded, not claimed away.
         assert "All conversations" not in listing.header_text(width)
+
+
+async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabled, isolated_index):
+    """F20: the scope can change in THREE places, and the clock has to follow all.
+
+    `_sync_ask_tick` reads the ACTIVE scope's rows (F14), and the fleet loaders
+    armed it — but `_collapse_asks` and `_expand_asks` reset the scope and drop
+    the fleet rows without it, so a fleet list's deadline timer outlived the
+    surface (a clock with nothing to paint, which this surface's docstring
+    forbids: "stopped, never merely paused, when the last row leaves").
+    """
+    _seed(isolated_index, "s-other", [_row("o1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._ask_session = app._session
+        app.action_open_fleet_asks()
+        await _settle(pilot, 6)
+        assert app._ask_tick is not None
+        app._collapse_asks()
+        await _settle(pilot)
+        assert app._ask_scope == SCOPE_SESSION and app._ask_fleet_rows == []
+        assert app._ask_tick is None, "the fleet list's clock outlived the fleet list"

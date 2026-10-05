@@ -502,12 +502,15 @@ class SessionSidebar(Widget, can_focus=True):
 
         The ONE state where this widget's shadow of the app's `fork_aside`
         binding changes an existing gesture's meaning rather than overriding a
-        refusal (review round 2, F15). Returning ``None`` is Textual's "not
-        mine": the binding chain skips to the next candidate — the app's
-        `fork_aside` — which is what the aside's own copy promises. Narrow on
-        purpose: every other action this widget declares stays enabled, and the
-        check reads the panel through the app rather than caching a flag that
-        could go stale against it.
+        refusal (review round 2, F15). ``None`` is Textual's own answer for
+        "disabled and visible" (`DOMNode.check_action`'s docstring, 8.2.8), and
+        the DISPATCH consequence is what this relies on: `App.run_action` treats
+        a falsy answer as not-handled and `_check_bindings` moves on to the next
+        candidate for that key — the app's `fork_aside` — which is what the
+        aside's own copy promises. (The binding here is ``show=False``, so
+        "visible" costs nothing.) Narrow on purpose: every other action this
+        widget declares stays enabled, and the check reads the panel through the
+        app rather than caching a flag that could go stale against it.
         """
         if action == "fleet_asks":
             panel_reader = getattr(self.app, "_aside_panel", None)

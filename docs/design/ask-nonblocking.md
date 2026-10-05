@@ -1180,8 +1180,10 @@ fleet and session lists are textually identical above the rows there; the scope 
 **row handles** (`handle · deadline`), which `test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width`
 pins. (3) The `ctrl+f asks` teacher needed 46 cells against a footer whose content saturates at 43, so it
 rendered **nowhere**; the chord's rung now outranks the pin's (the pin has a second teacher on `/help`,
-the chord had none) and spends two lengths — `ctrl+f asks` at ≥34 cells, `ctrl+f` at the 29-cell floor,
-where the note beside it supplies the object. (4) The `ctrl+f` shadow is **declined** while an aside is
+the chord had none) and spends two lengths — `ctrl+f asks` from a **120-column terminal** (the first
+width whose 34 content cells fit it; 130 is where the footer saturates at 43), `ctrl+f` at the 29-cell
+floor (a 100-column terminal, the width the door's own `f9` path produces), where the note beside it
+supplies the object. (4) The `ctrl+f` shadow is **declined** while an aside is
 open (`check_action` → the app's `fork_aside`), because the aside's own copy advertises that fold; and
 `/help`'s `ctrl+f` line now names both meanings.
 
@@ -1196,7 +1198,10 @@ re-evaluates it: a fleet list whose rows belong to other sessions has a countdow
 sidebar did not: a focused cursor row paints `tint-select-hi`, a ground in neither derivation, where raw
 `accent` measures 3.96:1 on the light ramp — under the repo's own 4.0 state floor — 14 of 54 ramps under
 it, two under 3:1. `chip-live` clears all four sidebar grounds on every ramp (worst 4.66, `everforest`),
-and `test_the_ask_marker_reads_on_every_sidebar_ground` is the pin. **D13 recorded, not fixed:** the
+and `test_the_ask_marker_reads_on_every_sidebar_ground` is the pin. **The accepted residual (round 3:
+D16):** on the light ramp the derived ink IS the ramp's primary text colour, so the mark on a row whose
+title paints `fg` is the same ink as that title — the mark is carried there by its glyph and its cell,
+not by hue, exactly as the panel's light ramp is (Ruling 1). **D13 recorded, not fixed:** the
 focused sidebar's whole footer line is under the `dim` floor on the light ramp (3.35:1 against 3.4; 11
 ramps miss on `tint-select`, 27 on `tint-select-hi`) — that ground is outside the gate's set for every
 `dim` consumer, and re-flooring 11 curated ramps for 0.05 is not this PR's call.

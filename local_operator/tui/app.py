@@ -26110,6 +26110,9 @@ class OperatorApp(App[None]):
             # asks from the bar leaves the fleet list and returns to this one.
             self._ask_scope = SCOPE_SESSION
             self._ask_fleet_rows = []
+            # ...and with the fleet rows gone the clock has to be re-evaluated on
+            # the rows that remain (review round 3: F20).
+            self._sync_ask_tick()
         if not self._ask_rows:
             return
         outstanding = self._open_ask_rows()
@@ -26204,6 +26207,10 @@ class OperatorApp(App[None]):
         # silently makes the next f4 open every conversation's queue.
         self._ask_scope = SCOPE_SESSION
         self._ask_fleet_rows = []
+        # The clock follows the SCOPE'S rows (reviews round 2/3: F14, F20), and
+        # this is the second place the scope can change under it — leaving the
+        # surface drops the fleet rows the tick may have been armed on.
+        self._sync_ask_tick()
         if self._ask_mode:
             self._ask_mode = False
             self._sync_ask_composer(restore_draft=restore_draft)
