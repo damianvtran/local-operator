@@ -361,6 +361,100 @@ async def test_is_pristine_reads_durable_rows_not_the_model_window(
 
 
 @pytest.mark.asyncio
+async def test_is_pristine_reads_bookkeeping_records_as_no_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The relay's reported bug: a session whose only rows are MCP cards.
+
+    Measured 2026-10-05 on the phone relay: a session started from the one-tap
+    control journaled three ``session_mcp_unavailable`` cards at boot (three
+    configured servers needing a reauth), and the composer's own directory
+    change was refused with "This session already has messages, so its working
+    directory can't change" — on an empty screen, nothing typed. The records a
+    session writes ABOUT itself are not a conversation, so the probe must read
+    them as "nothing has happened yet".
+
+    The exemption is exactly the bookkeeping vocabulary — not "any custom
+    row": a quiet-dial ``peer_message`` note is not in it, and this test pins
+    that boundary on the probe itself.
+    """
+    from local_operator.harness.message_types import (
+        PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+    )
+    from local_operator.harness.types import CustomMessage
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    await transcript.append_message(
+        CustomMessage(
+            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": "warning",
+                "server": "launchdarkly",
+                "reason": "/mcp reauth launchdarkly",
+            },
+        ),
+        preserve_mtime=True,
+    )
+
+    class _Session:
+        # Runtime role (SessionProtocol), the same reduced double as the
+        # durable-rows test above: an OWNER with no attached runtime.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
+        def __init__(self) -> None:
+            self._transcript = transcript
+            self.wake_scheduler = None
+            self.session_id = "s1"
+
+        def history(self):  # noqa: ANN202
+            return []
+
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
+
+    handle = object.__new__(ServingSessionHandle)
+    handle._session = _Session()  # type: ignore[attr-defined]
+    object.__setattr__(handle, "is_busy", lambda: False)
+
+    assert (
+        handle.is_pristine() is True
+    ), "an MCP warning card is a record about the session, not work in it"
+
+    await transcript.append_message(
+        CustomMessage(
+            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": "a quiet-dial note"},
+        )
+    )
+    assert handle.is_pristine() is False, "a custom row outside the vocabulary is history"
+
+
+@pytest.mark.asyncio
 async def test_the_tui_engages_a_runtime_without_any_input(tmp_path: Path, monkeypatch) -> None:
     """The reported bug, end to end: no keystroke, and a runtime starts anyway.
 
