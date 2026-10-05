@@ -6550,6 +6550,56 @@ def test_approval_mode_is_auto_reads_the_key_and_degrades_to_ask() -> None:
     assert _approval_mode_is_auto(_Boom()) is False, "an unreadable config must not approve"
 
 
+def test_saved_tool_approval_is_auto_answers_without_materialising_a_root(tmp_path: Path) -> None:
+    """The guarded root reader the mesh surfaces use (defect 2's one derivation).
+
+    Four properties, each a failure mode of the naive read: a root with NO config
+    file answers False WITHOUT being constructed (constructing ``ConfigManager``
+    creates ``config.yml`` — a mesh request-path check has no business writing, and
+    a later test of "no saved mode" must not be the thing that creates one); the
+    key is read through ``_approval_mode_is_auto`` (so ``auto`` rounds-trips and a
+    missing key means ask); a MALFORMED file ALSO answers False WITHOUT being
+    constructed — and without the rename ``ConfigManager`` performs
+    (``config.yml.bad.<stamp>``), because a create must not move the operator's
+    file (review F2); and any unreadable input answers False — the fail-closed
+    direction, because a wrong True asks a PEER for unattended authority nobody
+    needs.
+    """
+    from local_operator.session_factory import saved_tool_approval_is_auto
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert saved_tool_approval_is_auto(fresh) is False
+    assert not (fresh / "config.yml").exists(), "the read must not materialise a config"
+
+    _write_min_config(fresh, tool_approval_mode="auto")
+    assert saved_tool_approval_is_auto(fresh) is True
+    _write_min_config(fresh, tool_approval_mode="ask")
+    assert saved_tool_approval_is_auto(fresh) is False
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "config.yml").write_text(":::: not yaml ::::\n", encoding="utf-8")
+    assert saved_tool_approval_is_auto(broken) is False, "never approve on a read failure"
+    assert (broken / "config.yml").exists(), "the read must not move a bad file aside"
+    assert not list(broken.glob("config.yml.bad.*")), "no repair rename from a request path"
+
+    # The SECOND repair path of ``ConfigManager._load_config``: YAML-valid but not
+    # a mapping. It must also answer ask and leave the file where it is.
+    scalar_root = tmp_path / "scalar"
+    scalar_root.mkdir()
+    (scalar_root / "config.yml").write_text("- just\n- a list\n", encoding="utf-8")
+    assert saved_tool_approval_is_auto(scalar_root) is False
+    assert (scalar_root / "config.yml").exists(), "the read must not move a bad file aside"
+
+
+def _write_min_config(root: Path, **values: object) -> None:
+    body = "version: 0.0.0\nvalues:\n" + "".join(
+        f"  {key}: {value}\n" for key, value in values.items()
+    )
+    (root / "config.yml").write_text(body, encoding="utf-8")
+
+
 @pytest.mark.asyncio
 async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monkeypatch) -> None:
     """``tool_approval_mode: auto`` must build the APPROVING gate.

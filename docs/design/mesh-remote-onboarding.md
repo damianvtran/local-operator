@@ -132,7 +132,7 @@ is authority-increasing and the *runtime* rejects it without a signature (`appro
 | B1 | Build behind (0.63.2 vs current tag; readiness `build` row is an **exact-version** comparison) | `readiness.py` `compare_builds`; beat-2 matrix P5 |
 | B2 | No anchor: `/etc/local-operator/operators/<uid>.json` absent | measured; `operator/trust.py:26-31` (anchor paths) |
 | B3 | Relay supervision is launchd-only; on Linux the relay "degrades to a foreground process" | `network/cli.py:3290-3330` ("no launchd here: run `lop network serve` in the foreground") |
-| B4 | Trying to begin or receive a peer-created unattended session is refused **structurally** | `relay.py:6038-6044` (`_op_session_create`) and `:9103-9109` (`_ctl_peer_create`): "a session created on another device cannot start unattended (yolo) … no capability that unlocks it" |
+| B4 | Trying to begin or receive a peer-created unattended session is refused **structurally** — *superseded by slice (a): the boundary is now the `unattended` GRANT, checked receiver-side (§2 OQ4, §6 defect 2)* | `relay.py:6038-6044` (`_op_session_create`) and `:9103-9109` (`_ctl_peer_create`) — the claim at this doc's revision read: "a session created on another device cannot start unattended (yolo) … no capability that unlocks it" |
 | B5 | No challenge/signature path crosses the mesh (the ALLOW half) | `types.py:719`, `peer_rows.py:170-189` |
 | B6 | A joined device has no way to gain `move/delete/broker` without a manual grant | via `lop network member grant` (`network/cli.py:259-266`); measured node caps lack them |
 | B7 | A move dead-ends on attached clients | `server.py:5699-5702`, `:6248-6251`: "kept: This session is open in another terminal or attached client. Disconnect that client, then move again." |

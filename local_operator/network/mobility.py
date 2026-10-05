@@ -4272,16 +4272,43 @@ def _offload(
     if blocked is not None:
         return blocked
     transport = LinkTransport(server, link, session_id)
-    # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP, and it has to be: the source
-    # holds the session, so the source is the only device that can say whether it
-    # was created or re-stamped with accepted full-auto authority. It travels with
-    # the invite (below) because the step it configures — the destination's runtime
-    # construction — runs there. A MISSING key reads as off at the destination: an
-    # older source sends none and an older destination ignores it, both default-off.
+    # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP OR ITS SAVED MODE, and it has
+    # to be: the source holds the session, so the source is the only device that can
+    # say whether the session was created with accepted full-auto authority OR runs
+    # unattended on this device by the operator's own standing choice
+    # (``tool_approval_mode: auto``). Two halves, one bit:
+    #
+    # * the STAMP records authority accepted at the door (a create or a move here
+    #   under an accepted ``unattended`` request);
+    # * the SAVED MODE covers the sessions that never went through such a door —
+    #   "a moved auto session stays auto on the node" (design §6 defect 2): a
+    #   session running with no routine re-prompts HERE must keep doing so THERE,
+    #   and the read goes through the ONE derivation a session started here would
+    #   resolve (``session_factory.saved_tool_approval_is_auto`` →
+    #   ``_approval_mode_is_auto``, the same seam the headless gate and the spawned
+    #   handles seed from), so the carry cannot drift from the mode this device
+    #   actually applies. Its ONE stated gap: a LIVE session's gate can also be
+    #   pinned per session (an explicit ``--yolo``, or ``/approvals`` typed in the
+    #   session), and those pins live only inside the runtime process — no surface
+    #   reachable from the relay reads them, so a pin without the saved mode travels
+    #   as off. Everything the carry asks for is still only a REQUEST at the
+    #   destination: the stamp is a carry, never the authority, and the destination
+    #   re-checks its own ``unattended`` grant for this device at every engage
+    #   (``serving._carried_auto_authority``) — a revoked grant takes effect there,
+    #   which is what bounds trust.
+    #
+    # It travels with the invite (below) because the step it configures — the
+    # destination's runtime construction — runs there. A MISSING key reads as off at
+    # the destination: an older source sends none and an older destination ignores
+    # it, both default-off.
     from local_operator.session.placement import read_stamp
 
     _stamp_here = read_stamp(server.root, session_id)
     _unattended = bool(_stamp_here is not None and _stamp_here.unattended)
+    if not _unattended:
+        from local_operator.session_factory import saved_tool_approval_is_auto
+
+        _unattended = saved_tool_approval_is_auto(server.root)
     # THE MONITORS NOTICE'S ONE INPUT, READ HERE BECAUSE THE COMMIT BELOW DELETES THE
     # INDEX IT LIVES IN: how many monitors THIS device holds for the session. One small
     # file read (``carry.monitor_count``), and it feeds the up-front half of the carry

@@ -976,6 +976,113 @@ async def test_create_on_a_peer_forwards_the_target_and_answers_the_peers_bindin
 
 
 @pytest.mark.asyncio
+async def test_a_config_auto_create_on_a_peer_requests_unattended(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a, desktop) The saved ``auto`` mode implies ``yolo`` on the wire.
+
+    The desktop builder used to send no ``yolo`` at all — the operator's
+    full-auto never followed a create to the peer. The bit comes from
+    ``session_factory.saved_tool_approval_is_auto(root)`` — the ONE derivation —
+    and travels as a REAL boolean (``wire.yolo_requested`` accepts only exact
+    spellings; a string would be a request that cannot arrive).
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    ConfigManager(root).set_config_value("tool_approval_mode", "auto")
+    relay = FakeRelay({"peer_session_create": {"session_id": OTHER, "admitted": True}})
+    _join(monkeypatch, relay)
+
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["unattended_notice"] == "", "a granted request has nothing to notice"
+    _op, fields = relay.calls[0]
+    assert fields["yolo"] is True, fields
+
+
+@pytest.mark.asyncio
+async def test_a_refused_unattended_request_falls_back_attended_with_the_notice(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b, desktop) ``not_permitted`` => attended retry + the notice ON THE REPLY.
+
+    Three things in one cell, because they are one behaviour: the first attempt
+    carries ``yolo``; the retry drops ONLY ``yolo`` (its body is otherwise
+    byte-identical — a changed body is a changed intent, so it is a fresh call,
+    never a replay); and the notice crosses the route INTO the response model —
+    the boundary where this plane keeps losing undeclared fields, so ``""``
+    would be indistinguishable from "declared but dropped" without asserting a
+    real sentence here.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    ConfigManager(root).set_config_value("tool_approval_mode", "auto")
+    attempts: list[dict[str, Any]] = []
+
+    def answer(**fields: Any) -> dict[str, Any]:
+        attempts.append(dict(fields))
+        if len(attempts) == 1:
+            raise MeshRefusal(
+                "not_permitted",
+                "a session created on another device can start unattended (yolo) only "
+                f"when {PEER} grants the requesting member 'unattended'.",
+            )
+        return {"session_id": OTHER, "admitted": True}
+
+    relay = FakeRelay({"peer_session_create": answer})
+    _join(monkeypatch, relay)
+
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["session_id"] == OTHER
+    notice = result["unattended_notice"]
+    assert "created attended" in notice, notice
+    assert f"approve setup for {PEER} in the Mesh tab on {PEER}" in notice, notice
+    assert "ask for approvals" in notice, notice
+    assert "covers future sends from this device, not this conversation" in notice, notice
+    # The wire shape: one refusal, one retry, ``yolo`` the only difference.
+    first, second = attempts
+    assert first.pop("yolo") is True
+    assert second == first, (first, second)
+
+
+@pytest.mark.asyncio
+async def test_a_config_ask_create_on_a_peer_sends_no_yolo_and_no_notice(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d, desktop) No saved ``auto`` => today's exact body, byte for byte.
+
+    The desktop's attended create has NEVER carried a ``yolo`` key; this pins
+    that the new read cannot start sending one (a ``false`` would also be a wire
+    change), and that no notice rides a create that asked for nothing.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay({"peer_session_create": {"session_id": OTHER, "admitted": True}})
+    _join(monkeypatch, relay)
+
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["unattended_notice"] == ""
+    _op, fields = relay.calls[0]
+    assert fields == {"peer": PEER, "cwd": str(root)}, fields
+
+
+@pytest.mark.asyncio
 async def test_create_on_a_peer_that_stopped_answering_is_unconfirmed_not_retried(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:

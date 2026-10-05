@@ -36,10 +36,11 @@ and is the property ``session/peer_rows.py`` states for itself.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from local_operator.network.types import MeshRefusal
+from local_operator.network.types import MeshRefusal, unattended_fallback_notice
 
 # GLOSSING IS CALLED DIRECTLY, NOT THROUGH A HELPER, and that is a guard's requirement
 # rather than a style choice: ``tests/unit/network/test_reason_surfaces.py`` counts a
@@ -48,6 +49,8 @@ from local_operator.network.types import MeshRefusal
 # one reads as an UNGLOSSED leak even while it glosses — which would force a declaration
 # admitting the very thing this module must not do.
 from local_operator.resume import peer_reason_words
+
+logger = logging.getLogger(__name__)
 
 #: ALWAYS ``None``, and this is a measurement rather than a placeholder.
 #:
@@ -554,6 +557,20 @@ def create_on_peer(
 
     No first prompt is sent: the desktop's ``/new`` opens a conversation, and a prompt
     from this device would be work the user has not asked for yet.
+
+    THE SAVED MODE SUPPLIES THE IMPLIED UNATTENDED REQUEST (remote-onboarding §6
+    defect 2, the desktop half): when the origin's ``tool_approval_mode`` resolves
+    ``auto``, the create asks the peer for an unattended session exactly as the local
+    equivalent would run — the operator's standing "no routine re-prompts", read
+    through the ONE derivation (``session_factory.saved_tool_approval_is_auto`` →
+    ``_approval_mode_is_auto``). An IMPLIED request that a peer without the grant
+    refuses (``not_permitted``) FALLS BACK to an attended create and carries
+    ``unattended_notice`` in the reply — an unattended send must not dead-end in a
+    failed create — while nothing durable is left behind by the refusal
+    (``relay._op_session_create`` raises above the mint). The fallback's retry is a
+    CHANGED BODY and therefore a changed intent, issued as a fresh call rather than a
+    replay of the refused frame; the desktop receipt layer's ``Unclaimed`` discipline
+    reads the refusal the same way (nothing behind, the id stays usable).
     """
     # ONE PLACE BUILDS THE FRAME'S FIELDS, so the three that travel cannot drift
     # apart: ``cwd`` is ALWAYS forwarded (empty is the documented "the peer decides"
@@ -568,16 +585,55 @@ def create_on_peer(
             fields["team"] = name
         else:
             fields["profile"] = name
-    return _call(
-        root,
-        "peer_session_create",
-        # A spawn plus its first admission, the CLI's own budget for this verb. A
-        # PROMPTLESS create no longer waits for the spawn at all (the peer warms the
-        # runtime in the background and answers with the id), so this budget is the
-        # one that covers the prompt-ful case; see ``relay._op_session_create``.
-        timeout=120.0,
-        **fields,
-    )
+
+    # THE IMPLIED REQUEST, READ FROM THIS DEVICE'S SAVED MODE (see the docstring).
+    # Function-local import like every other composition-root reach in this module:
+    # the mesh surface must not drag the session factory onto its import graph.
+    from local_operator.session_factory import saved_tool_approval_is_auto
+
+    implied_yolo = saved_tool_approval_is_auto(root)
+
+    def _create(yolo: bool) -> dict[str, Any]:
+        # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing but the
+        # request itself. ``yolo`` is OMITTED when False — the attended body is
+        # byte-for-byte today's, which is what keeps a config-``ask`` device's
+        # create (and the fallback) indistinguishable from the pre-change call.
+        attempt: dict[str, Any] = dict(fields)
+        if yolo:
+            attempt["yolo"] = True
+        return _call(
+            root,
+            "peer_session_create",
+            # A spawn plus its first admission, the CLI's own budget for this verb. A
+            # PROMPTLESS create no longer waits for the spawn at all (the peer warms the
+            # runtime in the background and answers with the id), so this budget is the
+            # one that covers the prompt-ful case; see ``relay._op_session_create``.
+            timeout=120.0,
+            **attempt,
+        )
+
+    if not implied_yolo:
+        return _create(False)
+    try:
+        return _create(True)
+    except MeshRefusal as refusal:
+        if refusal.code != "not_permitted":
+            raise
+        # FALL BACK, ATTENDED. The implication came from the file, not from a user
+        # gesture on this request, so an ungranted peer must not turn the implied
+        # wish into a FAILED create; the notice says what will happen instead and
+        # the one grant that changes it. The retry is safe on every durable side:
+        # the refusal is raised above the mint (nothing on the peer), and the
+        # desktop receipt's ``Unclaimed`` path treats it as "leaves nothing
+        # behind", releasing the caller's id for exactly this kind of retry.
+        detail = _create(False)
+        notice = unattended_fallback_notice(peer)
+        logger.info(
+            "create on %s: the unattended request was refused (%s); created attended",
+            peer,
+            str(refusal),
+        )
+        return {**detail, "unattended_notice": notice}
 
 
 def remote_owner(root: Path, session_id: str) -> tuple[str, str] | None:
