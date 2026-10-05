@@ -1027,8 +1027,14 @@ class AskQueueList(Widget):
 
         ``open_count``/``truncated`` ride with the rows because the header's
         drawer register prints the backend's own number on a truncated frame
-        (amendment A6); omitting them leaves both unset, which is what a FLEET
-        list does — its rows are the whole index, not a capped prefix.
+        (amendment A6). THEY ARE ASSIGNED UNCONDITIONALLY — a caller that omits
+        them RESETS both, and the header then falls back to a split computed from
+        whatever rows it happens to carry. Every caller must therefore pass the
+        facts that belong to the rows it is handing over: the session scope
+        passes the WIRE's tally, and the FLEET scope passes the index read's own
+        (``_refresh_fleet_count_facts``). Round 2's F12 was exactly this bug in
+        the fleet branch, whose rows are the whole index only when that index was
+        not capped — which is not a property a caller may assume.
         """
         current = self.current()
         if scope is not None and scope in SCOPE_SUBJECTS:
