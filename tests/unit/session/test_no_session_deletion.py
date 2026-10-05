@@ -1269,6 +1269,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
     ),
+    # The child-attribution ledger (``session/subagent_ledger.py``) is the SAME
+    # artifact shape one level in: its staged write puts a temp FILE beside a
+    # FILE it then renames onto, inside the CHILD's own transcript directory
+    # (``<child session dir>/subagent-lane-<job>.v1.json``). The receiver is a
+    # receipt inside a directory that already exists — the module never creates,
+    # renames or removes that directory, and the only path it names is the
+    # child dir it was handed plus a fixed prefix and the job id.
+    (
+        "local_operator/session/subagent_ledger.py::_staged_write",
+        "os.replace",
+        "temp FILE -> <child session dir>/subagent-{lane,stop}-<job>.v1.json FILE",
+    ),
+    (
+        "local_operator/session/subagent_ledger.py::_staged_write",
+        "os.unlink",
+        "clears the .tmp FILE this same call just created, when the write failed",
+    ),
+    (
+        "local_operator/session/subagent_ledger.py::withdraw_lane_receipt",
+        "<path>.unlink",
+        "removes the lane-receipt FILE this build wrote on settle (never a directory)",
+    ),
+    (
+        "local_operator/session/subagent_ledger.py::withdraw_stop_receipt",
+        "<path>.unlink",
+        "removes the stop-receipt FILE this build wrote (never a directory)",
+    ),
+    (
+        "local_operator/harness/comms.py::SubagentComms.abandon_stop",
+        "<path>.unlink",
+        "withdraws the staged stop-receipt FILE when the cancel it attests to "
+        "was refused (the path came from ledger.write_stop_receipt, a file)",
+    ),
     (
         "local_operator/session/runtime/stop_ledger.py::_append",
         "os.replace",
@@ -2669,6 +2702,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::_staged_write",  # tmp -> record FILE
+        # tmp -> lane/stop receipt FILE inside the child's own transcript dir;
+        # same shape as the row above, one directory in (see the allow-list rows).
+        "local_operator/session/subagent_ledger.py::_staged_write",
         "local_operator/session/runtime/rescue.py::write_ledger",  # tmp -> rescue/<id>.json
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE

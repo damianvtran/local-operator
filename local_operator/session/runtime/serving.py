@@ -145,6 +145,23 @@ _ABORT_SETTLE_BUDGET_S = 1.0
 _ABORT_SETTLE_POLL_S = 0.02
 
 
+def _accepts_keyword(func: Any, name: str) -> bool:
+    """Whether ``func`` can be called with the keyword ``name``.
+
+    Used to decide whether a handle's ``cancel_subagents`` predates the ``by``
+    attribution keyword. Signature inspection rather than a ``try/except
+    TypeError`` trial: a ``TypeError`` raised INSIDE the call would be
+    indistinguishable from a signature mismatch and the stop would be issued
+    twice (review round 1, NIT 1). An unsignable callable (a C builtin, a
+    partial) reports False and takes the legacy path — losing an attribution
+    token is the acceptable degradation, a double stop is not.
+    """
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _mcp_boot_discovery_failure(session: Any) -> str | None:
     """The boot record's DISCOVERY failure as one honest line, or ``None``.
 
@@ -4508,6 +4525,15 @@ class ServingSessionHandle(SessionHandle):
         if not callable(cancel):
             return 0
         try:
+            # ``by`` names the MOBILE/attach surface as the actor, so the child's
+            # durable stop receipt and roster row say who stopped it rather than the
+            # generic parent-escape default. Whether the handle ACCEPTS the keyword
+            # is decided by INSPECTING the signature, not by catching ``TypeError``:
+            # a ``TypeError`` raised INSIDE ``cancel_subagents`` would otherwise be
+            # read as "unsupported signature" and the stop issued a second time
+            # (review round 1, NIT 1).
+            if _accepts_keyword(cancel, "by"):
+                return int(cast(int, cancel(reason, by="mobile-stop")))
             return int(cast(int, cancel(reason)))
         except Exception:  # noqa: BLE001 — a stop must never fail on its children
             logger.warning("cancelling subagents during abort failed", exc_info=True)

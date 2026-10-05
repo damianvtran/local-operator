@@ -120,6 +120,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 import weakref
 from dataclasses import dataclass
@@ -161,6 +162,7 @@ from local_operator.mcp.config import server_own_turn_only
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+from local_operator.session import subagent_ledger as ledger
 
 
 class SubagentModelUnavailable(RuntimeError):
@@ -1347,6 +1349,28 @@ def _make_runner(
                         schedule_persist()
                     except Exception:  # noqa: BLE001 - persistence is not load-bearing here
                         logger.warning("could not persist roster after attach", exc_info=True)
+                # THE LAUNCH RECEIPT (a3). Staged here because this is the first
+                # moment the child's transcript directory is known, and a crash
+                # any time after this leaves the on-disk statement "a lane ran
+                # here" that no later artifact can supply — the parent writes
+                # nothing once it is killed. Withdrawn on settle (the finally
+                # below); a leftover file IS the evidence. Best-effort: a failed
+                # write must never stop the child from running.
+                try:
+                    ledger.write_lane_receipt(
+                        child._transcript.directory,
+                        ledger.build_lane_payload(
+                            job_id=job_id,
+                            label=label,
+                            agent_role=str(getattr(job, "agent_role", "") or ""),
+                            child_session_id=child._transcript.directory.name,
+                            parent_session_id=str(getattr(parent_session, "session_id", "") or ""),
+                            parent_job_id=getattr(job, "parent_job_id", None),
+                            started_at=float(getattr(job, "start_time", 0.0) or time.time()),
+                        ),
+                    )
+                except Exception:  # noqa: BLE001 - evidence is not load-bearing here
+                    logger.warning("could not write subagent lane receipt", exc_info=True)
             # ``model`` is the child's EFFECTIVE selector, read off the built
             # child exactly as ``job.model_label`` is above. A consumer of the
             # event stream (the Axis runner, a UI) can then state which model
@@ -1371,6 +1395,7 @@ def _make_runner(
                     report_progress,
                     final,
                     parent_session.jobs,
+                    comms,
                 )
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
@@ -1470,6 +1495,17 @@ def _make_runner(
         finally:
             if unsubscribe is not None:
                 unsubscribe()
+            # WITHDRAW THE LANE RECEIPT. Every settle arm (completed /
+            # cancelled / failed) and every bare exception falls through this
+            # single finally, so one call here covers them all — a separate
+            # call per arm would be the same unlink three more times. A receipt
+            # that survives this is exactly the "started, never settled"
+            # reading the boot reconcile pass reports. Best-effort.
+            if child is not None:
+                try:
+                    ledger.withdraw_lane_receipt(child._transcript.directory, job_id)
+                except Exception:  # noqa: BLE001 - teardown must not fail over evidence
+                    logger.warning("could not withdraw subagent lane receipt", exc_info=True)
             if comms is not None:
                 # BEFORE dispose: detach fails any question still waiting on
                 # this child with "it finished before answering" rather than
@@ -1785,6 +1821,7 @@ def _make_relay(
     report_progress: Callable[[str], None],
     final: dict[str, Any],
     owner_jobs: Any = None,
+    comms: Any = None,
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
@@ -2045,6 +2082,11 @@ def _make_relay(
             # Same string into latest_details so the 1 Hz jobs.list() poll
             # and the event stream agree about what the child is doing.
             report_progress(progress)
+            # And the same moment onto the comms RECORD, so the stamp survives a
+            # path that never sees the job row (a nested child after a restart).
+            # Best-effort inside note_progress; the relay must not care.
+            if comms is not None:
+                comms.note_progress(job_id)
             await emit(SubagentProgressEvent(job_id=job_id, label=label, progress=progress))
 
     return relay

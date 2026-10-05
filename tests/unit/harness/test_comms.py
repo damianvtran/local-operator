@@ -2099,7 +2099,7 @@ def test_the_roster_marks_a_child_whose_transcript_is_gone(tmp_path):
     [row] = comms.roster()
 
     assert row.resumable is False
-    assert "gone from disk" in (row.detail or "")
+    assert row.detail == "no transcript on disk"
     # ...and the two surfaces agree, which is the invariant that matters.
     assert comms.resume("job-1", "carry on")[0] is None
 
@@ -3449,7 +3449,7 @@ def test_a_child_whose_transcript_vanished_is_not_resumable(tmp_path) -> None:
 
     assert row.status == "failed"
     assert row.resumable is False
-    assert row.detail == "transcript is gone from disk"
+    assert row.detail == "no transcript on disk"
 
 
 def test_the_roster_and_the_nodes_keep_insertion_order() -> None:
@@ -3685,7 +3685,7 @@ def test_a_cached_probe_expires_and_a_vanished_transcript_is_seen(tmp_path, monk
     monkeypatch.setattr(comms_module.time, "monotonic", lambda: clock[0])
     [row] = comms.roster()
     assert row.resumable is False
-    assert row.detail == "transcript is gone from disk"
+    assert row.detail == "no transcript on disk"
 
 
 def test_attaching_a_child_forgets_its_directorys_cached_probe(tmp_path) -> None:
