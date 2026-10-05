@@ -565,7 +565,7 @@ def create_on_peer(
     through the ONE derivation (``session_factory.saved_tool_approval_is_auto`` →
     ``_approval_mode_is_auto``). An IMPLIED request that a peer without the grant
     refuses (``not_permitted``) FALLS BACK to an attended create and carries
-    ``unattended_notice`` in the reply — a full-auto send must not dead-end in a
+    ``unattended_notice`` in the reply — an unattended send must not dead-end in a
     failed create — while nothing durable is left behind by the refusal
     (``relay._op_session_create`` raises above the mint). The fallback's retry is a
     CHANGED BODY and therefore a changed intent, issued as a fresh call rather than a

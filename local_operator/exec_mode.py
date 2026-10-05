@@ -1044,8 +1044,10 @@ def _saved_auto_approval() -> bool:
 
     Delegates the read to ``session_factory.saved_tool_approval_is_auto`` — the ONE
     guarded reader (fresh-root case included: constructing ``ConfigManager`` can
-    CREATE a config directory, and a launch-path check has no business writing), so
-    this call site and the mesh surfaces that ask the same question cannot drift.
+    CREATE a config directory, and a launch- or request-path check has no business
+    writing; since review F2 the malformed case is guarded the same way — a broken
+    file answers ask and is never renamed aside), so this call site and the mesh
+    surfaces that ask the same question cannot drift.
     Best-effort: any failure answers ``False``, which keeps the deny-trap advisory
     ON. That is the safe direction for a launch-time warning: a wrong ``True`` would
     silence advice for a run that then spent its life denied.

@@ -882,7 +882,7 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
     THE GUARDED SIBLING of :func:`_approval_mode_is_auto`, for callers OUTSIDE a
     session build that have to know what a session started here would resolve —
     the mesh surfaces deciding whether a create or a move should REQUEST
-    ``unattended`` (remote-onboarding §6 defect 2). Three properties make it the
+    ``unattended`` (remote-onboarding §6 defect 2). Four properties make it the
     one reader for those callers:
 
     * the derivation is ``_approval_mode_is_auto`` itself — same key, same
@@ -892,16 +892,42 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
       because constructing ``ConfigManager`` materialises the directory and a
       launch- or request-path check has no business writing (the rule
       ``exec_mode._saved_auto_approval`` states for its own call site);
+    * a MALFORMED file (unparseable, or a top level that is not a mapping) also
+      answers ``False`` WITHOUT being constructed — and WITHOUT the rename
+      ``ConfigManager`` would perform (``config.py::_handle_bad_config`` moves
+      the file to ``config.yml.bad.<stamp>``). That repair is right for a launch
+      that must recover; it is wrong for THIS reader, which mesh REQUEST paths
+      call: a create must not move the operator's file. The guard pre-parses
+      with the manager's own ``_parse_config_stream``, so a file its load would
+      repair is refused before the constructor runs. What remains: a rewrite
+      landing between the guard parse and the manager's own read could still be
+      repaired — a same-instant race, stated rather than hidden (review F2);
     * any failure is ``False`` — the fail-closed direction, because a wrong
       ``True`` here asks a PEER for unattended authority nobody needs, and the
       request can only ever be honoured against that peer's own grant anyway.
     """
     try:
-        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+        from local_operator.config import (
+            CONFIG_FILE_NAME,
+            ConfigManager,
+            _parse_config_stream,
+        )
         from local_operator.paths import config_dir
 
         base = Path(root) if root is not None else config_dir()
-        if not (base / CONFIG_FILE_NAME).is_file():
+        config_file = base / CONFIG_FILE_NAME
+        if not config_file.is_file():
+            return False
+        # THE MALFORMED GUARD (review F2): run the manager's OWN parse first,
+        # so a file its load would rename aside answers ask with the file LEFT
+        # IN PLACE. An unreadable file is "ask" too — the constructor below is
+        # only reached when its load would succeed without writing.
+        try:
+            with open(config_file, "r", encoding="utf-8") as handle:
+                loaded = _parse_config_stream(config_file, handle)
+        except Exception:  # noqa: BLE001 — unparseable is "ask", never a write
+            return False
+        if loaded is not None and not isinstance(loaded, dict):
             return False
         return _approval_mode_is_auto(ConfigManager(config_dir=base))
     except Exception:  # noqa: BLE001 — keep the request OFF when unsure

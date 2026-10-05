@@ -1046,9 +1046,10 @@ async def test_a_refused_unattended_request_falls_back_attended_with_the_notice(
     result = response.json()["result"]
     assert result["session_id"] == OTHER
     notice = result["unattended_notice"]
-    assert "created without full-auto" in notice, notice
-    assert f"approve setup for {PEER} in the Mesh tab" in notice, notice
-    assert "prompt for approvals" in notice, notice
+    assert "created attended" in notice, notice
+    assert f"approve setup for {PEER} in the Mesh tab on {PEER}" in notice, notice
+    assert "ask for approvals" in notice, notice
+    assert "covers future sends from this device, not this conversation" in notice, notice
     # The wire shape: one refusal, one retry, ``yolo`` the only difference.
     first, second = attempts
     assert first.pop("yolo") is True

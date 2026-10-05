@@ -5420,7 +5420,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             detail = _create(explicit_yolo or implied_yolo)
         except MeshRefusal as refusal:
             # THE IMPLIED REQUEST FALLS BACK, ATTENDED — the acceptance read
-            # literally: a full-auto send to a node must not dead-end in a failed
+            # literally: an unattended send to a node must not dead-end in a failed
             # create. ONLY THE IMPLIED CASE falls back: when the user typed
             # ``--yolo`` they asked for unattended ITSELF, and swallowing that
             # refusal would hide that the far end refused the thing they asked

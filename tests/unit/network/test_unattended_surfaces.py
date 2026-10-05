@@ -102,7 +102,7 @@ def test_a_config_auto_create_requests_unattended(
     # And nothing extra: the request succeeded, so there is no fallback to explain.
     out = capsys.readouterr().out
     assert "created on cloud-node-1" in out, out
-    assert "full-auto" not in out, out
+    assert "created attended" not in out, out
 
 
 def test_the_implied_request_falls_back_attended_with_the_notice(
@@ -113,8 +113,10 @@ def test_the_implied_request_falls_back_attended_with_the_notice(
     A full-auto send must not dead-end because a grant is missing: the peer
     refused ``yolo`` with ``not_permitted`` (raised above its mint — nothing
     durable behind), the retry drops ``yolo`` only, and the notice says what the
-    session will do instead plus the one grant that changes it. Both the human
-    receipt and the ``--json`` payload carry it; the payload field is additive.
+    session will do instead, how its cards are answered, and what the grant does
+    and does not change — future sends from this device, never a live switch
+    (design round 1, D1). Both the human receipt and the ``--json`` payload carry
+    it; the payload field is additive.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _save_mode(tmp_path, "auto")
@@ -126,8 +128,11 @@ def test_the_implied_request_falls_back_attended_with_the_notice(
     assert [call["yolo"] for call in recorder.calls] == [True, False], recorder.calls
     payload = capsys.readouterr().out
     assert '"unattended_notice"' in payload, payload
-    assert f"approve setup for {PEER} in the Mesh tab" in payload, payload
-    assert "prompt for approvals" in payload, payload
+    assert f"approve setup for {PEER} in the Mesh tab on {PEER}" in payload, payload
+    assert "ask for approvals" in payload, payload
+    # The grant's TRUE scope (design round 1, D1): it governs future sends and
+    # cannot quiet this conversation — the sentence must not read as if it could.
+    assert "covers future sends from this device, not this conversation" in payload, payload
     # The peer's refusal sentence is NOT echoed as the notice: it advises "create
     # it here", which is the advice for a FAILED create, and this one succeeded.
     assert "Until then, create it here" not in payload, payload
@@ -145,8 +150,8 @@ def test_the_fallback_receipt_says_it_on_the_human_lines_too(
     rc = net_cli.main(_parse([]))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "created without full-auto" in out, out
-    assert f"approve setup for {PEER} in the Mesh tab" in out, out
+    assert "created attended" in out, out
+    assert f"approve setup for {PEER} in the Mesh tab on {PEER}" in out, out
 
 
 def test_an_explicit_yolo_keeps_the_refusal(

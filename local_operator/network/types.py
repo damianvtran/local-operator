@@ -164,7 +164,9 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: ``approve`` gates who may ATTEMPT an allow for a session on this device (ask
 #: for a signing challenge; the signature still decides admission), and
 #: ``unattended`` is the right to start sessions here without a per-card gate.
-#: Both are GRANTABLE-ONLY (no role carries them) — see
+#: Both are granted PER MEMBER: no ``read``/``drive`` role carries them — an
+#: ``admin`` member holds the full vocabulary (``ROLE_CAPABILITIES``), so a
+#: consumer reads the member row rather than a role name — and both are in
 #: :data:`GRANTABLE_CAPABILITIES`.
 CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -430,12 +432,13 @@ MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"
 #: deciding device records in a PEER's row in its own record, so it needs no
 #: admin row for exactly those.
 #:
-#: ``approve`` and ``unattended`` are grantable and, like ``broker_credential``,
-#: are in no ROLE: they are the onboarding scopes the operator ticks on the
-#: approval card ("grant: approve", "trust: unattended sessions"), and a role
-#: that carried them silently would widen every existing member the day this
-#: table changed. ``approve`` gates who may ATTEMPT an allow; ``unattended``
-#: gates a session that starts with no card at all.
+#: ``approve`` and ``unattended`` are grantable per member: no ``read``/``drive``
+#: role carries them — the blanket ``admin`` role holds the full vocabulary — and
+#: adding either to a non-admin role silently would widen every existing member
+#: the day this table changed. They are the onboarding scopes the operator ticks
+#: on the approval card ("grant: approve", "trust: unattended sessions").
+#: ``approve`` gates who may ATTEMPT an allow; ``unattended`` gates a session
+#: that starts with no card at all.
 GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
     {
         "list",
@@ -937,15 +940,28 @@ def unattended_fallback_notice(peer: str = "") -> str:
     they must not drift (the rule ``delete_scope_refusal_sentence`` states for its
     own pair). It exists because the request it explains was IMPLIED: the origin's
     ``tool_approval_mode: auto``, not an explicit ask. An implied request that
-    dead-ended in a failed create would make a full-auto send the one thing
-    full-auto cannot do, so the create falls back ATTENDED and this sentence says
-    why the session will ask — and the one gesture that stops it asking.
+    dead-ended in a failed create would make an unattended send the one thing
+    unattended cannot do, so the create falls back ATTENDED and this sentence says
+    what that means: this conversation asks, here is how its cards are answered,
+    and here is what the grant it names actually changes.
+
+    THE GRANT'S TRUE SCOPE (design round 1, D1/D5). ``unattended`` is a
+    create/move-time carry, not a live switch: the fallback's create runs without
+    ``yolo``, so the receiver stamps the session attended (``stamp.unattended =
+    False``, ``relay._op_session_create``) and the carried-auto construction
+    needs that stamp — a grant made AFTER this refusal governs FUTURE sends from
+    this device and cannot quiet the conversation this notice is attached to. The
+    sentence must not imply otherwise, or an operator who makes the grant
+    expecting THIS session to go quiet is surprised — exactly the failure the
+    round-1 review named.
 
     THE REMEDY IS THE REFUSAL'S OWN VERB AND NOUN ("approve setup for <device> in
     the Mesh tab", ``relay._op_session_create``), because it IS that refusal's
-    remedy: one grant, made once, on the device that would run the session. Two
-    surfaces sending the operator to two different places would be worse than
-    either sentence alone.
+    remedy: one grant, made once, on the device that would run the session — and
+    the location is said out loud ("in the Mesh tab on <device>") because the
+    reader is on the REQUESTER's machine and must not have to infer whose tab
+    (design round 1, D4). Two surfaces sending the operator to two different
+    places would be worse than either sentence alone.
 
     ``peer`` is the device as the REQUESTER typed it (a name or an id); empty
     falls back to the description the refusal uses for an unnamed device.
@@ -953,14 +969,16 @@ def unattended_fallback_notice(peer: str = "") -> str:
     named = str(peer or "").strip()
     if named:
         subject = f"{named} has not granted"
-        remedy = f"approve setup for {named} in the Mesh tab"
+        remedy = f"approve setup for {named} in the Mesh tab on {named}"
     else:
         subject = "the device that would run the session has not granted"
-        remedy = "approve that device's setup in the Mesh tab"
+        remedy = "approve that device's setup in the Mesh tab on that device"
     return (
-        f"created without full-auto: {subject} this device 'unattended', so the "
-        "conversation will prompt for approvals there. Its operator makes that "
-        f"grant — {remedy}."
+        f"created attended: {subject} this device 'unattended', so this "
+        "conversation will ask for approvals there — answer its card from an "
+        "attached viewer, or from a device its operator has granted 'approve'. "
+        "The grant covers future sends from this device, not this conversation: "
+        f"its operator makes it — {remedy}."
     )
 
 
