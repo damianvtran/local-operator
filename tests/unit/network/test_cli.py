@@ -1220,6 +1220,10 @@ def test_the_transport_only_pair_reads_complete_once_never_askable_addresses_are
     assert "code" not in machine and "message" not in machine
     warned = [r for r in machine["checks"] if r.get("capability") == "mcp_credential"]
     assert warned and warned[0]["ok"] is False
+    # ... and the row carries its own state cell (F8 residual): a scanner that
+    # reads ROWS — the drill's `ready --json` acceptance — reads `warn`, never
+    # a failure-shaped bare `ok: false`.
+    assert warned[0]["state"] == "warn"
 
     # ... and the human line reads the fourth state: named, not fatal.
     monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
@@ -1228,6 +1232,45 @@ def test_the_transport_only_pair_reads_complete_once_never_askable_addresses_are
     assert "warn readiness mcp_credential cloud-node-1: this device has no MCP login" in human
     assert "— not required for onboarding" in human
     assert "FAIL readiness mcp_credential" not in human
+
+
+def test_the_ready_row_state_cell_reddens_when_the_classification_is_forced_away(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F8 residual, counter-probe: the `state` cell is live, not decoration.
+
+    A warn-only set keeps the aggregate green (`ok: true`, rc 0) while the row
+    itself says `warn`; force the non-gating classification away — the pre-F8
+    reading — and the SAME facts must read `FAIL` and redden the verdict.
+    """
+    checks: list[dict[str, Any]] = [
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "class": "equipment",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "no_credential",
+            "detail": (
+                "this device has no MCP login for https://mcp.slack.com/mcp; " "sign in here first"
+            ),
+            "remedies": [],
+        },
+    ]
+    payload: dict[str, Any] = {"identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 0  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["ok"] is True
+    assert machine["checks"][0]["state"] == "warn"
+
+    # COUNTER-PROBE: the classification forced away — the same row must redden.
+    monkeypatch.setattr(readiness, "NON_GATING_EQUIPMENT", frozenset())
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    reddened = json.loads(capsys.readouterr().out)
+    assert reddened["ok"] is False
+    assert reddened["checks"][0]["state"] == "FAIL"
+    assert "mcp_credential" in reddened["message"]
 
 
 def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_red(
