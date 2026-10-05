@@ -1553,6 +1553,7 @@ async def test_an_unreachable_owner_answers_in_words_not_the_shared_404(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote", detail
+    assert detail["cause"] == "unreachable", detail
     # The clause names the device once and the doctor command once — the failed
     # dial's own sentence ("…is unreachable…; nothing was changed") is NOT
     # appended, because it restated both facts (design round 1, D2).
@@ -1607,6 +1608,141 @@ async def test_a_forwarded_receipt_verdict_keeps_the_local_answer(
     )
     assert unknown.status_code == 409, unknown.text
     assert unknown.json()["detail"] == "unknown completion token", unknown.text
+
+
+@pytest.mark.asyncio
+async def test_a_build_behind_owner_answers_the_update_sentence(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator-hit copy: an owner older than the receipt op must not echo its
+    raw refusal into the user's sentence.
+
+    The stubbed answer is verbatim what the owner's authoriser sends an op it does
+    not dispatch — the sentence the operator met live, internal op name and all.
+    The composed sentence keeps the family's clause, says why it did not clear (an
+    older build) and the one fact that changes the outcome (it clears when that
+    device updates); the op name, the authoriser's words and the "/network doctor"
+    pointer — which diagnoses a link, not a build — stay out.
+    """
+    client, _root = mesh_api
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: {
+            "ok": False,
+            "code": "refused",
+            "message": "'net_session_receipt' is not an operation this build dispatches",
+            "session_id": OTHER,
+        },
+    )
+    response = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert set(detail) == {"code", "cause", "message"}, detail
+    assert detail["code"] == "session_is_remote", detail
+    assert detail["cause"] == "owner_build_behind", detail
+    assert detail["message"] == (
+        f"The unread mark for {OTHER} lives on build-box, and it could not be cleared "
+        "there right now: build-box runs an older build, and the mark clears when "
+        "that device updates."
+    ), detail
+    # The raw refusal is OUT: no internal op name, no authoriser wording.
+    assert "net_session_receipt" not in detail["message"], detail
+    assert "not an operation" not in detail["message"], detail
+    # Named once per clause, as its siblings are.
+    assert detail["message"].count("build-box") == 2, detail
+
+
+def test_the_build_behind_sentence_is_the_authorizers_own_unknown_op_refusal() -> None:
+    """The classifier keys on a SENTENCE, so the sentence is pinned to its producer.
+
+    ``_remote_receipt`` recognises a build-skewed owner by the fixed phrase in the
+    refusal ``Authorizer.check`` gives an op this build does not dispatch, and the
+    cell above feeds that phrase back in. This cell asks the REAL chokepoint — with
+    the receipt op removed from its tables, which is exactly what a build predating
+    the op lacks — and requires the sentence verbatim, so a reworded refusal reddens
+    HERE rather than letting the route silently re-embed the raw copy.
+    """
+    from local_operator.network import authorizer as az
+    from local_operator.network import types as net_types
+
+    class _State(az.NetworkState):
+        def network(self, network_id: str) -> net_types.NetworkRecord:
+            return net_types.NetworkRecord(network_id=network_id, name="home-net", epoch=1)
+
+        def local_session_ids(self) -> set[str]:
+            return set()
+
+    class _Audit:
+        def record(self, event: Any) -> None:
+            pass
+
+    auth = az.Authorizer(_State(), _Audit())
+    context = net_types.LinkContext(
+        link_id="l1",
+        device_id="d_" + "b" * 32,
+        instance_id="i_1",
+        network_id="n_" + "0" * 24,
+        epoch=1,
+        capabilities=frozenset({"view"}),
+        phase="member",
+        peer_addr="127.0.0.1:1",
+    )
+    # POPPED, NOT REBOUND: the authoriser holds the same dict the rest of the build
+    # reads, so removing the entry is exactly what an older build's table lacks.
+    saved = net_types.OP_CAPABILITY.pop("net_session_receipt")
+    try:
+        with pytest.raises(net_types.Refusal) as excinfo:
+            auth.check(context, {"op": "net_session_receipt", "req": 1})
+    finally:
+        net_types.OP_CAPABILITY["net_session_receipt"] = saved
+    assert excinfo.value.code == "unknown_op", excinfo.value
+    assert excinfo.value.sentence == (
+        "'net_session_receipt' is not an operation this build dispatches"
+    ), excinfo.value.sentence
+
+
+@pytest.mark.asyncio
+async def test_a_refusing_owner_keeps_its_sentence_beside_the_refused_cause(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other refusal classes keep their copy byte for byte; only the cause is new.
+
+    A refusal that is NOT the build-skew class still crosses as the owner's own
+    sentence, joined onto the family's clause (never ".."), and the 409 gains only
+    the discriminator a client branches on.
+    """
+    client, _root = mesh_api
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, sid: (PEER, "build-box"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.receipt_on_owner",
+        lambda *a, **k: {
+            "ok": False,
+            "code": "refused",
+            "message": "build-box did not clear it.",
+            "session_id": OTHER,
+        },
+    )
+    response = await client.post(
+        f"/v1/desktop/sessions/{OTHER}/seen", json={"completion_token": REQUEST_ID}
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_is_remote", detail
+    assert detail["cause"] == "refused", detail
+    # The owner's trailing period is joined once, exactly as before this change.
+    assert detail["message"] == (
+        f"The unread mark for {OTHER} lives on build-box, and it could not be cleared "
+        "there right now: build-box did not clear it."
+    ), detail
 
 
 @pytest.mark.asyncio
