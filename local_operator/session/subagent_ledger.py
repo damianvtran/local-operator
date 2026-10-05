@@ -102,8 +102,24 @@ LANE_BOUND_ENV = "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S"
 #: The ``detail`` note a reconcile pass attaches to a record whose lane receipt
 #: survived with no stop receipt and no recorded outcome. This is the reading
 #: that replaces "a row stuck running with nothing to say" after a hard parent
-#: death (SIGKILL/crash).
-LANE_NEVER_SETTLED_DETAIL = "a lane was recorded here and never settled"
+#: death (SIGKILL/crash). Named for the SUBAGENT, which is the noun the surfaces
+#: that render it use (design round 1, D5: "lane" was design-internal
+#: vocabulary appearing in no other user-facing string).
+LANE_NEVER_SETTLED_DETAIL = "a subagent was launched here and never settled"
+
+#: Below this many seconds of idle, the stall clause is OMITTED rather than
+#: printed (design round 1, N2). ``idle 0s`` on a row launched a tenth of a
+#: second ago is honest and says nothing; a reading that is always present but
+#: usually meaningless trains a reader to ignore it.
+IDLE_FLOOR_S = 1.0
+
+#: Cap on the caller's own words recorded as a stop REASON, applied BOTH to the
+#: record field and to the receipt payload (design round 1, R-MINOR-2: the
+#: record was capped and the artifact was not, so a runaway ``message`` from
+#: ``hub op='cancel'`` landed unbounded on disk and the module's "one small file
+#: per attempt" bound stopped being true). The ledger owns it so the two sites
+#: cannot drift.
+REASON_CAP = 2_000
 
 
 def lane_bound_s() -> float:
@@ -287,7 +303,10 @@ def build_stop_payload(
         "deliberate": bool(deliberate),
         "actor": actor,
         "mechanism": mechanism,
-        "reason": reason,
+        # Capped HERE, not at the call site: this is the artifact whose "one small
+        # file per attempt" bound the docstring promises, and a caller that forgets
+        # must not be able to break it.
+        "reason": str(reason)[:REASON_CAP],
         "killer": {"pid": os.getpid(), "argv0": argv0, "command": command},
     }
 
@@ -460,14 +479,26 @@ def idle_clause(
     from "silent for a while" — and must not read as stalled, so ``None`` in
     returns ``None`` out.
 
-    When idle exceeds ``bound_s`` the clause says ``no progress for 47m (bound
-    15m)`` rather than a bare ``idle 47m``: the bound is what makes the reading
-    honest after the config moves, and printing it is the operator's only cue
-    that a reading is advisory and a long tool call can trip it.
+    A FLOOR, because ``idle 0s`` on a row that launched a tenth of a second ago
+    is honest and carries nothing (design round 1, N2): below
+    :data:`IDLE_FLOOR_S` the clause is omitted entirely rather than printed.
+
+    THE OVERDUE FORM IS STRICTLY GREATER, AND NAMES THE BOUND (design round 1,
+    D1/D6). Rendering both sides through :func:`format_duration` made the
+    crossing INVISIBLE and self-contradictory: at 899 s and 901 s against a
+    900 s bound both read ``15m``, so the form changed while the numbers did not
+    and ``no progress for 15m (bound 15m)`` asserted a violation in the same
+    breath as the threshold it violated. Hence the ``>`` — read as "strictly
+    more than this" — and the bound names what it bounds, because a reader who
+    does not already know the lane stall bound exists cannot supply the noun.
     """
     if last_progress_at is None:
         return None
     idle = max(now - float(last_progress_at), 0.0)
+    if idle < IDLE_FLOOR_S:
+        return None
     if bound_s is not None and idle > float(bound_s):
-        return f"no progress for {format_duration(idle)} (bound {format_duration(bound_s)})"
+        return (
+            f"no progress for >{format_duration(bound_s)} (stall bound {format_duration(bound_s)})"
+        )
     return f"idle {format_duration(idle)}"
