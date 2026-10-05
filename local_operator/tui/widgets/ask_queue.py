@@ -155,12 +155,8 @@ FILTER_KEYS: dict[str, str] = {
 #: (design round 1, D1 = UX U2), so each half states its OWN emptiness and names
 #: the half that is holding the rows.
 EMPTY_ALL = "No asks outstanding. The agent is not waiting on anything."
-EMPTY_OUTSTANDING = (
-    "No asks are waiting or moved on. They have all settled — see Settled."
-)
-EMPTY_SETTLED = (
-    "No asks have settled yet. They are all still under Waiting or moved on."
-)
+EMPTY_OUTSTANDING = "No asks are waiting or moved on. They have all settled — see Settled."
+EMPTY_SETTLED = "No asks have settled yet. They are all still under Waiting or moved on."
 
 #: The scope the list is reading: this conversation's queue, or every
 #: conversation's. The TUI has no session-less screen, so the FLEET scope is
@@ -1165,9 +1161,7 @@ class AskQueueList(Widget):
         painted bytes.
         """
         counts = self.counts
-        clause = drawer_headline(
-            self._rows, open_count=self._open_count, truncated=self._truncated
-        )
+        clause = drawer_headline(self._rows, open_count=self._open_count, truncated=self._truncated)
         atoms = [HeaderAtom(f"{ASK_MARKER} ", "accent")]
         subject = SCOPE_SUBJECTS[self._scope] if self._scope == SCOPE_FLEET else ""
         segments: list[HeaderAtom] = []

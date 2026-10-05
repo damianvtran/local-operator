@@ -1194,9 +1194,7 @@ class SessionSidebar(Widget, can_focus=True):
         session owes an answer".
         """
         clean = {
-            str(key): int(value)
-            for key, value in (marks or {}).items()
-            if int(value or 0) > 0
+            str(key): int(value) for key, value in (marks or {}).items() if int(value or 0) > 0
         }
         if clean == self._asking:
             return

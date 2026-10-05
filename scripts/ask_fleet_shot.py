@@ -50,7 +50,10 @@ from local_operator.asks import policy, store  # noqa: E402
 from local_operator.paths import config_dir  # noqa: E402
 from local_operator.resume import SessionRow  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings  # noqa: E402
+from local_operator.tui.session_catalog import (  # noqa: E402
+    CatalogEntry,
+    SidebarSettings,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
