@@ -45,6 +45,7 @@ from local_operator.tui.widgets.session_picker import (
     OUTER_INSET_COLS,
     OUTER_INSET_ROWS,
     PASTE_QUERY_MAX_CHARS,
+    PICKER_FLEET_ASKS,
     PICKER_MIN_WIDTH,
     STACK_BELOW_COLS,
     SessionPickerScreen,
@@ -4725,3 +4726,132 @@ def test_the_agent_opened_mark_outranks_started_on_a_narrow_meta_row() -> None:
         assert _clocks_row("3h ago", "1m ago", width) == _clocks_row(
             "3h ago", "1m ago", width, agent_opened=False
         )
+
+
+class _Click:
+    """The mouse event shape the picker's own hit tests read."""
+
+    def __init__(self, x: int, y: int) -> None:
+        self.button = 1
+        self.x = x
+        self.y = y
+        self.screen_x = x
+        self.screen_y = y
+
+    def stop(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_pressing_the_ask_count_opens_the_fleet_list() -> None:
+    """U2: with the sidebar hidden this count is the only fleet surface there is.
+
+    Round 1 measured it as a statement with no door: a number saying another
+    conversation is waiting on the user, with nothing to press. It is a press
+    target now, on its own idiom — its own cells only, not the whole chrome row.
+    """
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_asks_total(3)
+        await pilot.pause()
+        painted = screen._filter_text().plain
+        assert "asks: 3" in painted
+        span = screen._asks_span
+        assert span is not None and painted[span[0] : span[1]] == "asks: 3"
+        # A press ONE CELL LEFT of the note (the separator) does nothing to the
+        # door — the target is the note's own cells.
+        screen.on_click(_Click(int(screen._filter.region.x), int(screen._filter.region.y)))
+        await pilot.pause()
+        assert app.chosen == []
+        x = int(screen._filter.content_region.x) + span[0]
+        y = int(screen._filter.region.y)
+        screen.on_click(_Click(x, y))
+        await pilot.pause()
+        assert app.chosen == [PICKER_FLEET_ASKS]
+
+
+@pytest.mark.asyncio
+async def test_the_picker_ask_total_can_be_restated_after_an_off_thread_read() -> None:
+    """F5: the screen opens on the poll's answer and is corrected a beat later."""
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert "asks:" not in screen._filter_text().plain
+        screen.set_asks_total(7)
+        await pilot.pause()
+        assert screen._asks_total == 7
+        painted = screen._filter_text().plain
+        assert "asks: 7" in painted
+        # ...and to ZERO, where the note (and so the door) is absent.
+        screen.set_asks_total(0)
+        await pilot.pause()
+        assert "asks:" not in screen._filter_text().plain
+        assert screen._asks_span is None
+
+
+def _painted_span_style(text, index: int) -> Style | None:
+    """The ``Style`` of the span covering ``index``, or None.
+
+    ``Text.spans`` carries ``Style | str`` — the string form is a style NAME and
+    has no colour or underline to read — so anything that is not a ``Style``
+    answers None rather than being returned to a caller that would attribute-error
+    on it (pyright is what caught this).
+    """
+    for span in text.spans:
+        if span.start <= index < span.end:
+            return span.style if isinstance(span.style, Style) else None
+    return None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_note_lights_and_takes_the_hand_like_the_door_it_is() -> None:
+    """D14/U12: under the default config this note IS the fleet surface.
+
+    With `tui.sidebar_visible=False` the picker's count is the only fleet surface
+    a user ever sees, and it is a real press target — but it was painted ``dim``,
+    byte-identically to the inert ``N sessions`` legend two cells to its right,
+    with the same ``default`` pointer and no shape under the pointer. Measured:
+    ``dim`` on this row's ground is 2.72:1 on the light ramp. The door now wears
+    the sidebar note's own affordance (a style on its cells, never new text) and
+    an ink that clears the ground on both ramps.
+    """
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_asks_total(3)
+        await pilot.pause()
+        span = screen._asks_span
+        assert span is not None
+        painted = screen._filter_text()
+        style = _painted_span_style(painted, span[0])
+        assert style is not None and style.color is not None
+
+        def truecolor(value) -> tuple[int, int, int]:
+            colour = value if isinstance(value, Color) else Color.parse(str(value))
+            return colour.get_truecolor()
+
+        door = theme_mod.semantic_color("muted")
+        dim = theme_mod.semantic_color("dim")
+        assert truecolor(style.color) == truecolor(door), (style, door)
+        assert truecolor(style.color) != truecolor(dim), "the door wears the legend's ink"
+        assert style.underline is not True, "the resting state is not underlined"
+
+        # UNDER THE POINTER: the hand, and the underline on exactly the note's
+        # own cells (the same span the press target reads).
+        x = int(screen._filter.content_region.x) + span[0]
+        y = int(screen._filter.region.y)
+        screen.on_mouse_move(_Click(x, y))
+        await pilot.pause()
+        assert screen._asks_hover is True
+        assert screen.styles.pointer == "pointer"
+        hovered = _painted_span_style(screen._filter_text(), span[0])
+        assert hovered is not None and hovered.underline is True
+        # The separator one cell left is NOT the door: no shape, no hand.
+        screen.on_mouse_move(_Click(x - 1, y))
+        await pilot.pause()
+        assert screen._asks_hover is False
+        assert screen.styles.pointer == "default"

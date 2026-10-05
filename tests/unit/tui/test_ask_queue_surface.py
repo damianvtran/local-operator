@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.color import Color
+from rich.style import Style
 
 from local_operator.asks import policy
 from local_operator.tui.app import ASK_ANSWER_PLACEHOLDER, OperatorApp
@@ -487,10 +489,10 @@ async def test_the_sidebar_mark_is_painted_for_the_current_session(enabled):
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         sidebar = app._session_sidebar
-        assert sidebar._asking == (session.session_id, 1)
+        assert sidebar._asking == {session.session_id: 1}
         app._sync_ask_surface([])
         await _settle(pilot)
-        assert sidebar._asking == (session.session_id, 0)
+        assert sidebar._asking == {}
 
 
 async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
@@ -508,7 +510,7 @@ async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?", status="timed_out")]))
         await _settle(pilot)
         sidebar = app._session_sidebar
-        assert sidebar._asking == (session.session_id, 1)
+        assert sidebar._asking == {session.session_id: 1}
         assert app._ask_bar.display is True
 
 
@@ -786,12 +788,16 @@ async def test_a_click_on_a_row_opens_that_ask(enabled):
 @pytest.mark.parametrize(
     "size, kept",
     [
-        # At 80 columns the row still fits the irreversible action's own hint;
-        # at 60 it fits the primary one and no more. Both are asserted, because
-        # "which hint survives" is the part of the sacrifice order a reader has
-        # to be able to predict.
-        ((80, 24), "d decline"),
-        ((60, 20), "enter answer"),
+        # At 130 columns the row still fits the irreversible action's own hint
+        # (`d decline`) alongside the primary one; at 100 the CONTROL and the
+        # drawer's count are what survives; at 60 the control alone, because a
+        # filtered view that cannot be un-filtered is worse than an unadvertised
+        # key — `esc` still collapses from the composer and `d` still declines,
+        # and both are still true when unspoken. Asserting all three makes the
+        # sacrifice order one a reader can predict rather than guess.
+        ((130, 30), "d decline"),
+        ((100, 30), "Waiting or moved on"),
+        ((60, 20), "Settled"),
     ],
 )
 async def test_the_list_header_stays_one_line_and_never_splits_a_hint(enabled, size, kept):
@@ -799,7 +805,10 @@ async def test_the_list_header_stays_one_line_and_never_splits_a_hint(enabled, s
 
     It is also the row the hit test counts from, so a header that wraps shifts
     every pointer hit below it — the two findings are one cause. Hints are spent
-    whole, from the right, and the row is ``no_wrap``.
+    whole, from the right, and the row is ``no_wrap``. The filter control is
+    what the row keeps longest: design §4's three-way filter is the operator's
+    own ask, and it is the only part of the row that is a live destination
+    rather than a statement.
     """
     session = _AskSession()
     app = _app(session)
@@ -981,13 +990,27 @@ async def test_a_late_answer_leaves_the_answerable_surfaces(enabled):
             ask_rows([_row("a1", "Deploy now?", status="late"), _row("a2", "Which region?")])
         )
         await _settle(pilot)
-        assert [row.ask_id for row in app._ask_rows] == ["a2"]
+        # The late row is KEPT in the list (design §4: the surface shows the
+        # whole queue and the filter picks a half), so what "leaves the
+        # answerable surfaces" means is now narrower and sharper: it leaves the
+        # set the user OWES an answer on.
+        assert [row.ask_id for row in app._open_ask_rows()] == ["a2"]
+        assert [row.ask_id for row in app._ask_rows] == ["a1", "a2"]
         assert "1 question waiting" in app.query_one(AskBar).render().plain
         assert "timed out" not in app.query_one(AskBar).render().plain
 
 
-async def test_the_bar_and_the_list_speak_one_count(enabled):
-    """UX U4 / QA Q4 / design D7: two totals for one queue, three rows apart."""
+async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
+    """UX U4 / QA Q4 / design D7, re-expressed by design §4's two registers.
+
+    Two totals for one queue, three rows apart, is the defect this file's
+    round-1 fix exists to prevent — and the fix was to make them ONE count.
+    Design §4 splits them again, deliberately and in one direction only: the
+    bar keeps the CHIP register (what the agent is still waiting on) and the
+    list takes the DRAWER register (what the drawer is showing). What must NOT
+    happen is the two counts disagreeing about the same population, so the
+    assertions below pin the halves they name rather than one shared string.
+    """
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
@@ -1000,10 +1023,15 @@ async def test_the_bar_and_the_list_speak_one_count(enabled):
         app._expand_asks()
         await _settle(pilot)
         header = app.query_one(AskQueueList).render().plain.splitlines()[0]
-        # The SAME count words, from one function, on both surfaces.
-        counts = "1 question waiting · 1 ask timed out"
-        assert counts in bar_text, bar_text
-        assert counts in header, header
+        # The CHIP: only the open half is "waiting"; the timed-out one is named
+        # as what it is.
+        assert "1 question waiting · 1 ask timed out" in bar_text, bar_text
+        # The DRAWER: a mixed queue spells BOTH halves, in the drawer's words.
+        assert "1 waiting, 1 moved on" in header, header
+        # Same rows, same totals: the two registers describe ONE queue.
+        assert "All · 2" in header, header
+        assert "Waiting or moved on · 2" in header, header
+        assert "Settled · 0" in header, header
 
 
 async def test_the_bar_keeps_its_chevron_at_eighty_columns(enabled):
@@ -1554,3 +1582,43 @@ def test_an_answer_that_landed_late_takes_the_warning_ink():
     # The same weight as the timeout row, which is the whole point of the ink.
     assert late._summary_ink() == AskResponseBlock({"text": "…"}, kind="timeout")._summary_ink()
     assert late._build_content(80).plain
+
+
+async def test_the_ask_marker_paints_the_derived_ink_not_the_raw_accent(enabled):
+    """F16: the palette gate guards the TOKENS; this guards the PAINT.
+
+    `test_palette_contrast.test_the_ask_panel_reads_on_its_own_ground` proves the
+    derived `chip-*` inks clear the panel's ground, but nothing tied
+    `AskQueueList.render` to them — so a revert to raw `accent`/`success` would
+    keep that gate green (the pre-fix code failed it only because the two tokens
+    did not exist). Asserted on the LIGHT ramp, where the two inks are different
+    values, so the assertion discriminates: the marker's own painted span must
+    carry the derived ink and not the raw hue.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        # TWO asks: one expands to its CARD, and this test is about the LIST
+        # (whose header paints the marker this asserts on).
+        app._sync_ask_surface(ask_rows([_row("a1", "Ship it?"), _row("a2", "And to where?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app._apply_theme("light")
+        await _settle(pilot)
+        derived = theme_mod.semantic_color("chip-live")
+        raw = theme_mod.semantic_color("accent")
+        assert derived != raw, "the light ramp is the one where these differ"
+        listing = app.query_one(AskQueueList)
+        text = listing.render()
+        marker_at = text.plain.index(ASK_MARKER)
+        span = next((span for span in text.spans if span.start <= marker_at < span.end), None)
+        assert span is not None, "the marker is painted with no style at all"
+        colour = span.style.color if isinstance(span.style, Style) else None
+        assert colour is not None
+        resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+        painted = resolved.get_truecolor()
+        assert painted == Color.parse(derived).get_truecolor(), (painted, derived)

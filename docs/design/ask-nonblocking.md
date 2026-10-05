@@ -1077,3 +1077,145 @@ between the answer's recording and its delivery.
   copy; a race's loser keeps `already answered by <surface>`; second `respond` and
   repeated `answer_one` byte-unchanged; the log shows `answered`+`revised` with ONE
   response row; kill-switch refusal without a queue.
+
+## 11. Amendment (2026-10-05): TUI fleet scope, filter, marks
+
+**Scope seam — one list, two scopes.** The TUI has no session-less screen, so `AskQueueList` is the ONE
+expanded surface and is told its SCOPE by the door it was opened from: the bar / `f4` opens *This
+conversation*, the sidebar footer's `asks: N` note opens *All conversations*. The list paints the
+subject and offers no toggle (a second scope store, a second list and a second entrance are all
+rejected). The fleet rows come from `asks.store.index_asks` — read ONCE, off-thread, when that scope
+opens; never on the 2 s poll, because the store's own comment puts a cap before that read "ever feeds
+a frame". Leaving the surface (Esc/`f4`) leaves the scope with it.
+
+**Total on the fleet surfaces.** The fleet total is the SUM of every session's outstanding count
+(index tally), unioned per session with the current session's live wire count. It is painted on the
+sidebar's footer note (`asks: N`, only while N > 0 — absence is not emptiness) and on the session
+picker's chrome row, and never as a chip of its own. `tui.sidebar_visible` still defaults off, so a
+user with the sidebar hidden sees the total only in the picker.
+
+**Marks.** `session_sidebar.set_asking` now takes `{session_id: count}` and marks EVERY session whose
+outstanding set (open ∪ timed_out — the same set the wire's `asks_open` publishes) is non-empty, one
+glyph cell per row, under the existing `!` gate mark. The index read rides the sidebar's own poll,
+throttled to 10 s.
+
+**Rows, filter, registers.** `ask_rows` no longer drops settled rows: it carries `delivered` and the
+halves are `pending` (answerable ∪ delivering) and `settled`. A settled row is a READ-ONLY one-liner —
+Enter/`d`/`x` are inert and it wears its status as a WORD in place of the status glyph. The one-line
+header carries the three segments `All · N` / `Waiting or moved on · N` / `Settled · N` (`1`/`2`/`3`,
+`[`/`]`, and the segments are press targets), and its count is the DRAWER register: `N waiting, M moved
+on` when mixed, else the chip clause (`queue_headline`), with the backend's `asks_open` and no split on
+a truncated frame. The bar keeps the chip register unchanged. Each empty half states its own sentence,
+so a filtered view can never read as an empty queue. At the narrow floor the drawer clause yields
+first, then the scope subject; the filter control yields last, because a view that cannot be
+un-filtered is worse than an unadvertised key.
+
+**Answering a fleet row.** By the ROW's own `session_id`, never by what is on screen: a row of the
+adopted session keeps the owner contract, and every other row goes through
+`engage_session_client(config_dir(), session_id, AskErrand(ask_id))` → `ask_respond` / `ask_decline` /
+`ask_dismiss` → `close()` in a `finally`, on a Textual worker, with an in-flight row state sized for
+engage 30 s + ack 15 s and no double-fire. Refusals arrive as the ask's own sentence
+(`asks/render.refusal_copy`) at the row. No HTTP, no new transport, no new timer.
+
+**Client-read-only.** No wire change, no new config key, no new composition root: this reads the index
+the desktop's aggregate route already reads, and answers through the ops that already shipped.
+
+### 11.1 Amendment (2026-10-05, round 2): the review round's rulings
+
+**Exact labels.** Scope subjects are `This conversation` / `All conversations`; the segments are
+`All · N` / `Waiting or moved on · N` / `Settled · N`; the three empty sentences are the desktop's,
+verbatim. The drawer's single-half clauses now speak the DRAWER's vocabulary — `N questions moved on`
+(never the chip's `N asks timed out`), because the segments above and the rows below already say
+"moved on" — and the all-settled state takes the desktop drawer's own constant, `All asks settled`. The
+`· K urgent` suffix on the mixed clause stays (the desktop states urgency in an sr-only channel; the
+TUI has none, so it is stated in words). The bar keeps the chip register unchanged.
+
+**The delivering half (§10) is PENDING and never SETTLED.** An answered-but-undelivered ask sits in the
+`Waiting or moved on` segment; the session's MARK cleared when it was answered (§4.8's outstanding set is
+`open`+`timed_out`: it tracks the debt the USER owes, and this one was paid); its drawer clause is `N answer(s) delivering
+— the agent will be told`, in §5's words and
+deliberately WITHOUT the desktop's "you can still change
+it" (this surface has no revise wire — recorded as a deferred follow-up, not silently promised). Its row
+is a read-only one-liner until delivery (not answerable — a second answer is what §10's window exists to
+prevent) and its tail says `answered, delivering` / `answered late, delivering`.
+
+**Registers and contrast.** Every settled/delivering row carries its status as a word after the row's own
+`·` separator, so a muted status cannot read as part of the question. The panel's state inks are the
+derived `chip-live` / `chip-success` / `chip-warning` family (`theme._fill_chip_live`), which is the
+family the palette gate now checks against `overlay` — the brand light ramp's accent and success both sat
+under the state floor there, and the dark ramp is byte-identical (there the derived ink IS the hue).
+
+**Doors, in keyboard and mouse.** The fleet scope keeps ONE entrance in the model — the app's
+`action_open_fleet_asks` — and now has three gestures onto it: the sidebar's footer note (mouse), the
+sidebar's own `ctrl+f` in F9 mode (taught on the same footer line, beside `ctrl+k pin`), and the session
+picker's `asks: N` chrome (a press target on its own cells). Pressing any of them while a fleet list is
+already up RE-READS in place: the mounted list is re-pointed, never re-mounted (a second mount raised
+`DuplicateIds`, which ends the session). The narrow-floor scope cue is the ROW TAIL (`handle · deadline`)
+— with no room for the subject, the rows are what say which conversation a queue belongs to.
+
+**Truncated frames.** The clause states the backend tally (`N outstanding`) and withholds the split; the
+three segments keep their live counts, because they are the filter control the operator asked for. The
+two disagree on screen by design — the segments describe the rows this frame carries, the clause the
+queue behind them — and that difference is the honest signal that the list is a prefix.
+
+**Hints follow the view.** The header's hint set is derived from the VISIBLE rows: `enter`/`d` need an
+answerable row, `x` needs a moved-on one (dismiss is offered on a timed-out ask alone), `esc` needs
+nothing. The spend order is by irreversibility — `d decline` outlives `enter answer`, which already has
+the `❯` cue — so at 100×30 the irreversible key is named again, as it was before this work.
+
+**Client-read-only, restated.** No wire change, no new config key, no new timer, no HTTP client in the
+TUI: this reads the index the desktop's aggregate route reads and answers through the ops that shipped.
+
+## 11.2 Amendment (2026-10-05, round 2): the residuals, and four corrections
+
+Round 2's review, QA, design and UX passes left F12–F18, D11–D15 and U12–U14. What changed, and what is
+now recorded rather than claimed:
+
+**Corrections (the note was wrong, not the code).** (1) A **delivering** row does **not** hold the
+session's mark: the mark is §4.8's outstanding set (`open` + `timed_out`) unioned with the current
+session's answerable rows, so it clears the moment the user answers — the debt it tracks is the USER's,
+and this ask's was paid. Four sites said otherwise; all four are fixed here and in the code. (2) At
+**100×30** the fleet header's two-rung ladder drops the **subject** as well as the drawer clause, so the
+fleet and session lists are textually identical above the rows there; the scope tell at that width is the
+**row handles** (`handle · deadline`), which `test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width`
+pins. (3) The `ctrl+f asks` teacher needed 46 cells against a footer whose content saturates at 43, so it
+rendered **nowhere**; the chord's rung now outranks the pin's (the pin has a second teacher on `/help`,
+the chord had none) and spends two lengths — `ctrl+f asks` from a **120-column terminal** (the first
+width whose 34 content cells fit it; 130 is where the footer saturates at 43), `ctrl+f` at the 29-cell
+floor (a 100-column terminal, the width the door's own `f9` path produces), where the note beside it
+supplies the object. (4) The `ctrl+f` shadow is **declined** while an aside is
+open (`check_action` → the app's `fork_aside`), because the aside's own copy advertises that fold; and
+`/help`'s `ctrl+f` line now names both meanings.
+
+**The fleet tally is a function of the INDEX, not of the writer that ran last (F12).** The list's count
+facts ride with its rows on every write — the door, the re-read after an answer, and the frontend
+snapshot — so a capped header cannot revert to a row-derived split one frame later.
+
+**The clock follows the ACTIVE SCOPE (F14).** `_sync_ask_tick` arms on the scope's rows, and the door
+re-evaluates it: a fleet list whose rows belong to other sessions has a countdown that moves.
+
+**The sidebar's mark takes the derived ink too (D12).** The panel moved to `chip-*` in round 1 and the
+sidebar did not: a focused cursor row paints `tint-select-hi`, a ground in neither derivation, where raw
+`accent` measures 3.96:1 on the light ramp — under the repo's own 4.0 state floor — 14 of 54 ramps under
+it, two under 3:1. `chip-live` clears all four sidebar grounds on every ramp (worst 4.66, `everforest`),
+and `test_the_ask_marker_reads_on_every_sidebar_ground` is the pin. **The accepted residual (round 3:
+D16):** on the light ramp the derived ink IS the ramp's primary text colour, so the mark on a row whose
+title paints `fg` is the same ink as that title — the mark is carried there by its glyph and its cell,
+not by hue, exactly as the panel's light ramp is (Ruling 1). **D13 recorded, not fixed:** the
+focused sidebar's whole footer line is under the `dim` floor on the light ramp (3.35:1 against 3.4; 11
+ramps miss on `tint-select`, 27 on `tint-select-hi`) — that ground is outside the gate's set for every
+`dim` consumer, and re-flooring 11 curated ramps for 0.05 is not this PR's call.
+
+**The picker's count is a DOOR and now reads like one (D14/U12).** Under the default
+`tui.sidebar_visible = False` it is the only fleet surface a user sees, and it was painted `dim` —
+byte-identical to the inert `N sessions` legend beside it (2.72:1 light), with the same `default`
+pointer. It wears the sidebar note's affordance (the hand, and an underline on its own cells under the
+pointer) and the `muted` ink, which clears its ground on both ramps.
+
+**Evidence, fixed rather than re-worded (D11).** `visual_capture.isolate_capture` pops `NO_COLOR` by
+design, so the round-2 "NO_COLOR frame" was a byte-identical copy of the colour one. The colour-less
+render is now an explicit shot MODE, re-asserted above the app import, and the frame differs (md5
+`ecd382615de0…`): the product was always fine colourlessly — the artifact was the lie.
+
+**Client-read-only, restated.** Still no wire change, no new config key, no new timer, no HTTP client in
+the TUI.
