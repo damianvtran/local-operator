@@ -396,6 +396,7 @@ async def test_a_moot_withdraw_through_the_tool_settles_the_ask_and_injects_noth
             from local_operator.session.frontend_state import ask_wire
 
             rows, outstanding = ask_wire(session)
+            assert rows is not None
             assert outstanding == 0
             assert [row["status"] for row in rows] == [store.STATUS_WITHDRAWN]
             # The receipt reached the model in its own words, not a paraphrase.
@@ -471,6 +472,7 @@ async def test_answered_in_chat_records_the_users_words_and_delivers_the_respons
             from local_operator.session.frontend_state import ask_wire
 
             rows, outstanding = ask_wire(session)
+            assert rows is not None
             assert outstanding == 0
             assert rows[-1]["status"] == store.STATUS_ANSWERED
             assert rows[-1]["delivered"] is True
