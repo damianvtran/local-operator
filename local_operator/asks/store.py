@@ -81,6 +81,17 @@ EVENT_DISMISSED = "dismissed"
 #: an ``answered`` row to supersede — the fold never honours a revision alone.
 EVENT_REVISED = "revised"
 
+#: THE WITHDRAWAL EVENT (design §12). Agent-authored: the asker retracting a
+#: question it no longer needs answered. Terminal-on-write like ``dismissed``,
+#: with ONE carve-out spelled in :func:`fold`: every user-act terminal row
+#: present (``answered``, ``declined``, ``dismissed``) outranks a later
+#: ``withdrawn`` — the user's own acts are never overridden by the asker's
+#: retraction. Unknown to builds older than this one, deliberately: an old fold
+#: skips a kind it does not branch on (the store's "corrupt or unknown ⇒
+#: tolerated" contract), so a log carrying these rows stays readable
+#: everywhere.
+EVENT_WITHDRAWN = "withdrawn"
+
 #: Every status a folded ask can hold (design §2.2, §4).
 STATUS_OPEN = "open"
 STATUS_ANSWERED = "answered"
@@ -88,11 +99,12 @@ STATUS_DECLINED = "declined"
 STATUS_TIMED_OUT = "timed_out"
 STATUS_LATE = "late"
 STATUS_DISMISSED = "dismissed"
+STATUS_WITHDRAWN = "withdrawn"
 STATUS_EXPIRED = "expired"
 
-#: The statuses whose transcript row(s) are still injected; a `dismissed` or
-#: `expired` ask injects NOTHING and must never attempt a delivery (else
-#: ``reconcile`` loops forever on a row it can never write).
+#: The statuses whose transcript row(s) are still injected; a `dismissed`,
+#: `withdrawn` or `expired` ask injects NOTHING and must never attempt a
+#: delivery (else ``reconcile`` loops forever on a row it can never write).
 INJECTING_STATUSES = frozenset({STATUS_ANSWERED, STATUS_DECLINED, STATUS_TIMED_OUT, STATUS_LATE})
 
 #: THE OUTSTANDING SET — the asks the user can still act on, and so the asks
@@ -101,8 +113,9 @@ INJECTING_STATUSES = frozenset({STATUS_ANSWERED, STATUS_DECLINED, STATUS_TIMED_O
 #: accepted and attributed — design §2.2, the spec's item 3: "a late answer is
 #: still attributable and the agent still receives it"). It stops being
 #: outstanding the moment it is SETTLED: ``answered``/``declined`` (the user
-#: responded), ``dismissed`` (the user put a timed-out ask away) and ``expired``
-#: (an answer or deadline past the 7-day window that injects nothing).
+#: responded), ``dismissed`` (the user put a timed-out ask away), ``withdrawn``
+#: (the asker retracted the question — design §12) and ``expired`` (an answer or
+#: deadline past the 7-day window that injects nothing).
 #:
 #: ONE AUTHORITY, deliberately. Before this constant the same two-status rule
 #: was spelled in four places — ``ask_wire``'s tally (open-only, which dropped a
@@ -356,8 +369,9 @@ def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool
     per-status, straight off the §2.2 delivery table: ``answered``/``declined``/
     ``late`` need the RESPONSE row (for `late` the deadline notice delivers
     nothing — a timed-out ask answered late flips true→false until its row
-    lands), ``timed_out`` needs the deadline row, ``dismissed``/``expired`` are
-    true when any row was written before, and ``open`` owes nothing.
+    lands), ``timed_out`` needs the deadline row, ``dismissed``/``withdrawn``/
+    ``expired`` are true when any row was written before, and ``open`` owes
+    nothing.
 
     STICKY by construction otherwise: rows are never deleted from a transcript,
     so once the required row is durable this cannot flip back — the one
@@ -372,9 +386,9 @@ def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool
         return timeout_row_id(ask_id) in present
     if status == STATUS_OPEN:
         return False
-    # dismissed / expired (and any status a future fold adds): any row is the
-    # delivered fact — this is what keeps an answered ask from flipping back
-    # when it folds to `expired` seven days later.
+    # dismissed / withdrawn / expired (and any status a future fold adds): any
+    # row is the delivered fact — this is what keeps an answered ask from
+    # flipping back when it folds to `expired` seven days later.
     return response_row_id(ask_id) in present or timeout_row_id(ask_id) in present
 
 
@@ -426,6 +440,14 @@ def fold(
     ``(events, now)``, so no two readers can disagree about an ask — and the
     answer-vs-deadline race is decided here rather than by which write landed
     first.
+
+    ``withdrawn`` (design §12) is terminal-on-write from the moment it appears,
+    with ONE carve-out: every user-act terminal row present (``answered``,
+    ``declined``, ``dismissed``) outranks it, in either write order. The asker
+    retracts; the user's own acts are never overridden by that retraction — a
+    racing withdrawal loses, and only a withdrawn row with no such sibling
+    folds to ``withdrawn``. The check sits below every user-act branch (and
+    above the deadline branches, which must never judge a retracted ask).
     """
     records: list[dict[str, Any]] = []
     for ask_id in _asks_in_order(events):
@@ -437,6 +459,7 @@ def fold(
         answered = _first(events, ask_id, EVENT_ANSWERED)
         declined = _first(events, ask_id, EVENT_DECLINED)
         dismissed = _first(events, ask_id, EVENT_DISMISSED)
+        withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
         revised = _last(events, ask_id, EVENT_REVISED)
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
@@ -455,6 +478,14 @@ def fold(
             status = STATUS_DISMISSED
         elif answered is not None:
             status = STATUS_LATE if now <= window_end else STATUS_EXPIRED
+        elif withdrawn is not None:
+            # THE ONE CARVE-OUT IS ABOVE, BY CONSTRUCTION (design §12): every
+            # user-act branch (answered in-window, declined, dismissed,
+            # answered-late) outranks this one, so a withdrawn row folds to
+            # ``withdrawn`` only when the log holds no such row — in either
+            # write order. Below it, the deadline branches never run for a
+            # retracted ask: ``withdrawn`` is terminal-on-write.
+            status = STATUS_WITHDRAWN
         elif expires_at <= now <= window_end:
             status = STATUS_TIMED_OUT
         elif now > window_end:
@@ -826,6 +857,7 @@ __all__ = [
     "EVENT_DECLINED",
     "EVENT_DISMISSED",
     "EVENT_QUEUED",
+    "EVENT_WITHDRAWN",
     "INJECTING_STATUSES",
     "LATE_WINDOW_S",
     "OUTSTANDING_STATUSES",
@@ -836,6 +868,7 @@ __all__ = [
     "STATUS_LATE",
     "STATUS_OPEN",
     "STATUS_TIMED_OUT",
+    "STATUS_WITHDRAWN",
     "append_event",
     "ask_ids",
     "asks_dir",

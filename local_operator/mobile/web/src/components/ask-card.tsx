@@ -575,9 +575,9 @@ export function AskCard({
 					{/* NO DISMISS HERE, deliberately (agent review round 1, R1): dismiss is
 					    a `timed_out` action and a timed-out ask renders in the ANSWERABLE
 					    branch above, so every status that reaches this branch (answered,
-					    late, declined, dismissed, expired, unknown) can only be refused.
-					    An EXPIRED ask additionally keeps no error register at all (§5) —
-					    the remedy is in the state line. */}
+					    late, declined, dismissed, withdrawn, expired, unknown) can only
+					    be refused. An EXPIRED ask additionally keeps no error register at
+					    all (§5) — the remedy is in the state line. */}
 				</>
 			)}
 		</div>

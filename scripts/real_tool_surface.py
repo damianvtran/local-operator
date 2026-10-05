@@ -112,6 +112,12 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         ask_user=lambda *args, **kwargs: None,  # pyright: ignore[reportArgumentType]
         # ``ask`` additionally requires an attached interactive surface.
         has_ui=True,
+        # The agent-side settle (design §12): its builder is createIf-gated on
+        # the callable the session binds while the queued engine is live — the
+        # DEFAULT arm since the flip — so leaving it unbound here would measure
+        # a surface no user has (the exact defect this module's docstring
+        # records for the project registry and the patience class).
+        withdraw_ask=lambda *args, **kwargs: {"ok": True},
     )
 
 

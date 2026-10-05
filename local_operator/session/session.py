@@ -627,6 +627,11 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "monitor",
     "hub",
     "ask",
+    # The agent-side settle rides the same queue §2.1's tool does (design §12):
+    # its builder returns ``None`` without one, so the merge is what mounts it
+    # on a live queued session — and a child, which never holds the hook, keeps
+    # not paying for it.
+    "ask_withdraw",
     # The sessions tool is gated on `subagent_launcher` — a field only a real
     # Session's per-turn context carries — so the merge below is what puts it
     # on a live session's inventory (and `harness/subagent`'s derived prune is
@@ -4929,9 +4934,9 @@ class Session:
 
         ``names`` exists because this merge is ALSO the rescue for a capability
         that arrives after construction, and those must not rescue each other:
-        :meth:`set_ask_handler` merges ``("ask",)`` alone, so installing a
-        question surface cannot resurrect a ``wake`` or ``task`` tool that
-        ``_build_child_session`` deliberately pruned from a subagent's
+        :meth:`set_ask_handler` merges ``("ask", "ask_withdraw")`` alone, so
+        installing a question surface cannot resurrect a ``wake`` or ``task``
+        tool that ``_build_child_session`` deliberately pruned from a subagent's
         inventory.
         """
         try:
@@ -8852,9 +8857,14 @@ class Session:
             self._ask_queue.dispose()
             self._ask_queue = None
         if handler is not None:
-            self._merge_capability_tools(("ask",))
-        elif any(tool.name == "ask" for tool in self._tools):
-            self.refresh_tools([tool for tool in self._tools if tool.name != "ask"])
+            # BOTH queued-ask tools are gated on the queue this hook creates, so
+            # installing the hook rescues the pair: §2.1's ``ask`` and §12's
+            # ``ask_withdraw``.
+            self._merge_capability_tools(("ask", "ask_withdraw"))
+        elif any(tool.name in ("ask", "ask_withdraw") for tool in self._tools):
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name not in ("ask", "ask_withdraw")]
+            )
 
     # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
 
@@ -8925,6 +8935,19 @@ class Session:
         if self.ask_queue() is None:
             return None
         return self._enqueue_ask
+
+    def _ask_withdraw_callable(self) -> Callable[..., Any] | None:
+        """The tool's withdraw door, or ``None`` on the BLOCKING arm (design §12).
+
+        Bound per turn beside :meth:`_ask_enqueue_callable` and ``None`` under
+        exactly the same two conditions, so ``build_ask_withdraw_tool`` decides
+        by the presence of THIS callable — one fact rather than a flag read in
+        two places. The agent-side settle is the same engine's second door, so
+        it cannot exist where the engine does not.
+        """
+        if self.ask_queue() is None:
+            return None
+        return self.withdraw_ask
 
     def _enqueue_ask(
         self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
@@ -9115,6 +9138,35 @@ class Session:
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.dismiss(ask_id, by=by)
+
+    def withdraw_ask(
+        self,
+        ask_id: str,
+        *,
+        reason: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        message_id: str | None = None,
+        by: str = "agent",
+    ) -> dict[str, Any]:
+        """THE AGENT-SIDE SETTLE (design §12), mirroring :meth:`respond_ask`.
+
+        Thin by design, like ``respond_ask``: the refusals, the fold re-check
+        and the append all live in ``AskQueue.withdraw``, and this method is the
+        seam through which the ``ask_withdraw`` tool — or any other in-process
+        caller — reaches the queue.
+
+        There is deliberately NO secret hop here, unlike :meth:`respond_ask`:
+        the ``answered_in_chat`` reason refuses secret questions outright, so no
+        chat text can ever reach a credential cell.
+
+        Under the kill switch this refuses in words exactly like
+        :meth:`respond_ask`: with no queue there is nothing to withdraw, and the
+        caller hears that rather than a traceback or a silent success.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -13395,6 +13447,11 @@ class Session:
             # how ``execute_ask`` decides: a callable here means enqueue-and-
             # receipt, an absent one means today's await.
             enqueue_ask=self._ask_enqueue_callable(),
+            # THE AGENT-SIDE SETTLE'S DOOR (design §12): same two conditions as
+            # the door above, because it is the same engine. ``None`` wherever
+            # the queue is absent, which is what keeps ``ask_withdraw`` off the
+            # blocking arm's tool surface.
+            withdraw_ask=self._ask_withdraw_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs

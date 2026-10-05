@@ -69,7 +69,7 @@ def _now_ms() -> int:
 
 
 class AskQueue:
-    """The session's queued asks: enqueue, answer, fold, deliver."""
+    """The session's queued asks: enqueue, answer, withdraw, fold, deliver."""
 
     def __init__(
         self,
@@ -501,7 +501,8 @@ class AskQueue:
 
         Returns ``(cleaned cells, refusal sentence)``, the refusal empty when the
         map is usable. Both rules are the design's (§2.4, review round 1 QA Q1 and
-        MINOR 6) and both entry points must agree on them — the row that lands is
+        MINOR 6) and every entry point must agree on them — ``respond``,
+        ``revise`` and :meth:`withdraw`'s chat path: the row that lands is
         terminal, so a surface that forgot a key would lose that question for
         good, and a SECRET cell may only ever be a KEY NAME: the ``[<key>]`` shape
         is what makes this hop load-bearing, because a cold CLI or relay route
@@ -630,6 +631,127 @@ class AskQueue:
             return {"ok": False, "error": "the dismissal could not be recorded."}
         self._settled(ask_id)
         return {"ok": True}
+
+    def withdraw(
+        self,
+        ask_id: str,
+        *,
+        reason: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        message_id: str | None = None,
+        by: str = "agent",
+    ) -> dict[str, Any]:
+        """THE ASKER'S OWN SETTLE (design §12): retract a question, or record the
+        user's chat answer as one. Returns ``{"ok": True, "text", "details"}``
+        or ``{"ok": False, "error": <sentence>}``, the same shape every op here
+        returns.
+
+        Every other write to the log is authored by a SURFACE on the user's
+        behalf — :meth:`respond`, :meth:`revise`, :meth:`decline`, :meth:`dismiss`.
+        Before this method the ASKER had no path, and two real shapes fell
+        through: an ask whose answer stopped mattering sat ``open`` →
+        ``timed_out`` → expiry, besetting every list as a question nobody will
+        answer (``reason="moot"``); and a user who simply replied in the
+        transcript left the ask reading "waiting" although the agent already had
+        the answer (``reason="answered_in_chat"``).
+
+        TWO REASONS, TWO ROWS, ONE APPEND EACH:
+
+        * ``moot`` appends ``withdrawn`` — terminal-on-write, injects NOTHING
+          (symmetric with ``dismissed``). The fold caveat lives in
+          :func:`asks.store.fold`: every user-act terminal row present
+          (``answered``, ``declined``, ``dismissed``) outranks a later
+          ``withdrawn``, in either write order, because the user's own acts are
+          never overridden by the asker's retraction. This method does not lean
+          on that caveat for its own refusals — it checks the fold and refuses a
+          settled ask in :func:`render.withdraw_refusal`'s words — so the caveat
+          is belt-and-braces for the true cross-process race only.
+        * ``answered_in_chat`` records through the same ``answered`` machinery
+          :meth:`respond` uses: the cells are the user's words VERBATIM, one
+          cell per question the message answers and an EMPTY LIST for a question
+          it does not cover (the §2.4 completeness contract is on the KEYS, so a
+          forgotten key is refused rather than lost), and ``by`` names the
+          evidence — ``{"surface": "chat", "message_id": ...}``. The standard
+          response row follows through ``reconcile``. A SECRET question is
+          REFUSED for this reason with its own sentence: there is no
+          masked-entry hop from chat text and there must not be one — the card
+          stays the only secret path.
+
+        Admissible exactly where an answer is: an open or timed-out ask (a
+        post-deadline answer folds to ``late`` as it would from any surface); a
+        settled ask is refused with no state change.
+
+        RUNTIME-LOCAL, AGENT-ONLY. No new remote wire op and no relay change:
+        the model's tool call runs inside this session, and
+        ``Session.withdraw_ask`` wraps this method the way ``respond_ask`` wraps
+        :meth:`respond`. The only wire-visible effect is the new folded status
+        travelling out through the existing index/frame flow.
+        """
+        if reason not in ("moot", "answered_in_chat"):
+            return {"ok": False, "error": render.WITHDRAW_BAD_REASON}
+        now = self._now()
+        record = self._find(ask_id, now)
+        if record is None:
+            return {"ok": False, "error": render.refusal_copy(None)}
+        status = str(record.get("status") or "")
+        settled = status not in (store.STATUS_OPEN, store.STATUS_TIMED_OUT)
+        if reason == "moot":
+            if answers:
+                # Refused rather than ignored: a model that meant to record the
+                # user's words and passed the wrong reason must hear it, because
+                # the words would otherwise be silently discarded by the
+                # withdrawal it did ask for. An EMPTY map passes deliberately —
+                # it is "no answers", so there are no words for this guard to
+                # protect (review round 1, NIT 5).
+                return {"ok": False, "error": render.WITHDRAW_MOOT_TAKES_NO_ANSWERS}
+            if settled:
+                return {"ok": False, "error": render.withdraw_refusal(record, reason)}
+            payload = {
+                "v": store.EVENT_SCHEMA,
+                "kind": store.EVENT_WITHDRAWN,
+                "ask_id": ask_id,
+                "at": now,
+                "by": {"surface": by},
+            }
+            if not store.append_event(self.session_dir, payload):
+                return {"ok": False, "error": "the withdrawal could not be recorded."}
+            self._settled(ask_id)
+            return {
+                "ok": True,
+                "text": render.withdraw_receipt(ask_id, reason),
+                "details": {"ask_id": ask_id, "reason": reason},
+            }
+        if settled:
+            return {"ok": False, "error": render.withdraw_refusal(record, reason)}
+        if any(question.get("secret") for question in (record.get("questions") or ())):
+            return {"ok": False, "error": render.WITHDRAW_SECRET_REFUSAL}
+        cells, map_refusal = self._whole_ask_cells(record, answers or {})
+        if map_refusal:
+            return {"ok": False, "error": map_refusal}
+        assert cells is not None  # ``_whole_ask_cells`` returns one with no refusal
+        by_map: dict[str, Any] = {"surface": "chat"}
+        if message_id:
+            by_map["message_id"] = str(message_id)
+        payload = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_ANSWERED,
+            "ask_id": ask_id,
+            "at": now,
+            "by": by_map,
+            "answers": cells,
+        }
+        if record.get("tool_call_id"):
+            # The same carry as :meth:`respond`: a card can link the answer to
+            # the tool call that queued the ask.
+            payload["tool_call_id"] = str(record.get("tool_call_id"))
+        if not store.append_event(self.session_dir, payload):
+            return {"ok": False, "error": "the answer could not be recorded."}
+        self._settled(ask_id)
+        return {
+            "ok": True,
+            "text": render.withdraw_receipt(ask_id, reason),
+            "details": {"ask_id": ask_id, "reason": reason},
+        }
 
     def _settled(self, ask_id: str) -> None:
         """Post-write bookkeeping common to every terminal transition.

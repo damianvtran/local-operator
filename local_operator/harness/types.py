@@ -1427,6 +1427,14 @@ class ToolContext(BaseModel):
     #: "details":…}`` or ``{"ok": False, "error":…}`` — so the tool can report
     #: a cap or a bound without knowing anything about the queue.
     enqueue_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: THE AGENT-SIDE SETTLE'S DOOR (design §12). Bound by the session under the
+    #: SAME two conditions as :attr:`enqueue_ask` — the flag on and a host that
+    #: can show asks — so ``ask_withdraw`` exists exactly where the queued
+    #: engine does and nowhere else (footprint ladder rung 3: a session on the
+    #: blocking arm pays no schema for an op its log cannot hold). Same shape as
+    #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
+    #: "details"}``, resolved once per session turn.
+    withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per

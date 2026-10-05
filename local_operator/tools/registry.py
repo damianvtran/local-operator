@@ -100,6 +100,11 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # tables on purpose: appending never shifts a provider-visible array
     # prefix, which is what the prompt cache keys on.
     "sessions": lambda context: builtin.build_sessions_tool(context),
+    # createIf: rung 3 — the agent-side settle exists only where the queued
+    # engine does (`context.withdraw_ask`), so the blocking arm, headless hosts
+    # and subagents pay zero schema for it (design ask-nonblocking.md §12).
+    # Appended at the END of both tables for the same cache-prefix reason.
+    "ask_withdraw": lambda context: builtin.build_ask_withdraw_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -140,6 +145,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "project_delete",
     "monitor",
     "sessions",
+    "ask_withdraw",
 ]
 
 
