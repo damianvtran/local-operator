@@ -1468,25 +1468,79 @@ async def _remote_receipt(request: Request, session_id: str, token: str) -> dict
     label = device_name or device_id
     # ONE USER-FACING NOUN: "the unread mark" is what the operator's own copy
     # names; "read receipt" stays in code and docs (design round 1, D3).
+    # The owner's (or this relay's) sentence may end with its own period;
+    # joining it into a clause below must not produce "..". The build-skew
+    # classifier reads this JOINED form, so it runs after the strip.
+    reason = str(result.get("message") or "").strip().rstrip(".")
     if code == "unreachable":
         # The reason this branch gets is mobility's sentence for the failed DIAL
         # ("{label} is unreachable …; nothing was changed") and would restate
         # this clause twice over. The family's shared diagnostic pointer takes
         # its place (see ``session/remote_open.unreachable_peer_sentence``), so
         # the branch keeps a next step instead of dead-ending (D1, D2).
+        cause = "unreachable"
         message = (
             f"The unread mark for {session_id} lives on {label}, and it could not be "
             f"cleared there right now. /network doctor {label} diagnoses the link."
         )
+    elif _owner_build_behind(reason):
+        # THE OPERATOR-HIT COPY (2026-10-05), and the reason this branch composes
+        # its own sentence instead of echoing the owner's: an owner whose build
+        # predates the receipt op answers its raw authoriser refusal, which
+        # embeds the INTERNAL op name ("'net_session_receipt' is not an operation
+        # this build dispatches") where the user needs three truths — where the
+        # mark lives, why it did not clear (an older build), and that clearing
+        # works when that device updates. No diagnostic pointer on purpose:
+        # "/network doctor" diagnoses a LINK, so naming it for a build skew would
+        # offer an action that cannot work (the design rounds' D1 rule — this
+        # branch still keeps a next step, and it is the one that changes the
+        # outcome here).
+        cause = "owner_build_behind"
+        message = (
+            f"The unread mark for {session_id} lives on {label}, and it could not be "
+            f"cleared there right now: {label} runs an older build, and the mark clears "
+            f"when that device updates."
+        )
     else:
-        # The owner's (or this relay's) sentence may end with its own period;
-        # joining it into this one must not produce "..".
-        reason = str(result.get("message") or "").strip().rstrip(".")
+        cause = "refused"
         message = (
             f"The unread mark for {session_id} lives on {label}, and it could not be "
             f"cleared there right now{(': ' + reason) if reason else ''}."
         )
-    raise HTTPException(409, {"code": "session_is_remote", "message": message})
+    # ONE CAUSE BESIDE THE CODE, for clients that branch on the class rather than
+    # on prose: all three arms share ``code`` (the client's move is the same in
+    # all three — paint the sentence and never fall through to the local path),
+    # and the values follow the family's existing tokens — mobility's ``Moved``
+    # codes ("unreachable", "refused") and readiness's ``behind`` build class
+    # with the party named (``readiness.CODE_BEHIND``) — in the
+    # ``authorizer._CAUSE_FOR`` shape: finer words where a local caller branches,
+    # one coarse class for the machine consumer.
+    raise HTTPException(409, {"code": "session_is_remote", "cause": cause, "message": message})
+
+
+#: The fixed phrase inside the refusal ``Authorizer.check`` gives an op this
+#: build does not dispatch (``authorizer._required_capability``). It crosses as
+#: a SENTENCE — the code stays local, because "which guard fired" is not
+#: something a remote peer is told — so words are the only signal the receiving
+#: end can classify on.
+_OWNER_BUILD_BEHIND_MARKER = "is not an operation this build dispatches"
+
+
+def _owner_build_behind(reason: str) -> bool:
+    """Is this refusal an owner whose build predates the receipt op?
+
+    That owner answers ``authorizer._required_capability``'s unknown-op refusal
+    ("'net_session_receipt' is not an operation this build dispatches") — the
+    operator-hit copy — and keying on the fixed phrase is therefore the contract,
+    not a shortcut: the wire deliberately carries an authoriser refusal codeless
+    (``wire.refusal_frame``), and ``credentials.client._transport_refusal_code``
+    reads its own transport refusals the same way. Matched as a phrase rather
+    than the full sentence so a future op name cannot silently stop matching —
+    the only op this route sends is ``net_session_receipt`` — and pinned to the
+    real refusal by ``tests/unit/server/test_desktop_mesh.py``, so a reworded
+    refusal fails there rather than quietly re-embedding the raw copy here.
+    """
+    return _OWNER_BUILD_BEHIND_MARKER in reason
 
 
 async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) -> None:
