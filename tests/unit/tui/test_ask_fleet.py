@@ -587,6 +587,69 @@ async def test_a_fleet_row_of_this_session_keeps_the_owner_contract(enabled, iso
         assert session.declined == [("a1", "terminal")]
 
 
+async def test_the_settle_handler_routes_by_the_rows_own_session(enabled, isolated_index):
+    """The seam the mounted card actually calls: ``_ask_settle_callback(row)``.
+
+    The two halves of DECISION 3 meet here. A row of the adopted session must
+    reach the OWNER contract (``_on_queue_ask_settle``), and a row belonging to
+    another conversation must reach the engage seam (``_on_fleet_ask_settle``) —
+    whichever surface happens to be on screen. Asserted by swapping both targets
+    for recorders, so the assertion is about the ROUTE and not about the op.
+    """
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        routed: list[tuple[str, object]] = []
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            app, "_on_fleet_ask_settle", lambda row, answers: routed.append(("fleet", row))
+        )
+        monkeypatch.setattr(
+            app, "_on_queue_ask_settle", lambda ask_id, answers: routed.append(("owner", ask_id))
+        )
+        app._ask_scope = SCOPE_FLEET
+        own = ask_rows([_row("a1", session_id=str(session.session_id))])[0]
+        other = ask_rows([_row("b1", session_id="s-other")])[0]
+        app._ask_fleet_rows = [own, other]
+
+        app._ask_settle_callback(own)({"q1": ["Yes"]})
+        app._ask_settle_callback(other)({"q1": ["Yes"]})
+        assert [kind for kind, _ in routed] == ["owner", "fleet"]
+        assert routed[0][1] == "a1"
+        assert routed[1][1] is other
+        monkeypatch.undo()
+
+
+async def test_an_in_flight_row_refuses_a_second_gesture(enabled, isolated_index):
+    """A7's double-fire guard, at the surface: the mark and the refusal are one state."""
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._ask_scope = SCOPE_FLEET
+        app._ask_fleet_rows = ask_rows([_row("b1", session_id="s-other")])
+        app._mount_ask_list(scope=SCOPE_FLEET)
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        current = listing.current()
+        assert current is not None
+        assert current.ask_id == "b1"
+        listing.set_in_flight("b1", True)
+        assert listing.in_flight("b1") is True
+        assert listing.render().plain  # paints, does not raise
+        posted: list[object] = []
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(listing, "post_message", lambda message: posted.append(message))
+        listing.action_pick()
+        listing.action_decline()
+        listing.action_dismiss()
+        assert posted == [], "an in-flight row must not fire twice"
+        listing.set_in_flight("b1", False)
+        listing.action_pick()
+        assert len(posted) == 1
+        monkeypatch.undo()
+
+
 async def test_the_fleet_list_opens_from_the_sidebar_note(enabled, isolated_index):
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
