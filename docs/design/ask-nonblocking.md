@@ -1077,3 +1077,45 @@ between the answer's recording and its delivery.
   copy; a race's loser keeps `already answered by <surface>`; second `respond` and
   repeated `answer_one` byte-unchanged; the log shows `answered`+`revised` with ONE
   response row; kill-switch refusal without a queue.
+
+## 11. Amendment (2026-10-05): TUI fleet scope, filter, marks
+
+**Scope seam — one list, two scopes.** The TUI has no session-less screen, so `AskQueueList` is the ONE
+expanded surface and is told its SCOPE by the door it was opened from: the bar / `f4` opens *This
+conversation*, the sidebar footer's `asks: N` note opens *All conversations*. The list paints the
+subject and offers no toggle (a second scope store, a second list and a second entrance are all
+rejected). The fleet rows come from `asks.store.index_asks` — read ONCE, off-thread, when that scope
+opens; never on the 2 s poll, because the store's own comment puts a cap before that read "ever feeds
+a frame". Leaving the surface (Esc/`f4`) leaves the scope with it.
+
+**Total on the fleet surfaces.** The fleet total is the SUM of every session's outstanding count
+(index tally), unioned per session with the current session's live wire count. It is painted on the
+sidebar's footer note (`asks: N`, only while N > 0 — absence is not emptiness) and on the session
+picker's chrome row, and never as a chip of its own. `tui.sidebar_visible` still defaults off, so a
+user with the sidebar hidden sees the total only in the picker.
+
+**Marks.** `session_sidebar.set_asking` now takes `{session_id: count}` and marks EVERY session whose
+outstanding set (open ∪ timed_out — the same set the wire's `asks_open` publishes) is non-empty, one
+glyph cell per row, under the existing `!` gate mark. The index read rides the sidebar's own poll,
+throttled to 10 s.
+
+**Rows, filter, registers.** `ask_rows` no longer drops settled rows: it carries `delivered` and the
+halves are `pending` (answerable ∪ delivering) and `settled`. A settled row is a READ-ONLY one-liner —
+Enter/`d`/`x` are inert and it wears its status as a WORD in place of the status glyph. The one-line
+header carries the three segments `All · N` / `Waiting or moved on · N` / `Settled · N` (`1`/`2`/`3`,
+`[`/`]`, and the segments are press targets), and its count is the DRAWER register: `N waiting, M moved
+on` when mixed, else the chip clause (`queue_headline`), with the backend's `asks_open` and no split on
+a truncated frame. The bar keeps the chip register unchanged. Each empty half states its own sentence,
+so a filtered view can never read as an empty queue. At the narrow floor the drawer clause yields
+first, then the scope subject; the filter control yields last, because a view that cannot be
+un-filtered is worse than an unadvertised key.
+
+**Answering a fleet row.** By the ROW's own `session_id`, never by what is on screen: a row of the
+adopted session keeps the owner contract, and every other row goes through
+`engage_session_client(config_dir(), session_id, AskErrand(ask_id))` → `ask_respond` / `ask_decline` /
+`ask_dismiss` → `close()` in a `finally`, on a Textual worker, with an in-flight row state sized for
+engage 30 s + ack 15 s and no double-fire. Refusals arrive as the ask's own sentence
+(`asks/render.refusal_copy`) at the row. No HTTP, no new transport, no new timer.
+
+**Client-read-only.** No wire change, no new config key, no new composition root: this reads the index
+the desktop's aggregate route already reads, and answers through the ops that already shipped.
