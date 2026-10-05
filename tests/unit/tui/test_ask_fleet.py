@@ -52,7 +52,9 @@ pytestmark = pytest.mark.asyncio
 _NOW = int(time.time() * 1000)
 
 
-def _row(ask_id: str, *, status: str = "open", delivered: bool = False, **extra: Any) -> dict:
+def _row(
+    ask_id: str, *, status: str = "open", delivered: bool = False, **extra: Any
+) -> dict[str, Any]:
     """One fold-shaped ask record, the shape ``ask_rows`` flattens."""
     return {
         "ask_id": ask_id,
@@ -82,7 +84,7 @@ class _RecordingSession(FakeSession):
 
     def __init__(self) -> None:
         super().__init__()
-        self.answered: list[tuple[str, dict, str]] = []
+        self.answered: list[tuple[str, dict[str, Any], str]] = []
         self.declined: list[tuple[str, str]] = []
 
     def respond_ask(self, ask_id, answers, *, by="unknown"):
@@ -123,7 +125,7 @@ def isolated_index(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _seed(config_root, session_id: str, asks: list[dict]) -> None:
+def _seed(config_root, session_id: str, asks: list[dict[str, Any]]) -> None:
     (config_root / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
     store.write_entry(config_root, session_id, cwd=f"/tmp/{session_id}", asks=asks)
 
@@ -388,7 +390,9 @@ async def test_the_fleet_tally_sums_the_index_and_the_marks_cover_every_session(
         marks = app._session_sidebar._asking
         assert marks["s-other"] == 2
         # The current session's LIVE wire count is unioned in — the index lags it.
-        assert marks[str(app._session.session_id)] == 1
+        session = app._session
+        assert session is not None
+        assert marks[str(session.session_id)] == 1
         # A4: the total is the SUM of the unioned marks, so a live ask the index
         # has not learned about yet is still counted — the footer and the marks
         # on screen state one number for one fleet.
@@ -458,7 +462,7 @@ async def test_the_kill_switch_hides_every_fleet_surface(monkeypatch, enabled, i
 
 
 class _FakeAttachClient:
-    def __init__(self, record: dict, raise_on: set[str] | None = None) -> None:
+    def __init__(self, record: dict[str, Any], raise_on: set[str] | None = None) -> None:
         self._record = record
         self._raise_on = raise_on or set()
 
@@ -480,7 +484,7 @@ class _FakeAttachClient:
         self._record["closed"] = True
 
 
-def _patch_engage(monkeypatch, record: dict, raise_on: set[str] | None = None) -> None:
+def _patch_engage(monkeypatch, record: dict[str, Any], raise_on: set[str] | None = None) -> None:
     async def _fake(config_dir, session_id, work, **kwargs):
         record["engage"] = (str(session_id), type(work).__name__, getattr(work, "ask_id", None))
         return _FakeAttachClient(record, raise_on), "detail"
@@ -491,7 +495,7 @@ def _patch_engage(monkeypatch, record: dict, raise_on: set[str] | None = None) -
 async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
     enabled, isolated_index, monkeypatch
 ):
-    record: dict = {}
+    record: dict[str, Any] = {}
     _patch_engage(monkeypatch, record)
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
@@ -507,7 +511,7 @@ async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
 async def test_a_fleet_decline_and_dismiss_ride_the_same_chain(
     enabled, isolated_index, monkeypatch
 ):
-    record: dict = {}
+    record: dict[str, Any] = {}
     _patch_engage(monkeypatch, record)
     _seed(isolated_index, "s-other", [_row("b1"), _row("b2", status="timed_out")])
     app = _app()
@@ -528,7 +532,7 @@ async def test_a_fleet_decline_and_dismiss_ride_the_same_chain(
 async def test_a_refused_fleet_answer_says_so_in_the_asks_own_words(
     enabled, isolated_index, monkeypatch
 ):
-    record: dict = {}
+    record: dict[str, Any] = {}
     _patch_engage(monkeypatch, record, raise_on={"respond"})
     _seed(isolated_index, "s-other", [_row("b1")])
     seen: list[str] = []
