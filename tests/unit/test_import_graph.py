@@ -721,3 +721,84 @@ def test_importing_the_rescue_pass_pulls_no_heavy_modules() -> None:
     # the young-session rule's constants.
     assert "local_operator.session.runtime.registry" in pulled
     assert "local_operator.session.retention" in pulled
+
+
+# --- The child-attribution ledger --------------------------------------------
+
+_SUBAGENT_LEDGER_LEAF_MODULES = frozenset(
+    {
+        "local_operator",
+        "local_operator.paths",
+        "local_operator.session",
+        "local_operator.session.subagent_ledger",
+    }
+)
+
+
+def test_subagent_ledger_is_stdlib_plus_paths_only() -> None:
+    """The child-attribution ledger must stay import-light.
+
+    ``session/subagent_ledger.py`` is imported by heavyweight writers
+    (``harness/subagent.py``, ``harness/comms.py`` via the runner, and
+    ``session/session.py``) and carries ``subagent.py``'s module-scope import,
+    which runs on every child build. Its whole value is that importing it cannot
+    widen that closure — so this cell imports it in a FRESH interpreter and
+    reads the module set that came with it, because the absence tests above only
+    prove the CLI and the composition root do not REACH it. A future
+    module-scope ``from local_operator.harness.x import y`` (or a pydantic /
+    asyncio dependency) added here would pass every other cell and silently put
+    the harness on the child-build path, which is exactly what this pin exists
+    to make loud.
+    """
+    modules = _imported_modules("local_operator.session.subagent_ledger")
+    for banned, why in (
+        ("asyncio", "the ledger is synchronous; the callers own the loop"),
+        ("pydantic", "the ledger is deliberately pydantic-free (stdlib + paths)"),
+        ("local_operator.harness", "the harness must not load just for an artifact write"),
+        ("local_operator.session.session", "the session package must not load for a write"),
+        ("local_operator.tui", "no surface loads for an artifact write"),
+        ("local_operator.server", "the backend service is not a ledger dependency"),
+        ("local_operator.model", "no provider/model layer loads for an artifact write"),
+    ):
+        _assert_absent(modules, banned, why)
+    pulled = {m for m in modules if m == "local_operator" or m.startswith("local_operator.")}
+    unexpected = sorted(pulled - _SUBAGENT_LEDGER_LEAF_MODULES)
+    assert not unexpected, (
+        "the child-attribution ledger grew a module-scope import outside its "
+        f"stated leaf set ({', '.join(unexpected)}); the module must stay "
+        "stdlib + local_operator.paths, so import anything else lazily inside "
+        "the function that needs it"
+    )
+
+
+def test_the_session_package_init_is_import_light() -> None:
+    """``local_operator/session/__init__.py`` must stay a bare namespace package.
+
+    ``tools/builtin.py`` calls ``from local_operator.session import subagent_ledger``
+    inside ``jobs op='list'`` and ``hub op='list'`` — a CALL-TIME import, so the
+    tool layer's module-scope closure never grows, but the first listing DOES
+    execute the ``local_operator.session`` package. Review round 1 (R-MINOR-5)
+    pointed out that the comment claiming this kept the session engine off the
+    tool layer's path was unpinned: a future import added to ``session/__init__``
+    (a re-export, a convenience alias) would reach the tool layer silently. The
+    package init is currently EMPTY; this cell is what keeps it that way.
+    """
+    modules = _imported_modules("local_operator.session")
+    for banned, why in (
+        ("asyncio", "the package init must not own a loop"),
+        ("pydantic", "no model layer loads for a bare package import"),
+        ("local_operator.harness", "the harness must not load for a package import"),
+        ("local_operator.tui", "no surface loads for a package import"),
+        ("local_operator.server", "the backend service is not a package dependency"),
+        ("local_operator.model", "no provider/model layer loads for a package import"),
+    ):
+        _assert_absent(modules, banned, why)
+    # And it must not pull a sibling MODULE either: an init that re-exports
+    # ``session.session`` would drag the whole engine in behind one listing.
+    pulled = sorted(m for m in modules if m.startswith("local_operator.session."))
+    assert pulled == [], (
+        "local_operator/session/__init__.py now imports sibling modules "
+        f"({pulled}); the tool layer reaches this package on a call-time import, "
+        "so a re-export here lands the session engine on that path. Keep the "
+        "package init empty and import the module you need directly."
+    )

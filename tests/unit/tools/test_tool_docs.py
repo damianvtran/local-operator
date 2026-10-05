@@ -186,7 +186,16 @@ MEASURED_TOKENS: dict[str, int] = {
     "eval": 379,
     "glob": 94,
     "grep": 346,
-    "hub": 675,
+    # 675 -> 673 (child-attribution v1): the ``message`` field description was
+    # rewritten to say that pause/cancel RECORD it as the stop reason. The new
+    # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
+    # recorded as the stop reason for pause/cancel; ignored by list/peek."), so
+    # the hub doc got two tokens CHEAPER while gaining the fact — re-measured
+    # deliberately, not pasted.
+    # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
+    # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
+    # paused child is halted-and-resumable, not stopped. Re-measured.
+    "hub": 677,
     "jobs": 365,
     "list_variables": 61,
     "lsp": 303,

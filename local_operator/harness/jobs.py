@@ -318,6 +318,16 @@ class AsyncJob(BaseModel):
     # Retention sweeps against this, not start_time, so a long-running job
     # stays observable for the full window after it finishes.
     settled_at: float | None = None
+    # Epoch seconds of the job's LAST reported progress, or ``None`` when it has
+    # never reported any. Distinct from both ``start_time`` (registration) and
+    # ``started_at`` (runner entry): a job can be admitted, started, and then go
+    # silent for hours, and this is the only field that says so. A reader must
+    # treat ``None`` as "no progress recorded" — a different fact from "reported
+    # long ago" — which is why this is never co-erced to 0. The stamp is set by
+    # the progress relay every ``bash``/``eval``/``task`` runner already goes
+    # through (see ``_progress_fn``); the annotation is descriptive and is not
+    # restricted to ``task`` jobs.
+    last_progress_at: float | None = None
     label: str
     result_text: str | None = None
     error_text: str | None = None
@@ -1451,6 +1461,27 @@ class AsyncJobManager:
                     job.latest_details = merged
                 else:
                     job.latest_details = {"progress": details}
+                # THE stamp: a live timestamp beside the (transient) progress
+                # string, so a surface can say how long a running job has been
+                # silent. Set on EVERY report, before the notify below, so a
+                # reader that observes the change also observes the stamp.
+                #
+                # DELIBERATELY LIVE-ONLY, NOT PERSISTED. The design's contested
+                # option was to route one report per ``PROGRESS_PERSIST_S``
+                # through the roster persist; that is a bounded reintroduction
+                # of exactly what ``_notify_transient_job_change`` below warns
+                # against, and it is refused by an existing pinned contract
+                # (``test_task_notification_callers_classify_transient_and
+                # _durable_mutations``: "only fields retained by the resume
+                # projection schedule persistence"). So progress keeps its
+                # transient path, and the DURABLE copy of this stamp is written
+                # by the roster moves that already persist (register/start/
+                # settle/cancel). Consequence, stated plainly: the live
+                # surfaces (``jobs op='list'``, ``hub op='list'``) are exact,
+                # while the sidecar's copy is "last progress at the last roster
+                # move" — i.e. roughly lane start for a pure hang. That is the
+                # documented fallback, not an oversight.
+                job.last_progress_at = time.time()
                 self._notify_transient_job_change()
 
         return report
