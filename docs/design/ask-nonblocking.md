@@ -1119,3 +1119,48 @@ engage 30 s + ack 15 s and no double-fire. Refusals arrive as the ask's own sent
 
 **Client-read-only.** No wire change, no new config key, no new composition root: this reads the index
 the desktop's aggregate route already reads, and answers through the ops that already shipped.
+
+### 11.1 Amendment (2026-10-05, round 2): the review round's rulings
+
+**Exact labels.** Scope subjects are `This conversation` / `All conversations`; the segments are
+`All · N` / `Waiting or moved on · N` / `Settled · N`; the three empty sentences are the desktop's,
+verbatim. The drawer's single-half clauses now speak the DRAWER's vocabulary — `N questions moved on`
+(never the chip's `N asks timed out`), because the segments above and the rows below already say
+"moved on" — and the all-settled state takes the desktop drawer's own constant, `All asks settled`. The
+`· K urgent` suffix on the mixed clause stays (the desktop states urgency in an sr-only channel; the
+TUI has none, so it is stated in words). The bar keeps the chip register unchanged.
+
+**The delivering half (§10) is PENDING and never SETTLED.** An answered-but-undelivered ask sits in the
+`Waiting or moved on` segment and keeps the session's mark; its drawer clause is `N answer(s) delivering
+— the agent will be told`, in §5's words and
+deliberately WITHOUT the desktop's "you can still change
+it" (this surface has no revise wire — recorded as a deferred follow-up, not silently promised). Its row
+is a read-only one-liner until delivery (not answerable — a second answer is what §10's window exists to
+prevent) and its tail says `answered, delivering` / `answered late, delivering`.
+
+**Registers and contrast.** Every settled/delivering row carries its status as a word after the row's own
+`·` separator, so a muted status cannot read as part of the question. The panel's state inks are the
+derived `chip-live` / `chip-success` / `chip-warning` family (`theme._fill_chip_live`), which is the
+family the palette gate now checks against `overlay` — the brand light ramp's accent and success both sat
+under the state floor there, and the dark ramp is byte-identical (there the derived ink IS the hue).
+
+**Doors, in keyboard and mouse.** The fleet scope keeps ONE entrance in the model — the app's
+`action_open_fleet_asks` — and now has three gestures onto it: the sidebar's footer note (mouse), the
+sidebar's own `ctrl+f` in F9 mode (taught on the same footer line, beside `ctrl+k pin`), and the session
+picker's `asks: N` chrome (a press target on its own cells). Pressing any of them while a fleet list is
+already up RE-READS in place: the mounted list is re-pointed, never re-mounted (a second mount raised
+`DuplicateIds`, which ends the session). The narrow-floor scope cue is the ROW TAIL (`handle · deadline`)
+— with no room for the subject, the rows are what say which conversation a queue belongs to.
+
+**Truncated frames.** The clause states the backend tally (`N outstanding`) and withholds the split; the
+three segments keep their live counts, because they are the filter control the operator asked for. The
+two disagree on screen by design — the segments describe the rows this frame carries, the clause the
+queue behind them — and that difference is the honest signal that the list is a prefix.
+
+**Hints follow the view.** The header's hint set is derived from the VISIBLE rows: `enter`/`d` need an
+answerable row, `x` needs a moved-on one (dismiss is offered on a timed-out ask alone), `esc` needs
+nothing. The spend order is by irreversibility — `d decline` outlives `enter answer`, which already has
+the `❯` cue — so at 100×30 the irreversible key is named again, as it was before this work.
+
+**Client-read-only, restated.** No wire change, no new config key, no new timer, no HTTP client in the
+TUI: this reads the index the desktop's aggregate route reads and answers through the ops that shipped.
