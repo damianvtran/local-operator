@@ -265,6 +265,21 @@ def transcript_is_bookkeeping_only(path: str | Path) -> bool:
     return saw_row
 
 
+def is_bookkeeping_message(message: object) -> bool:
+    """Whether ``message`` is a :data:`BOOKKEEPING_CUSTOM_TYPES` custom record.
+
+    The third spelling of the same question, for the one reader that sees the
+    conversation as MESSAGES rather than rows: ``is_pristine``'s
+    ``session.history()`` leg. The context window is seeded from the
+    transcript, so a fresh session's own MCP card is IN it as a
+    ``CustomMessage`` — measured live on 2026-10-05, the leg that kept
+    refusing a pristine move for an empty phone session after the transcript
+    legs were fixed. A plain message, or any custom type outside the set, is
+    work; only the records a session writes ABOUT itself pass.
+    """
+    return isinstance(message, CustomMessage) and message.custom_type in BOOKKEEPING_CUSTOM_TYPES
+
+
 #: Rewrite the file only once this many bytes are provably reclaimable. A
 #: prune pass runs on most turns, and rewriting a multi-megabyte transcript
 #: every turn would cost far more I/O than the blanking saves. 256 KiB makes

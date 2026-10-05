@@ -416,7 +416,12 @@ async def test_is_pristine_reads_bookkeeping_records_as_no_history(
             self.session_id = "s1"
 
         def history(self):  # noqa: ANN202
-            return []
+            # The REAL replay, not an empty stub: ``history()`` is the leg
+            # that kept refusing after the transcript legs were fixed — the
+            # context window is seeded from the transcript, so the MCP card
+            # is in it as a ``CustomMessage``. Returning [] here would make
+            # this test pass on a broken history leg.
+            return list(transcript.build_llm_history())
 
         @property
         def variables(self) -> Any:
