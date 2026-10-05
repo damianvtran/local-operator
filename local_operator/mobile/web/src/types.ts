@@ -312,6 +312,9 @@ export interface PendingAsk {
 		| "timed_out"
 		| "late"
 		| "dismissed"
+		/* The agent retracted the question (design §12). Additive: an older daemon
+		   never sends it, and an older reader treats it as unknown-but-renderable. */
+		| "withdrawn"
 		| "expired";
 	delivered: boolean;
 	questions: AskQuestion[];

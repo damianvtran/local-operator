@@ -1173,7 +1173,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #: The ceiling is the measured head + 62, the same band main carried before this
 #: change. The tighten band (1,200) is nowhere near tripped.
-BUDGET_BILLED_TOKENS = 35_937
+#:
+#: RAISED 35,937 -> 36,552 for the AGENT-SIDE SETTLE (``feat/ask-withdraw``,
+#: design ``docs/design/ask-nonblocking.md`` §12): the ``ask_withdraw`` tool, a
+#: createIf factory on the queued engine's own door (rung 3 — the door's
+#: presence IS the mode, so the blocking arm, headless hosts and every subagent
+#: pay zero schema for it). Measured with THIS script on both trees, same
+#: machine, one after the other, the CLEAN arm via ``env -i`` (the arm CI
+#: renders — the 762-char subagents-tiers delta below does not apply):
+#:
+#:   base (a8238e8ef, main + the §12 note)  99,879 chars = ~35,928  (9 left)
+#:   head (this branch)                    101,461 chars = ~36,497
+#:   delta                                   1,582 chars =   ~569
+#:
+#: and it decomposes exactly into the new surface:
+#:
+#:   +1,567 chars  ``tool_schemas`` (name + description + JSON schema of the
+#:                 ONE new tool; ``real_tool_surface`` now binds the door the
+#:                 way it binds ``ask_user``, because leaving it unbound would
+#:                 measure a surface no user has — the queued arm is the
+#:                 default since the flip)
+#:   +   15 chars  the one inventory line
+#:   =  1,582 chars = ~569 billed
+#:
+#: The raise exists because the capability needs structured params (the two
+#: reasons, the per-question cells map) and it is exactly the rung-3 case the
+#: ladder describes: it is paid only where the queue exists. Rung 1 is not
+#: available — a mode on ``ask`` was rejected in the design because
+#: ``AskParams`` is question-shaped and the op targets an EXISTING ask. The
+#: wording was trimmed once before this entry was written (the description
+#: carries the detection rule, the two reasons' consequences and the secret
+#: refusal, and nothing else); the remaining cost is the price of the
+#: capability. The ceiling is the measured head + 55, the band this file
+#: keeps, so the base's 9 tokens of standing headroom are restored rather than
+#: loosened. The tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 36_552
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

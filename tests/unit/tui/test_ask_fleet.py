@@ -146,9 +146,10 @@ async def test_ask_rows_keeps_every_status_and_carries_delivered():
             _row("a4", status="answered", delivered=False),
             _row("a5", status="declined"),
             _row("a6", status="expired"),
+            _row("a7", status="withdrawn"),
         ]
     )
-    assert [row.ask_id for row in rows] == ["a1", "a2", "a3", "a4", "a5", "a6"]
+    assert [row.ask_id for row in rows] == ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]
     by = {row.ask_id: row for row in rows}
     assert by["a1"].waiting and by["a1"].answerable and by["a1"].pending
     assert by["a2"].moved_on and by["a2"].pending and by["a2"].answerable
@@ -156,15 +157,27 @@ async def test_ask_rows_keeps_every_status_and_carries_delivered():
     # ANSWERED BUT NOT DELIVERED is §10's in-flight half: pending, not answerable.
     assert by["a4"].delivering and by["a4"].pending and not by["a4"].answerable
     assert by["a5"].settled and by["a6"].settled
+    # THE ASKER'S OWN RETRACTION (design §12): settled like a dismissal —
+    # nothing is owed, nothing is delivering, the row simply says what happened.
+    assert by["a7"].settled and not by["a7"].pending and not by["a7"].delivering
     assert filter_counts(rows) == {
-        FILTER_ALL: 6,
+        FILTER_ALL: 7,
         FILTER_OUTSTANDING: 3,
-        FILTER_SETTLED: 3,
+        FILTER_SETTLED: 4,
     }
 
 
 async def test_the_halves_partition_every_status():
-    statuses = ["open", "timed_out", "answered", "late", "declined", "dismissed", "expired"]
+    statuses = [
+        "open",
+        "timed_out",
+        "answered",
+        "late",
+        "declined",
+        "dismissed",
+        "withdrawn",
+        "expired",
+    ]
     for status in statuses:
         for delivered in (True, False):
             row = ask_rows([_row("a1", status=status, delivered=delivered)])[0]
@@ -224,6 +237,22 @@ async def test_the_drawer_register_never_calls_a_delivering_row_settled():
     # Once it is delivered it is settled, and no clause can contradict that.
     delivered = ask_rows([_row("a1", status="answered", delivered=True)])
     assert drawer_headline(delivered) == "All asks settled"
+
+
+async def test_a_withdrawn_row_wears_its_own_word_and_the_quiet_ink():
+    """Design §12: the settled chip gains `withdrawn` — the asker retracted its
+    own question, so it takes the `dismissed` register (muted), never a failure
+    ink and never the fallback spelling. The row paints the word in its own
+    field, and the status is ON the settled set rather than merely landing in
+    the settled half.
+    """
+    from local_operator.tui.widgets.ask_queue import SETTLED_STATUSES, STATUS_WITHDRAWN
+
+    assert STATUS_WITHDRAWN in SETTLED_STATUSES
+    listing = AskQueueList(ask_rows([_row("a1", status="withdrawn")]))
+    assert settled_chip(listing.rows[0]) == ("withdrawn", "muted")
+    painted = listing.render().plain.splitlines()[-1]
+    assert painted.rstrip().endswith("· withdrawn")
 
 
 async def test_a_settled_status_word_reads_as_its_own_field():

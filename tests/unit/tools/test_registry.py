@@ -107,6 +107,12 @@ def _engine_context(**kwargs) -> ToolContext:
         project_registry=object(),
         has_ui=True,
         ask_user=_ask_user,
+        # The agent-side settle's door (design §12): its builder is createIf-
+        # gated on the SAME callable the session binds for the queue, so this
+        # factory's "every capability attached" contract includes it — the
+        # whole table builds only while the door is present, exactly as the
+        # ask hook above keeps ``ask`` buildable.
+        withdraw_ask=lambda ask_id, **kwargs: {"ok": True},
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -192,6 +198,23 @@ def test_default_set_keeps_ask_for_a_host_with_a_hook_but_no_frontend_store() ->
     withui = [tool.name for tool in create_tools(_engine_context())]
     without = [tool.name for tool in create_tools(_engine_context(has_ui=False))]
     assert without == withui
+
+
+def test_default_set_drops_ask_withdraw_without_the_queue_door() -> None:
+    """createIf rung 3 for the agent-side settle (design §12).
+
+    No ``withdraw_ask`` callable, no tool — which is the exact state of the
+    blocking arm (the kill switch has no queue), a headless host and every
+    subagent, so none of them pays schema for an op whose log cannot hold a
+    ``withdrawn`` row. Asserted as a DELTA against the fully-capable surface
+    for the same reason the ``ask`` twin above is: ``lsp``/``browser`` are
+    gated on the host's own dependencies, so the declared list would make the
+    verdict machine-dependent.
+    """
+    withdoor = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(withdraw_ask=None))]
+    assert "ask_withdraw" in withdoor
+    assert without == [name for name in withdoor if name != "ask_withdraw"]
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

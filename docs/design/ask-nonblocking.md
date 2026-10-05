@@ -1219,3 +1219,130 @@ render is now an explicit shot MODE, re-asserted above the app import, and the f
 
 **Client-read-only, restated.** Still no wire change, no new config key, no new timer, no HTTP client in
 the TUI.
+
+
+## 12. Amendment (2026-10-05): agent-side settle — withdrawal, and the chat-answer attribution
+
+> **STATUS: SYNCED — shape acked (Aida, 2026-10-05); implementation starts from this
+> commit.** The operator's own words confirm both reasons are AGENT-side ("as it's working" →
+> moot; "if the user sends a response in the chat" → answered_in_chat). Drafted against main
+> `1f0a1b909` (v0.67.16).
+
+### 12.0 The gap this closes
+
+Every write to the ask log today is authored by a SURFACE on the user's behalf — `ask_respond`,
+`ask_revise`, `ask_decline`, `ask_dismiss` (§2.4). **The asker has no path.** Two real shapes fall
+through it:
+
+* **Moot.** The model asked; then the answer stopped mattering (it found the answer itself, the work
+  moved on, the user said "never mind" in chat). The ask then sits `open` → `timed_out` → 7-day
+  expiry, besetting the bar and every list as a question nobody will answer. Nothing is factually
+  wrong — every surface is *honest* — and that is the defect: an outstanding set containing questions
+  nobody will answer is how the operator learns to ignore the set. `dismiss` cannot carry this: it is
+  refused unless `timed_out` (queue.py), it is the USER's view action, and its copy is the user's
+  voice.
+* **Answered in chat.** §5.0 rightly forbids the composer converting a chat draft into an answer. So
+  when the operator simply replies in the transcript — the most natural way to answer a question they
+  can see — the ask keeps reading "waiting" although the agent HAS the answer, and the surfaced count
+  is now a lie with a clock on it. The only safe detector of "that message WAS the answer" is the
+  model itself; what it lacks is a way to RECORD the attribution.
+
+### 12.1 Proposal: one agent-facing op, two reasons
+
+`ask_withdraw {ask_id, reason: "moot" | "answered_in_chat", message_id?}` — agent-authored only
+(the tool naming is open: `ask_withdraw` / `ask_settle`; "withdraw" matches the operator's word for
+the half).
+
+| reason | event appended | folded status | injects |
+|---|---|---|---|
+| `moot` | `withdrawn` (NEW kind) | `withdrawn` (NEW, terminal) | **NOTHING** (symmetric with `dismissed`) |
+| `answered_in_chat` | `answered` (existing kind), `by: {surface: "chat", message_id?}` | `answered` (existing) | the standard response row, cells = the user's words |
+
+**Cells for `answered_in_chat`.** The model records the user's message **verbatim** — one cell per
+question the message answers; a question the message does not cover is sent as an EMPTY LIST, which
+is how §2.4 already says "no answer" without omitting the key. A **secret** question is REFUSED for
+this reason (there is no masked-entry hop from chat text, and there must not be one: the card
+remains the only secret path) — its own refusal sentence.
+
+**Refusals** (extend `refusal_copy`, render.py — every surface reads the same words):
+
+* answering a `withdrawn` ask → `"the agent withdrew this question — if you have an answer, send it
+  as a chat message."` (answer box hides everywhere, because `withdrawn` is not outstanding)
+* `withdraw(moot)` on an ask with an `answered` row → refused, no state change. On
+  `declined`/`dismissed` → no-op with a truthful sentence. On `late`/`expired` → no-op.
+* the existing user-voiced sentences are kept for user ops; the op-level returns to the MODEL may
+  carry their own wording where "you already declined this" would read wrong.
+
+**Fold rule and the ONE race.** `withdrawn` is terminal-on-write **except that every user-act
+terminal row present (`answered`, `declined`, `dismissed`) outranks a later `withdrawn`** — the
+user's own acts are never overridden by the asker's retraction; a racing withdrawal loses, and the
+model may re-ask. Only a `withdrawn` with no such sibling folds to `withdrawn`. The op also refuses
+a settled ask, so the fold caveat is belt-and-braces for the true cross-process race only.
+(Contrast `dismissed`'s documented shadowing, prevented surface-side because only a `timed_out` ask
+offers it; `withdrawn` is agent-callable at any time, so the guard must live in the fold.)
+**Reader tolerance**: an old build (pre-`withdrawn`) folding a log that contains `withdrawn` rows
+must keep working — confirm `fold` skips unknown kinds the way the torn-line rule skips bad rows
+(plugin: the store's "corrupt or unknown ⇒ tolerated" contract).
+
+**Who may call / plumbing.** v1 is agent-only and RUNTIME-LOCAL: the model's tool call runs inside
+the session runtime, and `Session.withdraw_ask` wraps `AskQueue.withdraw` exactly as
+`respond_ask` wraps `respond`. **No new remote wire op, no relay change in v1** — the mobile/desktop
+ops stay respond/revise/decline/dismiss. The only wire-visible change is the new folded STATUS value
+travelling out through the existing index/frame flow, which surfaces must RENDER (copy/maps).
+Kill switch: rides `LOP_ASK_NONBLOCKING` (the old arm has no queue; the tool is not mounted there).
+
+**The tool-footprint question.** Exposing this needs a tool for the model. Options: (i) a small
+`ask_withdraw` tool — **recommended**, implemented as a `createIf`-gated factory (footprint ladder
+rung 3: zero schema wherever the queued engine is absent) with its schema delta measured via
+`/context`; (ii) a mode on `ask` — rejected, `AskParams` is
+question-shaped and the op targets an EXISTING ask; (iii) auto-only, no tool — rejected, moot
+detection and chat attribution both need the model. Size (i) against the AGENTS.md tool-surface
+footprint ladder before writing its description; the ask receipt's prose is the budget precedent.
+
+**Detection (the hook).** Detection is the model's judgment; the tool description carries the rule —
+"if the user's latest message answers a queued ask, withdraw it with reason=answered_in_chat and
+their words". Optional runtime assist (PROPOSAL): when a chat message arrives while the session has
+open asks, the model-visible receipt appends one line naming the open ids ("open: a-3f9c — if this
+message answers it, withdraw it"). Track with the §9 text edits.
+
+**Surfaces (all read the same fold — passive render only):**
+
+* TUI: `ask_queue.py`'s status map and settled chip gain `withdrawn` (the bare word — the
+  `declined`/`dismissed` register; the chip has no room for a clause); `SETTLED_STATUSES` grows by
+  `withdrawn`; the halves partition unchanged (withdrawn is Settled, never outstanding; the
+  bar/list counts drop by themselves).
+* Wire/web: the status enum addition (`mobile/types.py`, web `types.ts`, `asks.ts` copy — the
+  settled row's clause register names the actor: "Withdrawn — the agent no longer needs an
+  answer"); an answered-in-chat row already renders through `answered_by.surface`.
+* Desktop: their lane; the settled half needs the word, no op.
+
+### 12.2 Open questions (FOR SYNC — Aida)
+
+1. **Whose half is "withdraw"? RESOLVED (Aida, 2026-10-05)** — the operator's own words settle it:
+   both reasons above are AGENT-side. **The operator-side settle is a real but DIFFERENT gap**
+   (`dismiss` being `timed_out`-only means a user cannot clear an OPEN ask — a UX gap, not the
+   engine gap) and is **deferred out of this slice**: it rides the PR thread as `deferred — dismiss
+   remains timed_out-only; widening it is a policy change with its own copy`, so it is not lost.
+2. **`/new`, session delete, or stop with open asks**: today they persist (durable by design,
+   answerable from any surface). Proposal: no auto-withdraw; the operator can still answer or
+   dismiss. Confirm.
+3. **Auto-supersede** (a new `ask` withdrawing the same session's prior still-open ask): NOT
+   proposed — a re-ask is a legitimate second question; noise control is the model's job via the
+   tool. Confirm.
+4. **Copy voice** for the agent-authored by-field: `by: {surface: "agent"}` for uniformity vs
+   `{actor: "agent"}`. Implementation detail; noting it.
+
+### 12.3 Evidence plan (at code time)
+
+Unit: fold orderings incl. the answered-vs-withdrawn race and unknown-kind tolerance; refusal copy
+per state; the verbatim-cells and secret-refusal rules. E2E (real runtime): queued ask → chat reply →
+tool withdraw(answered_in_chat) → folded `answered` + response row + index settles; moot withdraw →
+settled word only, no row, counts drop; wire value passthrough. Frames: TUI settled chip + bar count
+before/after; phone card (relay lane). PR: one core PR (this §12 + code), `Release: patch` — a
+self-contained feature, not a step-function.
+
+**The PR description states two things as CONTRACT** (Aida, sync): (a) the race rule — every
+user-act terminal row present (`answered`, `declined`, `dismissed`) outranks a later `withdrawn`,
+and only a `withdrawn` with no such sibling folds to `withdrawn`; and (b) old builds folding
+`withdrawn` rows tolerate the unknown kind. Both are cheap to state now and expensive to discover
+later.

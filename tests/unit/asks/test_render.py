@@ -209,3 +209,91 @@ def test_the_span_helper_reads_like_a_person_wrote_it():
     assert render._span(3700) == "1h"
     assert render._span(2 * 86400) == "2d"
     assert render._span(0) == "a moment"
+
+
+# --- the withdrawn state's sentence, and the withdraw op's own copy ----------
+
+
+def test_a_withdrawn_ask_refuses_with_the_chat_route():
+    """DESIGN §12's sentence, verbatim: a withdrawn ask's answer box hides
+    everywhere (it is not outstanding), so a stale tap must be told the ONE
+    route left — say it in chat, where the agent can record it."""
+    assert render.refusal_copy(_record(status=store.STATUS_WITHDRAWN)) == (
+        "the agent withdrew this question — if you have an answer, send it as a chat message."
+    )
+
+
+def test_a_withdrawn_refusal_keeps_the_state_table_byte_for_byte():
+    """The §10 op-vs-state split (§12): the new state's row joins the STATE
+    table, and the op's own sentences live outside it. A state-table caller
+    still reads the declined sentence unchanged — the withdraw op does not
+    rewrite rows other surfaces show."""
+    assert (
+        render.refusal_copy(_record(status=store.STATUS_DECLINED)) == "you already declined this."
+    )
+
+
+def test_the_withdraw_refusal_speaks_to_the_model_in_every_settled_state():
+    """The op-level sentences answer the MODEL, so the state table's user voice
+    ("you already declined this") — which would be false about who declined —
+    is replaced per state. One sentence each, truthful in both directions."""
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_DECLINED), "moot")
+        == "the user already declined this ask — there is nothing to withdraw."
+    )
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_DISMISSED), "moot")
+        == "the user already dismissed this ask — there is nothing to withdraw."
+    )
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_ANSWERED), "moot")
+        == "this ask already has the user's answer — it cannot be withdrawn."
+    )
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_LATE), "moot")
+        == "this ask already has the user's answer — it cannot be withdrawn."
+    )
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_WITHDRAWN), "moot")
+        == "this ask was already withdrawn."
+    )
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_EXPIRED), "moot")
+        == "this ask expired — there is nothing to withdraw."
+    )
+
+
+def test_the_chat_refusal_says_whether_anything_was_recorded():
+    """``answered_in_chat``'s refusals carry the fact the model needs first:
+    NOTHING was recorded, so the user's words still live only in the chat."""
+    assert (
+        render.withdraw_refusal(_record(status=store.STATUS_ANSWERED), "answered_in_chat")
+        == "this ask already has the user's answer — the chat message was not recorded."
+    )
+    assert "not recorded" in render.withdraw_refusal(
+        _record(status=store.STATUS_DECLINED), "answered_in_chat"
+    )
+    assert "nothing was recorded" in render.withdraw_refusal(
+        _record(status=store.STATUS_EXPIRED), "answered_in_chat"
+    )
+
+
+def test_an_unknown_ask_refuses_the_withdraw_in_the_shared_words():
+    """An ask no fold knows is refused with the SAME sentence every surface
+    gets (``refusal_copy(None)``): there is one answer to "which ask?" and it
+    does not get a second wording because the asker asked."""
+    assert render.withdraw_refusal(None, "moot") == render.refusal_copy(None)
+
+
+def test_the_receipts_state_what_happens_next():
+    moot = render.withdraw_receipt("a-7f3", "moot")
+    assert "a-7f3" in moot and "nothing will be delivered" in moot
+    chat = render.withdraw_receipt("a-7f3", "answered_in_chat")
+    assert "a-7f3" in chat and "response arrives" in chat
+
+
+def test_the_op_constants_are_the_sentences_the_queue_emits():
+    assert render.WITHDRAW_BAD_REASON == "reason must be 'moot' or 'answered_in_chat'."
+    assert "no answers" in render.WITHDRAW_MOOT_TAKES_NO_ANSWERS
+    assert "secret" in render.WITHDRAW_SECRET_REFUSAL
+    assert "card" in render.WITHDRAW_SECRET_REFUSAL

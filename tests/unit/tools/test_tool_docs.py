@@ -176,9 +176,20 @@ _WALK_DEPTH_CAP = 2
 #: it types a target. Every other entry is byte-identical, and the same two
 #: descriptions are the whole of ``scripts/bench_context_budget.py``'s raise
 #: (``35,874 -> 35,937``) — the two ledgers move together.
+#:
+#: RE-MEASURED 2026-10-05 by the agent-side settle (``feat/ask-withdraw``,
+#: design §12): ``ask_withdraw`` is NEW — 327 — because the default surface
+#: itself grew. The tool is createIf-gated on the queued engine's door, and
+#: ``scripts/real_tool_surface`` now binds that door the way it binds
+#: ``ask_user`` (leaving it unbound would measure a surface no user has — the
+#: queued arm is the default since the flip). Every other entry is
+#: byte-identical, and the same schema is the whole of
+#: ``scripts/bench_context_budget.py``'s raise (``35,937 -> 36,552``, the
+#: clean-arm arithmetic in its entry) — the two ledgers move together.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 849,
     "ask": 1205,
+    "ask_withdraw": 327,
     "bash": 313,
     "browser": 1365,
     "console": 1141,
@@ -282,7 +293,7 @@ def default_surface(hermetic_config: Path) -> list[AgentTool]:
     and the ``context-budget`` CI guard cannot disagree about what "the default
     surface" is: it forces the two machine-probing createIf gates (browser and
     console) deterministically ON, which is what makes a CI runner and a
-    developer box measure the same 33 tools. Function-scoped (not module-scoped)
+    developer box measure the same 34 tools. Function-scoped (not module-scoped)
     because the builders read the config at BUILD time, so each test's
     :func:`hermetic_config` must apply to its own render; the fixture is taken
     for its env side effect alone.

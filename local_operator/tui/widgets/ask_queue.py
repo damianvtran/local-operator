@@ -101,6 +101,7 @@ STATUS_LATE = store.STATUS_LATE
 STATUS_ANSWERED = store.STATUS_ANSWERED
 STATUS_DECLINED = store.STATUS_DECLINED
 STATUS_DISMISSED = store.STATUS_DISMISSED
+STATUS_WITHDRAWN = store.STATUS_WITHDRAWN
 STATUS_EXPIRED = store.STATUS_EXPIRED
 
 #: THE TERMINAL STATUSES — an ask in one of these has nothing left to answer.
@@ -108,7 +109,9 @@ STATUS_EXPIRED = store.STATUS_EXPIRED
 #: the same settlement one deadline later — the agent was told, the receipt is in
 #: the transcript, and offering an answer box for it can only be refused (design
 #: round 1, D6/U3: ``late`` was painted "timed out — still answerable" and stayed
-#: in the answerable set). ``expired`` injects nothing at all (§2.2).
+#: in the answerable set). ``withdrawn`` joins them because the ASKER retracted
+#: the question (design §12) — nobody is waiting on it, and a stale tap can only
+#: be refused. ``expired`` injects nothing at all (§2.2).
 #:
 #: A SURFACE NO LONGER DROPS THEM (design §4): the list keeps every row and the
 #: three-way filter picks the half, so what this set is FOR now is the question a
@@ -117,7 +120,14 @@ STATUS_EXPIRED = store.STATUS_EXPIRED
 #: answered-but-undelivered row is terminal as an ASK but still pending on the
 #: user's attention).
 SETTLED_STATUSES = frozenset(
-    {STATUS_ANSWERED, STATUS_LATE, STATUS_DECLINED, STATUS_DISMISSED, STATUS_EXPIRED}
+    {
+        STATUS_ANSWERED,
+        STATUS_LATE,
+        STATUS_DECLINED,
+        STATUS_DISMISSED,
+        STATUS_WITHDRAWN,
+        STATUS_EXPIRED,
+    }
 )
 
 #: `Moved on` is the drawer's own word for a row whose deadline passed but
@@ -182,13 +192,16 @@ SCOPE_SUBJECTS: dict[str, str] = {
 #: Settled rows wear a WORD rather than a glyph (design §4): the status is the
 #: row's whole content once there is nothing left to act on, so it is spelled
 #: and inked by severity. `answered` succeeded, `late` is the same answer one
-#: deadline late (warning), and declined/dismissed/expired are the quiet end of
-#: the scale — an expiry is not a failure (§5's copy contract).
+#: deadline late (warning), and declined/dismissed/withdrawn/expired are the
+#: quiet end of the scale — an expiry is not a failure (§5's copy contract),
+#: and a withdrawal is not a refusal (the asker retracted its own question;
+#: design §12 gives it the same muted register as `dismissed`).
 SETTLED_CHIPS: dict[str, tuple[str, str]] = {
     STATUS_ANSWERED: ("answered", "success"),
     STATUS_LATE: ("late", "warning"),
     STATUS_DECLINED: ("declined", "muted"),
     STATUS_DISMISSED: ("dismissed", "muted"),
+    STATUS_WITHDRAWN: ("withdrawn", "muted"),
     STATUS_EXPIRED: ("expired", "muted"),
 }
 #: ...which is to say: everything the reader must not be asked to answer. THE
@@ -1613,6 +1626,7 @@ __all__ = [
     "STATUS_MARKS",
     "STATUS_OPEN",
     "STATUS_TIMED_OUT",
+    "STATUS_WITHDRAWN",
     "AskBar",
     "AskQueueList",
     "AskRow",

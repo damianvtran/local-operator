@@ -139,6 +139,12 @@ async def test_with_the_kill_switch_the_tool_still_awaits_and_writes_no_log(
             assert answered == ["Still blocking?"], "the hook was not awaited"
             assert not store.asks_log_path(session.transcript.directory).exists()
             assert store.ask_ids(store.read_events(session.transcript.directory)) == []
+            # And the AGENT-SIDE SETTLE is not mounted either: with no queue
+            # there is no log that could hold a `withdrawn` row, so the tool
+            # must be absent from the provider array (design §12's kill switch —
+            # an absence, not a tool that can only error).
+            advertised = {tool.name for tool in stream.requests[-1].tools}
+            assert "ask_withdraw" not in advertised, sorted(advertised)
     finally:
         await dispose_quietly(session)
 
@@ -328,6 +334,238 @@ async def test_a_deadline_delivers_a_notice_into_the_model_context(
 
 async def _never_answers(questions: list[Any]) -> dict[str, list[str]] | None:
     raise AssertionError("the queued path must not call the host hook")
+
+
+# ---------------------------------------------------------------------------
+# The agent-side settle (design §12): withdraw + chat-answer attribution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_moot_withdraw_through_the_tool_settles_the_ask_and_injects_nothing(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §12's moot half over the assembled runtime, driven through the
+    REAL tool loop: the receipt's ask is withdrawn by a second tool call, the
+    fold settles it, the wire's outstanding count drops by itself — and NO row
+    is ever injected for it (symmetric with `dismissed`)."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-w",
+                arguments=_ask_args("still needed?"),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "withdraw-moot", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "a moot withdraw through the tool loop"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            # The tool is advertised exactly where the queue is, asserted on the
+            # provider's own array (the #868 lesson: the gate and the wire can
+            # disagree even when both halves are individually right).
+            advertised = {tool.name for tool in stream.requests[-1].tools}
+            assert "ask_withdraw" in advertised, sorted(advertised)
+            # The second turn withdraws the ask the FIRST turn queued.
+            stream.turns.append(
+                tool_call_turn(
+                    text="closing it",
+                    tool_name="ask_withdraw",
+                    tool_call_id="withdraw-1",
+                    arguments={"ask_id": ask_id, "reason": "moot"},
+                )
+            )
+            stream.turns.append(text_turn("noted"))
+            await session.prompt("actually, never mind")
+            record = session.ask_queue().find(ask_id)
+            assert record["status"] == store.STATUS_WITHDRAWN
+            assert record["delivered"] is False
+            # Nothing is injected, now or on the next reconcile — the ask has
+            # no expected row at all.
+            await session.reconcile_asks()
+            assert not session.transcript.has_entry(store.response_row_id(ask_id))
+            assert not session.transcript.has_entry(store.timeout_row_id(ask_id))
+            # The wire the bar, the sidebar and every list read: settled, and
+            # the outstanding count is zero.
+            from local_operator.session.frontend_state import ask_wire
+
+            rows, outstanding = ask_wire(session)
+            assert rows is not None
+            assert outstanding == 0
+            assert [row["status"] for row in rows] == [store.STATUS_WITHDRAWN]
+            # The receipt reached the model in its own words, not a paraphrase.
+            follow_up = "\n".join((message.text or "") for message in stream.requests[-1].messages)
+            assert "withdrawn" in follow_up and "nothing will be delivered" in follow_up
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_answered_in_chat_records_the_users_words_and_delivers_the_response(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §12's chat half over the assembled runtime: the user replies in
+    the transcript, the model records their words via the tool, and BOTH the
+    `answered` fold and the standard response row land — the response arriving
+    as its own paid turn, exactly as a card answer would cost."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-c",
+                arguments=_ask_args("deploy or roll back?"),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "withdraw-chat", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "a chat answer recorded through the tool loop"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            stream.turns.append(
+                tool_call_turn(
+                    text="recording the reply",
+                    tool_name="ask_withdraw",
+                    tool_call_id="withdraw-1",
+                    arguments={
+                        "ask_id": ask_id,
+                        "reason": "answered_in_chat",
+                        "answers": {"q0": ["roll back, keep the audit log"]},
+                    },
+                )
+            )
+            stream.turns.append(text_turn("recorded"))
+            # Spare turns: the response row this settle records buys its own
+            # delivery turn, and a short tape is how a cell starts lying.
+            stream.turns.append(text_turn("noted"))
+            stream.turns.append(text_turn("noted again"))
+            await session.prompt("roll back, keep the audit log")
+            record = session.ask_queue().find(ask_id)
+            assert record["status"] == store.STATUS_ANSWERED
+            assert record["answers"] == {"q0": ["roll back, keep the audit log"]}
+            assert record["answered_by"] == {"surface": "chat"}
+            # The standard response row delivers through decide-reconcile, and
+            # the model reads it: the report's own framing, not the user's turn.
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the chat answer's response row",
+            )
+            await _wait_until(
+                lambda: any(
+                    "The user answered:" in (message.text or "")
+                    for request in stream.requests
+                    for message in request.messages
+                ),
+                what="the response report in a provider request",
+            )
+            # The wire settles: answered and delivered, nothing outstanding.
+            from local_operator.session.frontend_state import ask_wire
+
+            rows, outstanding = ask_wire(session)
+            assert rows is not None
+            assert outstanding == 0
+            assert rows[-1]["status"] == store.STATUS_ANSWERED
+            assert rows[-1]["delivered"] is True
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_racing_a_withdrawal_wins_in_both_orders(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contract (a) over the real runtime, from both directions:
+
+    * the answer lands first — the racing withdrawal is REFUSED and writes no
+      ``withdrawn`` row, so the ask folds `answered` and its response delivers;
+    * the withdrawal lands first — a stale answer path is refused with the
+      STATE'S sentence — while an answered row that still lands (a write that
+      crossed the guard, appended directly as the cross-process gap would)
+      STILL WINS: the fold says `answered` and the response delivers.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="first",
+                tool_name="ask",
+                tool_call_id="ask-a",
+                arguments=_ask_args("first question"),
+            ),
+            tool_call_turn(
+                text="second",
+                tool_name="ask",
+                tool_call_id="ask-b",
+                arguments=_ask_args("second question"),
+            ),
+            text_turn("both queued"),
+            # Spares: each delivered response buys its own turn.
+            text_turn("noted"),
+            text_turn("noted"),
+            text_turn("noted"),
+        ]
+    )
+    session = _session(headless_tui_env, "race", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "an answer racing a withdrawal"):
+            await session.prompt("ask both")
+            first, second = _ask_ids(session.transcript.directory)
+
+            # Direction 1: answer first — the withdrawal loses and writes NOTHING.
+            assert session.respond_ask(first, {"q0": ["yes"]}, by="terminal")["ok"] is True
+            refused = session.withdraw_ask(first, reason="moot")
+            assert refused["ok"] is False
+            assert "already has the user's answer" in refused["error"]
+            kinds = [event["kind"] for event in store.read_events(session.transcript.directory)]
+            assert kinds.count(store.EVENT_WITHDRAWN) == 0
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(first)),
+                what="the winning answer's response row",
+            )
+            assert session.ask_queue().find(first)["status"] == store.STATUS_ANSWERED
+
+            # Direction 2: the withdrawal lands first...
+            assert session.withdraw_ask(second, reason="moot")["ok"] is True
+            stale = session.respond_ask(second, {"q0": ["a real answer"]})
+            assert stale["ok"] is False
+            assert stale["error"] == (
+                "the agent withdrew this question — if you have an answer, send it "
+                "as a chat message."
+            )
+            # ...and an answered row that crossed the guard anyway still WINS at
+            # the fold (contract (a)'s belt-and-braces half; appended directly
+            # because no real path exists in-process to defeat its own check).
+            store.append_event(
+                session.transcript.directory,
+                {
+                    "v": store.EVENT_SCHEMA,
+                    "kind": store.EVENT_ANSWERED,
+                    "ask_id": second,
+                    "at": store.now_ms(),
+                    "by": {"surface": "phone"},
+                    "answers": {"q0": ["late to the race"]},
+                },
+            )
+            assert session.ask_queue().find(second)["status"] == store.STATUS_ANSWERED
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(second)),
+                what="the racing answer's response row",
+            )
+    finally:
+        await dispose_quietly(session)
 
 
 # ---------------------------------------------------------------------------
