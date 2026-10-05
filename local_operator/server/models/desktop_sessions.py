@@ -514,6 +514,16 @@ class CreatedSession(BaseModel):
     #: and nothing was applied" — which is what a local create with no ``model`` field
     #: honestly reports.
     model: CreatedSessionModel = Field(default_factory=CreatedSessionModel)
+    #: THE UNATTENDED FALLBACK'S SENTENCE, ``""`` for every create that did not need
+    #: one (remote-onboarding §6 defect 2). It is non-empty exactly when the origin's
+    #: saved ``tool_approval_mode: auto`` implied a ``yolo`` request the peer refused
+    #: (``not_permitted`` — no ``unattended`` grant) and the create fell back ATTENDED:
+    #: the sentence says the conversation will prompt for approvals there and names
+    #: the one grant that stops it. THE RENDERER DOES NOT DRAW IT YET — declared here
+    #: so the value SURVIVES the response model instead of being silently dropped
+    #: (the boundary rule this class's own comments keep re-stating), and so a later
+    #: UI reads it without a wire change.
+    unattended_notice: str = ""
 
 
 class DraftReceipt(BaseModel):

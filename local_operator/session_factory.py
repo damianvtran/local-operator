@@ -875,6 +875,39 @@ def _approval_mode_is_auto(config_manager: Any) -> bool:
     return str(stored).strip().lower() == "auto"
 
 
+def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
+    """Whether ``tool_approval_mode: auto`` is SAVED at ``root`` (this process's
+    config root when ``root`` is None).
+
+    THE GUARDED SIBLING of :func:`_approval_mode_is_auto`, for callers OUTSIDE a
+    session build that have to know what a session started here would resolve —
+    the mesh surfaces deciding whether a create or a move should REQUEST
+    ``unattended`` (remote-onboarding §6 defect 2). Three properties make it the
+    one reader for those callers:
+
+    * the derivation is ``_approval_mode_is_auto`` itself — same key, same
+      default, same degrade-to-ask — so the requested mode cannot drift from the
+      gate a locally-started session would run with;
+    * a root with NO config file answers ``False`` WITHOUT being constructed,
+      because constructing ``ConfigManager`` materialises the directory and a
+      launch- or request-path check has no business writing (the rule
+      ``exec_mode._saved_auto_approval`` states for its own call site);
+    * any failure is ``False`` — the fail-closed direction, because a wrong
+      ``True`` here asks a PEER for unattended authority nobody needs, and the
+      request can only ever be honoured against that peer's own grant anyway.
+    """
+    try:
+        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+        from local_operator.paths import config_dir
+
+        base = Path(root) if root is not None else config_dir()
+        if not (base / CONFIG_FILE_NAME).is_file():
+            return False
+        return _approval_mode_is_auto(ConfigManager(config_dir=base))
+    except Exception:  # noqa: BLE001 — keep the request OFF when unsure
+        return False
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 

@@ -230,9 +230,14 @@ quietly dropped:
   user. The sentence names the missing name and the remedy (`definitions push`), and
   it is the PEER's own sentence, with this side's push failure appended if there was
   one.
-- **`--yolo` is refused**, on both ends, with no capability that unlocks it: it would
-  let one device make another run unattended with nobody there to see the approval.
-  Start such a session on the machine it runs on.
+- **`--yolo` needs an `unattended` grant, and the device that would RUN the session
+  decides**: its operator makes that one grant for the asking member (the Mesh tab's
+  "approve setup for <device>" path, or `lop network member grant <network> <device-id>
+  unattended`). With the grant, the create starts unattended — and so does a move of a
+  session that runs auto here. Without it, an EXPLICIT `--yolo` is refused with the
+  remedy named, while a create whose origin merely has `tool_approval_mode: auto` does
+  not dead-end: it falls back to an ATTENDED session and carries a notice saying the
+  conversation will prompt for approvals there until the grant is made.
 - **A profile's instructions are applied when it is a role, a specialist or a package
   seed.** A legacy chat agent's own prompt is deliberately not attachable (that is the
   product's rule, not the mesh's), so such a session runs its OWN instructions on that
@@ -900,6 +905,10 @@ The relay's own log is `logs/network.log`, and its LaunchAgent is
 
 **Capability vocabulary** — one list, the authorizer's:
 `admin`, `broker_credential`, `list`, `view`, `prompt`, `steer`, `stop`,
-`slash`, `delete`, `move`. Roles map onto them (`read` is viewer-shaped, `drive`
-adds `prompt`/`steer`/`stop`/`slash`, `admin` adds `admin`);
-`lop network show <network> --json` prints each member's granted list.
+`slash`, `delete`, `move` — plus the two onboarding scopes, grantable only (no
+role carries them): `approve` (answer approval prompts for sessions on that
+device) and `unattended` (start sessions there without approval prompts, and
+carry full-auto into creates and moves aimed at it). Roles map onto the rest
+(`read` is viewer-shaped, `drive` adds `prompt`/`steer`/`stop`/`slash`, `admin`
+adds `admin`); `lop network show <network> --json` prints each member's
+granted list.

@@ -929,6 +929,41 @@ def delete_scope_refusal(
     return delete_scope_refusal_sentence(command)
 
 
+def unattended_fallback_notice(peer: str = "") -> str:
+    """The notice a create carries when its IMPLIED unattended request was refused.
+
+    THE FALLBACK'S SENTENCE, written once because two surfaces produce it — the
+    CLI's ``network sessions --create`` and the desktop's ``create_on_peer`` — and
+    they must not drift (the rule ``delete_scope_refusal_sentence`` states for its
+    own pair). It exists because the request it explains was IMPLIED: the origin's
+    ``tool_approval_mode: auto``, not an explicit ask. An implied request that
+    dead-ended in a failed create would make a full-auto send the one thing
+    full-auto cannot do, so the create falls back ATTENDED and this sentence says
+    why the session will ask — and the one gesture that stops it asking.
+
+    THE REMEDY IS THE REFUSAL'S OWN VERB AND NOUN ("approve setup for <device> in
+    the Mesh tab", ``relay._op_session_create``), because it IS that refusal's
+    remedy: one grant, made once, on the device that would run the session. Two
+    surfaces sending the operator to two different places would be worse than
+    either sentence alone.
+
+    ``peer`` is the device as the REQUESTER typed it (a name or an id); empty
+    falls back to the description the refusal uses for an unnamed device.
+    """
+    named = str(peer or "").strip()
+    if named:
+        subject = f"{named} has not granted"
+        remedy = f"approve setup for {named} in the Mesh tab"
+    else:
+        subject = "the device that would run the session has not granted"
+        remedy = "approve that device's setup in the Mesh tab"
+    return (
+        f"created without full-auto: {subject} this device 'unattended', so the "
+        "conversation will prompt for approvals there. Its operator makes that "
+        f"grant — {remedy}."
+    )
+
+
 #: The slash commands a RELAYED connection may run through the ONE carrier that
 #: types the line into the OWNER's own terminal.
 #:
