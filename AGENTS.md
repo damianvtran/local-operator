@@ -1499,15 +1499,16 @@ then be advanced to `origin/main` before the update runs — `git -C <clone>
 fetch origin main && git -C <clone> update-ref refs/heads/main origin/main`, or
 `git reset --hard origin/main` in a scratch clone — because `lop-update`
 archives the NAMED ref out of the repository it runs in, and a `fetch` moves
-only the remote-tracking ref, never the local branch. A clone made with
-`--local` is silently degraded to a full clone when its source repository is
-shallow (git prints "source repository is shallow, ignoring --local"), so it
-inherits the shared checkout's local `main` instead of a fresh one. Measured on
-2026-10-05, that is what happened: a `--local` clone inherited a stale local
-`main`, a `fetch` advanced only `origin/main`, and the update archived the
-stale ref — installing a 0.64.4 build under a 0.67.x fleet and moving the
-serve runtime down, until `git reset --hard origin/main` in the clone and a
-re-run put it right in about two minutes.
+only the remote-tracking ref, never the local branch. The clone's own `main`
+starts where its SOURCE's does, so a stale one is inherited from the shared
+checkout, not from any clone mode — and a `--local` clone against a shallow
+source is a separate caveat, not the cause: `--local` is ignored there (git
+prints "source repository is shallow, ignoring --local"), so the clone shares no
+objects and is itself shallow. Measured on 2026-10-05, the stale start is what
+bit: the clone's local `main` was behind, a `fetch` advanced only `origin/main`,
+and the update archived the stale ref — installing a 0.64.4 build under a
+0.67.x fleet and moving the serve runtime down; `git reset --hard origin/main`
+in the clone and a re-run put it right in about two minutes.
 
 ### Installing over a live fleet
 
