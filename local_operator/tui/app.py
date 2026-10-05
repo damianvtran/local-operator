@@ -25794,12 +25794,21 @@ class OperatorApp(App[None]):
             self._ask_rows = []
             self._ask_fleet_rows = []
             self._ask_marks = {}
+            self._ask_open_count = None
+            self._ask_truncated = False
             self._ask_scope = SCOPE_SESSION
             self._ask_bar.set_state(count=0, expanded=False, present=False)
             self._sync_ask_tick()
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
+        #: The wire's OWN tally and its truncation marker, kept beside the rows so
+        #: the list can be MOUNTED with them: a list built from the current
+        #: snapshot has to state the same count its next ``set_rows`` would, or
+        #: the header would read the visible split on a frame whose rows are a
+        #: prefix of the queue (A6) until the next snapshot happened to land.
+        self._ask_open_count = open_count
+        self._ask_truncated = bool(truncated)
         self._sync_ask_tick()
         self._paint_ask_bar()
         if self._ask_list is not None:
@@ -26448,7 +26457,12 @@ class OperatorApp(App[None]):
         # on and the stash intact (review round 1, BLOCKER-1).
         self._clear_ask_surface()
         widget = AskQueueList(
-            rows, widget_id="ask-queue-list", now_ms=self._ask_now_ms(), scope=scope
+            rows,
+            widget_id="ask-queue-list",
+            now_ms=self._ask_now_ms(),
+            scope=scope,
+            open_count=None if scope == SCOPE_FLEET else self._ask_open_count,
+            truncated=False if scope == SCOPE_FLEET else self._ask_truncated,
         )
         self._ask_list = widget
         if highlight:
