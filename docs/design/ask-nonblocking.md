@@ -1273,10 +1273,11 @@ remains the only secret path) — its own refusal sentence.
 * the existing user-voiced sentences are kept for user ops; the op-level returns to the MODEL may
   carry their own wording where "you already declined this" would read wrong.
 
-**Fold rule and the ONE race.** `withdrawn` is terminal-on-write **except that an `answered` row
-wins over a later `withdrawn`** — the operator's real answer must never be swallowed by the asker's
-retraction; a racing withdrawal loses, and the model may re-ask. The op also refuses when an
-`answered` row already exists, so the fold caveat is belt-and-braces for the true race only.
+**Fold rule and the ONE race.** `withdrawn` is terminal-on-write **except that every user-act
+terminal row present (`answered`, `declined`, `dismissed`) outranks a later `withdrawn`** — the
+user's own acts are never overridden by the asker's retraction; a racing withdrawal loses, and the
+model may re-ask. Only a `withdrawn` with no such sibling folds to `withdrawn`. The op also refuses
+a settled ask, so the fold caveat is belt-and-braces for the true cross-process race only.
 (Contrast `dismissed`'s documented shadowing, prevented surface-side because only a `timed_out` ask
 offers it; `withdrawn` is agent-callable at any time, so the guard must live in the fold.)
 **Reader tolerance**: an old build (pre-`withdrawn`) folding a log that contains `withdrawn` rows
@@ -1306,11 +1307,13 @@ message answers it, withdraw it"). Track with the §9 text edits.
 
 **Surfaces (all read the same fold — passive render only):**
 
-* TUI: `ask_queue.py`'s status map and settled chip gain `withdrawn` ("Withdrawn — no longer
-  needed"); `SETTLED_STATUSES` grows by `withdrawn`; the halves partition unchanged (withdrawn is
-  Settled, never outstanding; the bar/list counts drop by themselves).
-* Wire/web: the status enum addition (`mobile/types.py`, web `types.ts`, `asks.ts` copy); an
-  answered-in-chat row already renders through `answered_by.surface`.
+* TUI: `ask_queue.py`'s status map and settled chip gain `withdrawn` (the bare word — the
+  `declined`/`dismissed` register; the chip has no room for a clause); `SETTLED_STATUSES` grows by
+  `withdrawn`; the halves partition unchanged (withdrawn is Settled, never outstanding; the
+  bar/list counts drop by themselves).
+* Wire/web: the status enum addition (`mobile/types.py`, web `types.ts`, `asks.ts` copy — the
+  settled row's clause register names the actor: "Withdrawn — the agent no longer needs an
+  answer"); an answered-in-chat row already renders through `answered_by.surface`.
 * Desktop: their lane; the settled half needs the word, no op.
 
 ### 12.2 Open questions (FOR SYNC — Aida)
@@ -1338,6 +1341,8 @@ settled word only, no row, counts drop; wire value passthrough. Frames: TUI sett
 before/after; phone card (relay lane). PR: one core PR (this §12 + code), `Release: patch` — a
 self-contained feature, not a step-function.
 
-**The PR description states two things as CONTRACT** (Aida, sync): (a) the race rule — an existing
-`answered` beats a later `withdrawn`; and (b) old builds folding `withdrawn` rows tolerate the
-unknown kind. Both are cheap to state now and expensive to discover later.
+**The PR description states two things as CONTRACT** (Aida, sync): (a) the race rule — every
+user-act terminal row present (`answered`, `declined`, `dismissed`) outranks a later `withdrawn`,
+and only a `withdrawn` with no such sibling folds to `withdrawn`; and (b) old builds folding
+`withdrawn` rows tolerate the unknown kind. Both are cheap to state now and expensive to discover
+later.

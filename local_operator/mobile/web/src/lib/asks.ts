@@ -185,10 +185,11 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 		case "dismissed":
 			return { text: "Dismissed — no reply was sent", tone: "gone" };
 		case "withdrawn":
-			/* DESIGN §12's word, verbatim — the ONE new copy this status needs on
-			   this surface. Like `dismissed`, the ask is over with nothing to send;
-			   unlike it, the asker retracted the question rather than the user. */
-			return { text: "Withdrawn — no longer needed", tone: "gone" };
+			/* DESIGN §12's state word; the settled register here names the ACTOR —
+			   the agent retracted, the user did not (design review round 1, D2).
+			   Like `dismissed`, the ask is over with nothing to send; unlike it,
+			   the asker retracted the question rather than the user. */
+			return { text: "Withdrawn — the agent no longer needs an answer", tone: "gone" };
 		case "expired":
 			return {
 				text: "Expired — this ask is too old to answer; ask the agent again",

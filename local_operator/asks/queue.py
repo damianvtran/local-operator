@@ -659,12 +659,13 @@ class AskQueue:
 
         * ``moot`` appends ``withdrawn`` — terminal-on-write, injects NOTHING
           (symmetric with ``dismissed``). The fold caveat lives in
-          :func:`asks.store.fold`: an ``answered`` row always wins, in either
-          write order, because the operator's real answer must never be
-          swallowed by the asker's retraction. This method does not lean on that
-          caveat for its own refusals — it checks the fold and refuses a settled
-          ask in :func:`render.withdraw_refusal`'s words — so the caveat is
-          belt-and-braces for the true cross-process race only.
+          :func:`asks.store.fold`: every user-act terminal row present
+          (``answered``, ``declined``, ``dismissed``) outranks a later
+          ``withdrawn``, in either write order, because the user's own acts are
+          never overridden by the asker's retraction. This method does not lean
+          on that caveat for its own refusals — it checks the fold and refuses a
+          settled ask in :func:`render.withdraw_refusal`'s words — so the caveat
+          is belt-and-braces for the true cross-process race only.
         * ``answered_in_chat`` records through the same ``answered`` machinery
           :meth:`respond` uses: the cells are the user's words VERBATIM, one
           cell per question the message answers and an EMPTY LIST for a question
@@ -699,7 +700,9 @@ class AskQueue:
                 # Refused rather than ignored: a model that meant to record the
                 # user's words and passed the wrong reason must hear it, because
                 # the words would otherwise be silently discarded by the
-                # withdrawal it did ask for.
+                # withdrawal it did ask for. An EMPTY map passes deliberately —
+                # it is "no answers", so there are no words for this guard to
+                # protect (review round 1, NIT 5).
                 return {"ok": False, "error": render.WITHDRAW_MOOT_TAKES_NO_ANSWERS}
             if settled:
                 return {"ok": False, "error": render.withdraw_refusal(record, reason)}

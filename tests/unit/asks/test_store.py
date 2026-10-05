@@ -390,6 +390,21 @@ def test_an_answered_late_row_also_outranks_a_later_withdrawn():
     assert record["status"] == store.STATUS_LATE
 
 
+def test_a_withdrawn_row_before_an_answered_late_row_still_folds_late():
+    """The mirrored write order of the cell above (review round 1, NIT 4): the
+    withdrawal lands FIRST and the past-deadline answer AFTER it — the answered
+    branch still sits above the withdrawn branch, so the fold reads ``late``,
+    never ``withdrawn``, and keeps the words."""
+    events = [
+        _queued(at=BASE, timeout_s=120),
+        _withdrawn(at=BASE + 200_000),
+        _answered(at=BASE + 300_000),
+    ]
+    record = store.fold(events, BASE + 400_000)[0]
+    assert record["status"] == store.STATUS_LATE
+    assert record["answers"] == {"q": ["yes"]}
+
+
 def test_expected_rows_are_per_kind_and_late_needs_the_response_alone():
     """A `late` ask owes ONE row, and that is the level-triggered rule.
 

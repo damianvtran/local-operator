@@ -68,7 +68,7 @@ describe("askStateLine", () => {
 
 	it("names a withdrawal as the agent's own retraction, never a failure", () => {
 		const line = askStateLine(ask({ status: "withdrawn" }), 1);
-		expect(line.text).toBe("Withdrawn — no longer needed");
+		expect(line.text).toBe("Withdrawn — the agent no longer needs an answer");
 		expect(line.tone).toBe("gone");
 		expect(isAnswerable("withdrawn")).toBe(false);
 	});
