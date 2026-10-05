@@ -35,6 +35,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -83,7 +84,7 @@ INDEX = {
 }
 
 
-def _ask(ask_id: str, status: str) -> dict:
+def _ask(ask_id: str, status: str) -> dict[str, Any]:
     now = int(NOW * 1000)
     return {
         "ask_id": ask_id,
@@ -143,7 +144,7 @@ class _CurrentSession(FakeSession):
         return {"ok": True}
 
 
-def _current_row() -> dict:
+def _current_row() -> dict[str, Any]:
     return _ask("a1", "open")
 
 
@@ -194,9 +195,8 @@ async def main() -> None:
             app._sync_ask_surface(ask_rows([_current_row()]))
             # The index tally, through the app's own reader and painter — the
             # production path, not a hand-set map.
-            marks, total = app._read_fleet_asks()
+            marks, _total = app._read_fleet_asks()
             app._ask_marks = dict(marks)
-            app._ask_fleet_total = total
             app._paint_sidebar_asks()
         await pilot.pause()
         await pilot.pause()
