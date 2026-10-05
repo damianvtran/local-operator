@@ -27,10 +27,21 @@ on:
       - main
     paths:
       - 'local_operator/mobile/web/**'
+      # The web job also READS two Python modules: the generated status order and
+      # link cap come from `STATUS_RANK` (server/models/desktop_projects.py) and
+      # `SESSIONS_MAX` (projects.py), and `src/projects-status.test.tsx` is what
+      # fails when they diverge. A paths gate that omitted them was a guard that
+      # could not fire on the one change it guards against: a status added on
+      # the server alone ran no web job at all, so the phone's board would
+      # silently mis-group it (review round 6, M2).
+      - 'local_operator/server/models/desktop_projects.py'
+      - 'local_operator/projects.py'
       - '.github/workflows/mobile-web.yml'
   pull_request:
     paths:
       - 'local_operator/mobile/web/**'
+      - 'local_operator/server/models/desktop_projects.py'
+      - 'local_operator/projects.py'
       - '.github/workflows/mobile-web.yml'
   workflow_dispatch:
 

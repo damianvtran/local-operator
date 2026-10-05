@@ -11,10 +11,15 @@
 
 /** The Python module that owns the board order. */
 export declare const PY_SOURCE: string;
+/** The Python module that owns the store's link cap. */
+export declare const PY_STORE: string;
 /** The committed generated module. */
 export declare const OUT: string;
 /** The ordered status list read out of one Python source text. Throws when the
     `STATUS_RANK` dict is missing, unbalanced or empty. */
 export declare function readStatusOrder(pySource: string): string[];
-/** The generated module's text for one ordered status list. */
-export declare function renderModule(order: string[]): string;
+/** The store's link cap read out of one Python source text. Throws when
+    `SESSIONS_MAX` cannot be read. */
+export declare function readSessionLinkCap(pySource: string): number;
+/** The generated module's text for one ordered status list and one link cap. */
+export declare function renderModule(order: string[], sessionLinkCap: number): string;

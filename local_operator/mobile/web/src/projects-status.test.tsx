@@ -23,9 +23,16 @@
 import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readStatusOrder, renderModule, OUT, PY_SOURCE } from "../scripts/generate-projects-status.mjs";
+import {
+	readSessionLinkCap,
+	readStatusOrder,
+	renderModule,
+	OUT,
+	PY_SOURCE,
+	PY_STORE,
+} from "../scripts/generate-projects-status.mjs";
 import { ProjectsSheet } from "./components/projects-sheet";
-import { STATUS_ORDER } from "./projects-status.generated";
+import { SESSION_LINK_CAP, STATUS_ORDER } from "./projects-status.generated";
 import type { ProjectSummary } from "./types";
 
 const getProjects = vi.fn();
@@ -46,31 +53,56 @@ afterEach(() => {
 describe("the generated status order", () => {
 	it("is the daemon's own board order, and the committed module is current", () => {
 		const source = readFileSync(PY_SOURCE, "utf8");
+		const store = readFileSync(PY_STORE, "utf8");
 		/* Both directions in one line: the module the sheet imports equals the
 		   order the Python source states today, and the committed FILE equals
 		   what the generator would write — so editing either one alone fails. */
 		expect(STATUS_ORDER).toEqual(readStatusOrder(source));
-		expect(readFileSync(OUT, "utf8")).toBe(renderModule(readStatusOrder(source)));
+		expect(readFileSync(OUT, "utf8")).toBe(
+			renderModule(readStatusOrder(source), readSessionLinkCap(store)),
+		);
+	});
+
+	it("carries the store's own link cap, and is current about it too", () => {
+		const store = readFileSync(PY_STORE, "utf8");
+		/* The cap is what lets the sheet say "the cap is reached" BEFORE the tap.
+		   A hand-copied 64 would go stale the day the store moves it — and the
+		   sheet would then offer a tap the store refuses (review round 6, D7). */
+		expect(SESSION_LINK_CAP).toBe(readSessionLinkCap(store));
+		const moved = store.replace(/^SESSIONS_MAX = \d+$/m, "SESSIONS_MAX = 99");
+		expect(moved).not.toBe(store);
+		expect(readSessionLinkCap(moved)).toBe(99);
+		expect(
+			renderModule(readStatusOrder(readFileSync(PY_SOURCE, "utf8")), readSessionLinkCap(moved)),
+		).not.toBe(readFileSync(OUT, "utf8"));
+		expect(() => readSessionLinkCap("nothing here")).toThrow();
 	});
 
 	it("would notice a status the daemon added or reordered", () => {
 		const source = readFileSync(PY_SOURCE, "utf8");
+		const store = readFileSync(PY_STORE, "utf8");
+		const current = () => renderModule(readStatusOrder(source), readSessionLinkCap(store));
 		/* The mutation is the real-world one: a status appended to the rank
 		   dict. The parser must see it, and the generated file must then be
 		   recognised as stale — otherwise the guard is theatre. */
 		const drifted = source.replace(/"archived": 6,/, '"archived": 6,\n    "blocked": 7,');
 		expect(drifted).not.toBe(source);
 		expect(readStatusOrder(drifted)).toEqual([...STATUS_ORDER, "blocked"]);
-		expect(renderModule(readStatusOrder(drifted))).not.toBe(readFileSync(OUT, "utf8"));
+		expect(renderModule(readStatusOrder(drifted), readSessionLinkCap(store))).not.toBe(
+			readFileSync(OUT, "utf8"),
+		);
 
 		/* And a reordering, which the appended-status case cannot catch. */
-		const reordered = source.replace(/"qa": 2,/, '"qa": 3,').replace(/"validation": 3,/, '"validation": 2,');
+		const reordered = source
+			.replace(/"qa": 2,/, '"qa": 3,')
+			.replace(/"validation": 3,/, '"validation": 2,');
 		expect(readStatusOrder(reordered)).toEqual([
 			...STATUS_ORDER.slice(0, 2),
 			"validation",
 			"qa",
 			...STATUS_ORDER.slice(4),
 		]);
+		expect(current()).toBe(readFileSync(OUT, "utf8"));
 	});
 
 	it("refuses a source it cannot parse rather than emitting an empty order", () => {

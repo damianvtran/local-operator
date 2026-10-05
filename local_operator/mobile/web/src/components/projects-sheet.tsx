@@ -55,7 +55,7 @@ import {
 import { getSessions } from "../api";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/format";
-import { STATUS_ORDER } from "../projects-status.generated";
+import { SESSION_LINK_CAP, STATUS_ORDER } from "../projects-status.generated";
 import type {
 	ProjectLinkedSession,
 	ProjectMilestone,
@@ -78,6 +78,51 @@ import { Sheet } from "./ui/sheet";
     field added to a form must not look like a foreign control. */
 const FIELD_CLASS =
 	"min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim";
+
+/** One form field: label, control, and the helper that explains the control.
+
+    The helper is a SIBLING of the `<label>`, wired to the control through
+    `aria-describedby` — never text INSIDE the label. Text inside a `<label>`
+    becomes part of the control's accessible NAME, so a reader asking for the
+    tags field was read "tags lowercase letters, digits, underscore and hyphen;
+    separated by commas" (design round 6, D9). The ids are explicit strings
+    rather than `useId` so a test can name one field without guessing. */
+function Field({
+	id,
+	label,
+	helper,
+	children,
+}: {
+	id: string;
+	label: string;
+	helper?: string;
+	children: ReactNode;
+}) {
+	return (
+		<div className="flex flex-col gap-1">
+			<label htmlFor={id} className="text-body-sm text-ink-muted">
+				{label}
+			</label>
+			{children}
+			{helper ? (
+				<p id={`${id}-helper`} className="text-meta text-ink-dim">
+					{helper}
+				</p>
+			) : null}
+		</div>
+	);
+}
+
+/** A description is prose of up to the store's `DESCRIPTION_MAX`, and the
+    detail view renders it `whitespace-pre-wrap`: a single-line input showed
+    ~50 characters of a 2000-character field and scrolled the rest out of sight
+    (design round 6, D1). */
+const DESCRIPTION_MAX = 2000;
+/** The message a milestone name containing a slash gets. The relay's delete
+    route carries the name as the LAST PATH SEGMENT (`{name:str}`, i.e.
+    `[^/]+` upstream), so `ship/v2` is creatable and then unaddressable: the
+    phone can make a milestone it could never remove (review round 6, M1). */
+const SLASH_IN_MILESTONE = "a milestone name cannot contain a slash: the route that removes one carries its name in the path, so it could never be removed from here";
 
 type View =
 	| { name: "browse" }
@@ -174,12 +219,19 @@ function sessionsText(project: ProjectSummary): string {
     `missing` (the linked session's directory is gone; the store marks it and
     never auto-removes) outranks the runtime word: a record can outlive the
     conversation it names, and saying "stopped" about a directory that no
-    longer exists would hide the one fact the reader can act on. */
+    longer exists would hide the one fact the reader can act on.
+
+    A `coordination` row is asked about FIRST, because its `runtime` is null by
+    construction — the field is not merely absent for a "filed by" id, and
+    reading `.state` off it would crash the sheet. Its word is the filing
+    itself: that is what the reader must know before acting on the row's unlink
+    control (removing a filing is what unlink does to it). */
 function sessionState(row: ProjectLinkedSession): { word: string; ink: string } {
+	if ((row.role ?? "work") === "coordination") return { word: "filed", ink: "text-ink-dim" };
 	if (!row.exists) return { word: "missing", ink: "text-warning" };
 	/* An unknown state word from a newer build passes through rather than being
 	   flattened into a known one. */
-	const base = row.runtime.state;
+	const base = row.runtime?.state ?? "stopped";
 	const ink =
 		base === "live"
 			? "text-accent"
@@ -315,6 +367,10 @@ export function ProjectsSheet({
 	   than by an effect, so an abandoned draft can never be re-shown. */
 	const [draft, setDraft] = useState<ProjectDraft | null>(null);
 	const [milestoneDraft, setMilestoneDraft] = useState<MilestoneDraft | null>(null);
+	/* The milestone editor's remove step. Armed by its own control below the
+	   primary row, so the destructive action is never the button adjacent to
+	   `save` (design round 6, D2). */
+	const [removalArmed, setRemovalArmed] = useState(false);
 	/* The link sub-view's candidates: the daemon's sessions, `null` while the
 	   fetch is in flight, with its own error line because a catalogue failure
 	   must not read as "there is nothing to link". */
@@ -513,12 +569,28 @@ export function ProjectsSheet({
 			name: editing?.name ?? "",
 			target_date: editing?.target_date ?? "",
 		});
+		setRemovalArmed(false);
 		setFormError("");
 		setView({ name: "milestone", key, editing: editing?.name ?? null });
 	};
 
 	const submitEdit = async (key: string) => {
 		if (busy || !draft) return;
+		const clearedEstimate = draft.estimate.trim() === "";
+		const estimate = clearedEstimate ? null : Number(draft.estimate);
+		/* `Number()` can produce a NON-FINITE value from input a number field
+		   accepts (`1e999`), and `JSON.stringify` writes that as `null` — which is
+		   exactly the silent no-op the estimate's own note warns about, because
+		   the store's apply arm ignores a null. That one value is refused HERE,
+		   in the store's own words for it ("estimate must be a number").
+
+		   A value that is a number but out of BOUNDS (0, or above the store's
+		   ESTIMATE_MAX) is DELIBERATELY SENT: the store answers with its own
+		   sentence naming the bound, which this client must not hand-copy. */
+		if (estimate !== null && !Number.isFinite(estimate)) {
+			setFormError("estimate must be a number");
+			return;
+		}
 		setBusy(true);
 		setFormError("");
 		try {
@@ -536,7 +608,7 @@ export function ProjectsSheet({
 				   request can clear it. An emptied box therefore OMITS the key
 				   (leave it as it is) — sending `null` would be a silent no-op that
 				   left the old number on the row while the form showed it blank. */
-				...(draft.estimate.trim() === "" ? {} : { estimate: Number(draft.estimate) }),
+				...(clearedEstimate ? {} : { estimate: Number(draft.estimate) }),
 				estimate_unit: draft.estimate_unit,
 			});
 			setNotice(`updated ${project.name}`);
@@ -553,6 +625,12 @@ export function ProjectsSheet({
 		if (busy || !milestoneDraft) return;
 		const milestoneName = (editing ?? milestoneDraft.name).trim();
 		if (!milestoneName) return;
+		/* The button is inert on a slash, but the rule is enforced here too: a
+		   name the delete route could never address must not be created. */
+		if (milestoneName.includes("/")) {
+			setFormError(SLASH_IN_MILESTONE);
+			return;
+		}
 		setBusy(true);
 		setFormError("");
 		try {
@@ -672,16 +750,51 @@ export function ProjectsSheet({
 	   union, and a property read inside a callback loses the narrowing. */
 	const editingMilestone = view.name === "milestone" ? view.editing : null;
 
+	/* The milestone editor's own rules, as one usable flag: a name is needed to
+	   ADD (an existing one is the key), and a name containing a slash can never
+	   be removed through the relay's route — so it must not be created
+	   (review round 6, M1). */
+	const milestoneName = (editingMilestone ?? milestoneDraft?.name ?? "").trim();
+	const nameHasSlash = milestoneName.includes("/");
+	const milestoneNameUsable = milestoneName !== "" && !nameHasSlash;
+
 	/* The link picker's rows: the daemon's sessions minus the ones this project
-	   already carries. Linking one it already has is a server-side no-op, and
-	   offering it would read as a tap that did nothing. */
-	const linkRows = useMemo(() => {
-		if (view.name !== "link" || candidates === null) return [];
-		const linked = new Set(
-			detail && detail.project.id === view.key ? detail.project.sessions : [],
-		);
-		return candidates.filter((session) => !linked.has(session.session_id));
+	   already carries — and minus the ones it carries as COORDINATION links. The
+	   relay's link body carries no role, so offering a coordination-linked row
+	   would MOVE it into the work set under a "linked …" receipt: a silent
+	   reclassification of a link is a data-integrity bug, not a UX nit (review
+	   round 6, m3). Those rows are counted, and the picker says so, rather than
+	   being dropped without a word. */
+	const { rows: linkRows, filed: filedLinks } = useMemo(() => {
+		if (view.name !== "link" || candidates === null) return { rows: [], filed: 0 };
+		const current = detail && detail.project.id === view.key ? detail.project : null;
+		const coordination = current?.coordination_sessions ?? [];
+		const linked = new Set([...(current?.sessions ?? []), ...coordination]);
+		return {
+			rows: candidates.filter((session) => !linked.has(session.session_id)),
+			filed: candidates.filter((session) => coordination.includes(session.session_id))
+				.length,
+		};
 	}, [view, candidates, detail]);
+
+	/* What this project already carries, against the store's own cap — generated
+	   from `SESSIONS_MAX`, so the phone never hand-copies the number. The cap
+	   counts the work and coordination lists TOGETHER (the store's rule), which
+	   is why this is not `links.length`. */
+	const linksUsed = detail
+		? detail.project.sessions.length + (detail.project.coordination_sessions ?? []).length
+		: 0;
+	const atLinkCap = linksUsed >= SESSION_LINK_CAP;
+
+	/* The two roles, counted apart. The composed view carries both in `links`,
+	   and they are NOT the same fact: a work link drives liveness and the
+	   completion check, a filed one is provenance. One heading that added them
+	   together said "sessions (2)" for a project the card described as "1
+	   session" (review round 6, m3). */
+	const workLinkCount = detail
+		? detail.links.filter((row) => (row.role ?? "work") === "work").length
+		: 0;
+	const filedLinkCount = detail ? detail.links.length - workLinkCount : 0;
 
 	return (
 		<Sheet open={open} onClose={onClose} title={title} returnFocusRef={returnFocusRef}>
@@ -838,9 +951,13 @@ export function ProjectsSheet({
 									{/* The edit form is the PATCH vocabulary reached from the phone:
 									    before it, a row could be created and deleted but never
 									    changed. */}
+									{/* `edit project` rather than a bare `edit`: this view also carries an
+									    `edit <milestone>` per row, and two controls whose accessible
+									    names differ only by context are ambiguous to walk (D9). */}
 									<Button
 										variant="outline"
 										className="shrink-0"
+										aria-label="edit project"
 										disabled={busy}
 										onClick={() => openEdit(detail.project)}
 									>
@@ -955,16 +1072,20 @@ export function ProjectsSheet({
 											{/* The date and the removal live in the milestone editor rather
 											    than as two more controls on this row: the row's own control
 											    stays the COMPLETION toggle, and stacking three tap targets
-											    on a 44px row is how a thumb presses the wrong one. */}
-											<button
-												type="button"
+											    on a 44px row is how a thumb presses the wrong one. The
+											    affordance is the SAME `Button` the project's own edit uses:
+											    a bare 37.6px text target beside a 57.7px bordered one reads
+											    as two different kinds of thing and misses the app's own
+											    44px floor (design round 6, D3). */}
+											<Button
+												variant="outline"
+												className="shrink-0"
 												disabled={busy}
 												aria-label={`edit ${milestone.name}`}
 												onClick={() => openMilestone(detail.project.id, milestone)}
-												className="min-h-11 shrink-0 rounded-sm px-2 text-meta text-ink-muted active:bg-surface disabled:opacity-50"
 											>
 												edit
-											</button>
+											</Button>
 										</div>
 									))
 								)}
@@ -977,7 +1098,13 @@ export function ProjectsSheet({
 									add milestone
 								</Button>
 							</Section>
-							<Section title={`sessions (${detail.links.length})`}>
+							<Section
+								title={
+									filedLinkCount > 0
+										? `sessions (${workLinkCount} · ${filedLinkCount} filed)`
+										: `sessions (${workLinkCount})`
+								}
+							>
 								{detail.links.length === 0 ? (
 									<p className="text-body-sm text-ink-dim">no linked sessions</p>
 								) : (
@@ -997,17 +1124,17 @@ export function ProjectsSheet({
 												{/* Unlinking is this row's own act: the link family was the
 												    one thing the phone could not do at all, and a
 												    session linked by mistake had no way out. */}
-												<button
-													type="button"
+												<Button
+													variant="outline"
+													className="shrink-0"
 													disabled={busy}
 													aria-label={`unlink ${row.title || row.session_id}`}
 													onClick={() =>
 														void unlinkSession(detail.project.id, row.session_id)
 													}
-													className="min-h-11 shrink-0 rounded-sm px-2 text-meta text-ink-muted active:bg-surface disabled:opacity-50"
 												>
 													unlink
-												</button>
+												</Button>
 											</div>
 										);
 									})
@@ -1015,7 +1142,7 @@ export function ProjectsSheet({
 								<Button
 									variant="outline"
 									className="mt-1"
-									disabled={busy}
+									disabled={busy || atLinkCap}
 									onClick={() => {
 										setFormError("");
 										setView({ name: "link", key: detail.project.id });
@@ -1023,6 +1150,16 @@ export function ProjectsSheet({
 								>
 									link a session
 								</Button>
+								{/* The cap, said BEFORE the tap: the refusal sentence names it too,
+								    but a reader should not have to spend a tap to learn that the
+								    store is full (design round 6, D7). The number is generated
+								    from `SESSIONS_MAX`, never hand-copied. */}
+								{atLinkCap ? (
+									<p className="mt-1 text-meta text-ink-dim">
+										this project has reached the {SESSION_LINK_CAP}-session cap (work and
+										filed links together); unlink one to link another
+									</p>
+								) : null}
 							</Section>
 							<div className="px-3 pt-2">
 								<Button
@@ -1048,9 +1185,14 @@ export function ProjectsSheet({
 			{view.name === "create" ? (
 				<div className="flex flex-col gap-3 px-3 pb-4">
 					<BackRow onClick={() => setView({ name: "browse" })} />
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">name</span>
+					<Field
+						id="create-name"
+						label="name"
+						helper="letters, digits, dot, underscore and hyphen; no spaces"
+					>
 						<input
+							id="create-name"
+							aria-describedby="create-name-helper"
 							value={name}
 							onChange={(event) => setName(event.target.value)}
 							placeholder="e.g. payments-migration"
@@ -1059,26 +1201,24 @@ export function ProjectsSheet({
 							autoCorrect="off"
 							className={FIELD_CLASS}
 						/>
-						<span className="text-meta text-ink-dim">
-							letters, digits, dot, underscore and hyphen; no spaces
-						</span>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">description (optional)</span>
-						<input
+					</Field>
+					<Field id="create-description" label="description (optional)">
+						{/* The store's own DESCRIPTION_MAX. The form used to stop the reader
+						   at 240, which silently made a phone-created description shorter
+						   than the same field on every other surface; a textarea because the
+						   detail view renders it `whitespace-pre-wrap` (D1). */}
+						<textarea
+							id="create-description"
 							value={description}
 							onChange={(event) => setDescription(event.target.value)}
-							/* The store's own DESCRIPTION_MAX. The form used to stop the
-							   reader at 240, which silently made a phone-created
-							   description shorter than the same field on every other
-							   surface. */
-							maxLength={2000}
-							className={FIELD_CLASS}
+							maxLength={DESCRIPTION_MAX}
+							rows={3}
+							className={cn(FIELD_CLASS, "py-2")}
 						/>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">status</span>
+					</Field>
+					<Field id="create-status" label="status">
 						<select
+							id="create-status"
 							value={createStatus}
 							onChange={(event) => setCreateStatus(event.target.value)}
 							className={FIELD_CLASS}
@@ -1091,10 +1231,15 @@ export function ProjectsSheet({
 								</option>
 							))}
 						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">tags (optional)</span>
+					</Field>
+					<Field
+						id="create-tags"
+						label="tags (optional)"
+						helper="lowercase letters, digits, underscore and hyphen; separated by commas"
+					>
 						<input
+							id="create-tags"
+							aria-describedby="create-tags-helper"
 							value={createTags}
 							onChange={(event) => setCreateTags(event.target.value)}
 							placeholder="payments, q4"
@@ -1103,10 +1248,15 @@ export function ProjectsSheet({
 							autoCorrect="off"
 							className={FIELD_CLASS}
 						/>
-						<span className="text-meta text-ink-dim">
-							lowercase letters, digits, underscore and hyphen; separated by commas
-						</span>
-					</label>
+					</Field>
+					{/* The create body is `ProjectCreate` (name, description, status,
+					    tags) and `extra="forbid"`: the dates, the estimate and milestones
+					    cannot be sent here at all, so the form says where they live rather
+					    than leaving the reader to hunt (design round 6, D8). */}
+					<p className="text-meta text-ink-dim">
+						start and target dates, the estimate and milestones are set from the project
+						once it exists — the create body carries name, description, status and tags.
+					</p>
 					{formError ? (
 						<p role="alert" className="text-body-sm break-words text-danger">
 							{formError}
@@ -1134,9 +1284,9 @@ export function ProjectsSheet({
 						label="project"
 						onClick={() => setView({ name: "detail", key: view.key })}
 					/>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">name</span>
+					<Field id="edit-name" label="name">
 						<input
+							id="edit-name"
 							value={draft.name}
 							onChange={(event) => setDraft({ ...draft, name: event.target.value })}
 							spellCheck={false}
@@ -1144,22 +1294,26 @@ export function ProjectsSheet({
 							autoCorrect="off"
 							className={FIELD_CLASS}
 						/>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">description</span>
-						<input
+					</Field>
+					<Field id="edit-description" label="description">
+						{/* The store's own DESCRIPTION_MAX, the same bound the create form
+						   carries — an edit form with a shorter cap could not append a word
+						   to a row another surface wrote — and a textarea, because the detail
+						   view renders this field `whitespace-pre-wrap` (D1). */}
+						<textarea
+							id="edit-description"
 							value={draft.description}
-							onChange={(event) => setDraft({ ...draft, description: event.target.value })}
-							/* The store's own DESCRIPTION_MAX, the same bound the create
-							   form carries — an edit form with a shorter cap could not
-							   append a word to a row another surface wrote. */
-							maxLength={2000}
-							className={FIELD_CLASS}
+							onChange={(event) =>
+								setDraft({ ...draft, description: event.target.value })
+							}
+							maxLength={DESCRIPTION_MAX}
+							rows={4}
+							className={cn(FIELD_CLASS, "py-2")}
 						/>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">status</span>
+					</Field>
+					<Field id="edit-status" label="status">
 						<select
+							id="edit-status"
 							value={draft.status}
 							onChange={(event) => setDraft({ ...draft, status: event.target.value })}
 							className={FIELD_CLASS}
@@ -1177,10 +1331,15 @@ export function ProjectsSheet({
 								</option>
 							))}
 						</select>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">tags</span>
+					</Field>
+					<Field
+						id="edit-tags"
+						label="tags"
+						helper="lowercase letters, digits, underscore and hyphen; separated by commas"
+					>
 						<input
+							id="edit-tags"
+							aria-describedby="edit-tags-helper"
 							value={draft.tags}
 							onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
 							placeholder="payments, q4"
@@ -1189,38 +1348,60 @@ export function ProjectsSheet({
 							autoCorrect="off"
 							className={FIELD_CLASS}
 						/>
-						<span className="text-meta text-ink-dim">
-							lowercase letters, digits, underscore and hyphen; separated by commas
-						</span>
-					</label>
-					<div className="flex gap-2">
-						<label className="flex flex-1 flex-col gap-1">
-							<span className="text-body-sm text-ink-muted">start date</span>
-							<input
-								type="date"
-								value={draft.start_date}
-								onChange={(event) =>
-									setDraft({ ...draft, start_date: event.target.value })
-								}
-								className={FIELD_CLASS}
-							/>
-						</label>
-						<label className="flex flex-1 flex-col gap-1">
-							<span className="text-body-sm text-ink-muted">target date</span>
-							<input
-								type="date"
-								value={draft.target_date}
-								onChange={(event) =>
-									setDraft({ ...draft, target_date: event.target.value })
-								}
-								className={FIELD_CLASS}
-							/>
-						</label>
+					</Field>
+					<div className="flex flex-col gap-1">
+						<div className="flex gap-2">
+							<div className="flex flex-1 flex-col gap-1">
+								<label htmlFor="edit-start-date" className="text-body-sm text-ink-muted">
+									start date
+								</label>
+								<input
+									id="edit-start-date"
+									aria-describedby="edit-dates-helper"
+									type="date"
+									value={draft.start_date}
+									onChange={(event) =>
+										setDraft({ ...draft, start_date: event.target.value })
+									}
+									className={FIELD_CLASS}
+								/>
+							</div>
+							<div className="flex flex-1 flex-col gap-1">
+								<label htmlFor="edit-target-date" className="text-body-sm text-ink-muted">
+									target date
+								</label>
+								<input
+									id="edit-target-date"
+									aria-describedby="edit-dates-helper"
+									type="date"
+									value={draft.target_date}
+									onChange={(event) =>
+										setDraft({ ...draft, target_date: event.target.value })
+									}
+									className={FIELD_CLASS}
+								/>
+							</div>
+						</div>
+						{/* The date tri-state, said out loud: an EMPTIED box clears the date
+						    (the daemon reads `""` as cleared) while a date left as it is
+						    keeps it. The estimate's own limitation is stated beside it, and
+						    the two must read alike (design round 6, D5). */}
+						<p id="edit-dates-helper" className="text-meta text-ink-dim">
+							emptying a date box clears that date; leaving it as it is keeps it
+						</p>
 					</div>
 					<div className="flex gap-2">
-						<label className="flex flex-1 flex-col gap-1">
-							<span className="text-body-sm text-ink-muted">estimate</span>
+						<Field
+							id="edit-estimate"
+							label="estimate"
+							helper="a new estimate replaces the old; it cannot be cleared from here"
+						>
+							{/* Said out loud because the field really cannot do it: the store's
+							    apply arm ignores a null estimate, so an emptied box means "keep
+							    the estimate", never "clear it". */}
 							<input
+								id="edit-estimate"
+								aria-describedby="edit-estimate-helper"
 								type="number"
 								inputMode="decimal"
 								step="any"
@@ -1231,16 +1412,10 @@ export function ProjectsSheet({
 								}
 								className={FIELD_CLASS}
 							/>
-							{/* Said out loud because the field really cannot do it: the store's
-							    apply arm ignores a null estimate, so an emptied box means "keep
-							    the estimate", never "clear it". */}
-							<span className="text-meta text-ink-dim">
-								a new estimate replaces the old; it cannot be cleared from here
-							</span>
-						</label>
-						<label className="flex flex-1 flex-col gap-1">
-							<span className="text-body-sm text-ink-muted">unit</span>
+						</Field>
+						<Field id="edit-estimate-unit" label="unit">
 							<select
+								id="edit-estimate-unit"
 								value={draft.estimate_unit}
 								onChange={(event) =>
 									setDraft({ ...draft, estimate_unit: event.target.value })
@@ -1250,7 +1425,7 @@ export function ProjectsSheet({
 								<option value="points">points</option>
 								<option value="days">days</option>
 							</select>
-						</label>
+						</Field>
 					</div>
 					{formError ? (
 						<p role="alert" className="text-body-sm break-words text-danger">
@@ -1283,9 +1458,18 @@ export function ProjectsSheet({
 						label="project"
 						onClick={() => setView({ name: "detail", key: view.key })}
 					/>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">name</span>
+					<Field
+						id="milestone-name"
+						label="name"
+						helper={
+							editingMilestone === null
+								? "a name that does not exist yet is added"
+								: "the name is the milestone's key; milestones are not renamed here"
+						}
+					>
 						<input
+							id="milestone-name"
+							aria-describedby="milestone-name-helper"
 							value={milestoneDraft.name}
 							onChange={(event) =>
 								setMilestoneDraft({ ...milestoneDraft, name: event.target.value })
@@ -1295,15 +1479,23 @@ export function ProjectsSheet({
 							spellCheck={false}
 							className={cn(FIELD_CLASS, editingMilestone !== null ? "text-ink-muted" : "")}
 						/>
-						<span className="text-meta text-ink-dim">
-							{editingMilestone === null
-								? "a name that does not exist yet is added"
-								: "the name is the milestone's key; milestones are not renamed here"}
-						</span>
-					</label>
-					<label className="flex flex-col gap-1">
-						<span className="text-body-sm text-ink-muted">target date (optional)</span>
+					</Field>
+					{/* Said WHILE the name is typed, on the add path: the button below is
+					    inert until the slash goes, and a reader should not have to wonder
+					    why (review round 6, M1). */}
+					{editingMilestone === null && nameHasSlash ? (
+						<p role="alert" className="text-body-sm break-words text-danger">
+							{SLASH_IN_MILESTONE}
+						</p>
+					) : null}
+					<Field
+						id="milestone-target-date"
+						label="target date (optional)"
+						helper="emptying the box clears the date; leaving it as it is keeps it"
+					>
 						<input
+							id="milestone-target-date"
+							aria-describedby="milestone-target-date-helper"
 							type="date"
 							value={milestoneDraft.target_date}
 							onChange={(event) =>
@@ -1311,10 +1503,7 @@ export function ProjectsSheet({
 							}
 							className={FIELD_CLASS}
 						/>
-						{/* Leaving the box empty is the whole "clear it" affordance: `""` is
-						    the spelling the daemon's tri-state reads as CLEARED, so an
-						    emptied date input is not the same act as never having set one. */}
-					</label>
+					</Field>
 					{formError ? (
 						<p role="alert" className="text-body-sm break-words text-danger">
 							{formError}
@@ -1323,23 +1512,12 @@ export function ProjectsSheet({
 					<div className="flex flex-wrap gap-2">
 						<Button
 							variant="primary"
-							disabled={
-								busy || (editingMilestone === null && milestoneDraft.name.trim() === "")
-							}
+							disabled={busy || !milestoneNameUsable}
 							aria-busy={busy ? true : undefined}
 							onClick={() => void submitMilestone(view.key, editingMilestone)}
 						>
 							{busy ? "saving…" : editingMilestone === null ? "add" : "save"}
 						</Button>
-						{editingMilestone !== null ? (
-							<Button
-								variant="danger"
-								disabled={busy}
-								onClick={() => void removeMilestone(view.key, editingMilestone)}
-							>
-								remove
-							</Button>
-						) : null}
 						<Button
 							variant="quiet"
 							disabled={busy}
@@ -1348,6 +1526,51 @@ export function ProjectsSheet({
 							cancel
 						</Button>
 					</div>
+					{/* REMOVAL IS NOT A NEIGHBOUR OF SAVE. It used to sit 8px away in the
+					    same 44px row with no confirm and no undo, while deleting the whole
+					    PROJECT asks for a confirmation view — a mis-tap destroyed a
+					    milestone (design round 6, D2). It now sits below its own primary
+					    row, behind a confirm that states what is lost and what is not. */}
+					{editingMilestone !== null ? (
+						nameHasSlash ? (
+							/* A milestone another surface made with a slash in its name cannot
+							   be addressed by the relay's delete route at all, so the honest
+							   control is an explanation rather than a button that 404s. */
+							<p className="text-meta break-words text-warning">{SLASH_IN_MILESTONE}</p>
+						) : removalArmed ? (
+							<div className="flex flex-col gap-2 rounded-sm border border-danger-border bg-danger-wash p-3">
+								<p className="text-body-sm break-words text-danger">
+									remove “{editingMilestone}” from this project? the milestone is gone;
+									the project's sessions and its history are untouched.
+								</p>
+								<div className="flex flex-wrap gap-2">
+									<Button
+										variant="danger"
+										disabled={busy}
+										onClick={() => void removeMilestone(view.key, editingMilestone)}
+									>
+										remove
+									</Button>
+									<Button
+										variant="quiet"
+										disabled={busy}
+										onClick={() => setRemovalArmed(false)}
+									>
+										keep it
+									</Button>
+								</div>
+							</div>
+						) : (
+							<Button
+								variant="quiet"
+								className="self-start"
+								disabled={busy}
+								onClick={() => setRemovalArmed(true)}
+							>
+								remove milestone
+							</Button>
+						)
+					) : null}
 				</div>
 			) : null}
 
@@ -1378,18 +1601,42 @@ export function ProjectsSheet({
 									type="button"
 									disabled={busy}
 									onClick={() => void linkSession(view.key, session.session_id)}
-									className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-surface disabled:opacity-50"
+									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-left active:bg-surface disabled:opacity-50"
 								>
-									<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
-										{session.conversation_name || session.session_id}
+									<span className="flex w-full min-w-0 items-baseline gap-2">
+										<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
+											{session.conversation_name || session.session_id}
+										</span>
+										<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
+											{session.session_id}
+										</span>
 									</span>
-									<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-										{session.session_id}
+									{/* Enough to CHOOSE with: the sessions list shows a row's section,
+									    model and working directory, and a picker offering only a name
+									    and a hex id leaves the reader guessing what they are about to
+									    attach (design round 6, D4). */}
+									<span className="w-full truncate text-meta text-ink-dim">
+										{[session.section, session.model_label, session.cwd]
+											.filter(Boolean)
+											.join(" · ")}
 									</span>
 								</button>
 							))}
 						</div>
 					)}
+					{/* The rows this picker deliberately does NOT offer, said out loud.
+					    A session filed against the project (a coordination link) would MOVE
+					    into the work set if linked from here, because the relay's link body
+					    carries no role — a silent reclassification (review round 6, m3). */}
+					{filedLinks > 0 ? (
+						<p className="mt-1 text-meta text-ink-dim">
+							{filedLinks === 1
+								? "1 session filed against this project is not offered"
+								: `${filedLinks} sessions filed against this project are not offered`}
+							: linking one here would move it out of the filed list, and this surface
+							can only link a session as work.
+						</p>
+					) : null}
 					{formError ? (
 						<p role="alert" className="text-body-sm break-words text-danger">
 							{formError}

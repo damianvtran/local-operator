@@ -505,8 +505,17 @@ export function createProject(input: {
 
 /** Partially edit one project. ONLY the keys carried are touched — the
     daemon forwards ``model_fields_set`` into the store, so an omitted key
-    keeps its stored value while an explicit ``""`` CLEARS a date and an
-    explicit ``null`` clears the estimate.
+    keeps its stored value while an explicit ``""`` CLEARS a date.
+
+    THE ESTIMATE IS THE EXCEPTION, and it is the store's rule rather than this
+    client's: ``update_project``'s apply arm is ``if "estimate" in supplied
+    and fields.estimate is not None``, so an explicit ``null`` is a silent
+    NO-OP that leaves the stored number in place (measured against the real
+    daemon — a ``null`` estimate came back as ``3.0``). A caller that wants to
+    leave an estimate alone must therefore OMIT the key; one that wants to
+    clear it has no request at all. (An earlier revision of this comment
+    claimed ``null`` cleared it, which was exactly the sort of unverified
+    claim this file should not carry.)
 
     The tri-state is the whole reason the caller builds the body rather than
     posting a whole record: a form that re-sent every field it rendered would
@@ -590,7 +599,15 @@ export function setProjectMilestone(
 
 /** Remove one milestone by name (case-insensitively, the same key the
     add-or-update route uses). Answered with the whole project view, so a
-    caller renders the store's own list rather than a locally filtered one. */
+    caller renders the store's own list rather than a locally filtered one.
+
+    THE NAME TRAVELS IN THE PATH, and the route upstream is ``{name:str}``
+    (``[^/]+``), so a name containing a slash can never be addressed here —
+    measured: ``DELETE …/milestones/ship%2Fv2`` answers 404, even though the
+    same name was accepted on create. Percent-encoding is not the defect and
+    cannot fix it (the segment is decoded before routing). A caller must not
+    create such a name, and must refuse the removal with that explanation
+    rather than sending a request that cannot match. */
 export function removeProjectMilestone(
 	key: string,
 	name: string,

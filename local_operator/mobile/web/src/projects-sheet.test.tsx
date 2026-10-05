@@ -21,6 +21,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
 import { ProjectsSheet } from "./components/projects-sheet";
+import { SESSION_LINK_CAP } from "./projects-status.generated";
 /* The populated and board states are pinned to VERBATIM relay bodies captured
    over HTTP against an isolated config root (`projects.list.json` / 
    `projects.detail.json`), and the refusals to the daemon's own error
@@ -30,7 +31,7 @@ import detailBody from "./fixtures/projects.detail.json";
 import listBody from "./fixtures/projects.list.json";
 import refusalBodies from "./fixtures/projects.refusals.json";
 import writeBodies from "./fixtures/projects.writes.json";
-import type { ProjectLinkedSession, ProjectSummary, ProjectView } from "./types";
+import type { ProjectLinkedSession, ProjectSummary, ProjectView, SessionSummary } from "./types";
 
 const getProjects = vi.fn();
 const getProject = vi.fn();
@@ -518,7 +519,7 @@ describe("edit", () => {
 		getProjects.mockResolvedValue({ projects: [summary()] });
 		renderSheet();
 		fireEvent.click(await screen.findByText("payments-migration"));
-		fireEvent.click(await screen.findByRole("button", { name: "edit" }));
+		fireEvent.click(await screen.findByRole("button", { name: "edit project" }));
 	}
 
 	it("sends the form's fields and re-reads the detail the reader lands on", async () => {
@@ -766,7 +767,7 @@ describe("milestones", () => {
 		);
 	});
 
-	it("removes a milestone, and refuses to save an empty new name", async () => {
+	it("removes a milestone behind its own confirm, and refuses to save an empty new name", async () => {
 		await openDetail([upcoming]);
 		// An ADD with no name has nothing to key on: the button is inert.
 		fireEvent.click(await screen.findByRole("button", { name: "add milestone" }));
@@ -776,6 +777,17 @@ describe("milestones", () => {
 		removeProjectMilestone.mockResolvedValue({ ok: true, project: view({ milestones: [] }) });
 		getProject.mockResolvedValue({ project: view({ milestones: [] }), links: [] });
 		fireEvent.click(await screen.findByRole("button", { name: "edit GA" }));
+
+		/* REMOVAL IS TWO TAPS, and the first one sends NOTHING: it used to be a
+		   `danger` button sitting beside `save`, with no confirm and no undo,
+		   while deleting the project asks for a whole view (design round 6, D2). */
+		fireEvent.click(screen.getByRole("button", { name: "remove milestone" }));
+		expect(removeProjectMilestone).not.toHaveBeenCalled();
+		expect(screen.getByText(/the project's sessions and its history are untouched/)).toBeTruthy();
+		// Backing out is a real option, and it also sends nothing.
+		fireEvent.click(screen.getByRole("button", { name: "keep it" }));
+		expect(removeProjectMilestone).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: "remove milestone" }));
 		fireEvent.click(screen.getByRole("button", { name: "remove" }));
 
 		await waitFor(() => expect(removeProjectMilestone).toHaveBeenCalledWith("p1", "GA"));
@@ -837,6 +849,201 @@ describe("create", () => {
 
 		expect(
 			await screen.findByText(/must be 1-64 characters of letters, digits/),
+		).toBeTruthy();
+	});
+});
+
+/* ---- round-6 remediation -------------------------------------------------
+ *
+ * One test per finding from the review and design rounds, where a regression
+ * would be silent: an accessible name that swallows its helper, a milestone the
+ * phone could create but never remove, a destructive tap next to `save`, a
+ * picker that would MOVE a filed link into the work set, a cap the reader only
+ * learned about from a refusal, and an estimate that could be sent as a silent
+ * no-op. Each one fails against the code as it stood before this round.
+ */
+describe("round-6 remediation", () => {
+	const filed = "4e92693767fa";
+
+	function candidate(over: Partial<SessionSummary> = {}): SessionSummary {
+		return {
+			session_id: "3b1c0d9e8f77",
+			section: "active",
+			conversation_name: "audit sweep",
+			cwd: "/Users/x/audit",
+			model_label: "opus",
+			streaming: false,
+			needs_attention: false,
+			pending_kind: null,
+			todos_open: 0,
+			mtime: 0,
+			...over,
+		};
+	}
+
+	async function openDetail(over: Partial<ProjectView> = {}, links: ProjectLinkedSession[] = []) {
+		getProjects.mockResolvedValue({ projects: [summary()] });
+		getProject.mockResolvedValue({ project: view(over), links });
+		renderSheet();
+		fireEvent.click(await screen.findByText("payments-migration"));
+	}
+
+	it("D9: a helper is DESCRIPTION, not part of the control's name", async () => {
+		getProjects.mockResolvedValue({ projects: [] });
+		renderSheet();
+		fireEvent.click(await screen.findByRole("button", { name: "new project" }));
+
+		/* Exact names: text inside a <label> becomes the control's accessible
+		   name, so these used to read "tags (optional) lowercase letters, digits,
+		   underscore and hyphen; separated by commas". */
+		expect(screen.getByLabelText("name")).toBeTruthy();
+		expect(screen.getByLabelText("description (optional)")).toBeTruthy();
+		expect(screen.getByLabelText("status")).toBeTruthy();
+		expect(screen.getByLabelText("tags (optional)")).toBeTruthy();
+		expect(screen.queryByLabelText(/lowercase letters, digits/)).toBeNull();
+		expect(
+			screen.getByLabelText("tags (optional)").getAttribute("aria-describedby"),
+		).toBe("create-tags-helper");
+	});
+
+	it("D1: the description is a textarea, in both forms", async () => {
+		getProjects.mockResolvedValue({ projects: [] });
+		renderSheet();
+		fireEvent.click(await screen.findByRole("button", { name: "new project" }));
+		expect(screen.getByLabelText("description (optional)").tagName).toBe("TEXTAREA");
+		// And the bound is the store's own DESCRIPTION_MAX, not the old 240.
+		expect(
+			(screen.getByLabelText("description (optional)") as HTMLTextAreaElement).maxLength,
+		).toBe(2000);
+
+		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+		await openDetail();
+		fireEvent.click(await screen.findByRole("button", { name: "edit project" }));
+		expect(screen.getByLabelText("description").tagName).toBe("TEXTAREA");
+	});
+
+	it("m2: a non-finite estimate is refused with a sentence, never sent as null", async () => {
+		/* `1e999` is what a number field hands back for a value that overflows a
+		   double; `Number()` makes it Infinity and `JSON.stringify` writes that as
+		   `null` — the silent no-op the estimate's own note warns about. */
+		patchProject.mockResolvedValue({ ok: true, project: summary() });
+		await openDetail();
+		fireEvent.click(await screen.findByRole("button", { name: "edit project" }));
+		fireEvent.change(screen.getByLabelText(/^estimate/), { target: { value: "1e999" } });
+		fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+		expect(await screen.findByText("estimate must be a number")).toBeTruthy();
+		expect(patchProject).not.toHaveBeenCalled();
+	});
+
+	it("m2b: an out-of-bounds estimate is SENT, not pre-empted by invented copy", async () => {
+		/* 0 is a NUMBER, and the store owns the bound and its wording (its refusal
+		   names ESTIMATE_MAX, which this client must not hand-copy). So the phone
+		   sends it; the store's own sentence comes back through the refusal path
+		   every other write already uses. */
+		patchProject.mockResolvedValue({ ok: true, project: summary() });
+		await openDetail();
+		fireEvent.click(await screen.findByRole("button", { name: "edit project" }));
+		fireEvent.change(screen.getByLabelText(/^estimate/), { target: { value: "0" } });
+		fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+		await waitFor(() =>
+			expect(patchProject).toHaveBeenCalledWith(
+				"p1",
+				expect.objectContaining({ estimate: 0 }),
+			),
+		);
+	});
+
+	it("M1: a milestone name with a slash is refused, and nothing is sent", async () => {
+		await openDetail();
+		fireEvent.click(await screen.findByRole("button", { name: "add milestone" }));
+		fireEvent.change(screen.getByLabelText("name"), { target: { value: "ship/v2" } });
+
+		expect(screen.getByText(/cannot contain a slash/)).toBeTruthy();
+		expect((screen.getByRole("button", { name: "add" }) as HTMLButtonElement).disabled).toBe(true);
+		fireEvent.click(screen.getByRole("button", { name: "add" }));
+		expect(setProjectMilestone).not.toHaveBeenCalled();
+	});
+
+	it("M1b: a slash-named milestone says why it cannot be removed here", async () => {
+		/* Created by another surface, so it EXISTS — and the relay's delete route
+		   cannot address it. The honest control is the explanation, not a button
+		   that 404s. */
+		await openDetail({
+			milestones: [
+				{ name: "ship/v2", target_date: null, completed_at: null, status: "upcoming" },
+			],
+		});
+		fireEvent.click(await screen.findByRole("button", { name: "edit ship/v2" }));
+
+		expect(screen.getByText(/cannot contain a slash/)).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "remove milestone" })).toBeNull();
+	});
+
+	it("m3/D4: the picker hides FILED links and shows enough to choose", async () => {
+		getProject.mockResolvedValue({
+			project: view({ sessions: [], coordination_sessions: [filed] }),
+			links: [],
+		});
+		getSessions.mockResolvedValue({
+			sessions: [
+				candidate({ session_id: filed, conversation_name: "filed one" }),
+				candidate({ session_id: "3b1c0d9e8f77", conversation_name: "work one" }),
+			],
+		});
+		getProjects.mockResolvedValue({ projects: [summary()] });
+		renderSheet();
+		fireEvent.click(await screen.findByText("payments-migration"));
+		fireEvent.click(await screen.findByRole("button", { name: "link a session" }));
+
+		/* The filed link is NOT offered: linking it here would move it into the
+		   work set under a "linked …" receipt, because the relay's link body
+		   carries no role (m3). */
+		expect(await screen.findByText("work one")).toBeTruthy();
+		expect(screen.queryByText("filed one")).toBeNull();
+		expect(screen.getByText(/1 session filed against this project is not offered/)).toBeTruthy();
+		// D4: the facts the sessions list shows, so the reader can choose.
+		expect(screen.getByText(/active · opus · \/Users\/x\/audit/)).toBeTruthy();
+	});
+
+	it("m3b: a FILED row is labelled, and its null runtime does not crash the sheet", async () => {
+		/* The composed view carries both roles in `links`, and a coordination row's
+		   `runtime` is null (the key is present, its value is null — not absent).
+		   Reading `.state` off it took the whole sheet down; and one heading that
+		   added the two roles together said "sessions (2)" for a project the card
+		   still described as "1 session". */
+		await openDetail(
+			{},
+			[
+				link({ session_id: "4e92693767fa", role: "work", exists: true, runtime: { state: "live" } }),
+				link({ session_id: "aa11bb22cc33", role: "coordination", exists: true, runtime: null }),
+			],
+		);
+
+		expect(await screen.findByText("filed")).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "sessions (1 · 1 filed)" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "unlink aa11bb22cc33" })).toBeTruthy();
+	});
+
+	it("D7: the link cap is stated before the tap", async () => {
+		const many = Array.from({ length: SESSION_LINK_CAP }, (_, index) =>
+			String(index).padStart(12, "0"),
+		);
+		getProject.mockResolvedValue({
+			project: view({ sessions: many }),
+			links: many.map((id) => link({ session_id: id })),
+		});
+		getProjects.mockResolvedValue({ projects: [summary()] });
+		renderSheet();
+		fireEvent.click(await screen.findByText("payments-migration"));
+
+		const entry = (await screen.findByRole("button", {
+			name: "link a session",
+		})) as HTMLButtonElement;
+		expect(entry.disabled).toBe(true);
+		expect(
+			screen.getByText(new RegExp(`reached the ${SESSION_LINK_CAP}-session cap`)),
 		).toBeTruthy();
 	});
 });
