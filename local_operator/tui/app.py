@@ -10973,7 +10973,6 @@ class OperatorApp(App[None]):
             tuple[SessionRow, ...],
             tuple[UnansweredPeer, ...],
             dict[str, int],
-            int,
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import (
@@ -16770,9 +16769,7 @@ class OperatorApp(App[None]):
                 asks_total=self._fleet_ask_total_cached(),
             )
             self.push_screen(picker, _resume_choice)
-            self.run_worker(
-                self._refresh_picker_asks_total(picker), group="ask-fleet-total"
-            )
+            self.run_worker(self._refresh_picker_asks_total(picker), group="ask-fleet-total")
             return
 
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume
@@ -25878,9 +25875,7 @@ class OperatorApp(App[None]):
             # that times out while its card is open). Re-deriving it here is
             # what keeps the card from saying "the agent asked and moved on"
             # over a question the bar has already called timed out (UX U9).
-            row = next(
-                (item for item in active_rows if item.ask_id == self._ask_mounted_id), None
-            )
+            row = next((item for item in active_rows if item.ask_id == self._ask_mounted_id), None)
             if row is not None:
                 self._ask_card.set_title(self._ask_card_title(row))
         if self._ask_mounted_id is not None and not any(
@@ -26469,8 +26464,7 @@ class OperatorApp(App[None]):
             logger.debug("could not read the session catalogue for ask labels", exc_info=True)
             return
         self._ask_session_titles = {
-            entry.id: (entry.sub_title if entry.subagent else entry.row.name)
-            for entry in entries
+            entry.id: (entry.sub_title if entry.subagent else entry.row.name) for entry in entries
         }
 
     def _fleet_answer_starts_here(self, row: AskRow) -> bool:

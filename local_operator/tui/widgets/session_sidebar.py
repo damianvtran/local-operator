@@ -2631,14 +2631,14 @@ class SessionSidebar(Widget, can_focus=True):
         # with the note in the tail, the chip is no longer the line's last span,
         # and the resting bytes are unchanged because the underline branch only
         # fires under the pointer.
-        hovered: tuple[int, int] | None = None
+        underlined: tuple[int, int] | None = None
         if chip_span is not None and self._chip_hover:
-            hovered = chip_span
+            underlined = chip_span
         note_span = self._asks_span_in(footer)
         if note_span is not None and self._asks_hover:
-            hovered = note_span
-        if hovered is not None:
-            start, end = hovered
+            underlined = note_span
+        if underlined is not None:
+            start, end = underlined
             result.append("\n" + footer[:start], style=footer_style)
             result.append(
                 footer[start:end], style=Style(color=footer_style) + Style(underline=True)

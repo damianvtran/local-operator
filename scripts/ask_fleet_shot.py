@@ -190,8 +190,7 @@ async def main() -> None:
             mode = arg
         else:
             raise SystemExit(
-                f"unknown argument {arg!r}: expected a WxH size or "
-                "marks|none|fleet|gate|picker"
+                f"unknown argument {arg!r}: expected a WxH size or " "marks|none|fleet|gate|picker"
             )
 
     if mode != "none":
