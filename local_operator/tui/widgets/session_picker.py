@@ -1765,6 +1765,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         now: float,
         digests: dict[str, str] | None = None,
         refresh_live_state: Callable[[list[SessionRow]], list[SessionRow]] | None = None,
+        asks_total: int = 0,
     ) -> None:
         super().__init__()
         self._all = list(rows)
@@ -1788,6 +1789,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # without an index — tests, embedders — gets the name-and-id filter
         # unchanged instead of an error.
         self._digests = dict(digests or {})
+        #: The FLEET ask total (amendment A2/A4): every session's outstanding
+        #: asks, added up. Painted on the footer's chrome row only while it is
+        #: > 0, and only ever as the marks' arithmetic rather than as a control
+        #: of its own — the picker's door is a row, not the note.
+        self._asks_total = max(0, int(asks_total or 0))
         # Soft matching reruns on every keystroke; a per-screen index caches each
         # digest's token set (and a deduplicated vocabulary over them) so the
         # bounded edit-distance search costs ~13 ms per query change at real
@@ -3629,6 +3635,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # Only the SEPARATORS (" · ", the three-cell lead) stay `faint`: those
         # are the "meta separators" the step is named for.
         tail = Text(no_wrap=True, overflow="ellipsis")
+        # THE FLEET ASK TOTAL (amendment A2/A4), stated on this screen's own
+        # chrome row while it is > 0 and NOT as a chip of its own: the fleet
+        # total is the marks' arithmetic, and a second affordance beside them
+        # is what A2 forbids. It is prepended so the counter and the legends
+        # keep their established order behind it.
+        if self._asks_total > 0:
+            tail.append(f"   asks: {self._asks_total}", style=dim)
         if counter is not None:
             first, last, total = counter
             tail.append("   showing ", style=dim)
