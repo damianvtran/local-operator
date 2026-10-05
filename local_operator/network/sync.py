@@ -196,6 +196,74 @@ COPY_SET_NAMES: tuple[str, ...] = (
 #: ``rmtree``d the source destroyed real work (review round 1, B-M2).
 COPY_SET_TREES: tuple[str, ...] = ("scratchpad",)
 
+#: FILENAME FAMILIES the copy set carries. ``COPY_SET_NAMES`` holds EXACT names; a
+#: child-attribution receipt carries the job id in the middle of its name
+#: (``subagent-lane-<job_id>.v1.json``), which no exact-name list can hold, so a keyed
+#: artifact needs a FAMILY: an ANCHORED prefix plus a suffix, with the middle free.
+#:
+#: WITHOUT THIS THE MOVE REFUSES, and it is reachable in normal use. ``assert_complete``
+#: is fail-closed on any top-level name no list accounts for, and a STOP RECEIPT IS
+#: PERMANENT (by design nothing withdraws it), so every session that ever cancelled,
+#: escaped, hub-stopped or tore down a child holds one forever: a DELETING move of such
+#: a session refused outright — offering only "delete the evidence" as the remedy — and
+#: a ``--keep`` move silently dropped it, so the destination read the child as orphaned.
+#: The lane receipt is the only artifact that answers "a lane ran here and never
+#: settled" once the parent is gone, so carrying it is the point of the family.
+#:
+#: Spelled here rather than imported from ``session.subagent_ledger`` for the same
+#: import-weight reason the rest of this module's copy-set names are (this module is
+#: imported at relay construction); ``test_sync_copy_set.py`` pins every literal
+#: against the module that owns it, and its derived-constant guard reads ``*_PREFIX``
+#: and ``*_SUFFIX`` constants so the NEXT keyed artifact cannot repeat this omission.
+SUBAGENT_RECEIPT_SUFFIX = ".v1.json"
+SUBAGENT_LANE_RECEIPT_PREFIX = "subagent-lane-"
+SUBAGENT_STOP_RECEIPT_PREFIX = "subagent-stop-"
+
+#: The families, EACH WITH ITS REASON, keyed by ``(anchored prefix, suffix)``.
+COPY_SET_FAMILIES: dict[tuple[str, str], str] = {
+    (SUBAGENT_LANE_RECEIPT_PREFIX, SUBAGENT_RECEIPT_SUFFIX): (
+        "the child-lane launch receipt: written when a subagent child attaches and "
+        "withdrawn on settle, so a surviving one is the only evidence that a lane ran "
+        "in this session and never settled"
+    ),
+    (SUBAGENT_STOP_RECEIPT_PREFIX, SUBAGENT_RECEIPT_SUFFIX): (
+        "the child stop receipt: the acting party's attestation that a deliberate stop "
+        "was issued, staged BEFORE the stop so it survives a hard parent death"
+    ),
+}
+
+
+def in_copy_set_family(name: str) -> bool:
+    """Whether ``name`` belongs to a copy-set FAMILY (anchored prefix + suffix).
+
+    The middle of the name is the job id and is deliberately unconstrained. The
+    anchors are what keep this from swallowing a name nobody classified: an EMPTY
+    middle is refused, so ``subagent-lane-.v1.json`` is not a member.
+    """
+    return any(
+        name.startswith(prefix) and name.endswith(suffix) and len(name) > len(prefix) + len(suffix)
+        for prefix, suffix in COPY_SET_FAMILIES
+    )
+
+
+def family_entries(directory: Path) -> list[str]:
+    """Family members present at ``directory``'s root, sorted.
+
+    Files only: a family name that is a DIRECTORY is not a receipt, and leaving it
+    to the ordinary directory rules is what keeps a symlinked or directory-shaped
+    impostor on the refusal path rather than silently carried here.
+    """
+    try:
+        children = sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+    return [
+        child.name
+        for child in children
+        if child.is_file() and not child.is_symlink() and in_copy_set_family(child.name)
+    ]
+
+
 #: Directories whose CONTENTS are re-creatable machinery rather than work: a python
 #: bytecode cache or a test runner's cache an agent's own command left behind. They
 #: are excluded rather than refused (their bytes are derivable, and a 300 MB
@@ -415,9 +483,14 @@ def session_dir(root: Path, session_id: str) -> Path:
 
 
 def copy_set(root: Path, session_id: str) -> list[str]:
-    """The copy set's names that exist for this session, in a fixed order."""
+    """The copy set's names that exist for this session, in a fixed order.
+
+    Exact names first (their order is stable), then the keyed FAMILY members, so a
+    caller that indexes the result never sees a receipt displace a name it knows.
+    """
     directory = session_dir(root, session_id)
-    return [name for name in COPY_SET_NAMES if (directory / name).is_file()]
+    exact = [name for name in COPY_SET_NAMES if (directory / name).is_file()]
+    return exact + family_entries(directory)
 
 
 #: ``b"\x00link\x00"`` / ``b"\x00file\x00"`` — what a member IS, fed into the content
@@ -650,6 +723,14 @@ def unlisted_entries(directory: Path) -> list[str]:
             continue
         if name in listed or name in CACHE_TREE_NAMES:
             continue
+        # A FAMILY MEMBER is classified by its anchored prefix+suffix rather than by
+        # an exact name (see ``COPY_SET_FAMILIES``). It must be a REGULAR FILE, matching
+        # ``family_entries`` — the carry half — exactly: a link or a directory wearing a
+        # receipt's name falls through to the refusal below rather than being accepted
+        # here and then silently not carried, which is the silent-drop half of the bug
+        # this family exists to close.
+        if child.is_file() and not child.is_symlink() and in_copy_set_family(name):
+            continue
         if name.endswith(TRANSIENT_SUFFIX) and child.is_file() and not child.is_symlink():
             continue
         if child.is_dir() and not child.is_symlink():
@@ -876,7 +957,7 @@ def _member_stamps(
     """
     directory = Path(directory)
     stamps: dict[str, _MemberStamp] = {}
-    for name in COPY_SET_NAMES:
+    for name in list(COPY_SET_NAMES) + family_entries(directory):
         path = directory / name
         try:
             if name == TRANSCRIPT_NAME:
@@ -1471,7 +1552,7 @@ def _item_path(root: Path, session_id: str, name: str, attachments_dir: Path | N
     tree_path = _tree_entry_path(session_dir(root, session_id), name)
     if tree_path is not None:
         return tree_path
-    if name not in COPY_SET_NAMES or name in NEVER_COPIED:
+    if (name not in COPY_SET_NAMES and not in_copy_set_family(name)) or name in NEVER_COPIED:
         return None
     return session_dir(root, session_id) / name
 
@@ -1971,7 +2052,7 @@ def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path 
     tree_path = _tree_entry_path(Path(dest_dir), name, landed=True)
     if tree_path is not None:
         return tree_path
-    if name not in COPY_SET_NAMES or name in NEVER_COPIED:
+    if (name not in COPY_SET_NAMES and not in_copy_set_family(name)) or name in NEVER_COPIED:
         return None
     return Path(dest_dir) / name
 
@@ -2211,7 +2292,7 @@ def held_report(dest_dir: Path, attachments_root: Path) -> dict[str, Any]:
     are derived from one place each (``COPY_SET_NAMES`` + ``tree_entry_names``).
     """
     files: dict[str, str] = {}
-    for name in list(COPY_SET_NAMES) + tree_entry_names(dest_dir):
+    for name in list(COPY_SET_NAMES) + family_entries(Path(dest_dir)) + tree_entry_names(dest_dir):
         if name == TRANSCRIPT_NAME:
             continue
         path = Path(dest_dir) / name
@@ -2524,6 +2605,14 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
             if not candidate.is_file():
                 continue
             shutil.copyfile(candidate, target / name)
+            copied.append(name)
+        # THE KEYED FAMILY MEMBERS COME TOO (the child-attribution receipts). They are
+        # top-level FILES in the session directory exactly like the names above, but
+        # their names carry a job id, so they are enumerated by family rather than by
+        # an exact-name loop. Without this a recovered session loses the only evidence
+        # of how its children ended.
+        for name in family_entries(source):
+            shutil.copyfile(source / name, target / name)
             copied.append(name)
         # THE COPY SET'S TREES COME TOO, or the recovered conversation silently
         # loses the files its own agent wrote for it (``scratchpad/``), which is

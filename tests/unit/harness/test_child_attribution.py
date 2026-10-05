@@ -219,10 +219,20 @@ def test_idle_clause_is_none_without_a_stamp() -> None:
 
 def test_idle_clause_recent_and_over_bound() -> None:
     assert ledger.idle_clause(997.0, now=1000.0) == "idle 3s"
+    # The overdue form names the bound and marks the crossing (D1/D6).
     over = ledger.idle_clause(1000.0 - 47 * 60, now=1000.0, bound_s=900.0)
-    assert over == "no progress for 47m (bound 15m)"
+    assert over == "no progress for >15m (stall bound 15m)"
     # Exactly at the bound is NOT over it.
     assert ledger.idle_clause(1000.0 - 900, now=1000.0, bound_s=900.0) == "idle 15m"
+    # D1's measured collision: 899 s and 901 s against a 900 s bound must not
+    # render the same string, which is what "no progress for 15m (bound 15m)" did.
+    under = ledger.idle_clause(1000.0 - 899, now=1000.0, bound_s=900.0)
+    just_over = ledger.idle_clause(1000.0 - 901, now=1000.0, bound_s=900.0)
+    assert under != just_over, (under, just_over)
+    assert under == "idle 15m" and just_over == "no progress for >15m (stall bound 15m)"
+    # N2's floor: a row that reported a fraction of a second ago says nothing.
+    assert ledger.idle_clause(999.9, now=1000.0) is None
+    assert ledger.idle_clause(999.0, now=1000.0) == "idle 1s"
 
 
 # --- the module: reconcile ---------------------------------------------------
@@ -342,10 +352,17 @@ async def test_jobs_ops_list_renders_the_idle_clause(iso) -> None:
     await parent.async_init()
     job_id = parent._launch_subagent(label="hung-lane", prompt="do a long thing")
     await wait_until(lambda: (job_of(parent, job_id).last_progress_at or 0) > 0)
+    # Push the stamp past the floor (N2) so the clause is exercised deterministically
+    # rather than by sleeping: the reading is a function of the stamp, not the clock.
+    job_of(parent, job_id).last_progress_at -= 5.0
     result = await execute_jobs("c", {"op": "list"}, None, None, ctx_for(parent))
     text = body(result)
-    assert "idle " in text
+    assert "idle 5s" in text
     assert "hung-lane" in text
+    # D7: the clause sits with the columns, BEFORE the label, so a scanning eye
+    # finds it in the same region as status/age rather than past a variable label.
+    row = next(line for line in text.splitlines() if "hung-lane" in line)
+    assert row.index("idle 5s") < row.index("hung-lane")
     await asyncio.wait_for(parent.dispose(), timeout=30)
 
 
@@ -356,9 +373,10 @@ async def test_hub_ops_list_renders_idle_and_attribution(iso) -> None:
     job_id = parent._launch_subagent(label="cancel-lane", prompt="do a long thing")
     await wait_child_dir(parent, job_id)
     await asyncio.sleep(0.2)
+    job_of(parent, job_id).last_progress_at -= 5.0
 
     listed = await execute_hub("c", {"op": "list"}, None, None, ctx_for(parent))
-    assert "idle " in body(listed)
+    assert "idle 5s" in body(listed)
 
     await execute_hub(
         "c",
@@ -369,7 +387,10 @@ async def test_hub_ops_list_renders_idle_and_attribution(iso) -> None:
     )
     after = await execute_hub("c", {"op": "list"}, None, None, ctx_for(parent))
     text = body(after)
-    assert "stopped by parent-hub: operator asked to stop it" in text
+    # The verb is mechanism-neutral (D2) and the actor is humanized (D4); the raw
+    # token still rides the details payload.
+    assert "ended by the parent: operator asked to stop it" in text
+    assert "parent-hub" not in text
     await asyncio.wait_for(parent.dispose(), timeout=30)
 
 
@@ -604,8 +625,9 @@ async def test_a_restart_recovers_stop_attribution_and_flags_a_never_settled_lan
     assert orphan.lane_never_settled is True
     listed = await execute_hub("c", {"op": "list"}, None, None, ctx_for(booted))
     text = body(listed)
-    assert "stopped by mobile-stop: user stopped it from the phone" in text
+    assert "ended by the phone: user stopped it from the phone" in text
     assert ledger.LANE_NEVER_SETTLED_DETAIL in text
+    assert "launched here and never settled" in text
 
 
 # --- settle-item (i): does dispose await child runner-settle? ----------------
@@ -638,3 +660,326 @@ async def test_dispose_awaits_child_settle_so_the_lane_receipt_is_withdrawn(iso)
     assert ledger.read_lane_receipts(child_dir) == []  # settle arm ran
     stops = ledger.read_stop_receipts(child_dir)
     assert stops and stops[0]["actor"] == "parent-teardown"
+
+
+# --- Q1 / R-MINOR-1: a REFUSED stop must leave no attribution anywhere --------
+
+
+def _spy_cancel(session: Session, seen: list[tuple[str, str]]) -> None:
+    """Wrap ``jobs.cancel`` recording the record's stamp AT CALL TIME.
+
+    This is what makes the STAGING ORDER observable: the design's rule is that
+    the acting party attests BEFORE it acts, so at the moment the cancel is
+    issued the record must already name the actor. An assertion taken after the
+    ``await`` returns cannot see the order at all (review round 1, R-MINOR-4).
+    """
+    real = session.jobs.cancel
+
+    async def wrapper(job_id: str, *args: Any, **kwargs: Any) -> bool:
+        comms = session._subagent_comms
+        record = comms._record(job_id) if comms is not None else None
+        seen.append((job_id, "" if record is None else record.ended_by))
+        return await real(job_id, *args, **kwargs)
+
+    session.jobs.cancel = wrapper  # type: ignore[method-assign]
+
+
+def _no_stamp(record: Any) -> bool:
+    return record is not None and record.ended_by == "" and record.cancel_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cancel_through_the_jobs_tool_leaves_no_attribution(iso) -> None:
+    """Q1's deterministic repro: cancelling an already-completed row is NORMAL
+    (the tool reports "was not cancelled"), and it must not stamp the record."""
+    parent = make_parent(iso, CompletingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="settle-qa", prompt="quick")
+    await wait_until(lambda: job_of(parent, job_id).status == "completed", timeout=20)
+    child_dir = await wait_child_dir(parent, job_id)
+
+    result = await execute_jobs(
+        "c", {"op": "cancel", "job_id": job_id}, None, None, ctx_for(parent)
+    )
+    assert "was not cancelled" in body(result)
+    assert _no_stamp(parent.subagent_comms._record(job_id))
+    assert ledger.read_stop_receipts(child_dir) == []
+    after = await execute_hub("c", {"op": "list"}, None, None, ctx_for(parent))
+    assert "ended by" not in body(after)
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cancel_on_the_escape_path_leaves_no_attribution(iso) -> None:
+    """Esc-Esc on a child that has already settled: the receipt AND the record
+    stamp must both roll back."""
+    parent = make_parent(iso, CompletingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="settle-escape", prompt="quick")
+    await wait_until(lambda: job_of(parent, job_id).status == "completed", timeout=20)
+    child_dir = await wait_child_dir(parent, job_id)
+
+    await parent._cancel_job_quietly(job_id, "esc-esc", by="user-escape")
+
+    assert _no_stamp(parent.subagent_comms._record(job_id))
+    assert ledger.read_stop_receipts(child_dir) == []
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cancel_through_the_hub_race_leaves_no_attribution(iso) -> None:
+    """The settlement race in ``comms.cancel``: the status check passes, then the
+    manager refuses. Both halves must roll back."""
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="race", prompt="long")
+    await wait_child_dir(parent, job_id)
+    child_dir = await wait_child_dir(parent, job_id)
+
+    async def refuse(_job_id: str, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+    parent.jobs.cancel = refuse  # type: ignore[method-assign]
+    delivery = await parent.subagent_comms.cancel(job_id, by="parent-hub", reason="raced")
+    assert delivery.outcome == "failed"
+    assert _no_stamp(parent.subagent_comms._record(job_id))
+    assert ledger.read_stop_receipts(child_dir) == []
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_pause_leaves_no_attribution_and_reports_failure(iso) -> None:
+    """R-MINOR-1's worst site: ``pause`` threw the manager's refusal away, so a
+    refused pause left a ``stopped by`` stamp on a still-running child."""
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="pause-refused", prompt="long")
+    child_dir = await wait_child_dir(parent, job_id)
+
+    async def refuse(_job_id: str, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+    parent.jobs.cancel = refuse  # type: ignore[method-assign]
+    delivery = await parent.subagent_comms.pause(job_id, by="parent-hub", reason="park")
+    assert delivery.outcome == "failed"
+    record = parent.subagent_comms._record(job_id)
+    assert _no_stamp(record)
+    assert record is not None and record.paused is False
+    assert ledger.read_stop_receipts(child_dir) == []
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_that_refuses_a_stamp_is_rolled_back(iso, monkeypatch) -> None:
+    """R-MINOR-1's fourth site: teardown stamped every running child and could not
+    see a per-job refusal. A child that settles instead of being cancelled must
+    not keep a ``parent-teardown`` attestation."""
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="teardown-race", prompt="long")
+    child_dir = await wait_child_dir(parent, job_id)
+
+    real_cancel = parent.jobs.cancel
+
+    async def settle_instead(job_id_: str, *args: Any, **kwargs: Any) -> bool:
+        job = parent.jobs.get(job_id_)
+        if job is not None:
+            job.status = "completed"
+        return False
+
+    parent.jobs.cancel = settle_instead  # type: ignore[method-assign]
+    try:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+    finally:
+        parent.jobs.cancel = real_cancel  # type: ignore[method-assign]
+
+    assert _no_stamp(parent.subagent_comms._record(job_id))
+    assert ledger.read_stop_receipts(child_dir) == []
+
+
+# --- R-MINOR-4: the stamp must PRECEDE the act, at every site ----------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["hub", "escape", "jobs-tool", "teardown"])
+async def test_the_stamp_precedes_the_cancel_at_every_site(iso, site: str) -> None:
+    """The ordering rule is contract: the acting party attests BEFORE it acts,
+    because a wedged child cannot record its own stop and a cancel that raises
+    must not lose the attribution. Asserted at the moment ``jobs.cancel`` runs,
+    so moving ``begin_stop`` below the ``await`` fails this cell (R-MINOR-4)."""
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label=f"order-{site}", prompt="long")
+    await wait_child_dir(parent, job_id)
+
+    seen: list[tuple[str, str]] = []
+    _spy_cancel(parent, seen)
+
+    if site == "hub":
+        await execute_hub(
+            "c", {"op": "cancel", "to": job_id, "message": "hub"}, None, None, ctx_for(parent)
+        )
+    elif site == "escape":
+        await parent._cancel_job_quietly(job_id, "esc", by="user-escape")
+    elif site == "jobs-tool":
+        await execute_jobs("c", {"op": "cancel", "job_id": job_id}, None, None, ctx_for(parent))
+    else:
+        # teardown: dispose() awaits each runner's cancel, so the spy observes the
+        # cancel the same way the other three sites do.
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+    assert seen, f"jobs.cancel was never called for site {site}"
+    stamped_at_cancel = {by for _jid, by in seen}
+    assert (
+        stamped_at_cancel and "" not in stamped_at_cancel
+    ), f"site {site} issued the cancel before stamping the actor: {seen}"
+
+
+# --- R-MINOR-2: the receipt's reason is capped like the record's -------------
+
+
+def test_the_stop_reason_is_capped_on_disk_as_well_as_on_the_record(tmp_path) -> None:
+    payload = ledger.build_stop_payload(
+        job_id="j",
+        label="l",
+        child_session_id="c",
+        parent_session_id="p",
+        actor="parent-hub",
+        reason="x" * (ledger.REASON_CAP * 3),
+    )
+    assert len(payload["reason"]) == ledger.REASON_CAP
+
+
+# --- D2: a PAUSED row must not read "stopped" --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_paused_row_uses_a_mechanism_neutral_verb(iso) -> None:
+    parent = make_parent(iso, HangingChild())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="pause-lane", prompt="long")
+    await wait_child_dir(parent, job_id)
+    await parent.subagent_comms.pause(job_id, by="parent-hub", reason="pausing to free the slot")
+
+    text = body(await execute_hub("c", {"op": "list"}, None, None, ctx_for(parent)))
+    assert "paused" in text
+    assert "ended by the parent: pausing to free the slot" in text
+    # A paused child is halted-and-RESUMABLE: the attribution verb must not claim
+    # it was stopped, which contradicted the row's own adjective (D2).
+    assert "stopped by" not in text
+    await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+# --- D3: the hard-death row must not claim an attribution --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_settled_record_with_no_outcome_reads_gone_not_cancelled(iso) -> None:
+    """D3, fixed at the ladder's single rung.
+
+    A [redacted] record is stamped ``settled`` by ``restore`` itself, so the hard
+    parent-death shape lands on the last rung with NO outcome. It used to read
+    ``cancelled`` — an attribution nobody made, contradicted on the same row by the
+    reconcile detail. The design's §2.5 table expects ``gone``.
+    """
+    import json
+
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+
+    parent_dir = iso / "sessions" / "d3parent"
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    child_dir = iso / "sessions" / "d3child"
+    child_dir.mkdir(parents=True, exist_ok=True)
+    # A real hard-killed child HAS a transcript (its lane ran): give it one, so the
+    # resumable assertion below is about the STATUS WORD rather than about the
+    # roster's own transcript probe.
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    (child_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps({"type": "message", "role": "user", "content": "go"}) + "\n"
+    )
+    ledger.write_lane_receipt(
+        child_dir,
+        ledger.build_lane_payload(
+            job_id="dead1",
+            label="dead-lane",
+            agent_role="",
+            child_session_id="d3child",
+            parent_session_id="d3parent",
+            parent_job_id=None,
+            started_at=1.0,
+        ),
+    )
+    (parent_dir / SUBAGENT_ROSTER_SIDECAR).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 3,
+                "jobs": [],
+                "records": [
+                    {
+                        "job_id": "dead1",
+                        "label": "dead-lane",
+                        "session_dir": str(child_dir),
+                        "outcome": None,
+                        "settled": True,
+                    }
+                ],
+                "accounting": {},
+            }
+        )
+    )
+    booted = Session(
+        model=MODEL,
+        stream_fn=CompletingChild(),
+        tools=[],
+        transcript=Transcript(parent_dir),
+        system_blocks_provider=lambda: [],
+        cwd=str(iso),
+    )
+    booted._load_subagent_roster()
+    info = next(row for row in booted.subagent_comms.roster() if row.job_id == "dead1")
+    assert info.status == "gone", info
+    assert info.status != "cancelled"
+    assert info.detail is not None and "never settled" in info.detail
+    # Still resumable: the word changed, the capability did not.
+    assert info.resumable is True
+
+
+# --- R-MINOR-3: teardown attribution for a GRANDCHILD ------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_child_session_s_own_teardown_stamps_its_running_grandchild(iso) -> None:
+    """The mechanism R-MINOR-3 doubted, exercised directly.
+
+    ``_stamp_teardown_attribution`` walks only THIS session's manager, and a
+    grandchild's row lives on its parent's — so the reviewer read a torn-down
+    grandchild as landing on the never-settled path. It does not: teardown is
+    RECURSIVE. ``Session.dispose`` (root) cancels its child's runner, whose
+    ``finally`` calls ``_dispose_child`` → ``child.dispose()``, and THAT dispose
+    stamps the child's own running rows with ``parent-teardown`` before cancelling
+    them. This cell drives the inner half directly: a child Session holding a
+    running grandchild, disposed on its own, must leave the grandchild a
+    ``parent-teardown`` receipt and no never-settled reading.
+    """
+    from local_operator.harness.jobs import AsyncJob
+
+    child = make_parent(iso, HangingChild(), name="childsess")
+    await child.async_init()
+    grandchild_job = child._launch_subagent(label="grandchild", prompt="long")
+    await wait_child_dir(child, grandchild_job)
+    grandchild_dir = await wait_child_dir(child, grandchild_job)
+
+    # A settle that never happens: the point is the STAMP, not the outcome.
+    async def never_settles(job_id: str, *args: Any, **kwargs: Any) -> bool:
+        job = child.jobs.get(job_id)
+        if isinstance(job, AsyncJob):
+            job.status = "cancelled"
+        return True
+
+    child.jobs.cancel = never_settles  # type: ignore[method-assign]
+    await child.dispose()
+
+    stamps = ledger.read_stop_receipts(grandchild_dir)
+    assert stamps and stamps[0]["actor"] == "parent-teardown", stamps

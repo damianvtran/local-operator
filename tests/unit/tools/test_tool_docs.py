@@ -192,7 +192,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # recorded as the stop reason for pause/cancel; ignored by list/peek."), so
     # the hub doc got two tokens CHEAPER while gaining the fact — re-measured
     # deliberately, not pasted.
-    "hub": 673,
+    # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
+    # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
+    # paused child is halted-and-resumable, not stopped. Re-measured.
+    "hub": 677,
     "jobs": 365,
     "list_variables": 61,
     "lsp": 303,

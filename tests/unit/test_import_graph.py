@@ -769,3 +769,36 @@ def test_subagent_ledger_is_stdlib_plus_paths_only() -> None:
         "stdlib + local_operator.paths, so import anything else lazily inside "
         "the function that needs it"
     )
+
+
+def test_the_session_package_init_is_import_light() -> None:
+    """``local_operator/session/__init__.py`` must stay a bare namespace package.
+
+    ``tools/builtin.py`` calls ``from local_operator.session import subagent_ledger``
+    inside ``jobs op='list'`` and ``hub op='list'`` — a CALL-TIME import, so the
+    tool layer's module-scope closure never grows, but the first listing DOES
+    execute the ``local_operator.session`` package. Review round 1 (R-MINOR-5)
+    pointed out that the comment claiming this kept the session engine off the
+    tool layer's path was unpinned: a future import added to ``session/__init__``
+    (a re-export, a convenience alias) would reach the tool layer silently. The
+    package init is currently EMPTY; this cell is what keeps it that way.
+    """
+    modules = _imported_modules("local_operator.session")
+    for banned, why in (
+        ("asyncio", "the package init must not own a loop"),
+        ("pydantic", "no model layer loads for a bare package import"),
+        ("local_operator.harness", "the harness must not load for a package import"),
+        ("local_operator.tui", "no surface loads for a package import"),
+        ("local_operator.server", "the backend service is not a package dependency"),
+        ("local_operator.model", "no provider/model layer loads for a package import"),
+    ):
+        _assert_absent(modules, banned, why)
+    # And it must not pull a sibling MODULE either: an init that re-exports
+    # ``session.session`` would drag the whole engine in behind one listing.
+    pulled = sorted(m for m in modules if m.startswith("local_operator.session."))
+    assert pulled == [], (
+        "local_operator/session/__init__.py now imports sibling modules "
+        f"({pulled}); the tool layer reaches this package on a call-time import, "
+        "so a re-export here lands the session engine on that path. Keep the "
+        "package init empty and import the module you need directly."
+    )

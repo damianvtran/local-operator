@@ -215,11 +215,37 @@ def extract_parent_message(text: str) -> ParentMessage | None:
 #: cannot grow without bound; eviction is oldest-settled-first.
 MAX_RECORDS = 256
 
-#: Cap on the caller's own words recorded as a child's ``cancel_reason``. Same
-#: reasoning as the roster row's ``error_text`` cap: the reason reaches the
-#: roster/status surfaces, so a runaway string must not become an unbounded
-#: field. A sentence's worth is plenty for "why did you stop it".
-_CANCEL_REASON_CAP = 2_000
+#: Cap on the caller's own words recorded as a child's ``cancel_reason``. The
+#: LEDGER owns the number (``subagent_ledger.REASON_CAP``) because the same words
+#: land in the receipt payload, and one cap with two spellings drifts: the record
+#: was capped and the artifact was not until review round 1's R-MINOR-2. Aliased
+#: rather than re-spelled so the two sites cannot part.
+_CANCEL_REASON_CAP = ledger.REASON_CAP
+
+
+@dataclass(frozen=True)
+class StopStamp:
+    """What :meth:`SubagentComms.begin_stop` wrote, and what it replaced.
+
+    A stop is STAGED before it is issued (the acting party attests while the
+    target may still be wedged), and a staged attestation for a stop that then
+    never happened is a lie on the exact surface this feature exists to make
+    trustworthy. Undoing it therefore needs both halves: the receipt FILE to
+    remove, and the record's PREVIOUS attribution to restore — the prior values
+    rather than a blank, because a child can have been stopped, resumed and
+    stopped again, and a guessed reset would erase the earlier real one.
+    """
+
+    job_id: str
+    receipt: str | None
+    prior_ended_by: str
+    prior_cancel_reason: str
+    #: What this call WROTE. Kept so the rollback can tell OUR stamp from a later
+    #: actor's: ``abandon_stop`` restores only when the record still holds exactly
+    #: these values, so a stop that was superseded by a newer one is left alone.
+    wrote_ended_by: str
+    wrote_cancel_reason: str
+
 
 #: How long a roster may reuse one child's "transcript is on disk" probe. The
 #: probe feeds only the roster's ``resumable`` hint (``resume`` re-probes before
@@ -724,7 +750,24 @@ def _lifecycle(
             getattr(job, "error_text", None),
         )
     if record.settled:
-        return ("cancelled" if record.session_dir is not None else "gone", None, None)
+        # NOBODY ATTESTED THIS, SO IT IS NOT ``cancelled``. This rung is reached only
+        # when the record carries NO outcome (the rung above takes every record that
+        # has one) — i.e. the child ended without any deliberate stop being recorded.
+        # A restored record is stamped ``settled`` by ``restore`` itself, so the hard
+        # parent-death shape lands here, and calling it ``cancelled`` handed the row
+        # an attribution the reconcile detail then contradicted ("cancelled … a
+        # subagent was launched here and never settled", design round 1, D3). The
+        # design's §2.5 table expects ``gone`` for this shape and that is what it now
+        # reads. ``session_dir`` is deliberately no longer consulted: it was only
+        # ever a proxy for "the parent knew about this child", which says nothing
+        # about WHO ended it.
+        #
+        # Behaviour change, stated: a restored child with no recorded outcome now
+        # reads ``gone`` rather than ``cancelled``. Both are resumable, so no
+        # resumability is lost; only the word changes, and the ladder's own contract
+        # ("THE single definition of the precedence every reader consumes") is what
+        # makes this the one place to change it.
+        return ("gone", None, None)
     return ("gone", None, None)
 
 
@@ -944,7 +987,14 @@ class RosterPass:
                 resumable=False,
                 age_s=None,
                 detail="pause is still landing; it becomes resumable in a moment",
-                last_progress_at=record.last_progress_at,
+                # The LIVE job row first, the record second — the same preference
+                # the normal branch makes (review round 1, NIT 2: this branch read
+                # the record alone, so a paused lane briefly showed a stale idle).
+                last_progress_at=(
+                    getattr(job, "last_progress_at", None)
+                    if getattr(job, "last_progress_at", None) is not None
+                    else record.last_progress_at
+                ),
                 ended_by=record.ended_by,
                 cancel_reason=record.cancel_reason,
             )
@@ -1846,7 +1896,8 @@ class SubagentComms:
         by: str,
         reason: str = "",
         mechanism: str = "cancel",
-    ) -> str | None:
+        stage_receipt: bool = True,
+    ) -> "StopStamp | None":
         """Stamp WHO/WHY on the record and stage the durable stop receipt.
 
         Called BEFORE the stop is issued at every deliberate-stop site. Two
@@ -1860,10 +1911,18 @@ class SubagentComms:
           runtime kill: the acting party attests before acting, because the
           target may be wedged and unable to record anything itself.
 
-        Returns the receipt path as a string so a caller whose cancel is then
-        REFUSED can withdraw it (see :meth:`abandon_stop`) — a staged receipt
-        for a stop that did not happen is a lie. Returns ``None`` when the job
-        is unknown or has no transcript directory yet.
+        Returns a :class:`StopStamp` carrying BOTH what it wrote and the values
+        it replaced, so a caller whose stop is then REFUSED can undo it exactly
+        (:meth:`abandon_stop`) — a staged receipt for a stop that did not happen
+        is a lie, and so is a record stamp the surfaces render as
+        ``stopped by <actor>``. The prior values matter because a child can have
+        been stopped and resumed before: a guessed reset would erase a real
+        earlier attribution. Returns ``None`` only when the job is unknown.
+
+        ``stage_receipt=False`` stamps the record WITHOUT writing a receipt, for
+        the one path that ends a child without issuing a ``jobs.cancel`` at all
+        (cancelling an already-parked child): there is no cancel to attest to,
+        but the decision to end it is still the parent's and still worth naming.
 
         NEVER raises: the stop must not fail because evidence could not be
         written.
@@ -1872,10 +1931,20 @@ class SubagentComms:
             record = self._record(job_id)
             if record is None:
                 return None
-            record.ended_by = str(by or "")
-            record.cancel_reason = str(reason or "")[:_CANCEL_REASON_CAP]
-            if record.session_dir is None:
-                return None
+            wrote_by = str(by or "")
+            wrote_reason = str(reason or "")[: ledger.REASON_CAP]
+            stamp = StopStamp(
+                job_id=job_id,
+                receipt=None,
+                prior_ended_by=record.ended_by,
+                prior_cancel_reason=record.cancel_reason,
+                wrote_ended_by=wrote_by,
+                wrote_cancel_reason=wrote_reason,
+            )
+            record.ended_by = wrote_by
+            record.cancel_reason = wrote_reason
+            if not stage_receipt or record.session_dir is None:
+                return stamp
             payload = ledger.build_stop_payload(
                 job_id=record.job_id,
                 label=record.label,
@@ -1886,24 +1955,55 @@ class SubagentComms:
                 reason=str(reason or ""),
             )
             path = ledger.write_stop_receipt(record.session_dir, payload)
-            return str(path) if path is not None else None
+            if path is None:
+                return stamp
+            return StopStamp(
+                job_id=stamp.job_id,
+                receipt=str(path),
+                prior_ended_by=stamp.prior_ended_by,
+                prior_cancel_reason=stamp.prior_cancel_reason,
+                wrote_ended_by=stamp.wrote_ended_by,
+                wrote_cancel_reason=stamp.wrote_cancel_reason,
+            )
         except Exception:  # noqa: BLE001 — a stop must not fail over evidence
             logger.warning("could not stage subagent stop receipt", exc_info=True)
             return None
 
-    def abandon_stop(self, receipt_path: str | None) -> None:
-        """Take back a stop receipt for a stop that was REFUSED. NEVER raises.
+    def abandon_stop(self, stamp: "StopStamp | None") -> None:
+        """Undo a stop that was REFUSED — the receipt AND the record stamp.
 
-        Mirrors ``control._withdraw_staged_stop_marker``: the marker is removed
-        only when the act it attests to did not happen, so a target that stays
-        alive is never later read as a deliberate stop.
+        Mirrors ``control._withdraw_staged_stop_marker`` for the artifact, and
+        extends the same discipline to the record: a refusal must be as complete
+        as the act, or ``hub op='list'`` renders ``stopped by jobs-tool`` for a
+        child nothing stopped (design/QA round 1, Q1 — the record stamp used to
+        survive while only the file was withdrawn). The prior values are
+        RESTORED rather than blanked, so a child stopped once before keeps that
+        attribution.
+
+        NEVER raises: a refusal must not fail over cleanup.
         """
-        if not receipt_path:
+        if stamp is None:
             return
-        try:
-            Path(receipt_path).unlink()
-        except OSError:
-            pass
+        if stamp.receipt:
+            try:
+                Path(stamp.receipt).unlink()
+            except OSError:
+                pass
+        record = self._record(stamp.job_id)
+        if record is None:
+            return
+        # Only roll back OUR stamp: restore exactly when the record still holds
+        # what this call wrote. A later actor (another stop that won, a resume
+        # that settled) leaves DIFFERENT values, and that statement is newer —
+        # clobbering it with a refused earlier one would be the same lie in the
+        # other direction.
+        if (
+            record.ended_by != stamp.wrote_ended_by
+            or record.cancel_reason != stamp.wrote_cancel_reason
+        ):
+            return
+        record.ended_by = stamp.prior_ended_by
+        record.cancel_reason = stamp.prior_cancel_reason
 
     def apply_lane_evidence(self, evidence: "Iterable[ledger.LaneEvidence]") -> None:
         """Fold the boot reconcile pass's findings onto the live records.
@@ -2725,20 +2825,28 @@ class SubagentComms:
                 record.paused = False
                 if record.outcome is None:
                     record.outcome = "cancelled"
-                # A cancel of a parked child is still a deliberate stop by an
-                # actor, so it is attributed and receipted like any other.
-                self.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
+                # A cancel of a parked child is still a deliberate end by an
+                # actor, so the record is attributed — but NO RECEIPT is staged:
+                # the receipt attests to a ``jobs.cancel`` that this branch never
+                # issues (the child is already stopped), and a staged attestation
+                # for an act that did not happen is the lie the rollback exists to
+                # prevent. ``stage_receipt=False`` is that distinction.
+                self.begin_stop(
+                    job_id, by=by, reason=reason, mechanism="cancel", stage_receipt=False
+                )
                 return Delivery(job_id, label, "cancelled")
             state = job.status if job is not None else "gone"
             return Delivery(job_id, label, "failed", f"job is already {state}")
         # Attribution and the durable stop receipt are staged BEFORE the cancel
         # is issued: the child may be wedged and unable to record anything once
         # the stop lands, which is exactly why the acting party attests first.
-        receipt = self.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
+        stamp = self.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
         if not await jobs.cancel(job_id):
-            # The manager refused (raced to a terminal state): a staged receipt
-            # for a stop that did not happen is a lie, so take it back.
-            self.abandon_stop(receipt)
+            # The manager refused (a race: the job settled between the status check
+            # above and this call). Take back BOTH halves — the receipt and the
+            # record stamp — or the roster renders `stopped by <actor>` for a child
+            # nothing stopped (design/QA round 1, Q1).
+            self.abandon_stop(stamp)
             return Delivery(job_id, label, "failed", "job is no longer running")
         return Delivery(job_id, label, "cancelled")
 
@@ -2794,8 +2902,17 @@ class SubagentComms:
         # afterwards would let the roster observe a moment where a deliberate
         # pause looked like a plain cancellation.
         record.paused = True
-        self.begin_stop(job_id, by=by, reason=reason, mechanism="pause")
-        await jobs.cancel(job_id)
+        stamp = self.begin_stop(job_id, by=by, reason=reason, mechanism="pause")
+        # The manager's refusal is its RETURN VALUE, and it used to be thrown
+        # away: a pause whose cancel was refused left a stop receipt and a
+        # `stopped by` stamp for a child that is still running (review round 1,
+        # R-MINOR-1). A refused pause is a failed pause, reported as such —
+        # synchronously, before any teardown can observe `paused` (see the
+        # ordering note above).
+        if not await jobs.cancel(job_id):
+            record.paused = False
+            self.abandon_stop(stamp)
+            return Delivery(job_id, record.label, "failed", "job stopped before the pause landed")
         return Delivery(job_id, record.label, "paused")
 
     def resume(self, job_id: str, message: str) -> tuple[str | None, str | None]:

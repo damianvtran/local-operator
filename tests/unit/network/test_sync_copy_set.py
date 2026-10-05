@@ -150,7 +150,16 @@ MEASURED_IN_THE_STORE: tuple[str, ...] = (
 
 
 def _classified(name: str) -> bool:
-    return name in sync.COPY_SET_NAMES or name in sync.COPY_SET_TREES or name in sync.NEVER_COPIED
+    return (
+        name in sync.COPY_SET_NAMES
+        or name in sync.COPY_SET_TREES
+        or name in sync.NEVER_COPIED
+        # A KEYED artifact's name cannot appear in an exact-name list, so its PREFIX and
+        # SUFFIX are the classified spelling (``COPY_SET_FAMILIES``). Without this,
+        # widening the derivation to see ``*_PREFIX``/``*_SUFFIX`` (below) would demand a
+        # declaration for every family anchor instead of recognising it.
+        or any(name in pair for pair in sync.COPY_SET_FAMILIES)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +238,7 @@ def test_the_measured_store_entries_are_all_classified() -> None:
 # cover is the exact failure that happened: a new constant with a literal value in a
 # module that owns session state.
 _PATH_SUFFIX = re.compile(
-    r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|BASENAME)$"
+    r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|BASENAME|PREFIX|SUFFIX)$"
 )
 _UPPER_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
 #: A path-shaped VALUE: one or more RELATIVE segments — no leading ``/``, and no segment
@@ -363,8 +372,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "config root — not an entry of a session directory",
     ),
     "local_operator/secrets/keys.py": (
-        2,
-        "``secrets/`` and its registration ticket: the credential store at the config root",
+        5,
+        "``secrets/`` and its registration ticket: the credential store at the config root. "
+        "The three ``*_PREFIX`` fragments (``master.key.incoming``, ``master.stage``, "
+        "``master.wrapped.incoming``) are STAGING-HALF fragments of a key file, joined to "
+        "a key name and never used as a bare session entry",
     ),
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
@@ -388,10 +400,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions`` itself: the directory the entries live IN",
     ),
     "local_operator/asks/store.py": (
-        2,
+        4,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. The third constant in that module, ``ASKS_LOG_NAME`` "
+        "directory. Plus the two row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``), "
+        "joined to a row id and never a bare filename. The third name constant in that "
+        "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
         "``sync.COPY_SET_NAMES``, so a session moved with an open ask carries the "
         "question with it.",
@@ -404,9 +418,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "content the store never reads",
     ),
     "local_operator/network/store.py": (
-        6,
+        7,
         "the mesh's own store under ``<config>/network``: catalogue, audit, outbox, "
-        "pending, the networks directory and the last-join-attempt record",
+        "pending, the networks directory and the last-join-attempt record, plus the "
+        "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
     "local_operator/network/audit.py": (
@@ -426,9 +441,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
     ),
     "local_operator/network/sync.py": (
-        4,
+        6,
         "``network``, ``replicas`` and ``staging`` under the config root, plus "
-        "``attachments`` (see above): the sync plane's own directories",
+        "``attachments`` (see above): the sync plane's own directories. Plus two "
+        "fragments: ``.tmp`` (the atomic-write corpse suffix the file above documents) "
+        "and ``.json`` (the attachment store's sidecar suffix, never a bare name). The "
+        "three ``SUBAGENT_*_PREFIX``/``_SUFFIX`` constants in that module are the "
+        "receipt FAMILY's anchors and are classified as such (``COPY_SET_FAMILIES``)",
     ),
     "local_operator/network/credentials/placement.py": (
         3,
@@ -478,9 +497,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``run/viewers``: where a viewer's attachment record lands, under the store root",
     ),
-    "local_operator/tools/group_reaper.py": (1, "``proc-groups`` under the store root"),
+    "local_operator/tools/group_reaper.py": (
+        2,
+        "``proc-groups`` under the store root, plus the ``.lock`` suffix on its own lock file",
+    ),
     "local_operator/tools/spill.py": (1, "``spill``, where elided tool output is parked"),
-    "local_operator/tools/builtin.py": (1, "the ripgrep excludes file under the agent home"),
+    "local_operator/tools/builtin.py": (
+        3,
+        "the ripgrep excludes file under the agent home, plus two HOST-id fragments "
+        "(``ui``/``bridge``) that name a front end inside a session id, never a filename",
+    ),
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),
     # The rescue ledger (`session/runtime/rescue.py`) is the supervisor's own
@@ -592,6 +618,56 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
     ),
+    # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
+    # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.
+    # ---- Each is declared with what it is joined to, so a future keyed session
+    # ---- artifact written as a fragment rather than as a family anchor lands here.
+    "local_operator/aida/proactive.py": (
+        3,
+        "Aida's extra/row/trigger ID prefixes, joined to a generated id (``aida-...``) "
+        "inside a payload, never a filename",
+    ),
+    "local_operator/classification/recommend.py": (
+        1,
+        "``recommend_`` prefixes a generated question id",
+    ),
+    "local_operator/compaction/cutpoint.py": (
+        1,
+        "``compaction-elision`` prefixes an elision id inside the transcript payload",
+    ),
+    "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
+    "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
+    "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
+    "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),
+    "local_operator/secrets/store.py": (
+        1,
+        "``LOP_PROVIDER_`` prefixes an environment variable name, not a path",
+    ),
+    "local_operator/session/attention.py": (
+        1,
+        "``completion-`` prefixes a provisional attention id",
+    ),
+    "local_operator/session/runtime/stall_watchdog.py": (
+        2,
+        "``runtime-stall`` / ``.deadline`` are the halves of the per-pid stall "
+        "deadline's name; both are joined to a PID and written under ``log_dir()``, so "
+        "neither can name a session directory",
+    ),
+    "local_operator/session/session.py": (
+        1,
+        "``send-notice-`` prefixes an entry id inside the transcript's own custom rows",
+    ),
+    "local_operator/terminals.py": (1, "``xterm-kitty`` is a TERM value, not a path"),
+    "local_operator/tui/glyphs.py": (1, "``mcp__`` prefixes a tool name in the glyph table"),
+    "local_operator/tui/widgets/editor.py": (
+        1,
+        "``LOP_SECRET_`` prefixes an environment variable name",
+    ),
+    "local_operator/variables.py": (
+        1,
+        "``LOCAL_OPERATOR_`` prefixes an environment variable name",
+    ),
+    "local_operator/wakes/patience.py": (1, "``patience-`` prefixes a wake id"),
 }
 
 
@@ -1296,3 +1372,88 @@ def test_a_fetch_does_not_re_hash_the_copy_set(
     )
     assert (dest / "scratchpad" / "big.bin").stat().st_size == 3 * sync.SYNC_CHUNK_BYTES + 7
     assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# The keyed FAMILIES: the child-attribution receipts (review round 1, MAJOR 1)
+# ---------------------------------------------------------------------------
+
+
+def _receipt_dir(root, session_id: str = "abc123"):
+    """A session directory holding the two receipt families."""
+    from local_operator.session import subagent_ledger as ledger
+
+    directory = sync.session_dir(root, session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    ledger.write_lane_receipt(
+        directory,
+        ledger.build_lane_payload(
+            job_id="j1",
+            label="lane",
+            agent_role="",
+            child_session_id=session_id,
+            parent_session_id="p",
+            parent_job_id=None,
+            started_at=1.0,
+        ),
+    )
+    ledger.write_stop_receipt(
+        directory,
+        ledger.build_stop_payload(
+            job_id="j1",
+            label="lane",
+            child_session_id=session_id,
+            parent_session_id="p",
+            actor="parent-hub",
+            mechanism="cancel",
+            reason="stop",
+        ),
+    )
+    return directory
+
+
+def test_receipt_families_are_classified_by_anchored_prefix_and_suffix(tmp_path) -> None:
+    """The family rule is anchored on BOTH ends, so it cannot swallow a stranger."""
+    assert sync.in_copy_set_family("subagent-lane-0e38bb686170.v1.json")
+    assert sync.in_copy_set_family("subagent-stop-0e38bb686170.v1.json")
+    # An EMPTY middle is not a member: the anchors must not degrade into "any name
+    # starting with the prefix", which is how a family rule turns into a catch-all.
+    assert not sync.in_copy_set_family("subagent-lane-.v1.json")
+    assert not sync.in_copy_set_family("subagent-lane-0e38bb686170.json")
+    assert not sync.in_copy_set_family("subagent-lane-0e38bb686170.v1.json.bak")
+    assert not sync.in_copy_set_family("runtime-stop.json")
+    assert not sync.in_copy_set_family("transcript.jsonl")
+
+
+def test_a_deleting_move_of_a_session_holding_receipts_is_not_refused(tmp_path) -> None:
+    """THE REGRESSION THIS FAMILY EXISTS FOR: the guard is fail-closed on any name it
+    cannot account for, and a STOP RECEIPT IS PERMANENT, so before the family every
+    session that ever stopped a child refused to move — with "delete the evidence" as
+    the only remedy the sentence offered. Pinned against the real ``assert_complete``
+    (the deleting move's own call), not a re-implementation of it."""
+    directory = _receipt_dir(tmp_path)
+    assert sync.unlisted_entries(directory) == []
+    sync.assert_complete(directory)  # must not raise
+
+
+def test_a_keeping_copy_carries_the_receipts(tmp_path) -> None:
+    """The other half: only a DELETING move calls ``assert_complete``, so without the
+    family a ``--keep`` move silently left the receipts behind and the destination read
+    the child as orphaned. ``copy_set`` is what both move halves enumerate."""
+    _receipt_dir(tmp_path)
+    names = sync.copy_set(tmp_path, "abc123")
+    assert "subagent-lane-j1.v1.json" in names
+    assert "subagent-stop-j1.v1.json" in names
+
+
+def test_a_symlink_wearing_a_receipt_name_is_still_refused(tmp_path) -> None:
+    """The family carries REGULAR FILES only, and the refusal path agrees: a link
+    dressed as a receipt is not a receipt, and the two halves of the rule must not
+    disagree about that."""
+    directory = tmp_path / "sessions" / "abc123"
+    directory.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text("{}")
+    os.symlink(outside, directory / "subagent-lane-j1.v1.json")
+    assert sync.unlisted_entries(directory) == ["subagent-lane-j1.v1.json"]
+    assert sync.family_entries(directory) == []

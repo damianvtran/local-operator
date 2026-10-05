@@ -9268,18 +9268,20 @@ class Session:
         "cancelled" with no attribution on any surface.
         """
         comms = self._subagent_comms
-        receipt: str | None = None
+        stamp: Any = None
         if comms is not None:
             try:
-                receipt = comms.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
+                stamp = comms.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
             except Exception:  # noqa: BLE001 — a stop must not fail over evidence
                 logger.warning("could not stage stop evidence for %s", job_id, exc_info=True)
         try:
             cancelled = await self.jobs.cancel(job_id)
             if not cancelled and comms is not None:
-                # The job had already settled: the stop this receipt attests to
-                # did not happen, so take it back.
-                comms.abandon_stop(receipt)
+                # The job had already settled: nothing stopped, so take back BOTH
+                # halves of the staged attribution — the receipt and the record
+                # stamp. Withdrawing only the file left `stopped by user-escape`
+                # rendered for a child nothing stopped (design/QA round 1, Q1).
+                comms.abandon_stop(stamp)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -21616,7 +21618,7 @@ class Session:
         """
         return self._attention_run_request_dispatched or self._attention_run_carried_prompt
 
-    def _stamp_teardown_attribution(self) -> None:
+    def _stamp_teardown_attribution(self) -> list[Any]:
         """Name ``parent-teardown`` as the actor for every running child.
 
         Runs immediately before ``jobs.dispose`` issues the cancellations. A
@@ -21625,19 +21627,51 @@ class Session:
         children still running, so the receipt (recovered by the boot reconcile
         pass) is what lets a later boot say who stopped them.
 
+        Returns the ``(job_id, stamp)`` pairs so the caller can UNDO any whose
+        cancel dispose then refuses: a child that settled on its own in the
+        window between this stamp and the cancel must not keep a
+        ``parent-teardown`` attestation (design/QA round 1, Q1 — this site had
+        no rollback at all).
+
         Deliberately reads ``_subagent_comms`` directly rather than the property:
         teardown of a session that never delegated must not mint a comms
         instance as its last act. Best-effort — teardown must proceed.
         """
         comms = self._subagent_comms
         if comms is None:
-            return
+            return []
+        stamps: list[Any] = []
         try:
             for job in self.jobs.list():
                 if getattr(job, "type", "") == "task" and job.status == "running":
-                    comms.begin_stop(job.id, by="parent-teardown", reason="", mechanism="cancel")
+                    stamp = comms.begin_stop(
+                        job.id, by="parent-teardown", reason="", mechanism="cancel"
+                    )
+                    if stamp is not None:
+                        stamps.append((job.id, stamp))
         except Exception:  # noqa: BLE001 — teardown must not fail over evidence
             logger.warning("could not stamp teardown attribution", exc_info=True)
+        return stamps
+
+    def _abandon_refused_teardown_stamps(self, stamps: list[Any]) -> None:
+        """Take back the teardown evidence for children it did NOT stop.
+
+        ``jobs.dispose`` cancels every running row and AWAITS each runner, so by
+        the time it returns a row's status is final. A child that finished on its
+        own in the window between the stamp and the cancel keeps a stop receipt
+        and a ``parent-teardown`` stamp attesting to a stop that did not happen —
+        the same lie the hub and escape paths roll back.
+        """
+        comms = self._subagent_comms
+        if comms is None or not stamps:
+            return
+        try:
+            for job_id, stamp in stamps:
+                job = self.jobs.get(job_id)
+                if job is None or job.status != "cancelled":
+                    comms.abandon_stop(stamp)
+        except Exception:  # noqa: BLE001 — teardown must not fail over evidence
+            logger.warning("could not roll back teardown attribution", exc_info=True)
 
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
@@ -21964,8 +21998,12 @@ class Session:
             # actor. The sidecar was written a moment ago with the children still
             # running (on purpose); the receipt is what carries the attribution
             # across the restart, via the boot reconcile pass.
-            self._stamp_teardown_attribution()
+            teardown_stamps = self._stamp_teardown_attribution()
             await self.jobs.dispose()
+            # AFTER dispose has awaited every runner, so each status is final: a
+            # child that settled on its own instead of being cancelled must not
+            # keep a parent-teardown attestation.
+            self._abandon_refused_teardown_stamps(teardown_stamps)
             self._wake.dispose()
             self._monitors.dispose()
             # A shell receipt can be queued behind a turn that was just aborted.
