@@ -186,7 +186,13 @@ MEASURED_TOKENS: dict[str, int] = {
     "eval": 379,
     "glob": 94,
     "grep": 346,
-    "hub": 675,
+    # 675 -> 673 (child-attribution v1): the ``message`` field description was
+    # rewritten to say that pause/cancel RECORD it as the stop reason. The new
+    # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
+    # recorded as the stop reason for pause/cancel; ignored by list/peek."), so
+    # the hub doc got two tokens CHEAPER while gaining the fact — re-measured
+    # deliberately, not pasted.
+    "hub": 673,
     "jobs": 365,
     "list_variables": 61,
     "lsp": 303,
