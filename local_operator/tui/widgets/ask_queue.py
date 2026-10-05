@@ -93,12 +93,19 @@ STATUS_DECLINED = store.STATUS_DECLINED
 STATUS_DISMISSED = store.STATUS_DISMISSED
 STATUS_EXPIRED = store.STATUS_EXPIRED
 
-#: Statuses a SURFACE drops, because the user has nothing left to do about
-#: them. ``answered`` and ``declined`` are settled; ``late`` joins them because
-#: it is the same settlement one deadline later — the agent was told, the
-#: receipt is in the transcript, and offering an answer box for it can only be
-#: refused (design round 1, D6/U3: ``late`` was painted "timed out — still
-#: answerable" and stayed in the answerable set).
+#: THE TERMINAL STATUSES — an ask in one of these has nothing left to answer.
+#: ``answered`` and ``declined`` are settled; ``late`` joins them because it is
+#: the same settlement one deadline later — the agent was told, the receipt is in
+#: the transcript, and offering an answer box for it can only be refused (design
+#: round 1, D6/U3: ``late`` was painted "timed out — still answerable" and stayed
+#: in the answerable set). ``expired`` injects nothing at all (§2.2).
+#:
+#: A SURFACE NO LONGER DROPS THEM (design §4): the list keeps every row and the
+#: three-way filter picks the half, so what this set is FOR now is the question a
+#: caller asks about ONE row — is this over? — while the row-level answer the list
+#: reads is :attr:`AskRow.settled` (which also covers the DELIVERING half: an
+#: answered-but-undelivered row is terminal as an ASK but still pending on the
+#: user's attention).
 SETTLED_STATUSES = frozenset(
     {STATUS_ANSWERED, STATUS_LATE, STATUS_DECLINED, STATUS_DISMISSED, STATUS_EXPIRED}
 )
@@ -188,8 +195,10 @@ _ANSWERABLE = store.OUTSTANDING_STATUSES
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
 #: ``●`` open, ``◷`` timed out but still answerable (the wake glyph's meaning —
-#: "a clock decided something"). A settled row has no glyph because it has no
-#: row: see :data:`SETTLED_STATUSES`.
+#: "a clock decided something"). A SETTLED row paints no glyph and no fallback
+#: bit of punctuation either: its status is a WORD in the tail
+#: (``settled_chip``), because once there is nothing left to act on the status
+#: IS the row.
 STATUS_MARKS: dict[str, str] = {
     STATUS_OPEN: "●",
     STATUS_TIMED_OUT: "◷",
