@@ -180,9 +180,7 @@ async def test_the_drawer_register_spells_both_halves_when_mixed():
 
 
 async def test_the_drawer_register_keeps_the_urgency_word_when_the_halves_mix():
-    rows = ask_rows(
-        [_row("a1", urgent=True), _row("a2", status="timed_out", urgent=True)]
-    )
+    rows = ask_rows([_row("a1", urgent=True), _row("a2", status="timed_out", urgent=True)])
     # OPEN urgent asks only — the same set the bar counts, so a timed-out one
     # cannot inflate the word beside a bar that shows the hue alone.
     assert drawer_headline(rows) == "1 waiting, 1 moved on · 1 urgent"
@@ -360,9 +358,7 @@ async def test_a_header_segment_is_a_press_target(enabled):
         listing = app.query_one(AskQueueList)
         spans = dict(
             (value, (start, end))
-            for value, start, end in listing._segment_spans(
-                max(1, int(listing.content_size.width))
-            )
+            for value, start, end in listing._segment_spans(max(1, int(listing.content_size.width)))
         )
         assert FILTER_SETTLED in spans
         start, _end = spans[FILTER_SETTLED]
@@ -489,9 +485,7 @@ def _patch_engage(monkeypatch, record: dict, raise_on: set[str] | None = None) -
         record["engage"] = (str(session_id), type(work).__name__, getattr(work, "ask_id", None))
         return _FakeAttachClient(record, raise_on), "detail"
 
-    monkeypatch.setattr(
-        "local_operator.mobile.attach_client.engage_session_client", _fake
-    )
+    monkeypatch.setattr("local_operator.mobile.attach_client.engage_session_client", _fake)
 
 
 async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
@@ -548,9 +542,7 @@ async def test_a_refused_fleet_answer_says_so_in_the_asks_own_words(
         assert record["closed"] is True
 
 
-async def test_a_fleet_row_of_this_session_keeps_the_owner_contract(
-    enabled, isolated_index
-):
+async def test_a_fleet_row_of_this_session_keeps_the_owner_contract(enabled, isolated_index):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:

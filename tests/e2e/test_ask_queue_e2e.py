@@ -536,9 +536,7 @@ async def test_the_aggregate_read_the_fleet_scope_uses_reports_a_real_sessions_a
             # And the answer settles it, so the halves and the mark both move.
             assert session.ask_queue().respond(ask_id, {"q0": ["yes"]}, by="terminal")["ok"] is True
             await session.reconcile_asks()
-            settled = next(
-                r for r in store.index_asks(headless_tui_env) if r["ask_id"] == ask_id
-            )
+            settled = next(r for r in store.index_asks(headless_tui_env) if r["ask_id"] == ask_id)
             assert settled["status"] == store.STATUS_ANSWERED
             # The DELIVERY is the transcript row, and it is asserted there rather
             # than on the index's `delivered` hint: the index is derived and is
@@ -590,14 +588,20 @@ async def test_a_fleet_scope_sees_a_stopped_sessions_ask_and_can_answer_it_by_id
 
     # Answering by ask_id settles it at the LOG (the TUI's fleet path sends the
     # op through an engaged runtime; the durability underneath is this).
-    assert store.append_event(directory, {
-        "kind": store.EVENT_ANSWERED,
-        "v": store.EVENT_SCHEMA,
-        "ask_id": ask_id,
-        "at": store.now_ms(),
-        "answers": {"q0": ["yes"]},
-        "by": {"surface": "terminal"},
-    }) is True
+    assert (
+        store.append_event(
+            directory,
+            {
+                "kind": store.EVENT_ANSWERED,
+                "v": store.EVENT_SCHEMA,
+                "ask_id": ask_id,
+                "at": store.now_ms(),
+                "answers": {"q0": ["yes"]},
+                "by": {"surface": "terminal"},
+            },
+        )
+        is True
+    )
     revived = _session(headless_tui_env, "fleet-cold", ScriptedStream([text_turn("got it")]))
     revived.set_ask_handler(_never_answers)
     try:
