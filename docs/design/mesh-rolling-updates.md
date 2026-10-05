@@ -268,9 +268,15 @@ The capability authorises *a nudge to fetch and install*, not *a delivery*:
 3. **Monotonicity.** A target not strictly newer than what is installed is
    refused: `already_on_target` is a no-op receipt, `ahead_of_target` is a skip.
    There are no downgrades in the standing path.
-4. Anything the member cannot resolve on its own channel — a source-ref build,
-   an unpublished version, an editable checkout ("dev-tree skew is out of scope
-   by design", `update.py:347`) — is **refused by name**, not attempted.
+4. **The member resolves `target.version`; `source_ref` is identity, never
+   fetched.** A non-empty `source_ref` rides the record as the origin's build
+   identity — the operator's own release flow produces exactly that shape
+   (`lop-update` from `main`: version published, ref set) — and it is never
+   fetched, checked out, or installed from. Refusal keys on the version being
+   unresolvable on the member's own channel (`target_not_published`), or on an
+   editable/dev checkout that has no channel at all (`editable_install`;
+   "dev-tree skew is out of scope by design", `update.py:347`) — refused by
+   name, not attempted.
 
 So the worst a compromised member can do with the grant is make a device run a
 *newer published release* earlier than the operator would have, bounded by
@@ -307,7 +313,7 @@ a per-network policy.**
   `--from-snapshot <ref>` form the `lop-update` script execs
   (`~/.local/bin/lop-update`), and the TUI's `/update`. "Primary" in the
   operator's words is this: the device you actually update; nothing in the
-  schema changes, and any member that has granted peers may be an origin.
+  schema changes, and any member that its peers have granted may be an origin.
 - **Policy.** `network.rollout_on_update`: `auto` | `ask` | `off`, defaulted in
   the config file's existing `network:` section (beside `keepalive_s`,
   `link_idle_s`). `auto` = roll after the local update settles (the operator's
@@ -318,10 +324,11 @@ a per-network policy.**
   gate that matters, and a member without the grant is never touched.
 - **Scope.** For each active network the origin belongs to: the active members,
   minus self, **minus members that do not hold the origin's `update` grant**
-  (recorded `no_grant`, with the grants remedy above), **minus members that do
-  not advertise the update feature string** (§5; recorded `predates_rolling_
-  updates`), **minus `kind: "pool"` members** (ephemeral pods are replaced, not
-  updated — `mesh-compute-pool.md` §3.5; recorded `unsupported_kind`). What
+  (recorded `skipped` (`no_grant`), with the grants remedy above), **minus
+  members that do not advertise the update feature string** (§5; recorded
+  `skipped` (`predates_rolling_updates`)), **minus `kind: "pool"` members**
+  (ephemeral pods are replaced, not updated — `mesh-compute-pool.md` §3.5;
+  recorded `skipped` (`unsupported_kind`)). What
   remains is the roll set, ordered by the network's member order from a
   **snapshot** taken when the record opens (a member admitted mid-rollout rides
   the next rollout).
@@ -346,12 +353,11 @@ a per-network policy.**
 
 ```
 net_update  { "target": {"version": "0.67.16", "source_ref": ""},
-              "rollout": "ro_…", "waited_s": 0 }
-        →  { "state": "busy"|"draining"|"applying"|"rolling"|"done"
-                       |"already_on_target"|"ahead_of_target"|"failed"
-                       |"unsupported",
-             "reason": "", "version": "", "sessions": {"moved": 0, "kept": 0},
-             "updated_at": 0.0 }
+              "rollout": "ro_…" }
+        →  { "state": "busy"|"done"|"already_on_target"|"ahead_of_target"
+                       |"refused"|"failed",
+             "code": "", "reason": "", "method": "", "version": "",
+             "sessions": {"moved": 0, "kept": 0}, "updated_at": 0.0 }
 ```
 
 One op, idempotent; each call is a **fresh probe**, and a call that observes
@@ -362,6 +368,36 @@ the call: a busy member answers `busy` in milliseconds with its own reason, and
 the caller re-asks (fresh probe per retry; `MOVE_WAIT_POLL_S` shape, §4). A
 second distinct target while one is in flight is refused `update_in_progress`;
 a re-trigger of the same target is naturally idempotent.
+
+`code` carries the member-side class when `state` is `refused`
+(`target_not_published` / `editable_install` / `update_in_progress`); `method`
+discloses the install shape on `done` (the onboarding runner's own values,
+`onboard.py:1431-1436`); `reason` is the member's own sentence for
+`busy`/`failed`; `sessions` counts what the pass moved and what it kept. The
+member's checks run in one order — target validation first (the no-action and
+refusal outcomes need no idle), then the fresh busy probe — so every reply
+state has exactly one producer.
+
+**The one vocabulary map** (S1 freezes it, one test per row). Three vocabularies
+meet in this design — the §2 refusal codes, the reply above, and the record's
+member states (§6.1) — and this table is their single reconciliation:
+
+| Producer | Reply (`state`, `code`) | Record (`state`, `code`) |
+|---|---|---|
+| exclusion before any call: no grant / no `mesh-update-v1` / pool member | — | `skipped` (`no_grant` / `predates_rolling_updates` / `unsupported_kind`) |
+| dial fails | — | `unreachable` |
+| fresh probe: sessions busy, inside the wait budget | `busy` | `draining` |
+| the slow call itself, installing | — | `applying` |
+| pass completed | `done` | `done` |
+| no action needed | `already_on_target` / `ahead_of_target` | `already_on_target` / `ahead_of_target` |
+| member-side terminal refusal | `refused` (`target_not_published` / `editable_install`) | `refused` (same code) |
+| retry-class: busy past the budget / no answer / an update already in flight | `busy` / — / `refused` (`update_in_progress`) | `deferred` (`busy` / `no_answer` / `update_in_progress`) |
+| install or relay-roll failure | `failed` | `failed` |
+
+`draining` and `applying` exist only on the record side (the origin's view of
+its own wait and its own in-flight call); `rolling` is deliberately absent —
+the services roll and the re-engage sit inside the one bounded call, so the
+observable boundary is the reply set above.
 
 ---
 
@@ -391,17 +427,20 @@ substituted where it exists:
    per-member wait (default 15 min, `--wait` up to 30 min, `MOVE_MAX_WAIT_S`
    precedent). Each probe is fresh; a member that stays busy past the budget is
    answered `busy` with its own reason and the origin **defers** it
-   (`deferred: busy (2 sessions, since 10:02)`) and continues. The drain never
+   (record `deferred`, code `busy`, detail `2 sessions busy since 10:02`) and
+   continues. The drain never
    stops, signals, or signs anything on the member — the fleet tool's own
    words, kept as the bound on this step.
 3. **Install.** Under the member's update lock, re-probe idle (a turn may have
    started between calls; a fresh `busy` wins and nothing is touched), then:
    - resolve the exact version through the member's own channel with the
-     onboarding lane's spellings (`onboard.py:1392-1414`): prefer the
-     generation-layout updater where the member has it (`lop-update <tag>`, which
-     execs `lop update --from-snapshot <tag>`); the classic uv-tool path
-     otherwise, disclosed in the receipt as an in-place install — safe
-     here because the drain succeeded moments before, and *only* then;
+     onboarding lane's spellings (`onboard.py:1392-1414`): the generation-layout
+     updater first — the lane's `lop update --to <version>` (§8.1) on a
+     repo-less member, or `lop-update <tag>` where both a repo checkout and the
+     script exist (it execs `lop update --from-snapshot <tag>` and exits 1
+     without a repo, `~/.local/bin/lop-update`); the classic uv-tool path is the
+     disclosed last resort — an in-place install, safe here because the drain
+     succeeded moments before, and *only* then;
    - verify the built tree's own metadata agrees with the announced version
      before it becomes visible (`install_into_generation` step 2 — the guard
      against the stale-index incident, `update.py:2748-2752`);
@@ -459,8 +498,9 @@ mobility's "each retry is a fresh idle probe"; `mobility.py:87-94`.)
 spawns the installer as a child (the updater is an external `uv`/installer
 invocation; `update.py:5300-5307`). It survives its own restart by construction:
 the generation layout means the running relay keeps its tree, and the pointer
-flip is what the restart resolves to (`update.py:2659-2664` explains why the
-daemon units name the stable shim). If the relay dies mid-install, no pointer
+flip is what the restart resolves to (why the daemon units name the stable
+shim: `update.py:2215-2268`; a relay left a generation behind names the same
+fact, `relay.py:10854-10860`). If the relay dies mid-install, no pointer
 moved; the stale lock is superseded on the next trigger.
 
 **4.6 Where the drain gate is *not* needed, stated so nobody adds it.** The
@@ -516,7 +556,7 @@ off):
 
 | Surface | Must hold | How |
 |---|---|---|
-| `net_update` op | An old member answers `unknown_op`; the origin never asks one | origin checks `mesh-update-v1` first; result recorded `predates_rolling_updates`, remedy = the existing "update it there" path |
+| `net_update` op | An old member answers `unknown_op`; the origin never asks one | origin checks `mesh-update-v1` first; result recorded `skipped` (`predates_rolling_updates`), remedy = the existing "update it there" path |
 | Capability rows | A member that predates `update` never resolves it against a requester; an unknown name in a row is inert | capability rows are read per use from the device's own record; unknown names cannot grant anything |
 | Receipts | Old origins (none can exist for `net_update`) and newer members | additive keys; unknown ignored; versions compared, never assumed |
 | Rollout record | Schema additive for readers | unknown fields ride; states are closed but new states must be a decision here |
@@ -549,10 +589,17 @@ creates (`approvals.py:193-227` are the pattern to copy, not the store). Shape:
   "target": {"version": "0.67.16", "source_ref": ""},
   "members": [
     {"device": "d_…", "name": "cloud-node-1",
-     "state": "pending|draining|applying|rolling|done|deferred|unreachable|unsupported|failed",
+     "state": "pending|draining|applying|done|already_on_target|ahead_of_target|deferred|failed|unreachable|refused|skipped",
+     "code": "",
      "detail": "2 sessions busy since 10:02", "version": "",
      "receipts": [{"at": …, "state": …, "detail": "…"}]}]}
 ```
+
+Member states are the map's record column (§3); `code` distinguishes
+causes where the state alone cannot (`skipped`: `no_grant` /
+`predates_rolling_updates` / `unsupported_kind`; `refused`:
+`target_not_published` / `editable_install`; `deferred`: `busy` / `no_answer` /
+`update_in_progress`).
 
 The member keeps **no mirrored record** — deliberately. Its ground truth is the
 install itself (dist-info + `.lop-source`), its lock, and its audit rows; the
@@ -560,9 +607,9 @@ origin's record is the orchestration view. Two stores that must agree would be
 a new failure mode for no gain.
 
 **6.2 Ordering.** Origin → members in the snapshot's order, one at a time
-(§4.1). A member that is `done` is skipped on resume (`already_on_target`
-re-probes are cheap); the first non-terminal member in order is where a resume
-continues.
+(§4.1). A member that is `done` or `already_on_target` is skipped on resume
+(the re-probe is cheap and idempotent); the first non-terminal member in order
+is where a resume continues.
 
 **6.3 Resumability, case by case.**
 
@@ -580,7 +627,7 @@ continues.
 - Origin: `update_rollout_started`, `update_member_triggered`,
   `update_member_state`, `update_rollout_done` (one row per semantic change,
   never per poll — the audit module's cost rule, `audit.py:44/:515-534`).
-- Member: `update_requested`, `update_refused` (with the code above),
+- Member: `update_requested`, `update_refused` (the §3 map's code),
   `update_started`, `update_completed` / `update_failed`, alongside the
   existing `update_report` machine line the desktop already parses
   (`update.py:6781-6810`). One rollout is a handful of rows per device — the
@@ -588,10 +635,12 @@ continues.
 
 **6.5 Safety notes, so the shape is not re-litigated.**
 
-- The rollout **never touches a member's sessions' contents**; it moves builds
-  and services. The one loss mode is a turn that begins in the seconds around a
-  swap on a member *without* the generation layout, which the drain is exactly
-  sized to prevent; the receipt's `method` field says which install shape ran.
+- The rollout **never cuts a turn or edits an existing transcript**; it moves
+  builds and services, and its one session-visible write is the step-5
+  re-engage nudge (§4.2). The one loss mode is a turn that begins in the
+  seconds around a swap on a member *without* the generation layout, which the
+  drain is exactly sized to prevent; the receipt's `method` field says which
+  install shape ran.
 - The origin **must itself have settled** before rolling: its own runtimes may
   still be retiring (that is fine — the origin's sessions are not the members'
   concern), but its install and services must be on the target, because the
@@ -644,7 +693,9 @@ rolling to 3 peers: cloud-node-1, dev-vm-2, gpu-pod-3
 ```
 
 **7.4 The manual verbs.** `lop network update <peer> | --all | --status |
---resume <id>`, `--wait/--json`, documented under the `lop network` group;
+--resume [<id>]` (a bare `--resume` addresses the most recent active record —
+which is why §7.3's summary prints it bare), `--wait/--json`, documented under
+the `lop network` group;
 `lop network update` rolls this device's grant-holding members, `lop update`
 remains "this device only". The two must not be confused in help text or
 sentences.
@@ -669,10 +720,10 @@ qa-tester; UI slices add designer; the flow's first real use adds ux-reviewer).
 
 1. **S1 — Authority and a single-peer update.** `update` in the capability
    tables + words + totality tests; `net_update` peer op (slow pool) +
-   `peer_update` local op + `lop network update <peer>`; the refusals table of
-   §2 with tests per row. Acceptance: two-device rig; positive cell moves an
-   idle member one version; refusal cells for `no_grant`, `busy`, downgrade,
-   editable, old peer.
+   `peer_update` local op + `lop network update <peer>`; the §2 refusals and
+   the §3 vocabulary map, with tests per row. Acceptance: two-device rig;
+   positive cell moves an idle member one version; refusal cells per the map
+   (no grant, old peer, busy, downgrade, editable, update already in flight).
 2. **S2 — The member pass.** Snapshot/drain/install/roll/re-engage, the update
    lock, receipts. Acceptance: unit cells + a two-relay rig with a synthetic
    busy session — the pass must **wait**, then update after the turn completes,
@@ -703,7 +754,7 @@ receipts, what to keep), executed on the real topology (the Mac origin +
   `lop update` on the Mac. Expect: the rollout opens, reaches the node, answers
   `busy` with the node's own reason, and **nothing on the node is touched** —
   prove it with the node's session still running and its build stamp unchanged.
-  The record shows `deferred: busy`; the pass has continued (nothing blocked).
+  The record shows `deferred` (`busy`); the pass has continued (nothing blocked).
 - **Step B — the completion.** Let the turn finish (or pick the moment), then
   either wait for the cadence hook or run `lop network update --resume`. Expect
   the node to update **after** the idle probe: install receipt with `method`,
