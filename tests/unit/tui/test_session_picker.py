@@ -45,6 +45,7 @@ from local_operator.tui.widgets.session_picker import (
     OUTER_INSET_COLS,
     OUTER_INSET_ROWS,
     PASTE_QUERY_MAX_CHARS,
+    PICKER_FLEET_ASKS,
     PICKER_MIN_WIDTH,
     STACK_BELOW_COLS,
     SessionPickerScreen,
@@ -4725,3 +4726,67 @@ def test_the_agent_opened_mark_outranks_started_on_a_narrow_meta_row() -> None:
         assert _clocks_row("3h ago", "1m ago", width) == _clocks_row(
             "3h ago", "1m ago", width, agent_opened=False
         )
+
+
+class _Click:
+    """The mouse event shape the picker's own hit tests read."""
+
+    def __init__(self, x: int, y: int) -> None:
+        self.button = 1
+        self.x = x
+        self.y = y
+        self.screen_x = x
+        self.screen_y = y
+
+    def stop(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_pressing_the_ask_count_opens_the_fleet_list() -> None:
+    """U2: with the sidebar hidden this count is the only fleet surface there is.
+
+    Round 1 measured it as a statement with no door: a number saying another
+    conversation is waiting on the user, with nothing to press. It is a press
+    target now, on its own idiom — its own cells only, not the whole chrome row.
+    """
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_asks_total(3)
+        await pilot.pause()
+        painted = screen._filter_text().plain
+        assert "asks: 3" in painted
+        span = screen._asks_span
+        assert span is not None and painted[span[0] : span[1]] == "asks: 3"
+        # A press ONE CELL LEFT of the note (the separator) does nothing to the
+        # door — the target is the note's own cells.
+        screen.on_click(_Click(int(screen._filter.region.x), int(screen._filter.region.y)))
+        await pilot.pause()
+        assert app.chosen == []
+        x = int(screen._filter.content_region.x) + span[0]
+        y = int(screen._filter.region.y)
+        screen.on_click(_Click(x, y))
+        await pilot.pause()
+        assert app.chosen == [PICKER_FLEET_ASKS]
+
+
+@pytest.mark.asyncio
+async def test_the_picker_ask_total_can_be_restated_after_an_off_thread_read() -> None:
+    """F5: the screen opens on the poll's answer and is corrected a beat later."""
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert "asks:" not in screen._filter_text().plain
+        screen.set_asks_total(7)
+        await pilot.pause()
+        assert screen._asks_total == 7
+        painted = screen._filter_text().plain
+        assert "asks: 7" in painted
+        # ...and to ZERO, where the note (and so the door) is absent.
+        screen.set_asks_total(0)
+        await pilot.pause()
+        assert "asks:" not in screen._filter_text().plain
+        assert screen._asks_span is None

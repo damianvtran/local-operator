@@ -27,11 +27,23 @@ MODE is one of:
              never made)
     fleet    the marks frame, then a press on the footer note: the ONE list
              opened on the fleet scope (the door, exercised end to end)
+    gate     the marks frame where one marked session ALSO holds a pending gate:
+             `!` keeps the cell (a blocked turn is the louder fact) while the
+             footer still counts that session's ask — the documented precedence,
+             rendered rather than asserted
+    picker   the SESSION PICKER with the fleet count on its chrome row — the
+             only fleet surface a user sees with the sidebar hidden, and a press
+             target since round 2 (U2)
+
+The keyboard route to the fleet list (`ctrl+f`, round 2: U2) is taught by the
+SAME footer the note rides; `marks` at 80x24 is the frame that shows the note
+surviving a width where it used to vanish (U3).
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -126,9 +138,21 @@ def _seed_index() -> None:
         )
 
 
-def _entries() -> list[CatalogEntry]:
+#: The session that ALSO holds a pending approval in the `gate` frame. It keeps
+#: its ask mark's COUNT (the footer still sums it) and yields the CELL to `!`.
+GATED_ID = "s-tools"
+
+
+def _entries(*, gate: bool = False) -> list[CatalogEntry]:
     return [
-        CatalogEntry(SessionRow(id=session_id, mtime=NOW - age * 60, name=name))
+        CatalogEntry(
+            SessionRow(
+                id=session_id,
+                mtime=NOW - age * 60,
+                name=name,
+                pending=gate and session_id == GATED_ID,
+            )
+        )
         for session_id, name, age in ROWS
     ]
 
@@ -160,10 +184,13 @@ async def main() -> None:
         if "x" in arg:
             cols, rows = arg.split("x")
             size = (int(cols), int(rows))
-        elif arg in {"marks", "none", "fleet"}:
+        elif arg in {"marks", "none", "fleet", "gate", "picker"}:
             mode = arg
         else:
-            raise SystemExit(f"unknown argument {arg!r}: expected a WxH size or marks|none|fleet")
+            raise SystemExit(
+                f"unknown argument {arg!r}: expected a WxH size or "
+                "marks|none|fleet|gate|picker"
+            )
 
     if mode != "none":
         _seed_index()
@@ -173,6 +200,15 @@ async def main() -> None:
     async with app.run_test(size=size) as pilot:
         app._session = session
         await pilot.pause()
+        # `ASK_QUEUE_SHOT_THEME=light` renders the same state on the paper ramp
+        # (the same env seam `ask_queue_shot.py` uses, and for the same reason:
+        # the FILENAME is what a reader compares against). Round 1 shipped no
+        # light sidebar frame at all — design round 1's D10 recorded the gap
+        # that made the light ramp's own mark unmeasured.
+        wanted = os.environ.get("ASK_QUEUE_SHOT_THEME", "").strip()
+        if wanted:
+            app._apply_theme(wanted)
+            await pilot.pause()
         app._sidebar_settings = SidebarSettings(False, "left")
         for turn in range(1, 6):
             app._append_block(UserBlock(f"Turn {turn}: what should we do about the stale rows?"))
@@ -185,7 +221,7 @@ async def main() -> None:
         await pilot.press("f9")
         await pilot.pause()
         sidebar = app._session_sidebar
-        sidebar.set_entries(_entries())
+        sidebar.set_entries(_entries(gate=mode == "gate"))
         sidebar.current_id = CURRENT_ID
         sidebar.cursor_id = ROWS[1][0]
         if mode != "none":
@@ -202,6 +238,24 @@ async def main() -> None:
         await pilot.pause()
         if mode == "fleet":
             app.action_open_fleet_asks()
+            for _ in range(8):
+                await pilot.pause()
+        if mode == "picker":
+            # The PICKER'S OWN IDIOM (U2): the count is the door, and with the
+            # sidebar hidden it is the only fleet surface a user ever sees. The
+            # screen is pushed with the same total the app hands production —
+            # the app's own cached reader, so the frame cannot state a number
+            # the sidebar's own footer would not.
+            from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+            app.push_screen(
+                SessionPickerScreen(
+                    [entry.row for entry in _entries()],
+                    NOW,
+                    {},
+                    asks_total=app._fleet_ask_total_cached(),
+                )
+            )
             for _ in range(8):
                 await pilot.pause()
         for _ in range(6):

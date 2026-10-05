@@ -35,8 +35,18 @@ only, which is exactly how both slipped through: a new surface has to solve its
 own pairs. So the bar's ground is the composer's ``surface`` (the gate's own
 ground, where ``fg`` 13.76/13.86, ``muted`` 7.93/6.58 and ``dim`` 4.18/3.46 all
 clear their floors, and the accent glyph reads 8.02/4.43) and the list's rows
-avoid ``dim`` entirely on ``overlay`` (``fg`` 11.30/10.92, ``muted`` 6.51/5.18,
-``warning`` 7.09/4.78).
+avoid ``dim`` entirely on ``overlay`` (``fg`` 11.30/10.92, ``muted`` 6.51/5.18).
+
+THE STATE HUES ON THAT PANEL ARE THE DERIVED ``chip-*`` INKS (design round 2,
+D1). Round 1 solved ``fg``/``muted`` against ``overlay`` and stopped there: the
+marker was still ``accent`` (3.49:1 on the light ramp's overlay), the delivering
+glyph and the ``answered`` chip word still ``success`` (3.45:1), the urgency
+word still ``warning`` — all under this repo's 4.0 state floor, all now under a
+gate pair of their own (``tests/unit/tui/test_palette_contrast.py``).
+``theme._fill_chip_live`` already derives exactly this: the hue when it clears
+the panel's ground, the ramp's neutral ink when it does not, so every ramp keeps
+its own palette and the dark ramp is byte-identical (there ``chip-live`` IS the
+accent).
 """
 
 from __future__ import annotations
@@ -187,6 +197,21 @@ SETTLED_CHIPS: dict[str, tuple[str, str]] = {
 #: rule decides the wire's tally, this surface's rows and the sidebar mark, so
 #: it lives in ``asks.store.OUTSTANDING_STATUSES`` and nowhere else.
 _ANSWERABLE = store.OUTSTANDING_STATUSES
+
+#: THE DELIVERING HALF's word (§10): answered, response row not yet durable. It
+#: belongs to the PENDING side — the user's queue is not finished until the agent
+#: has been told — but it is not answerable, so it reads as a status word like a
+#: settled one and takes the same `·` separator (round 2: F3/U4). Two spellings
+#: because `late` is a different fact from `answered` and §5's copy contract
+#: names both.
+_DELIVERING_CHIPS: dict[str, str] = {
+    STATUS_ANSWERED: "answered, delivering",
+    STATUS_LATE: "answered late, delivering",
+}
+
+#: How many cells a fleet row's conversation handle may take. The handle is a
+#: catalogue title — a sentence — and a single line has a question to show.
+SESSION_HANDLE_CELLS = 24
 
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
@@ -401,6 +426,29 @@ def settled_chip(row: AskRow) -> tuple[str, str]:
     return SETTLED_CHIPS.get(row.status, (row.status or "settled", "muted"))
 
 
+def delivering_chip(row: AskRow) -> tuple[str, str] | None:
+    """``(word, ink)`` for the DELIVERING half, or ``None`` when not delivering.
+
+    §10's second state, and the one the first cut of this header had no words
+    for: an ask the user has ANSWERED whose response row the runtime has not
+    made durable yet. It is PENDING (it belongs in the middle segment and keeps
+    the session's mark — the queue is not finished until the agent has been
+    told) and it is NOT answerable, so the row carries this status word where a
+    settled row carries its chip (round 2: F3/Q1/U4).
+
+    The ink is the same `success`/`warning` role a settled answer uses, so a
+    reader cannot tell the two apart by colour — they are told apart by the
+    WORDS, which is the point: one says the agent was told, the other says it
+    has not been yet.
+    """
+    if not row.delivering:
+        return None
+    word = _DELIVERING_CHIPS.get(row.status)
+    if word is None:
+        return None
+    return (word, SETTLED_CHIPS.get(row.status, (word, "success"))[1])
+
+
 def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0) -> str:
     """The queue's count, in ONE vocabulary for the bar and the list header.
 
@@ -447,11 +495,21 @@ def drawer_headline(
     U5 — the same finding, transferred with the surface).
 
     So a MIXED queue spells both halves here, in the drawer's own words, and
-    every other state falls through to the chip's clause — which is what keeps
-    the two surfaces from disagreeing about a single-state queue. That the bar
-    and this header can print different sentences for one queue is not a
-    defect: they are two true statements about the same set, and the shared
-    clauses are shared by construction.
+    the single-half cases name that half in the DRAWER's vocabulary — "moved
+    on", never the chip's "timed out" — because the segments above and the rows
+    below this line already say "moved on" for that half, and one surface must
+    not carry two words for one state (round 2: F3/D4). The bar keeps the chip
+    clause; the two registers are named in §11.
+
+    THE DELIVERING HALF IS PENDING AND MUST NEVER READ AS SETTLED (round 2:
+    F3/Q1/U4). ``pending`` = answerable ∪ delivering (§10), so an
+    answered-but-undelivered row sits in the "Waiting or moved on" segment while
+    the old fallback printed `N settled` over it — the header contradicting its
+    own segment. It says so in §5's words instead, and without the desktop's
+    "you can still change it": the TUI has no revise wire at all, and promising
+    a door that does not exist is worse than the missing sentence. The
+    all-settled case takes the desktop drawer's own constant (`All asks
+    settled`) rather than inventing a second form for it.
 
     THE TRUNCATED FRAME STATES THE BACKEND'S TALLY (``open_count``) AND
     WITHHOLDS THE SPLIT: the wire caps the list, so a waiting/moved-on split
@@ -465,6 +523,7 @@ def drawer_headline(
         return f"{open_count or 0} outstanding"
     waiting = sum(1 for row in rows if row.waiting)
     moved_on = sum(1 for row in rows if row.moved_on)
+    delivering = sum(1 for row in rows if row.delivering)
     # OPEN rows only, the same set the bar counts (review round 3, MINOR-1): an
     # urgent ask is one whose deadline is imminent, and a timed-out ask has no
     # imminent deadline left — counting it here made the list say `1 urgent · 1
@@ -476,16 +535,28 @@ def drawer_headline(
         # with it: the drawer's own sentence replaced the chip's, and the chip's
         # was the only place urgency was ever stated in words (D13). It is
         # appended rather than interleaved so the half-counts stay a prefix.
-        return f"{clause} · {urgent} urgent" if urgent else clause
-    clause = queue_headline(waiting, moved_on, urgent)
+        clause = f"{clause} · {urgent} urgent" if urgent else clause
+    elif moved_on:
+        noun = "question" if moved_on == 1 else "questions"
+        clause = f"{moved_on} {noun} moved on"
+    else:
+        clause = queue_headline(waiting, 0, urgent)
+    if delivering:
+        noun = "answer" if delivering == 1 else "answers"
+        # §10's own words for this half (design §5's copy contract: "Answered —
+        # delivering"), and deliberately WITHOUT the desktop's "— you can still
+        # change it": that sentence is true on a surface with a revise wire, and
+        # this one has none (recorded as deferred on the PR).
+        stating = f"{delivering} {noun} delivering — the agent will be told"
+        clause = f"{clause} · {stating}" if clause else stating
     if clause:
         return clause
     if rows:
         # Every row settled, and the chip register has no words for that (it
         # counts what is owed). The drawer still owes a count — it is showing
-        # exactly those rows — so it says the third half's own name.
-        settled = len(rows)
-        return f"{settled} settled"
+        # exactly those rows — so it says the third half's own name, in the
+        # desktop drawer's own constant (round 2: D4/F3).
+        return "All asks settled"
     return ""
 
 
@@ -774,9 +845,15 @@ class AskQueueList(Widget):
     #: kept longest, so the irreversible `d` outlives the reversible tips when
     #: the row runs out of room (UX round 1, U7 asked for `d` to be named
     #: precisely because it cannot be undone).
+    #:
+    #: `d` LEADS since review round 2 (D3): the spend order is by
+    #: IRREVERSIBILITY, and `enter` already carries its own cue on the row (the
+    #: `❯` caret marks the selected one), so at a width where only one hint fits
+    #: it has to be the hint with no other teacher. The base named `d decline`
+    #: at 100x30 and the first cut of this header had silently stopped doing so.
     HEADER_HINTS = (
-        "enter answer",
         "d decline",
+        "enter answer",
         "x dismiss",
         "esc collapse",
     )
@@ -796,6 +873,7 @@ class AskQueueList(Widget):
         scope: str = SCOPE_SESSION,
         open_count: int | None = None,
         truncated: bool = False,
+        session_titles: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
@@ -821,6 +899,12 @@ class AskQueueList(Widget):
         #: double-fire guard: the engage can take the phone's 30 s + 15 s
         #: window, and a second Enter while it runs would send the answer twice.
         self._in_flight: set[str] = set()
+        #: ``{session_id: title}`` for FLEET rows, supplied by the app from the
+        #: session catalogue. A fleet row names the conversation it belongs to,
+        #: and the catalogue's own title is the name the user sees on every other
+        #: surface — the cwd's last segment is only the fallback for a session the
+        #: catalogue no longer carries (round 2: U8/U6).
+        self._session_titles: dict[str, str] = dict(session_titles or {})
 
     # -- the view-model ------------------------------------------------------
 
@@ -912,8 +996,18 @@ class AskQueueList(Widget):
         now_ms: int = 0,
         open_count: int | None = None,
         truncated: bool = False,
+        scope: str | None = None,
+        session_titles: Mapping[str, str] | None = None,
     ) -> None:
         """Replace the list, keeping the highlight on the same ASK where it can.
+
+        ``scope``/``session_titles`` are only passed when the app is RE-POINTING
+        an already-mounted list at another scope (round 2: U1). Re-mounting
+        would put a second widget with the same id in the prompt host while the
+        first one's deferred removal is still pending — the `DuplicateIds`
+        crash that ended the session — and retargeting is also the better answer
+        to a second press on the door: the reader keeps their place and gets
+        fresh rows.
 
         Called from the app's frontend-snapshot writer, which is what makes the
         panel follow the wire: without it an ask answered on another surface
@@ -930,6 +1024,10 @@ class AskQueueList(Widget):
         list does — its rows are the whole index, not a capped prefix.
         """
         current = self.current()
+        if scope is not None and scope in SCOPE_SUBJECTS:
+            self._scope = scope
+        if session_titles is not None:
+            self._session_titles = dict(session_titles)
         self._rows = list(rows)
         self._now_ms = now_ms
         self._open_count = open_count
@@ -989,17 +1087,25 @@ class AskQueueList(Widget):
         same guard covers a row whose answer is already IN FLIGHT (A7): the
         second gesture is dropped rather than queued, which is the double-fire
         guard.
+
+        `answerable` and NOT `pending` since round 2 (F3/U4): `pending` folds in
+        the DELIVERING half (§10), and a delivering row has already been
+        answered — declining or re-answering it is not a gesture this surface
+        offers, and it is exactly the window in which a second answer would
+        contradict the first. The row still COUNTS as pending (it sits in the
+        middle segment and keeps the session's mark), it just is not a row the
+        picker opens.
         """
         row = self.current()
         if row is None or row.ask_id != ask_id:
             return False
-        if not row.pending or row.ask_id in self._in_flight:
+        if not row.answerable or row.ask_id in self._in_flight:
             return False
         return True
 
     def action_pick(self) -> None:
         row = self.current()
-        if row is not None and row.pending and row.ask_id not in self._in_flight:
+        if row is not None and row.answerable and row.ask_id not in self._in_flight:
             self.post_message(self.Picked(row.ask_id))
 
     def action_collapse(self) -> None:
@@ -1007,12 +1113,12 @@ class AskQueueList(Widget):
 
     def action_decline(self) -> None:
         row = self.current()
-        if row is not None and row.pending and row.ask_id not in self._in_flight:
+        if row is not None and row.answerable and row.ask_id not in self._in_flight:
             self.post_message(self.Decline(row.ask_id))
 
     def action_dismiss(self) -> None:
         row = self.current()
-        if row is not None and row.pending and row.ask_id not in self._in_flight:
+        if row is not None and row.answerable and row.ask_id not in self._in_flight:
             self.post_message(self.Dismiss(row.ask_id))
 
     def action_filter_all(self) -> None:
@@ -1099,7 +1205,10 @@ class AskQueueList(Widget):
         while `❯` was still painted, so the panel read as live).
 
         A settled row takes the highlight and NOTHING else (A1): it is inert, so
-        the click must not mount a picker that could only refuse an answer.
+        the click must not mount a picker that could only refuse an answer. A
+        DELIVERING row is the same case with a different reason (round 2:
+        F3/U4) — it is already answered — so the gate is `answerable`, not
+        `pending`.
         """
         event.stop()
         y = int(event.y)
@@ -1113,7 +1222,7 @@ class AskQueueList(Widget):
         self._index = row
         self.refresh()
         target = self.visible_rows[row]
-        if target.pending and target.ask_id not in self._in_flight:
+        if target.answerable and target.ask_id not in self._in_flight:
             self.post_message(self.Picked(target.ask_id))
 
     def on_mouse_move(self, event: events.MouseMove) -> None:  # type: ignore[override]
@@ -1134,6 +1243,30 @@ class AskQueueList(Widget):
         self.action_move(-1)
 
     # -- paint ---------------------------------------------------------------
+
+    def header_hints(self) -> tuple[str, ...]:
+        """The hints the CURRENT view can actually honour (round 2: D2/F7/U9).
+
+        The header used to spend its hint set purely by WIDTH, so an all-settled
+        queue advertised `enter answer · d decline` over rows that are inert by
+        construction (A1) — a dead-end affordance, and one that landed the hints
+        exactly inverted against the rows: advertised where the keys do nothing,
+        absent where they are live.
+
+        So the set is derived from the VISIBLE rows (the filter half on screen)
+        and the keys' own objects: `enter`/`d` need an ANSWERABLE row, `x` needs
+        a moved-on one (dismiss is only ever offered on a timed-out ask, so
+        advertising it over open rows names a key the row would refuse), and
+        `esc` needs nothing — it is how a reader leaves any view, including an
+        empty half. Order is still ``HEADER_HINTS``' own.
+        """
+        visible = self.visible_rows
+        live = {"esc collapse"}
+        if any(row.answerable for row in visible):
+            live |= {"enter answer", "d decline"}
+        if any(row.moved_on for row in visible):
+            live.add("x dismiss")
+        return tuple(hint for hint in self.HEADER_HINTS if hint in live)
 
     def header_atoms(self, width: int) -> list[HeaderAtom]:
         """The ONE-LINE header, as paintable atoms, at this width.
@@ -1162,7 +1295,14 @@ class AskQueueList(Widget):
         """
         counts = self.counts
         clause = drawer_headline(self._rows, open_count=self._open_count, truncated=self._truncated)
-        atoms = [HeaderAtom(f"{ASK_MARKER} ", "accent")]
+        # `chip-live` and not `accent` for the marker: the ask panel paints on
+        # `overlay`, and the brand light accent lands at 3.49:1 there — under
+        # the palette gate's own 4.0 state floor (design round 2, D1). The repo
+        # already derives the remedy for exactly this ground
+        # (`theme._fill_chip_live`, built because the light accent fails on
+        # `overlay`), and on every ramp where the accent DOES clear, that token
+        # IS the accent — so the dark ramp is unchanged.
+        atoms = [HeaderAtom(f"{ASK_MARKER} ", "chip-live")]
         subject = SCOPE_SUBJECTS[self._scope] if self._scope == SCOPE_FLEET else ""
         segments: list[HeaderAtom] = []
         if self._rows:
@@ -1206,8 +1346,8 @@ class AskQueueList(Widget):
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
         kept: list[HeaderAtom] = []
-        for hint in self.HEADER_HINTS:
-            prefix = "  ·  " if not kept else "  ·  "
+        for hint in self.header_hints():
+            prefix = "  ·  "
             if _atoms_width([*atoms, *kept, HeaderAtom(prefix + hint, "muted")]) > width:
                 break
             kept.append(HeaderAtom(prefix + hint, "muted"))
@@ -1224,27 +1364,52 @@ class AskQueueList(Widget):
     def _session_label(self, row: AskRow) -> str:
         """The conversation a FLEET row belongs to, as a short handle.
 
-        The working directory's last segment, falling back to the session id —
-        the same two facts ``store.index_asks`` puts on every row for exactly
-        this purpose. Empty in session scope, where the row belongs to whatever
-        conversation is on screen and naming it would be noise.
+        The catalogue's own TITLE first, then the working directory's last
+        segment, then the session id (round 2: U8/U6). The title is what the
+        sidebar and the picker call that conversation, so a fleet row and the
+        row the user knows cannot name one session two ways; the cwd is only a
+        fallback for a session the catalogue no longer carries (an archived or
+        deleted one is still a question someone asked). Clipped, because a
+        title is a sentence and this is a tail.
+
+        Empty in session scope, where the row belongs to whatever conversation
+        is on screen and naming it would be noise.
         """
         if self._scope != SCOPE_FLEET or not row.session_id:
             return ""
-        return row.cwd.rstrip("/").split("/")[-1] or row.session_id
+        handle = self._session_titles.get(row.session_id) or (
+            row.cwd.rstrip("/").split("/")[-1] or row.session_id
+        )
+        return _clip_cells(handle, SESSION_HANDLE_CELLS)
 
     def _empty_slice(self) -> str | None:
         return empty_sentence(self._rows, self._filter)
 
     def render(self) -> Text:
+        # THE STATE INKS OF THIS PANEL ARE THE OVERLAY-SAFE ONES, and that is a
+        # correction rather than a preference (design round 2, D1). Everywhere
+        # else a state hue is solved against `bg`/`surface`; this panel's ground
+        # is `overlay`, and on the brand light ramp the accent lands at 3.49:1
+        # and `success` at 3.45:1 there — under the repo's own 4.0 state floor.
+        # `theme._fill_chip_live` exists for exactly this ground (the quick-send
+        # card is its other client), so the marker, the delivering glyph and the
+        # settled chip words all take the derived `chip-*` inks: the hue itself
+        # on every ramp that clears, the ramp's neutral ink where it does not.
+        # The dark ramp is byte-identical either way (`chip-live` == accent).
         fg = Style(color=theme_mod.semantic_color("fg"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        warning = Style(color=theme_mod.semantic_color("warning"))
-        success = Style(color=theme_mod.semantic_color("success"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        chip_live = Style(color=theme_mod.semantic_color("chip-live"))
+        chip_success = Style(color=theme_mod.semantic_color("chip-success"))
+        chip_warning = Style(color=theme_mod.semantic_color("chip-warning"))
         bold = Style(bold=True)
         accent = Style(color=theme_mod.semantic_color("accent"))
-        inks = {"fg": fg, "muted": muted, "accent": accent, "active": bold + fg}
+        inks = {
+            "fg": fg,
+            "muted": muted,
+            "accent": accent,
+            "active": bold + fg,
+            "chip-live": chip_live,
+        }
         # `content_size`, not `size`: the box the text is really painted in.
         width = max(1, int(self.content_size.width))
         text = Text()
@@ -1266,12 +1431,17 @@ class AskQueueList(Widget):
             # names the half holding the rows. It is the one painted line this
             # panel spends on no ask, and it is why a filtered view can never be
             # mistaken for an empty queue.
-            text.append(sentence, style=dim)
+            # The sentence takes `muted`, not `dim`: `dim` is this repo's
+            # micro-label rung, and on the brand light ramp it reads 2.72:1 on
+            # this panel's own ground — under even that rung's floor — while
+            # this line is a SENTENCE telling the reader where their asks went
+            # (design round 2, D1).
+            text.append(sentence, style=muted)
         for index, row in enumerate(visible):
             selected = index == self._index
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append("❯ " if selected else "  ", style=bold if selected else muted)
-            chip = settled_chip(row) if row.settled else None
+            chip = settled_chip(row) if row.settled else delivering_chip(row)
             if row.ask_id in self._in_flight:
                 # In flight through the engage seam (A7): the row says it is
                 # being sent and refuses a second gesture. A WORD, not a
@@ -1283,7 +1453,7 @@ class AskQueueList(Widget):
                 # queue is not finished until the agent has been told) but it is
                 # not something to answer, so it wears the delivering glyph
                 # rather than an answerable one.
-                line.append(f"{DELIVERING_MARK} ", style=success)
+                line.append(f"{DELIVERING_MARK} ", style=chip_success)
             elif row.settled:
                 # A SETTLED row has no state GLYPH: the chip word in the tail
                 # IS the status (design §4: "a status CHIP in place of the
@@ -1293,7 +1463,7 @@ class AskQueueList(Widget):
                 line.append("  ", style=muted)
             else:
                 mark = STATUS_MARKS.get(row.status, "●")
-                line.append(f"{mark} ", style=warning if row.urgent else muted)
+                line.append(f"{mark} ", style=chip_warning if row.urgent else muted)
             # The SELECTED question is `fg` and not `accent`: accent on this
             # panel's ground reads 3.49:1 in the light ramp, under the 4.0 the
             # palette gate sets for a state hue (design D3). Selection is
@@ -1332,7 +1502,15 @@ class AskQueueList(Widget):
                     # cut in the question stays put as the clock moves.
                     tail += " " * max(0, room - 2 - cell_len(expiry))
             if chip is not None:
-                tail = f"  {chip[0]}"
+                # A SEPARATOR, not just a gap (design round 2, D6): the muted
+                # statuses (`declined`/`dismissed`/`expired`) share the question's
+                # own ink, so with two spaces between them the row read as one
+                # sentence — `Should the retry budget double?  declined` — and the
+                # word the reader has to classify was the one that did not look
+                # like a field. `·` is the separator this row's tail already uses
+                # for `handle · deadline`, so the status lands in the register the
+                # row already has.
+                tail = f"  · {chip[0]}"
             fixed = 4 + cell_len(tail)  # two marker cells, two state-glyph cells
             question = _clip_cells(
                 row.head_question or f"(ask {row.ask_id})",
@@ -1341,10 +1519,10 @@ class AskQueueList(Widget):
             line.append(question, style=(bold + fg) if selected else muted)
             if tail:
                 if chip is not None:
-                    chip_inks = {"success": success, "warning": warning}
+                    chip_inks = {"success": chip_success, "warning": chip_warning}
                     line.append(tail, style=chip_inks.get(chip[1], muted))
                 else:
-                    line.append(tail, style=warning if row.urgent else muted)
+                    line.append(tail, style=chip_warning if row.urgent else muted)
             text.append(line)
             if index + 1 < len(visible):
                 text.append("\n")

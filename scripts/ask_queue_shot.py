@@ -45,6 +45,16 @@ THE FLEET-SCOPE MODES (design §4/§11: settled rows, the three-way filter):
     truncated          the header stating the BACKEND tally and withholding the
                  waiting/moved-on split (a capped wire frame)
 
+THE ROUND-2 MODES (the fixes the reviews asked for):
+
+    list-delivering    an ANSWERED ask whose response row is not durable yet:
+                 still PENDING (middle segment, session mark) and no longer
+                 answerable — the frame that used to read `1 settled` over it
+    in-flight    one row mid-engage: `…` in the glyph cell, inert to every
+                 gesture, which is the whole double-fire guard (F2/U5)
+    list-fleet-capped  the FLEET list over an index at the projection cap: the
+                 split is withheld and the backend tally stated (F6)
+
 WHY THE TRANSCRIPT IS SEEDED FIRST. Every frame here has to answer "can the
 user still read the conversation behind this surface?" — the bar is one row in
 a dock that also carries the composer, and the list/card are panels above it.
@@ -227,6 +237,18 @@ SETTLED_ONLY = [
         delivered=True,
     ),
     _row("a5", "Should the retry budget double?", status="declined"),
+]
+
+#: The DELIVERING frame (round 2: F3/Q1/U4): answered, response row not yet
+#: durable. It is PENDING — the middle segment counts it — and it is not
+#: answerable, so the header may not call it settled.
+DELIVERING = [
+    _row(
+        "a7",
+        "Rotate the deploy key before the cutover?",
+        status="answered",
+        delivered=False,
+    ),
 ]
 
 #: The FLEET rows: two conversations' queues, each row carrying its own session
@@ -450,6 +472,25 @@ async def main() -> None:
             # sidebar's own door is captured by `scripts/ask_fleet_shot.py`.
             app._ask_scope = SCOPE_FLEET
             app._ask_fleet_rows = ask_rows(FLEET if mode == "list-fleet" else [])
+            app._mount_ask_list(scope=SCOPE_FLEET)
+        elif mode == "list-delivering":
+            app._sync_ask_surface(ask_rows(DELIVERING))
+            await pilot.pause()
+            app._expand_asks()
+        elif mode == "in-flight":
+            # The row is marked in flight the way `_run_fleet_ask_op` marks it:
+            # through the app-level set the mount seeds the widget from.
+            app._sync_ask_surface(ask_rows(THREE[:2]))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            app._ask_in_flight.add("a2")
+            app._seed_ask_in_flight(app.query_one(AskQueueList))
+        elif mode == "list-fleet-capped":
+            app._ask_scope = SCOPE_FLEET
+            app._ask_fleet_rows = ask_rows(FLEET)
+            app._ask_fleet_open_count = 20
+            app._ask_fleet_truncated = True
             app._mount_ask_list(scope=SCOPE_FLEET)
         elif mode == "truncated":
             # A CAPPED wire frame: the backend says seven are outstanding while

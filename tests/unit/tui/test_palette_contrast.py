@@ -127,6 +127,36 @@ def test_danger_reads_on_its_own_tint(name: str) -> None:
     )
 
 
+def test_the_ask_panel_reads_on_its_own_ground() -> None:
+    """The ask drawer's state inks pair with ITS ground, not with `bg`/`surface`.
+
+    Review round 2 (D1) measured the gap this closes: the state floors above
+    check `bg` and `surface`, but the ask panel paints on `overlay`, and the
+    brand LIGHT ramp's accent lands at 3.49:1 and its `success` at 3.45:1 there
+    — under the 4.0 state floor — while every check here passed. The remedy is
+    the repo's own: `theme._fill_chip_live` derives `chip-live`,
+    `chip-success` and `chip-warning` (the hue when it clears this ground, the
+    ramp's neutral ink when it does not), which is exactly the family the panel
+    now paints with.
+
+    Gated at AA (4.5) rather than 4.0 because that is the floor the derivation
+    itself uses: a ramp whose hue clears 4.0 but not 4.5 keeps the neutral ink,
+    so every ramp clears this by construction — this test is what keeps it true
+    if the derivation or a curated palette changes.
+    """
+    for name in _ALL_THEMES:
+        tokens = theme.theme_spec(name).tokens
+        for token in ("chip-live", "chip-success", "chip-warning"):
+            for ground in ("overlay", "tint-select"):
+                if ground not in tokens:
+                    continue
+                ratio = contrast(tokens[token], tokens[ground])
+                assert ratio >= 4.5, (
+                    f"{name}: {token} {tokens[token]} on {ground} {tokens[ground]}: "
+                    f"{ratio:.2f} < 4.5 — the ask panel's state ink is illegible on its own ground"
+                )
+
+
 def test_the_legend_card_reads_on_its_ground() -> None:
     """The `? Keys` card's copy rides the `overlay` ground — AA there (D3), measured.
 

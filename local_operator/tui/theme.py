@@ -211,8 +211,14 @@ OPTIONAL_TOKENS: tuple[str, ...] = (
     "tool-exec",
     "tool-meta",
     # The second family, and the first that is MEASURED rather than sourced:
-    # see :func:`_fill_chip_live`.
+    # see :func:`_fill_chip_live`. It is a FAMILY because the ask drawer is not
+    # the only surface that paints a state hue on `overlay`: the delivering
+    # glyph and the settled status words carry `success`/`warning` there too,
+    # and on the brand light ramp those land at 3.45:1 — under the state floor
+    # (design round 2, D1). All three are derived by the same rule.
     "chip-live",
+    "chip-success",
+    "chip-warning",
 )
 
 #: The floor a derived ground ink must clear: AA for normal text, the number the
@@ -241,33 +247,46 @@ def contrast(color_a: str, color_b: str) -> float:
 
 
 def _fill_chip_live(tokens: dict[str, str]) -> None:
-    """Give a ramp a `live`-chip ink that clears AA on the CARD's ground (D8).
+    """Give a ramp `live`-chip inks that clear AA on the PANEL's ground (D8).
 
-    Mutates in place, and leaves an authored value alone. The quick-send card
-    is the one surface whose state chips sit on `overlay`; every ramp's
-    `accent` is solved against `bg`/`surface` instead, and on a LIGHT ramp
-    `overlay` is a step darker — which is where the brand light accent lands at
-    3.49:1 (4.29:1 on the selected row's `tint-select`), under the floor, with
-    no green or blue token in that ramp clearing it either (success 3.45,
-    signal 3.54).
+    Mutates in place, and leaves an authored value alone. The ask drawer is the
+    surface whose state chips sit on `overlay`; every ramp's `accent`,
+    `success` and `warning` are solved against `bg`/`surface` instead, and on a
+    LIGHT ramp `overlay` is a step darker — which is where the brand light
+    accent lands at 3.49:1 (4.29:1 on the selected row's `tint-select`) and its
+    `success` at 3.45:1, under the floor, with no green or blue token in that
+    ramp clearing it either (signal 3.54).
 
-    MEASURED, not inferred from polarity: the accent is taken when it clears
-    every ground the chip can sit on, and the ramp's own neutral ink when it
-    does not. The neutral ink is the text colour the ramp already guarantees
-    against its grounds, so the fallback is a token with a contract rather than
-    a new hue. A curated palette that authors `chip-live` keeps its choice.
+    MEASURED, not inferred from polarity: a hue is taken when it clears every
+    ground the chip can sit on, and the ramp's own neutral ink when it does not.
+    The neutral ink is the text colour the ramp already guarantees against its
+    grounds, so the fallback is a token with a contract rather than a new hue.
+    A curated palette that authors a token keeps its choice.
+
+    The three form a FAMILY (`chip-live` = accent, `chip-success` = success,
+    `chip-warning` = warning) because they answer one question — "what ink
+    clears this panel's ground?" — and a surface that solved one of them by
+    hand would drift from the others the first time a ramp moved.
     """
-    if "chip-live" in tokens:
-        return
     accent = tokens.get("accent")
     ink = tokens.get("fg") or tokens.get("muted")
     if not accent or not ink:
         return
     grounds = [tokens[token] for token in ("overlay", "tint-select") if token in tokens]
-    if grounds and all(contrast(accent, ground) >= _GROUND_INK_FLOOR for ground in grounds):
-        tokens["chip-live"] = accent
-    else:
-        tokens["chip-live"] = ink
+
+    def resolves(hue: str) -> bool:
+        return bool(grounds) and all(
+            contrast(hue, ground) >= _GROUND_INK_FLOOR for ground in grounds
+        )
+
+    for token, source in (
+        ("chip-live", accent),
+        ("chip-success", tokens.get("success")),
+        ("chip-warning", tokens.get("warning")),
+    ):
+        if token in tokens:
+            continue
+        tokens[token] = source if source and resolves(source) else ink
 
 
 #: Derivation sources for the tool-category family, in the ramp's own terms.
