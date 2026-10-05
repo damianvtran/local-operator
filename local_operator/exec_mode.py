@@ -1042,30 +1042,19 @@ def _declared_by_profile(name: str | None) -> bool:
 def _saved_auto_approval() -> bool:
     """Whether ``tool_approval_mode: auto`` is saved in this run's config root.
 
-    Best-effort: any failure — an odd tree, an unreadable config — degrades to
-    ``False``, which keeps the deny-trap advisory ON. That is the safe
-    direction for a launch-time warning: a wrong ``True`` would silence advice
-    for a run that then spent its life denied.
-
-    THE FRESH-ROOT CASE IS GUARDED, not documented away (review R1-2):
-    constructing ``ConfigManager`` can CREATE a config directory, and a
-    launch-path check has no business writing. No config file means no saved
-    mode — answered without constructing anything. A MALFORMED file may still
-    be moved aside by the manager, exactly as it will be, moments later, by
-    the launch path's own preflight; that residual is stated, not hidden.
+    Delegates the read to ``session_factory.saved_tool_approval_is_auto`` — the ONE
+    guarded reader (fresh-root case included: constructing ``ConfigManager`` can
+    CREATE a config directory, and a launch- or request-path check has no business
+    writing; since review F2 the malformed case is guarded the same way — a broken
+    file answers ask and is never renamed aside), so this call site and the mesh
+    surfaces that ask the same question cannot drift.
+    Best-effort: any failure answers ``False``, which keeps the deny-trap advisory
+    ON. That is the safe direction for a launch-time warning: a wrong ``True`` would
+    silence advice for a run that then spent its life denied.
     """
-    try:
-        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
-        from local_operator.paths import config_dir
-        from local_operator.session_factory import _approval_mode_is_auto
+    from local_operator.session_factory import saved_tool_approval_is_auto
 
-        root = config_dir()
-        if not (root / CONFIG_FILE_NAME).is_file():
-            return False
-
-        return _approval_mode_is_auto(ConfigManager(root))
-    except Exception:  # noqa: BLE001 — keep the advisory ON when unsure
-        return False
+    return saved_tool_approval_is_auto()
 
 
 def _deny_trapped_advisory(args: ExecArgs) -> str | None:

@@ -2372,6 +2372,13 @@ async def create_session(body: CreateSession, request: Request):
                     "applied": bool(model_result.get("applied")),
                     "detail": str(model_result.get("detail") or ""),
                 }
+            # THE FALLBACK'S SENTENCE CROSSES HERE TOO (remote-onboarding §6 defect
+            # 2): ``create_on_peer`` attaches it when an implied unattended request
+            # was refused and the create fell back attended, and an undeclared key
+            # would be dropped at this route's own response model — the exact loss
+            # class the block above documents. Absent reads as "", which is every
+            # create that did not need one, local or remote.
+            created["unattended_notice"] = str(peer_reply.get("unattended_notice") or "")
             return created
         pool = host(request)
         target = body.target.model_dump() if body.target else None

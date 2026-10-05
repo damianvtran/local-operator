@@ -5175,7 +5175,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     missing answer as a result (Q-R4-1). ``ok`` is a claim about a NAMED field the
     peer reported — never about the absence of one.
     """
-    from local_operator.network.types import MeshRefusal
+    from local_operator.network.types import MeshRefusal, unattended_fallback_notice
 
     peer = str(getattr(args, "peer", "") or "")
     session_id = str(getattr(args, "stop", "") or "")
@@ -5364,32 +5364,78 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             # instructions and the agent's routing. Nothing here silently drops
             # one of them, which is what the old behaviour did to both.
             pass
-        detail = _relay_answer(
-            "peer_session_create",
-            peer=peer,
-            cwd=str(getattr(args, "cwd", "") or ""),
-            name=str(getattr(args, "name", "") or ""),
-            prompt=str(getattr(args, "prompt", "") or ""),
-            # FORWARDED SO THE QUESTION CAN BE ASKED. The owner accepts it only
-            # against its own ``unattended`` grant (design §2 OQ4); dropping the
-            # flag here would leave a granted member unable to say what it wants,
-            # which is the dead end this slice removes.
-            yolo=bool(getattr(args, "yolo", False)),
-            model=(
-                {
-                    "provider": str(getattr(args, "hosting", "") or ""),
-                    "model_id": str(getattr(args, "model", "") or ""),
-                }
-                if (getattr(args, "hosting", None) or getattr(args, "model", None))
-                else None
-            ),
-            profile=profile,
-            agent_name=agent_name,
-            agent_id=agent_id,
-            team=team,
-            effort=effort,
-            timeout=120.0,  # a spawn plus its first turn's admission
-        )
+        # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
+        # defect 2, the create half): a device whose ``tool_approval_mode``
+        # resolves ``auto`` asks for an unattended session when it asks a peer
+        # for one, exactly as the local equivalent would run — the operator's
+        # standing "no routine re-prompts", read once, in the file. The read goes
+        # through the ONE derivation (``session_factory.saved_tool_approval_is_auto``
+        # → ``_approval_mode_is_auto``), so the request cannot drift from the gate
+        # a session started here would run with. Explicit ``--yolo`` stays the
+        # override; with config ``ask`` this call is byte-identical to what it was.
+        from local_operator.session_factory import saved_tool_approval_is_auto
+
+        explicit_yolo = bool(getattr(args, "yolo", False))
+        implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
+
+        def _create(yolo: bool) -> dict[str, Any]:
+            # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
+            # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
+            # it is issued as a fresh call (its own control connection and request
+            # numbering), never a replay of the refused frame under the old
+            # identity. Nothing durable existed when the refusal was raised:
+            # ``not_permitted`` is raised ABOVE the mint in
+            # ``relay._op_session_create``, so a refused create leaves no
+            # directory, no stamp and no claim behind — the retry has nothing to
+            # reconcile on either surface.
+            return _relay_answer(
+                "peer_session_create",
+                peer=peer,
+                cwd=str(getattr(args, "cwd", "") or ""),
+                name=str(getattr(args, "name", "") or ""),
+                prompt=str(getattr(args, "prompt", "") or ""),
+                # FORWARDED SO THE QUESTION CAN BE ASKED. The owner accepts it only
+                # against its own ``unattended`` grant (design §2 OQ4); dropping the
+                # flag here would leave a granted member unable to say what it wants,
+                # which is the dead end this slice removes.
+                yolo=yolo,
+                model=(
+                    {
+                        "provider": str(getattr(args, "hosting", "") or ""),
+                        "model_id": str(getattr(args, "model", "") or ""),
+                    }
+                    if (getattr(args, "hosting", None) or getattr(args, "model", None))
+                    else None
+                ),
+                profile=profile,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                team=team,
+                effort=effort,
+                timeout=120.0,  # a spawn plus its first turn's admission
+            )
+
+        unattended_notice = ""
+        try:
+            detail = _create(explicit_yolo or implied_yolo)
+        except MeshRefusal as refusal:
+            # THE IMPLIED REQUEST FALLS BACK, ATTENDED — the acceptance read
+            # literally: an unattended send to a node must not dead-end in a failed
+            # create. ONLY THE IMPLIED CASE falls back: when the user typed
+            # ``--yolo`` they asked for unattended ITSELF, and swallowing that
+            # refusal would hide that the far end refused the thing they asked
+            # for — the design keeps the explicit ask's refusal.
+            if not implied_yolo or refusal.code != "not_permitted":
+                raise
+            detail = _create(False)
+            unattended_notice = unattended_fallback_notice(peer)
+            logging.getLogger(__name__).info(
+                "create on %s: the unattended request was refused (%s); created attended",
+                peer,
+                str(refusal),
+            )
+        if unattended_notice:
+            detail = {**detail, "unattended_notice": unattended_notice}
         minted = str(_reported(detail, "session_id", verb="create") or "")
         prompt = str(getattr(args, "prompt", "") or "")
         # THE RECEIPT NAMES THE DEVICE, AND DOES NOT CALL AN ABSENT PROMPT A
@@ -5404,6 +5450,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if unattended_notice:
+            # THE FALLBACK IS SAID OUT LOUD. The same sentence rides the payload
+            # (``**detail`` below carries ``unattended_notice``), so a ``--json``
+            # consumer reads it too; a receipt that quietly created attended where
+            # the device is set to auto would be the silent substitution this
+            # slice exists to end.
+            lines.append(unattended_notice)
         # WHO IT RUNS AS, SAID IN THE RECEIPT. The identity half of this verb is new,
         # and a receipt that named the device but not the agent would leave the one
         # fact the user just chose unreported — they cannot re-read it from the

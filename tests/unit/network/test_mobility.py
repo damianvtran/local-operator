@@ -590,6 +590,60 @@ def test_an_offload_carries_the_sessions_unattended_authority_on_the_invite(
     assert second and second[0].get("unattended") is False, second[0]
 
 
+def test_an_offload_carries_the_devices_saved_auto_mode(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect 2, the move half of the SURFACE fix: the device's saved mode travels.
+
+    A session that runs with no routine re-prompts HERE because ``tool_approval_mode``
+    resolves ``auto`` must keep doing so on the node (the design's acceptance: "a
+    moved auto session stays auto"). Before this, the invite read ONLY the stamp —
+    the authority accepted at a create/move doorstep — so a locally-auto session
+    with a plain stamp lost auto the moment it landed. The read goes through the
+    ONE derivation (``session_factory.saved_tool_approval_is_auto`` → the same
+    ``_approval_mode_is_auto`` a locally-started session runs with) and this cell
+    pins both directions: ``auto`` on the source travels True (and the destination
+    stamps it), and a return to ``ask`` travels False — a read that drifted into
+    "always true" goes red on the second half.
+    """
+    from local_operator.config import ConfigManager
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    # No stamp bit anywhere: the carry has to come from the saved mode alone.
+    carried = read_stamp(server_a.root, SESSION)
+    assert carried is not None and carried.unattended is False
+    ConfigManager(server_a.root).set_config_value("tool_approval_mode", "auto")
+
+    frames: list[dict[str, Any]] = []
+    real = mobility.LinkTransport.ask
+
+    def capture(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        frames.append(dict(frame))
+        return real(self, frame)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", capture)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert result["ok"] is True, result
+    invites = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert invites, frames
+    assert invites[0].get("unattended") is True, invites[0]
+    arrived = read_stamp(server_b.root, SESSION)
+    assert arrived is not None and arrived.unattended is True, arrived
+
+    # The negative half: saved mode back at `ask` and no stamp bit => attended.
+    second_id = "9f3ac1e0b7d3"
+    _owned_session(server_a, second_id)
+    ConfigManager(server_a.root).set_config_value("tool_approval_mode", "ask")
+    frames.clear()
+    moved = _move(server_a, second_id, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert moved["ok"] is True, moved
+    second = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert second and second[0].get("unattended") is False, second[0]
+
+
 def test_a_second_offload_after_a_round_trip_is_a_real_move_not_a_stale_signal(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
