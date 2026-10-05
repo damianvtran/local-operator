@@ -2355,6 +2355,14 @@ _ROSTER_ROW_FIELDS = frozenset(
         "start_time",
         "started_at",
         "settled_at",
+        # The lane's last-progress clock. Durable so a long hang leaves the
+        # sidecar saying when the child was last HEARD FROM, not just when it
+        # started — the reading the mobile lane could not get from any surface.
+        # Source-compatible in the same direction as every other key here: an
+        # older binary restores a row carrying it and drops that row (see the
+        # ``AsyncJob`` version-skew note), the accepted cost of every prior
+        # addition to this allowlist.
+        "last_progress_at",
         "label",
         "queued",
         "agent_id",
@@ -9174,7 +9182,7 @@ class Session:
         """Whether a boundary-respecting cancel is pending for this turn."""
         return self._graceful_cancel_requested
 
-    def cancel_subagents(self, reason: str = "interrupted") -> int:
+    def cancel_subagents(self, reason: str = "interrupted", *, by: str = "user-escape") -> int:
         """Cancel every running SUBAGENT and report how many were stopped.
 
         Deliberately separate from :meth:`abort`, which stops this session's
@@ -9209,7 +9217,7 @@ class Session:
             # Fire-and-forget per child, through the session's own tracker: a
             # child that is slow to unwind must not hold the keystroke, and a
             # cancel that raises must not take its siblings down with it.
-            self._spawn_background(self._cancel_job_quietly(job.id, reason))
+            self._spawn_background(self._cancel_job_quietly(job.id, reason, by=by))
         return len(running)
 
     def running_subagents(self) -> int:
@@ -9243,16 +9251,35 @@ class Session:
             logger.warning("listing subagent jobs failed", exc_info=True)
             return []
 
-    async def _cancel_job_quietly(self, job_id: str, reason: str) -> None:
+    async def _cancel_job_quietly(
+        self, job_id: str, reason: str, *, by: str = "user-escape"
+    ) -> None:
         """Cancel one job, logging rather than raising on failure.
 
         The caller is a keystroke handler with no way to report an error and
         nothing useful to do about one; a child that fails to tear down cleanly
         must not stop its siblings from being cancelled.
+
+        ``reason`` is the caller's own words and is now KEPT, not discarded: it
+        is stamped on the child's record and staged into the durable stop
+        receipt before the cancel is issued, so a stopped child can name both
+        its actor (``by``) and why. It used to be thrown away here (``del
+        reason``), which is the whole reason a cancelled child read as a bare
+        "cancelled" with no attribution on any surface.
         """
-        del reason  # the manager stamps its own "cancelled" reason
+        comms = self._subagent_comms
+        receipt: str | None = None
+        if comms is not None:
+            try:
+                receipt = comms.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
+            except Exception:  # noqa: BLE001 — a stop must not fail over evidence
+                logger.warning("could not stage stop evidence for %s", job_id, exc_info=True)
         try:
-            await self.jobs.cancel(job_id)
+            cancelled = await self.jobs.cancel(job_id)
+            if not cancelled and comms is not None:
+                # The job had already settled: the stop this receipt attests to
+                # did not happen, so take it back.
+                comms.abandon_stop(receipt)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -19705,6 +19732,37 @@ class Session:
         await self._await_subagent_roster_writer()
         await self._maybe_persist_todos()
 
+    def _reconcile_lane_evidence(self) -> None:
+        """Fold the child-dir receipts onto the restored records (design 2.5).
+
+        One extra read pass per boot, deliberately OFF the roster hot path: the
+        hot path caches transcript probes precisely to avoid a syscall per
+        record per render, and this reads one small directory per child once.
+
+        Two recoveries, both load-bearing:
+
+        * a stop receipt lets the record name its actor and reason even when the
+          sidecar never captured them (a crash between the stamp and the
+          persist) — this is what makes the stop receipt durable rather than
+          merely live; and
+        * a launch receipt with no stop receipt and no recorded outcome flags the
+          record as never-settled, the hard-kill shape no other artifact can
+          describe because the killed parent writes nothing.
+
+        It changes NO status: the existing ladder already maps the shape, and
+        v1 only enriches ``detail``, which keeps the change out of every status
+        consumer (counts, panel glyph, mobile projection). Best-effort — a boot
+        must not fail because evidence could not be read.
+        """
+        try:
+            from local_operator.session import subagent_ledger
+
+            evidence = subagent_ledger.reconcile_lane_evidence(self.subagent_comms.snapshot())
+            if evidence:
+                self.subagent_comms.apply_lane_evidence(evidence)
+        except Exception:  # noqa: BLE001 — evidence must not stop a boot
+            logger.warning("lane-evidence reconcile failed", exc_info=True)
+
     def _load_subagent_roster(self) -> None:
         """Rehydrate the subagent panel and the resume basis from disk.
 
@@ -19758,6 +19816,7 @@ class Session:
             # use; restoring into it is what makes the children addressable.
             try:
                 self.subagent_comms.restore(list(records))
+                self._reconcile_lane_evidence()
                 for record in self.subagent_comms.snapshot():
                     job_id = str(record.get("job_id") or "")
                     session_dir = str(record.get("session_dir") or "")
@@ -21557,6 +21616,29 @@ class Session:
         """
         return self._attention_run_request_dispatched or self._attention_run_carried_prompt
 
+    def _stamp_teardown_attribution(self) -> None:
+        """Name ``parent-teardown`` as the actor for every running child.
+
+        Runs immediately before ``jobs.dispose`` issues the cancellations. A
+        stop receipt is staged per child so the attribution is DURABLE — the
+        roster sidecar was deliberately written a moment earlier with the
+        children still running, so the receipt (recovered by the boot reconcile
+        pass) is what lets a later boot say who stopped them.
+
+        Deliberately reads ``_subagent_comms`` directly rather than the property:
+        teardown of a session that never delegated must not mint a comms
+        instance as its last act. Best-effort — teardown must proceed.
+        """
+        comms = self._subagent_comms
+        if comms is None:
+            return
+        try:
+            for job in self.jobs.list():
+                if getattr(job, "type", "") == "task" and job.status == "running":
+                    comms.begin_stop(job.id, by="parent-teardown", reason="", mechanism="cancel")
+        except Exception:  # noqa: BLE001 — teardown must not fail over evidence
+            logger.warning("could not stamp teardown attribution", exc_info=True)
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -21874,6 +21956,15 @@ class Session:
                     )
                 except (Exception, asyncio.TimeoutError):  # noqa: BLE001
                     logger.warning("final roster/todo snapshot did not land", exc_info=True)
+            # ATTRIBUTE THE TEARDOWN CANCELS. ``jobs.dispose`` below cancels every
+            # running child, and a child stopped by quitting is a DELIBERATE stop
+            # by the parent — not the anonymous "cancelled" it would otherwise
+            # read as. Stamped here, after the intentional pre-cancel snapshot
+            # above and before dispose, so the durable stop receipts name the
+            # actor. The sidecar was written a moment ago with the children still
+            # running (on purpose); the receipt is what carries the attribution
+            # across the restart, via the boot reconcile pass.
+            self._stamp_teardown_attribution()
             await self.jobs.dispose()
             self._wake.dispose()
             self._monitors.dispose()

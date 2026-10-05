@@ -51,6 +51,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Iterable,
     Literal,
     Mapping,
     Protocol,
@@ -87,6 +88,7 @@ from local_operator.harness.types import (
     ModelSpec,
     StaleAside,
 )
+from local_operator.session import subagent_ledger as ledger
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
 if TYPE_CHECKING:
@@ -212,6 +214,12 @@ def extract_parent_message(text: str) -> ParentMessage | None:
 #: exists only so a session that spawns thousands of children over a day
 #: cannot grow without bound; eviction is oldest-settled-first.
 MAX_RECORDS = 256
+
+#: Cap on the caller's own words recorded as a child's ``cancel_reason``. Same
+#: reasoning as the roster row's ``error_text`` cap: the reason reaches the
+#: roster/status surfaces, so a runaway string must not become an unbounded
+#: field. A sentence's worth is plenty for "why did you stop it".
+_CANCEL_REASON_CAP = 2_000
 
 #: How long a roster may reuse one child's "transcript is on disk" probe. The
 #: probe feeds only the roster's ``resumable`` hint (``resume`` re-probes before
@@ -355,6 +363,18 @@ class ChildInfo:
     #: an hour ago had no in-product path to its transcript at all — exactly
     #: the case this class's docstring says it exists to cover.
     session_id: str | None = None
+    #: Epoch seconds of the child's last reported progress, or ``None`` when it
+    #: has never reported any. Read beside a ``running`` status to say how long
+    #: a child has been SILENT — the reading the mobile lane could not get from
+    #: any surface (it had to page the transcript and count steps). ``None`` is
+    #: "no progress recorded", never "stalled": see :meth:`RosterPass.describe`.
+    last_progress_at: float | None = None
+    #: WHO ended the child (a machine token: ``user-escape``, ``mobile-stop``,
+    #: ``parent-hub``, ``parent-teardown``, ``jobs-tool``) and WHY, in the
+    #: caller's own words. Empty means "no actor recorded" — never "unknown" —
+    #: so an old record reads honestly rather than inventing an attribution.
+    ended_by: str = ""
+    cancel_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -556,6 +576,23 @@ class _ChildRecord:
     #: attempt into this record so the viewer can render every historical
     #: launch row as its concise prompt, not just the current one.
     prior_launch_prompts: dict[str, str] = field(default_factory=dict)
+    #: Epoch seconds of the child's last reported progress (see
+    #: ``ChildInfo.last_progress_at``). Kept on the record as well as the job
+    #: row because a nested child's row lives on its PARENT's manager, which a
+    #: restart does not rehydrate — the record is then the only place the stamp
+    #: survives.
+    last_progress_at: float | None = None
+    #: Who ended the child and why, set by :meth:`SubagentComms.begin_stop`
+    #: BEFORE the stop is issued. ``record_outcome`` deliberately leaves these
+    #: alone (as it leaves ``paused`` alone): attribution is the actor's
+    #: statement, not a property of the terminal status.
+    ended_by: str = ""
+    cancel_reason: str = ""
+    #: Set by the boot reconcile pass when a lane receipt survived with no stop
+    #: receipt and no recorded outcome — "a lane ran here and never settled".
+    #: Derived from disk each boot, never persisted, and surfaced only in
+    #: ``ChildInfo.detail``; it changes no status (see design 2.5).
+    lane_never_settled: bool = False
 
 
 def _spec_from_label(label: str) -> ModelSpec | None:
@@ -907,6 +944,9 @@ class RosterPass:
                 resumable=False,
                 age_s=None,
                 detail="pause is still landing; it becomes resumable in a moment",
+                last_progress_at=record.last_progress_at,
+                ended_by=record.ended_by,
+                cancel_reason=record.cancel_reason,
             )
 
         age = _age_of(record, job, status, now)
@@ -977,6 +1017,22 @@ class RosterPass:
             elif status == "failed" and record.error_text:
                 detail = f"failed: {record.error_text}"
 
+        # The boot reconcile pass (``reconcile_lane_evidence``) flags a record
+        # whose lane receipt survived with no stop receipt and no recorded
+        # outcome. Gated on the ABSENCE OF AN OUTCOME (the exact fact the flag
+        # encodes) rather than on a status list, so it does not depend on which
+        # status the ladder happens to land on, and suppressed only while the
+        # child is actually live — a running child cannot have been reconciled.
+        # Appended rather than assigned so a real detail ("transcript is gone
+        # from disk") is kept beside it.
+        if (
+            record.lane_never_settled
+            and record.outcome is None
+            and status not in ("running", "pausing", "queued", "starting")
+        ):
+            never = ledger.LANE_NEVER_SETTLED_DETAIL
+            detail = f"{detail}; {never}" if detail else never
+
         return ChildInfo(
             job_id=record.job_id,
             label=record.label,
@@ -988,6 +1044,16 @@ class RosterPass:
             result_text=result_text,
             error_text=error_text,
             session_id=record.session_dir.name if record.session_dir is not None else None,
+            # Prefer the LIVE job row's stamp (the relay sets it on every
+            # progress) and fall back to the record's, which is the only copy a
+            # nested child's parent-side restore ever sees.
+            last_progress_at=(
+                getattr(job, "last_progress_at", None)
+                if getattr(job, "last_progress_at", None) is not None
+                else record.last_progress_at
+            ),
+            ended_by=record.ended_by,
+            cancel_reason=record.cancel_reason,
         )
 
     def roster(self) -> list[ChildInfo]:
@@ -1752,6 +1818,111 @@ class SubagentComms:
         record.cut_off_cause = cut_off_cause
         return status, error_text, result_text
 
+    # -- child-attribution: progress stamp + deliberate-stop evidence ---------
+
+    def note_progress(self, job_id: str, at: float | None = None) -> None:
+        """Stamp the child's last-progress time on its record. NEVER raises.
+
+        Called by the subagent progress relay beside ``report_progress``. The
+        record copy is kept in step with the job row's stamp so the reading
+        survives where the row does not: a nested child's row lives on its
+        PARENT's manager, and a boot restores only the rows the parent sidecar
+        carried (see ``_ChildRecord.last_progress_at``).
+
+        Best-effort like every other evidence write here: a stamp must not be
+        able to break a child's turn.
+        """
+        try:
+            record = self._record(job_id)
+            if record is not None:
+                record.last_progress_at = float(at if at is not None else time.time())
+        except Exception:  # noqa: BLE001 — evidence must not break the relay
+            logger.warning("could not stamp subagent progress", exc_info=True)
+
+    def begin_stop(
+        self,
+        job_id: str,
+        *,
+        by: str,
+        reason: str = "",
+        mechanism: str = "cancel",
+    ) -> str | None:
+        """Stamp WHO/WHY on the record and stage the durable stop receipt.
+
+        Called BEFORE the stop is issued at every deliberate-stop site. Two
+        effects, deliberately together because they are one act of attribution:
+
+        * the RECORD gets ``ended_by``/``cancel_reason``, so ``hub op='list'``
+          can say ``stopped by user-escape: interrupted`` rather than a bare
+          ``cancelled`` — this is the field the old ``del reason`` threw away; and
+        * the child's transcript directory gets a ``subagent-stop-<job>.v1.json``
+          receipt, staged exactly as ``runtime-stop.json`` is staged before a
+          runtime kill: the acting party attests before acting, because the
+          target may be wedged and unable to record anything itself.
+
+        Returns the receipt path as a string so a caller whose cancel is then
+        REFUSED can withdraw it (see :meth:`abandon_stop`) — a staged receipt
+        for a stop that did not happen is a lie. Returns ``None`` when the job
+        is unknown or has no transcript directory yet.
+
+        NEVER raises: the stop must not fail because evidence could not be
+        written.
+        """
+        try:
+            record = self._record(job_id)
+            if record is None:
+                return None
+            record.ended_by = str(by or "")
+            record.cancel_reason = str(reason or "")[:_CANCEL_REASON_CAP]
+            if record.session_dir is None:
+                return None
+            payload = ledger.build_stop_payload(
+                job_id=record.job_id,
+                label=record.label,
+                child_session_id=record.session_dir.name,
+                parent_session_id=str(getattr(self._session, "session_id", "") or ""),
+                actor=str(by or ""),
+                mechanism=str(mechanism or ""),
+                reason=str(reason or ""),
+            )
+            path = ledger.write_stop_receipt(record.session_dir, payload)
+            return str(path) if path is not None else None
+        except Exception:  # noqa: BLE001 — a stop must not fail over evidence
+            logger.warning("could not stage subagent stop receipt", exc_info=True)
+            return None
+
+    def abandon_stop(self, receipt_path: str | None) -> None:
+        """Take back a stop receipt for a stop that was REFUSED. NEVER raises.
+
+        Mirrors ``control._withdraw_staged_stop_marker``: the marker is removed
+        only when the act it attests to did not happen, so a target that stays
+        alive is never later read as a deliberate stop.
+        """
+        if not receipt_path:
+            return
+        try:
+            Path(receipt_path).unlink()
+        except OSError:
+            pass
+
+    def apply_lane_evidence(self, evidence: "Iterable[ledger.LaneEvidence]") -> None:
+        """Fold the boot reconcile pass's findings onto the live records.
+
+        Attribution recovered from a stop receipt is only written when the
+        artifact actually named an actor/reason (so an empty receipt cannot
+        blank a stamp the sidecar already had). ``never_settled`` is a
+        boot-derived flag, recomputed every boot and never persisted.
+        """
+        for item in evidence:
+            record = self._record(item.job_id)
+            if record is None:
+                continue
+            if item.ended_by or item.cancel_reason:
+                record.ended_by = item.ended_by
+                record.cancel_reason = item.cancel_reason
+            if item.never_settled:
+                record.lane_never_settled = True
+
     def roster(self) -> list[ChildInfo]:
         """Every child this session launched, live or long settled.
 
@@ -1871,6 +2042,15 @@ class SubagentComms:
                     "error_text": record.error_text,
                     "paused": record.paused,
                     "settled_at": record.settled_at,
+                    # The attribution trio rides with the outcome: all four are
+                    # durable facts about how a child ended, and a boot restores
+                    # them so `hub op='list'` can still name the actor after the
+                    # job row and the process are gone. Missing keys default
+                    # harmlessly, so a sidecar written before this field existed
+                    # reads exactly as it did.
+                    "last_progress_at": record.last_progress_at,
+                    "ended_by": record.ended_by,
+                    "cancel_reason": record.cancel_reason,
                     "attempt_aliases": list(record.attempt_aliases),
                     # Concise prompt for each collapsed attempt, so a resumed
                     # session that reopens this record still renders every
@@ -1969,6 +2149,17 @@ class SubagentComms:
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),
+                # Non-numeric/absent stamps degrade to None ("no progress
+                # recorded") rather than 0, which would read as "reported at the
+                # epoch" — a stall an operator would chase forever.
+                last_progress_at=(
+                    float(row["last_progress_at"])
+                    if isinstance(row.get("last_progress_at"), (int, float))
+                    and not isinstance(row.get("last_progress_at"), bool)
+                    else None
+                ),
+                ended_by=str(row.get("ended_by") or ""),
+                cancel_reason=str(row.get("cancel_reason") or ""),
                 paused=bool(row.get("paused")),
                 outcome=(str(row["outcome"]) if row.get("outcome") is not None else None),
                 # Missing defaults to "", which is right for a sidecar written
@@ -2501,9 +2692,15 @@ class SubagentComms:
             self._clear_ask(record, future)
         return Reply(job_id, record.label, text=answer)
 
-    async def cancel(self, job_id: str) -> Delivery:
+    async def cancel(self, job_id: str, *, by: str = "", reason: str = "") -> Delivery:
         """Stop a child. Idempotent from the caller's point of view: a second
-        cancel reports the state rather than pretending to act."""
+        cancel reports the state rather than pretending to act.
+
+        ``by``/``reason`` name WHO stopped it and WHY in the caller's own words.
+        Keyword-only with empty defaults so every existing caller and test
+        double is untouched; an empty ``by`` records no actor rather than
+        inventing one.
+        """
         record = self._record(job_id)
         label = record.label if record is not None else job_id
         # The manager that OWNS the job: a grandchild runs in its parent's
@@ -2528,13 +2725,24 @@ class SubagentComms:
                 record.paused = False
                 if record.outcome is None:
                     record.outcome = "cancelled"
+                # A cancel of a parked child is still a deliberate stop by an
+                # actor, so it is attributed and receipted like any other.
+                self.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
                 return Delivery(job_id, label, "cancelled")
             state = job.status if job is not None else "gone"
             return Delivery(job_id, label, "failed", f"job is already {state}")
-        await jobs.cancel(job_id)
+        # Attribution and the durable stop receipt are staged BEFORE the cancel
+        # is issued: the child may be wedged and unable to record anything once
+        # the stop lands, which is exactly why the acting party attests first.
+        receipt = self.begin_stop(job_id, by=by, reason=reason, mechanism="cancel")
+        if not await jobs.cancel(job_id):
+            # The manager refused (raced to a terminal state): a staged receipt
+            # for a stop that did not happen is a lie, so take it back.
+            self.abandon_stop(receipt)
+            return Delivery(job_id, label, "failed", "job is no longer running")
         return Delivery(job_id, label, "cancelled")
 
-    async def pause(self, job_id: str) -> Delivery:
+    async def pause(self, job_id: str, *, by: str = "", reason: str = "") -> Delivery:
         """Stop a child now, keeping it explicitly resumable.
 
         Mechanically a cancel: the job signal is aborted, the runner's
@@ -2586,6 +2794,7 @@ class SubagentComms:
         # afterwards would let the roster observe a moment where a deliberate
         # pause looked like a plain cancellation.
         record.paused = True
+        self.begin_stop(job_id, by=by, reason=reason, mechanism="pause")
         await jobs.cancel(job_id)
         return Delivery(job_id, record.label, "paused")
 

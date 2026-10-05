@@ -4508,7 +4508,17 @@ class ServingSessionHandle(SessionHandle):
         if not callable(cancel):
             return 0
         try:
-            return int(cast(int, cancel(reason)))
+            try:
+                # ``by`` names the MOBILE/attach surface as the actor, so the
+                # child's durable stop receipt and roster row say who stopped it
+                # rather than the generic parent-escape default.
+                return int(cast(int, cancel(reason, by="mobile-stop")))
+            except TypeError:
+                # A reduced handle / test double whose ``cancel_subagents``
+                # predates the ``by`` keyword: the stop still happens; only the
+                # attribution token is lost. Kept narrow so a real error inside
+                # the stop is not swallowed as "unsupported signature".
+                return int(cast(int, cancel(reason)))
         except Exception:  # noqa: BLE001 — a stop must never fail on its children
             logger.warning("cancelling subagents during abort failed", exc_info=True)
             return 0
