@@ -1488,6 +1488,28 @@ directory name also carries the commit or version it was built from
 (`…/generations/<timestamp>-<sha-or-version>`), so every build is auditable
 after the fact, including when the marker is the `pypi <version>` form.
 
+**When the root checkout is dirty, run the update from a clean clone — and
+advance that clone's own `main` BEFORE updating.** If `~/local-operator` holds
+staged or uncommitted work that is not yours, do not clear it and do not run an
+update against it: point the updater at a separate clean clone with
+`LOCAL_OPERATOR_REPO=<scratch clone> lop-update <ref>`. Use a real clone, never
+a worktree — a worktree's `.git` is a file and fails the `-d "$REPO/.git"`
+gate described at the top of this section. The clone's OWN local `main` must
+then be advanced to `origin/main` before the update runs — `git -C <clone>
+fetch origin main && git -C <clone> update-ref refs/heads/main origin/main`, or
+`git reset --hard origin/main` in a scratch clone — because `lop-update`
+archives the NAMED ref out of the repository it runs in, and a `fetch` moves
+only the remote-tracking ref, never the local branch. The clone's own `main`
+starts where its SOURCE's does, so a stale one is inherited from the shared
+checkout, not from any clone mode — and a `--local` clone against a shallow
+source is a separate caveat, not the cause: `--local` is ignored there (git
+prints "source repository is shallow, ignoring --local"), so the clone shares no
+objects and is itself shallow. Measured on 2026-10-05, the stale start is what
+bit: the clone's local `main` was behind, a `fetch` advanced only `origin/main`,
+and the update archived the stale ref — installing a 0.64.4 build under a
+0.67.x fleet and moving the serve runtime down; `git reset --hard origin/main`
+in the clone and a re-run put it right in about two minutes.
+
 ### Installing over a live fleet
 
 **The install must not run against a busy fleet.** That is the rule; the command
