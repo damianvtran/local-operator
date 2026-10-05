@@ -3990,8 +3990,9 @@ def _remote_entry(sid: str, *, age: float = 0.0, device: str = "pixel-8") -> Cat
 
 def _scroll_catalog() -> list[CatalogEntry]:
     """The operator-shaped list the report was against: remote rows interleaved
-    among `previous` by birth (the rank order), cold rows below them, and one
-    subagent row — so the rank order and the presented order genuinely differ."""
+    among `previous` by birth, cold rows below them, and one subagent row —
+    a list deep enough that the window has to slide while remote rows sit where
+    the report had them."""
     rows: list[CatalogEntry] = [_aged(f"act{i}", active=True, age=60.0 * (i + 1)) for i in range(4)]
     age = 1000.0
     for i in range(18):
@@ -4297,11 +4298,16 @@ async def test_remote_rows_scroll_out_of_the_top_not_the_middle():
         sidebar = await _sidebar_with(pilot, app, entries)
         ranks = [sidebar._axis_key(entry)[0] for entry in sidebar.entries]
         assert ranks == sorted(ranks), f"the scroll axis is not grouped: {ranks}"
-        peer_at = [i for i, rank in enumerate(ranks) if rank == 3]
-        previous_at = [i for i, rank in enumerate(ranks) if rank == 2]
-        subagent_at = [i for i, rank in enumerate(ranks) if rank == 4]
-        assert max(previous_at) < min(peer_at), "peers must scroll after previous"
-        assert max(peer_at) < min(subagent_at), "peers must scroll before subagents"
+        # The REMOTE rows are ORDINARY rows now (the peer axis retired): this
+        # fixture's remote rows are cold, so they rank with `previous` and
+        # interleave by birth like every other cold row — which is the list the
+        # operator described when he filed the report ("... among previous
+        # sessions"), and now the list the frame paints.
+        peer_ranks = {
+            sidebar._axis_key(entry)[0] for entry in sidebar.entries if entry.row.is_remote
+        }
+        assert peer_ranks == {2}, f"remote rows left the previous axis: {peer_ranks}"
+        assert sidebar._axis_key(sidebar.entries[-1])[0] == 4, "the axis does not end at subagents"
 
         previous_display = [
             entry.id for _kind, entry in sidebar._display_rows() if entry is not None

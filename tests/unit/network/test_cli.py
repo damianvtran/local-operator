@@ -640,7 +640,8 @@ def test_a_peer_row_is_a_name_and_words_never_the_wire_token() -> None:
     sibling create arm says "cannot be reached from this device right now", and a
     peer addressed by the 34-character id every other surface replaces with its
     name (``mesh-ui.md`` §1.2 gives the id a column of its own, eight characters
-    of it; the sidebar's heading is ``⇄ <label>``). The token and the id are both
+    of it; the sidebar's tooltip names the device and its network on the row).
+    The token and the id are both
     still in this verb's ``--json`` payload — that is the machine surface, and the
     row below asserts they are the fields kept there rather than deleted.
 

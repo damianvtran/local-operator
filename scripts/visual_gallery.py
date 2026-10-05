@@ -64,29 +64,26 @@ def cases() -> list[dict[str, Any]]:
                 # Five widths/variants, because the sample's whole point is the
                 # trade-off between them: "base" is the size at which the list does
                 # not grow at all, "wide" the size at which it does, and "peers"
-                # adds the remote rows whose `⇄` slot and `⇄ <device>` sections are
-                # the mesh annotation's own frame (`mesh-ui.md` §1.3/§4.1).
-                # "silent"/"silent-two" are the delta's HEADLINE state — a peer
-                # that answered nothing, so the whole section is its heading —
-                # which had no case at all until design round 4 (D26).
+                # adds the remote rows whose `⇄` slot and merged bins are the mesh
+                # annotation's own frame (`mesh-ui.md` §1.3, revised 2026-10-05:
+                # remote rows are first-class; there is no per-device section).
                 if variant == "peers-focus":
                     # TALLER THAN THE OTHER FRAMES ON PURPOSE: this is the settling
                     # frame for the caret/locality interaction (design round 1,
-                    # D4) AND the only size at which the second peer's section is
-                    # on screen at all — the `(unreachable)` heading and the
-                    # unreachable row were in no artifact of that round because
-                    # the peer tier is three chrome lines per device and the
-                    # 100x30 window stopped before it (review round 4, MINOR 5).
+                    # D4) AND the size at which the second device's row is on
+                    # screen beside the first's — the pair is what shows the rows
+                    # interleaved in ONE bin instead of split per device
+                    # (`_require_merged_bins` refuses a frame that is not this).
                     args += ["peers-focus", "100x45"]
+                elif variant == "peers-hover":
+                    # 100x45 for `peers-focus`'s reason, and because the tooltip
+                    # itself costs rows: the clause `on <device> · <network>` is
+                    # the convention's readable half, and a frame that loses it
+                    # to a small window is refused rather than shipped
+                    # (`_require_hover_device_clause`).
+                    args += ["peers-hover", "100x45"]
                 elif variant == "peers":
                     args += ["peers", "100x30"]
-                elif variant in {"silent", "silent-two"}:
-                    # 100x45 for the reason `peers-focus` is: at 100x30 the frame
-                    # stops before the subagent tier, and the whole claim these
-                    # cases carry is the ORDER of a silent peer's section against
-                    # it (design round 4, D27). The rig refuses such a frame
-                    # rather than writing one — `_require_silent_sections`.
-                    args += [variant, "100x45"]
                 else:
                     args += ["160x40" if variant == "wide" else "100x30"]
             elif script == "mesh_sidebar_shot.py":

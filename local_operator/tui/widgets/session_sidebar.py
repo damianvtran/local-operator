@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Self, cast
 
 from rich.segment import Segment
 from rich.style import Style
@@ -76,8 +76,8 @@ _ROW_PREFIX_CELLS = 4 + PIN_CELL_WIDTH
 #: and the one cell `_advance_spinner` patches in place on its fast path.
 _ROW_MARK_COLUMN = 2 + PIN_CELL_WIDTH
 
-#: The locality mark's column. A peer section's heading is indented to it so
-#: the heading's `⇄` stacks with the rows it governs (see `_peer_heading_text`).
+#: The locality mark's column — where a remote row paints `⇄`, after the pin
+#: cell and the caret.
 _LOCALITY_COLUMN = PIN_CELL_WIDTH + 1
 
 #: The widest the list may grow on a roomy terminal, in the same units as
@@ -275,48 +275,19 @@ def _strip_dangling_separator(title: str) -> str:
     return title
 
 
-#: Section RANK to the name a TIER header row carries. One mapping so
+#: Section RANK to the name a section header carries. One mapping so
 #: `_display_rows` and `render` can never disagree about which sections exist.
 #:
-#: The PEER sections are absent from this table on purpose: their rank is shared
-#: and their heading is per-device, so `_section_key` builds both and `render`
-#: reads the heading back out of the row kind. Everything else here is unchanged,
-#: which is what keeps a device with no peers painting byte-identically.
+#: Remote rows are absent from this table as a CATEGORY on purpose, in the
+#: sense that matters: they have no rank of their own and no key of their own.
+#: They file through `_unpinned_rank`'s ordinary rule like every local row, so
+#: a device with no peers paints byte-identically and a device with peers paints
+#: one list — see `_unpinned_rank` for the SHARED CONVENTION and its sentence.
+#:
+#: ``subagent`` keeps rank 4 rather than closing the gap the retired peer axis
+#: (rank 3) left: the rank is this widget's own sort key, and renumbering it
+#: would churn every test and comment for a hole nothing reads.
 _SECTION_NAMES = {0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
-
-#: The rank a PEER's rows take: after `previous`, before `subagent`. Another
-#: device's sessions are colder than anything you are doing here and warmer than
-#: an expired agent run (``mesh-ui.md`` §1.3 decision 1). This is why
-#: ``subagent`` moved from 3 to 4: the ranks are an ORDER, and inserting a tier
-#: between two of them means renumbering the one below rather than sharing a
-#: number with it — two tiers on one rank would sort through each other.
-_SECTION_PEER_RANK = 3
-
-
-def _peer_heading_text(label: str, reachable: bool) -> str:
-    """The ONE spelling of a peer section's heading, for both of its sources.
-
-    Split out because the heading is now DERIVED from two different things: a
-    peer's rows (which carry the device's label and its reachability) and a
-    peer that answered NOTHING (``SessionSidebar._silent_peer_tiers``, which
-    carries the relay's own report). A second ``f" ⇄ …"`` beside this one is how
-    the two would drift into two vocabularies for one state — and the reader has
-    to be able to tell a live section from a silent one by that suffix alone.
-
-    The indent aligns the heading's `⇄` with the rows' locality cell
-    (`_LOCALITY_COLUMN`), the same property the round-1 fix installed when the
-    mark was one cell in: the heading has no caret and no pin, and a heading
-    whose glyph starts at a different x from the cells it governs reads as a
-    separate column rather than a label for the block under it.
-    """
-    return f"{' ' * _LOCALITY_COLUMN}⇄ {label}" + ("" if reachable else " (unreachable)")
-
-
-#: Prefix a peer section's heading carries in its row kind, so `render` can tell
-#: a device's heading from the four tier names WITHOUT the heading having to be a
-#: key in a table (`header:peer:⇄ damian-mbp`). The label itself is derived once,
-#: by `_section_key`, and read back here.
-_PEER_HEADER_PREFIX = "peer:"
 
 
 class SessionSidebar(Widget, can_focus=True):
@@ -630,12 +601,6 @@ class SessionSidebar(Widget, can_focus=True):
         #: never touch `rank_entries`, which is the partition the mobile relay
         #: shares.
         self._pins: tuple[str, ...] = ()
-        #: Peers that did NOT answer the last listing read, as ``(name, reason)``.
-        #: Handed in by the app's poll from the relay's own answer
-        #: (`peer_rows.unanswered_peers`), and painted as a HEADING-ONLY section —
-        #: see `_silent_peer_rows` for why one line with no rows under it is the
-        #: honest shape rather than a bug in the section machinery.
-        self._silent_peers: tuple[tuple[str, str], ...] = ()
         #: Startup default from `tui.sidebar_show_subagents`; flipped by
         #: `ctrl+a` for THIS session only, never written back to config.
         self.show_subagents: bool = False
@@ -777,11 +742,6 @@ class SessionSidebar(Widget, can_focus=True):
         if not window:
             return 0
         tiers = {self._section_key(entry) for entry in window}
-        # The row-less peer sections are ALWAYS painted, whatever the window is
-        # (design round 4, D27), so they are charged unconditionally — a heading
-        # the page size did not reserve is an overrun, which is the one thing
-        # this accounting exists to prevent.
-        tiers |= self._silent_peer_tiers()
         chrome = len(tiers) * 2 + (len(tiers) - 1)
         # The `+N more pinned` note is chrome too, and the charge must follow
         # the PAINT: `_display_rows` emits the note whenever a pinned row is not
@@ -814,15 +774,8 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not self.entries:
             return 0
-        # The SECTION KEY, not the rank: every peer is its own section with its
-        # own heading, so counting distinct ranks would charge one heading for
-        # two peers and the frame would overrun its height by a line — the same
-        # fault this accounting exists to prevent.
+        # The SECTION KEY: one heading per distinct section actually painted.
         tiers = {self._section_key(entry) for entry in self.entries}
-        # The silent peers are sections too (design round 4, D27) and cost the
-        # same chrome, so they are charged here as well — `_chrome_for` asks the
-        # same question of a window and must get the same shape of answer.
-        tiers |= self._silent_peer_tiers()
         # Per section: its heading, the blank beneath it, and a blank above
         # every heading after the first. The leading blank is load-bearing:
         # without it a heading sits flush against the previous group's last
@@ -942,7 +895,7 @@ class SessionSidebar(Widget, can_focus=True):
         return None
 
     def _section_of(self, entry: CatalogEntry) -> int:
-        """0 pinned, 1 active, 2 previous, 3 peer, 4 subagent.
+        """0 pinned, 1 active, 2 previous, 4 subagent.
 
         A THREE-way key over ``active``, not a widening of it:
         ``CatalogEntry.active`` is ``pending or unseen or live_state``, and the
@@ -952,9 +905,6 @@ class SessionSidebar(Widget, can_focus=True):
 
         Pinned outranks subagent, which is what makes a pinned subagent row
         appear in ``★ Pinned`` even while the layer is off.
-
-        A REMOTE row takes the peer rank here but its SECTION is per device —
-        see :meth:`_section_key`, which is what the sort and the paint both use.
 
         This is the PAINT the pin lifts into: :meth:`_unpinned_rank` is the rank
         without it, and the scroll axis uses that one (see `_axis_key`).
@@ -966,6 +916,19 @@ class SessionSidebar(Widget, can_focus=True):
     def _unpinned_rank(self, entry: CatalogEntry) -> int:
         """Where the row files when nothing is pinned — the SCROLL AXIS' rank.
 
+        SHARED CONVENTION (the sidebar-UI sibling ``feat/sidebar-remote-rows``
+        names the same sentence): remote rows are first-class: they file into
+        the same bins as local rows under the same ordering rule, carry a
+        per-row indicator, and their hover reads the owning device and its
+        network; there is no separate remote section.
+
+        Every row that is not a subagent files by ``CatalogEntry.active`` —
+        pending, unseen or live is ACTIVE, everything else is PREVIOUS — whether
+        the runtime behind it is on this machine or another one. A per-device
+        axis existed (``mesh-ui.md`` §1.3 decision 1 drew it); the operator's
+        convergence report retired it: a device's sessions, split by their OWN
+        state beside this device's, is the one list.
+
         Split out of `_section_of` so the two orders that read it cannot drift:
         the axis (`_axis_key`, and through it `_presentation_order`) places a
         row by the section it belongs to with NO pin, and the paint
@@ -976,55 +939,28 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if entry.subagent:
             return 4
-        if entry.row.is_remote and entry.row.owner_device:
-            return _SECTION_PEER_RANK
         return 1 if entry.active else 2
 
-    @staticmethod
-    def _peer_heading(row: Any) -> str:
-        """The heading a peer's section carries: `` ⇄ <label>``, plus its state.
-
-        The label is the peer's NAME — a 32-hex device id is not something a user
-        recognises their own laptop by — and the suffix is the design's two-word
-        case (``mesh-ui.md`` §1.3): ``(unreachable)`` when the owning device did
-        not answer the read that stamped these rows. Nothing claims staleness of
-        the ROWS here; that is ``placement_stale``'s business and the tooltip's,
-        because a heading that stacked both would be a sentence, not a label.
-
-        THE LEADING INDENT IS THE LOCALITY COLUMN (design round 2, D18, moved
-        by issue #1357 slice 2a). Rows paint the locality glyph in
-        `_LOCALITY_COLUMN` (after the pin cell and the caret), and this heading
-        used to paint it at the start of the line — so the one glyph that says
-        "everything under this line is another device" started at a different x
-        from every mark it governed and the column did not stack. A heading has
-        no pin and no caret, so those columns are empty on it by definition, and
-        indenting it costs no row its width: the tier headings above
-        (``★ Pinned``, ``Active Sessions``) keep the star column and stay put.
-        """
-        return _peer_heading_text(row.owner_label or UNNAMED_DEVICE, bool(row.reachable))
-
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
-        """``(rank, section heading)`` — the ONE key the PAINT's sort uses.
+        """``(rank, section name)`` — the ONE key the PAINT's sort uses.
 
-        The heading is the section's IDENTITY here, not a label looked up later:
-        a peer's rows form their own contiguous section per DEVICE, so two peers
-        are two sections rather than one rank sorted through each other. That is
-        why the pair (and not :meth:`_section_of`) is what `_display_rows` and
-        `render` both call — the two cannot disagree about a heading they each
-        derive from one function.
+        The name is the section's IDENTITY here, not a label looked up later:
+        one rank is one section, and the pair is what `_display_rows` and
+        `render` both call, so the two cannot disagree about which sections
+        exist.
 
         :meth:`_axis_key` is its pin-blind sibling — the key the WINDOW slides
-        over (`_presentation_order`). Both read the heading through
-        :meth:`_peer_heading`, so the axis and the paint cannot disagree about
-        which rows are one peer's section either.
+        over (`_presentation_order`) — and both derive the name from
+        `_SECTION_NAMES`, so the axis and the paint cannot disagree about the
+        section a row belongs to. (The mesh's per-device peer sections made
+        this key ``(rank, "peer:<device>")``; a remote row now takes the
+        ordinary rank — see `_unpinned_rank`.)
         """
         rank = self._section_of(entry)
-        if rank == _SECTION_PEER_RANK:
-            return rank, _PEER_HEADER_PREFIX + self._peer_heading(entry.row)
         return rank, _SECTION_NAMES[rank]
 
     def _axis_key(self, entry: CatalogEntry) -> tuple[int, str]:
-        """`(rank, section heading)` for the SCROLL AXIS — the pin is not a section.
+        """`(rank, section name)` for the SCROLL AXIS — the pin is not a section.
 
         See `_unpinned_rank` for why the axis is pin-blind: a pinned row that
         jumped to the head of the axis would be LIFTED INTO VIEW, and the
@@ -1032,31 +968,27 @@ class SessionSidebar(Widget, can_focus=True):
         (`_pinned_overflow`).
         """
         rank = self._unpinned_rank(entry)
-        if rank == _SECTION_PEER_RANK:
-            return rank, _PEER_HEADER_PREFIX + self._peer_heading(entry.row)
         return rank, _SECTION_NAMES[rank]
 
     def _presentation_order(self, ranked: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
         """The order the list presents — and therefore the order it SCROLLS.
 
         `rank_entries` has decided the ranking; this only regroups it so each
-        section is one block in the order the frame paints them (active,
-        previous, one block per peer device, subagents — the placement
-        ``mesh-ui.md`` decision 1 specifies: "a peer's rows form one contiguous
-        section each, placed after `previous` and before `subagent`"). Within a
-        section the ranking's own order survives: the sort is stable.
+        section is one block in the order the frame paints them (pinned, active,
+        previous, subagents — ONE RANK, ONE SECTION, for every row whether it is
+        local or remote; see `_unpinned_rank` for the SHARED CONVENTION). Within
+        a section the ranking's own order survives: the sort is stable.
 
         WHY THE WINDOW SLIDES OVER THIS ORDER (operator report, 2026-09-29:
         remote sessions "disappear when scrolling down ... among previous
-        sessions"). The window used to slide over the RANK order — where a
-        peer's rows sit interleaved with `previous` by birth — while the frame
-        painted them regrouped into their own per-device sections. The two
-        orders disagreed, so the frame's edges and the window's edges disagreed:
-        a remote row left the window while it was drawn in the MIDDLE of the
-        frame (the rows below it stayed put), and rows near it slid DOWN while
-        the user scrolled down. With one order, a window's edges are the frame's
-        edges: rows leave and enter at the top and bottom of the list, in the
-        order they are shown.
+        sessions"). The window and the frame must agree about the order — the
+        report's frame used to slide over the RANK order while the paint
+        REGROUPED (the mesh's per-device peer sections), so a remote row left
+        the window while it was drawn in the MIDDLE of the frame (the rows
+        below it stayed put), and rows near it slid DOWN while the user
+        scrolled down. With one order, a window's edges are the frame's edges:
+        rows leave and enter at the top and bottom of the list, in the order
+        they are shown.
         """
         return tuple(sorted(ranked, key=self._axis_key))
 
@@ -1113,21 +1045,13 @@ class SessionSidebar(Widget, can_focus=True):
         # paints under `★ Pinned` at the top. A pinned row the window does NOT
         # carry is not visible until the page reaches its slot — the pin never
         # reaches the axis — which is what the `+N more pinned` note is for.
-        #
-        # A SECTION WITHOUT ROWS IS STILL A SECTION (design round 4, D27). The
-        # silent peers are put through the SAME key as the live ones inside this
-        # one pass, so a peer's place in the list is a property of its NAME and
-        # not of whether it answered: built at the end of the list instead, its
-        # section sat below `⌥ Subagent Runs` while it was unreachable and JUMPED
-        # above it the moment it recovered — the peer axis' rank (mesh-ui.md
-        # decision 1: after `previous`, before `subagent`) is not conditional on
-        # liveness. They also interleave with the live peer sections by heading,
-        # so two devices do not re-order themselves when one of them comes back.
         sections: dict[tuple[int, str], list[CatalogEntry]] = {}
         for entry in sorted(self.visible_entries, key=self._section_key):
             sections.setdefault(self._section_key(entry), []).append(entry)
-        for key in self._silent_peer_tiers():
-            sections.setdefault(key, [])
+        # Sections are built FROM rows, so a section with no rows contributes
+        # no header — and a remote row's key is its ordinary rank, so a
+        # device's sessions split by their own state and interleave with this
+        # device's (see `_unpinned_rank` for the SHARED CONVENTION).
         for key, entries in sorted(sections.items()):
             self._append_section(rows, key[1])
             rows.extend(("entry", entry) for entry in entries)
@@ -1173,61 +1097,17 @@ class SessionSidebar(Widget, can_focus=True):
         the last active row and the two groups ran together. The first heading
         takes no leading blank: nothing sits above it to separate from.
 
-        AND NEVER TWO BREAKS IN A ROW (design round 4, D28). A row-less section
-        ends on the blank it just emitted, so the section after it may not emit
-        another one: two unreachable peers were separated by TWO blank rows where
-        every other boundary in the list is one, which is the frame a user with
-        two lost devices actually gets. Every section goes through here — the
-        live ones, the peer ones and the silent ones — so "one blank per
-        boundary" is a property of the builder rather than of each call site.
+        AND NEVER TWO BREAKS IN A ROW. The guard is one condition and stays
+        one: a section must not open on the back of another blank, so "one
+        blank per boundary" is a property of the builder rather than of each
+        call site. (The row-less peer sections this was measured on — design
+        round 4, D28 — are retired; the guard is now simply the builder's
+        invariant, not a case.)
         """
         if rows and rows[-1][0] != "blank":
             rows.append(("blank", None))
         rows.append((f"header:{heading}", None))
         rows.append(("blank", None))
-
-    def _silent_peer_tiers(self) -> set[tuple[int, str]]:
-        """The section KEY of every peer that did not answer.
-
-        WHY A HEADING WITH NOTHING UNDER IT. ``mesh-ui.md`` §8.3 says a peer that
-        does not answer contributes NO ROWS rather than stale ones — dropping the
-        rows is right, and it is not what UX round 3's U16 filed. What it also
-        did was drop the FACT: the section was built from rows, so a peer that
-        stopped answering lost its heading too, and the sidebar then read as a
-        complete list. "My peer has no sessions" and "my peer is gone" became
-        one picture, and the six sessions the user was looking at a minute ago
-        vanished and came back with nothing said either way.
-
-        The heading keeps §8.3's promise (no row claims a state the peer did not
-        send) and restores the one sentence that explains the frame. It is the
-        SAME string a live section would carry with ``reachable`` false, because
-        the state is the same state — see :func:`_peer_heading_text` — and it is
-        built from the SAME key (`_section_key`) so it takes the peer rank's
-        place in the list rather than the end of it (design round 4, D27).
-
-        Chrome, never entries: these sections contribute no ``CatalogEntry``, so
-        they stay out of ``self.entries`` — which is what `action_move`,
-        `_cursor_index` and `_switch_session_from` index — and `_entry_at`
-        already answers ``None`` for a row whose entry is ``None``.
-
-        The relay's ``reason`` is deliberately NOT painted. It is the machine
-        token ``connect_failed:ConnectionRefusedError`` that UX round 3 filed as
-        U23 on the listing surface; the tooltip on a real row shows it, and a
-        heading is not the place to grow a second, unlocalised spelling of it.
-
-        Shared by the three places that must agree about these sections: the
-        paint (`_display_rows`, which builds them) and the two chrome counts
-        (`_header_lines`, `_chrome_for`, which reserve their height). A second
-        derivation of the heading text is how a heading gets painted without
-        being charged, and an uncharged line is an overrun.
-        """
-        return {
-            (
-                _SECTION_PEER_RANK,
-                _PEER_HEADER_PREFIX + _peer_heading_text(name or UNNAMED_DEVICE, False),
-            )
-            for name, _reason in self._silent_peers
-        }
 
     def set_asking(self, marks: Mapping[str, int]) -> None:
         """Mark every row that holds OUTSTANDING ASKS the user has not answered.
@@ -1373,20 +1253,6 @@ class SessionSidebar(Widget, can_focus=True):
         if pins == self._pins:
             return
         self._pins = pins
-        self.refresh()
-
-    def set_silent_peers(self, peers: Sequence[tuple[str, str]]) -> None:
-        """Replace the peers that did not answer. ``(name, reason)`` per peer.
-
-        Display-only, and refreshes only on an actual change for the same reason
-        `set_pins` does: this runs on every catalog poll, and un-inking the list
-        every two seconds in every open terminal is a cost the user pays without
-        seeing anything move. See `_silent_peer_rows` for what it paints and why.
-        """
-        silent = tuple((str(name), str(reason)) for name, reason in peers)
-        if silent == self._silent_peers:
-            return
-        self._silent_peers = silent
         self.refresh()
 
     def set_subagent_total(self, total: int) -> None:
@@ -1705,10 +1571,11 @@ class SessionSidebar(Widget, can_focus=True):
         IT FIXED (operator report, 2026-09-29): paging by moving the CURSOR and
         revealing it is contiguous only while the page size is constant, and
         this list's page size varies with the sections a window carries (each
-        peer device's section spends three chrome lines, and the pinned note
-        appears and disappears). When the window shrank across the move, the
-        reveal walk advanced the offset PAST rows the move never showed — a full
-        pagedown sweep skipped four peer rows in one fixture and a pinned row in
+        section spends its heading, a blank and the leading break, and the
+        pinned note appears and disappears). When the window shrank across the
+        move, the reveal walk advanced the offset PAST rows the move never
+        showed — a full
+        pagedown sweep skipped four remote rows in one fixture and a pinned row in
         another — and a wheel-scrolled viewport, whose cursor the wheel
         deliberately leaves behind, teleported back to the cursor on the first
         page key, dropping every remote row it was showing.
@@ -2201,14 +2068,20 @@ class SessionSidebar(Widget, can_focus=True):
         status = entry.status
         if entry.status_code == "wedged":
             status = f"{status} · {WEDGED_REMEDY}"
-        # WHERE IT LIVES, and only when there is something to say: this is the
-        # peer's NAME readable after the user has scrolled past the heading (the
-        # heading is one line of chrome, the tooltip travels with the row), plus
-        # the reason when the link is down. Local rows gain no clause — "on this
-        # device" on every row is the noise the mark's absence already avoids.
+        # WHERE IT LIVES, and only when there is something to say. This is the
+        # one place the device is readable now that remote rows carry no section
+        # of their own: the row is width-bound and the tooltip travels with it.
+        # The network rides WITH the device — a device can sit in more than one
+        # network, and "damian-mbp" alone does not say which one the row came
+        # through — and it is omitted rather than guessed when the membership
+        # name could not be read (no name is no claim). Local rows gain no
+        # clause — "on this device" on every row is the noise the mark's
+        # absence already avoids.
         location = ""
         if entry.row.is_remote or entry.row.owner_device:
             location = f"on {entry.row.owner_label or UNNAMED_DEVICE}"
+            if entry.row.owner_network_name:
+                location += f" · {entry.row.owner_network_name}"
             if not entry.row.reachable:
                 # THE WORDS, NOT THE TOKEN (design round 1, D3; UX round 3, U23).
                 # This tooltip used to print the relay's raw reason —
@@ -2456,25 +2329,17 @@ class SessionSidebar(Widget, can_focus=True):
                 result.append(" " * width)
                 continue
             if kind.startswith("header:"):
-                # A PEER heading carries its own label after the prefix, so a
-                # section whose text depends on a device is not in the table at
-                # all. The table below stays the TIER vocabulary — the four
-                # names every device with no peers still paints — and the
-                # fallback reads the label `_section_key` already derived, which
-                # is why the two can never disagree about what a section is
-                # called.
-                if kind.startswith("header:" + _PEER_HEADER_PREFIX):
-                    label = kind[len("header:" + _PEER_HEADER_PREFIX) :]
-                else:
-                    label = {
-                        "header:pinned": "★ Pinned",
-                        "header:active": "Active Sessions",
-                        "header:previous": "Previous Sessions",
-                        "header:subagent": "⌥ Subagent Runs",
-                    }[kind]
-                # Same treatment as the "Sessions" title above: `muted`, no
-                # rule, no new palette entry. Mirrors the mobile relay's two
-                # headings so the surfaces read the same.
+                # The four section names, and nothing else: sections are built
+                # from rows and named by `_SECTION_NAMES` alone, so the kind IS
+                # the lookup key. (Peer sections used to smuggle a per-device
+                # label through this branch; remote rows now file under an
+                # ordinary section — see `_unpinned_rank`.)
+                label = {
+                    "header:pinned": "★ Pinned",
+                    "header:active": "Active Sessions",
+                    "header:previous": "Previous Sessions",
+                    "header:subagent": "⌥ Subagent Runs",
+                }[kind]
                 result.append(
                     truncate_cells(label, width).ljust(width),
                     style=theme_mod.semantic_color("muted"),
@@ -2562,12 +2427,13 @@ class SessionSidebar(Widget, can_focus=True):
             #
             # THE SLOT HOLDS TWO FACTS, NOT ONE (design round 1, D4). Taking both
             # cells for the caret was the defect: the one row the user is
-            # deciding about was the one row that stopped saying it was remote,
-            # and the peer heading that carries the fact independently is only
-            # two lines above it, on a screen the user is scrolling. The slot's
-            # first cell is the caret, its second is the locality mark; a local
-            # row still paints two blanks, so the mark grows no row
-            # (mesh-ui.md §1.3 decision 2, which this keeps).
+            # deciding about was the one row that stopped saying it was remote.
+            # The slot's first cell is the caret, its second is the locality mark;
+            # a local row still paints two blanks, so the mark grows no row
+            # (mesh-ui.md §1.3 decision 2, which this keeps). The mark IS the
+            # row's remoteness statement — with the peer sections retired it is
+            # the ONLY statement on the frame — and the device and its network
+            # are one hover away (`_describe`).
             if requested or cursor:
                 line.append("»" if requested else "›")
             else:

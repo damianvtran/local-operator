@@ -53,13 +53,20 @@ unit-test hosts. They validate rendering, not live provider authentication.
 Two additions to that matrix are worth naming here, because each was a state a
 review round had to rebuild a rig to look at (design round 4, D26/D29):
 
-- `sidebar_shot.py silent` and `silent-two` — a peer that answered nothing, so
-  its whole section is the heading `⇄ <device> (unreachable)` with no rows under
-  it. Neither is a fixture the row producer can express, because the state is
-  precisely the ABSENCE of rows: the script calls `set_silent_peers` itself and
-  refuses to write a frame whose headings are missing or painted below
-  `⌥ Subagent Runs`. Capture at **100x45** — at 100x30 the frame stops before the
-  subagent tier, and the tier is half of what the case asserts.
+- `sidebar_shot.py peers`, `peers-focus` and `peers-hover` — the mesh tier from
+  hand-stamped remote rows, MERGED into the ordinary bins (operator convergence,
+  2026-10-05: the per-device `⇄ <device>` sections retired; remote rows are
+  first-class). `peers-focus` puts the caret ON a remote row, the only frame
+  showing the caret and the locality mark on one row, at **100x45** so the second
+  device's row is on screen beside the first's. `peers-hover` rests the pointer
+  on a remote row with its tooltip up — the only place the row names the device
+  AND its network now that the heading is gone (and the only capture with
+  `tooltips=True`), also **100x45**. The rig refuses to write a mesh frame whose
+  sections leave the four tier names, or one with no remote row on the drawn
+  page (`_require_merged_bins`), or a hover frame whose tooltip lacks the
+  device · network clause (`_require_hover_device_clause`) — without them a
+  frame could silently regress to the old grouping, or to a shorter tooltip
+  that still looks like a tooltip, and be read as the new state.
 - `mesh_sidebar_shot.py` — the ONE capture built from a real mesh (two config
   roots, two identities, two relays on loopback, a live link) rather than from
   hand-stamped rows, which is what makes a row-producer regression fail here
@@ -71,11 +78,16 @@ review round had to rebuild a rig to look at (design round 4, D26/D29):
   are stated. It also refuses a frame whose model chip is still `connecting…`,
   the mid-connect transient one run in three produced (D30).
 
-Both `silent` cases and the mesh case are in the committed inventory, so the
+Both `peers` cases and the mesh case are in the committed inventory, so the
 next round re-derives them with `visual_gallery.py --case …` instead of writing
 another rig. Pairing in the mesh case is written into both stores rather than
 negotiated (no pty, no second human), so it is evidence about the transport and
 the rendering, never about the pairing ceremony.
+
+*(The `silent`/`silent-two` cases retired with the per-device peer sections —
+operator convergence, 2026-10-05; there is no heading-only state left, and
+`_require_merged_bins` is what keeps the surviving `peers` frames honest about
+the merge.)*
 
 ### A fresh capture against a committed PNG: state the zoom, or the check lies
 

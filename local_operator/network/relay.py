@@ -7032,9 +7032,10 @@ class RelayServer:
 
         The mesh's name first, because that is the name every surface the user
         is looking at puts on this device (see :meth:`_member_name`): a receipt
-        that answered ``damians-MacBook-Pro`` about a session the sidebar heads
-        ``⇄ pixel-8`` reads as a SECOND device being involved. UX round 4's U25
-        measured exactly that on the stop receipt.
+        that answered ``damians-MacBook-Pro`` about a session the sidebar's
+        ``⇄`` row and tooltip attribute to ``pixel-8`` reads as a SECOND device
+        being involved. UX round 4's U25 measured exactly that on the stop
+        receipt.
 
         The identity is the middle term rather than the first because it is the
         device's own record of itself: minted before any join and unchanged by

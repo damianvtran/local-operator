@@ -322,9 +322,11 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the peer's own sentences, carried as declared reply fields",
     ),
     # Carried into ``SessionRow.unreachable_reason`` / ``UnansweredPeer.reason``. Both
-    # readers are glossed or silent by design: the sidebar tooltip goes through
-    # ``peer_reason_words``, and the silent-peer HEADING deliberately paints no reason
-    # (``SessionSidebar._silent_peer_tiers`` says why).
+    # readers are glossed or hidden by design: the sidebar tooltip goes through
+    # ``peer_reason_words``, and nothing else paints a reason — the heading-only
+    # state that would have printed one retired with the merged bins (operator
+    # convergence, 2026-10-05), and the park detector reads ``UnansweredPeer``
+    # without publishing it.
     ("local_operator/session/peer_rows.py", "_read", "reason"): (
         2,
         "carried; both readers gloss or hide it",

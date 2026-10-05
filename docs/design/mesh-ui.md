@@ -259,7 +259,7 @@ and even then `lop network log` can explain it.
 An empty list is a sentence, not a blank: `No peers yet — /network invite mints
 a token, /network join accepts one.`
 
-### 1.3 The session sidebar: peer grouping and the locality mark
+### 1.3 The session sidebar: remote rows and the locality mark
 
 The sidebar is the surface R6 has to fit into. Its geometry, read from
 `tui/widgets/session_sidebar.py`:
@@ -280,7 +280,8 @@ The sidebar is the surface R6 has to fit into. Its geometry, read from
   empty section contributes no header;
 * the title's width is `width - 6 - (len(age) + 1)`.
 
-**Decision 1 — peer grouping is a new section axis; the existing tiers stay.**
+**Decision 1 (RETIRED 2026-10-05 — see §1.3.1) — peer grouping is a new
+section axis; the existing tiers stay.**
 `_SECTION_NAMES`'s four keys become a *(rank, peer key)* pair, so a peer's rows
 form one contiguous section each, placed **after `previous` and before
 `subagent`**:
@@ -292,6 +293,10 @@ form one contiguous section each, placed **after `previous` and before
 | 2 | `previous` | `Previous Sessions` (unchanged) |
 | 3 | `peer:<device_id>` | `⇄ <label>` — `⇄ <label> (unreachable)` when the link is down |
 | 4 | `subagent` | `⌥ Subagent Runs` (unchanged) |
+
+*(The rank-3 row is the RETIRED axis: remote rows now take ranks 0-2 and 4 like
+local rows — §1.3.1. Everything below in this decision is kept as the record of
+what landed and why; the revision section states what replaced it.)*
 
 Why this shape and not the alternatives:
 
@@ -358,6 +363,11 @@ this order after the state sentence: `on <peer label>` (or
 `on <peer label> — unreachable: <reason>`). This is where a peer's *name* is
 readable when the user has scrolled past the heading, and it costs no cells.
 
+*(Revised 2026-10-05 — §1.3.1: the clause reads `on <device> · <network>`, and
+with the per-device heading retired the tooltip is no longer a fallback for a
+title-less fact — it is the ONE place the device and its network are readable,
+which is why both are in it.)*
+
 **Fields the sidebar needs, and where they come from.** `resume.SessionRow`
 (`resume.py:1826`) gains, defaulted exactly like its existing live-state fields
 so every other construction site renders as before:
@@ -370,33 +380,80 @@ reachable: bool = True        # False ⇒ the group heading carries `(unreachabl
 placement_stale: bool = False # the projection is cache-only (owner unreachable)
 ```
 
+*(§1.3.1 added `owner_network_name` — the membership's network by NAME, resolved
+by the reader — moved `(unreachable)` entirely into the tooltip's clause (the
+heading retired), and the producer now stamps `created_at` from the federated
+row's `started` claim so a remote row orders by the same key as a local one.)*
+
 and `session/catalog.decorate_rows` (`session/catalog.py:569`) is **the one join
 point**: it already reads the live registry and the wake index for the whole
 list, and it is where the peer projection is merged in (a scan of the local
 relay's cached projection, not one socket per row — the projection is already a
 local cache; the sidebar never blocks on a network read).
 
-`CatalogEntry` (`session/catalog.py:37`) needs nothing new: it wraps `SessionRow`
-and the `_section_of` change reads the row's `owner_device`/`owner_device_name`
-(mobility §9.2's names, adopted in §2.6).
+`CatalogEntry` (`session/catalog.py:37`) needs nothing new: it wraps `SessionRow`,
+and every reader — `_unpinned_rank` for the bins, `_describe` for the hover —
+reads the fields off the row (mobility §9.2's names, adopted in §2.6).
 
 **Empty and degraded states.**
 
-* **Zero peers / feature off:** no peer section exists, `_SECTION_NAMES`'s four
-  keys and every label are what they are today. **Byte-identical frame** (§4.1).
-* **Peer unreachable, rows cached:** the section renders from the cache with
-  `(unreachable)` in the heading and the rows' marks in `dim`; pressing Enter on
-  one opens the existing unreachable/unavailable path, whose sentence names the
-  `/resume` and the last-known state rather than "session not found".
-* **Peer unreachable, nothing cached:** the section is absent (an empty section
-  contributes no header) and the *peer* is still visible on `/network peers` and
-  on `/network`'s screen — which is the reason those exist separately from the
-  sidebar.
+* **Zero peers / feature off:** no remote row exists and no mark is painted;
+  `_SECTION_NAMES`'s four keys and every label are what they are today.
+  **Byte-identical frame** (§4.1).
+* **Peer unreachable, rows cached (revised, §1.3.1):** the cached rows file into
+  their ordinary bins, `dim`-marked, and each tooltip carries
+  `— unreachable: <glossed reason>`; pressing Enter on one opens the existing
+  unreachable/unavailable path, whose sentence names the `/resume` and the
+  last-known state rather than "session not found".
+* **Peer unreachable, nothing cached:** contributes nothing to the list — no
+  rows (§8.3) and, since §1.3.1, no chrome either (the heading-only state is
+  gone) — and the *peer* is still visible on `/network peers` and on `/network`'s
+  screen, which is the reason those exist separately from the sidebar.
 * **Degraded projection read:** the existing `SessionRow.degraded` tuple
   (`resume.py:1930`) gains `"peers"` when the projection could not be read, and
   the sidebar's existing "could not read" treatment covers it — the same
   mechanism that exists because a swallowed registry failure once rendered as
   "Nothing running right now" (`session/catalog.py:569-606`).
+
+#### 1.3.1 Revision — the per-device axis retired (operator convergence, 2026-10-05)
+
+**What changed and why.** The operator reported the two sidebars had converged on
+the wrong shape — remote sessions segregated into a section of their own — and
+asked the segregation removed. Decision 1's per-device axis (rank 3, the
+`⇄ <label>` headings, and the heading-only silent state) is RETIRED in both
+repos, and the convention both now name — the sentence lives at the TUI's
+row-normalisation point, `SessionSidebar._unpinned_rank`, and the sibling
+`feat/sidebar-remote-rows` names the same one — is:
+
+> Remote rows are first-class: they file into the same bins as local rows under
+> the same ordering rule, carry a per-row indicator, and their hover reads the
+> owning device and its network; there is no separate remote section.
+
+**What each of Decision 1's claims becomes.**
+
+* *Sections:* a remote row takes `1 if active else 2` (`CatalogEntry.active` —
+  pending, unseen or live), like every local row; `★ Pinned` and
+  `⌥ Subagent Runs` lift them the ordinary way. `_SECTION_NAMES` loses its fifth
+  key; rank 3 is unassigned (`subagent` keeps 4 rather than renumbering every
+  consumer for a hole nothing reads).
+* *Ordering:* the same `rank` key orders them — which forced the producer to
+  supply the `-created_at` term honestly, because a remote row stamped 0 parked
+  at the bottom of its bin, a soft form of the same segregation.
+  `session/peer_rows.py` stamps the federated row's `started` claim, the only
+  per-row time the wire carries.
+* *The mark:* unchanged — `⇄` in the locality cell on every remote row — and
+  now the only statement of remoteness on the frame, which is why its test says
+  so.
+* *The tooltip:* `on <device> · <network>`, the network by NAME resolved by the
+  reader (`peer_rows._network_names`) from this device's own membership record,
+  because the wire carries only the id. `SessionRow.owner_network_name` is the
+  field.
+* *Silent peers:* a peer that does not answer still contributes no rows (§8.3),
+  and it no longer contributes a heading — there is no heading-only state left.
+  The `unanswered_peers` read stays on the poll because the park detector
+  (`app._note_remote_parks`) needs the roster; the sidebar no longer takes it.
+* *Desktop half:* the same convention retires the desktop sidebar's peer
+  grouping; the sibling PR carries that half's frames.
 
 ### 1.4 `/new remote <peer>` with autofill
 
@@ -1377,7 +1434,7 @@ assert them:
 
 | Test | Asserts |
 |---|---|
-| `tests/unit/tui/test_sidebar_peer_sections.py` | section keys and order; a peer's rows are contiguous; `⇄` is in the prefix slot and column 2 is untouched; the zero-peer frame's `_display_rows()` equals the base revision's |
+| `tests/unit/tui/test_sidebar_peer_sections.py` | merged bins and interleaving by the ordinary rank key; no per-device section outside the four tier names; `⇄` in the locality cell and the title column untouched; the tooltip's device · network clause; the zero-peer frame's `_display_rows()` equals the base revision's |
 | `tests/unit/tui/test_slash_network.py` | `/network` is in `_FRONTEND_LOCAL_SLASHES`; every `NETWORK_SUBCOMMANDS` word is accepted and nothing else is; the picker's offered words equal the handler's accepted words (one list, both readers) |
 | `tests/unit/tui/test_new_remote.py` | the grammatical forms of §1.4.1 and each refusal sentence; the autocomplete rows come from the peer catalogue, and an unreachable peer is offered but refused with its reason |
 | `tests/unit/tui/test_slash_prefixes_text.py` (existing, extended) | the two new registry declarations (`/network` SUBCOMMAND with its vocabulary; `/new` REMOTE_PEER) are stated entry-by-entry rather than defaulted |
@@ -1436,7 +1493,7 @@ isolated config dir), never the stills.
 | D2 | `SlashCommand.subcommands` + `ArgumentShape.REMOTE_PEER` (two small registry additions) | overloading `WORD`; a second command registry; a `:`-delimited `/new remote:peer` |
 | D3 | `/network*` is `FRONTEND_LOCAL` | routing lifecycle to the session's owner |
 | D4 | `NetworkScreen` modelled on `InfoScreen`, two-phase | a notice listing; a `ReportView` |
-| D5 | Peer = a new section axis (rank 3), existing tiers intact | nesting tiers inside peers; per-row marks only; every row under a device |
+| D5 | Peer = a new section axis (rank 3), existing tiers intact — **RETIRED 2026-10-05, §1.3.1: remote rows are first-class in the ordinary bins** | nesting tiers inside peers; per-row marks only; every row under a device |
 | D6 | Locality mark in the **cursor slot's locality cell** (column 3; the pin cell's own pair sits ahead of it since #1357 slice 2a) | the spine's suggested status-glyph column (owned by the urgency ladder); a reserved leading cell |
 | D7 | Mobility keeps the spine's spelling — `/move <id> --to <peer\|local>` in the TUI, `lop sessions move … --to` in the CLI — with `--to` as the discriminant and an explicit ambiguity refusal | a separate `/handoff`: cleaner grammar, but the spine names `/move` and mobility §4.2 landed it, so a third spelling would be the divergence |
 | D8 | Panel `d`/`shift+P`, selection-scoped, with typed confirmation for panic | a global chord; a bare `p`; yes/no for panic |

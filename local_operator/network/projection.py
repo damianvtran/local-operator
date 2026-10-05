@@ -378,8 +378,8 @@ class RelayPeerCatalog:
         ``peers``/``sessions``. Both were ``None`` on every call, so
         ``peers()`` returned ``[]``, ``_load()`` returned ``[]``, and
         ``peer_session_rows()`` returned ``()`` on every device that has a
-        relay — the remote rows the sidebar's ``⇄`` tier, the per-device
-        heading and the ``/resume`` guard all read. It survived a green suite
+        relay — the remote rows the sidebar's ``⇄`` mark and the ``/resume``
+        guard all read. It survived a green suite
         because every producer test stood a fake in for this class, so
         ``_call`` was never exercised against a real reply.
 

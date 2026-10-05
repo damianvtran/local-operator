@@ -2590,11 +2590,15 @@ class SessionRow(NamedTuple):
     #: older client keeps rendering exactly as it does today.
     degraded: tuple[str, ...] = ()
     #: Immutable conversation birth, not transcript activity or runtime start.
-    #: Unknown legacy dates tie at zero and are ordered by session id.
+    #: Unknown legacy dates tie at zero and are ordered by session id. The
+    #: REMOTE producer stamps the federated row's ``started`` claim here (the
+    #: only per-row time a peer listing carries — ``session/peer_rows.py``
+    #: says why), so a remote row orders against this device's own by the
+    #: same key instead of collapsing below every local row.
     created_at: float = 0.0
 
     # -- where the session LIVES (the mesh's half of R6) --------------------
-    # The five fields below are ``docs/design/mesh-ui.md`` §1.3's, named there
+    # The fields below are ``docs/design/mesh-ui.md`` §1.3's, named there
     # after ``mesh-session-mobility.md`` §9.2's row vocabulary rather than
     # invented locally: one wire shape, one spelling, so a client that groups by
     # ``owner_device_name`` cannot disagree with the feed about what a device is
@@ -2612,10 +2616,22 @@ class SessionRow(NamedTuple):
     locality: str = ""
     #: The owning device's member id. Empty for a local session.
     owner_device: str = ""
-    #: The owning device's human NAME — the heading and the tooltip read this,
-    #: never the id, because a 32-hex device id is not something a user
-    #: recognises their own laptop by.
+    #: The owning device's human NAME — the tooltip reads this, never the id,
+    #: because a 32-hex device id is not something a user recognises their own
+    #: laptop by.
     owner_device_name: str = ""
+    #: The mesh network the row was projected through, by human NAME, for the
+    #: tooltip's location clause (and its desktop sibling's hover/accessible
+    #: name). Resolved by the reader that owns the store — ``session/
+    #: peer_rows.py`` reads it off this device's own membership record for the
+    #: ``(device, network)`` the projection reported — because the federated row
+    #: carries only the network's id and a 32-hex id is no more a name to a
+    #: person than a device id is. Empty for a local row, and empty for a remote
+    #: row whose membership name could not be read; the clause is then omitted
+    #: rather than guessed. The ID deliberately rides nothing: no surface paints
+    #: it, and the §2.8.1 follow-up (a per-device ``networks: [...]`` list) is
+    #: where an id-carrying shape belongs if one is ever needed.
+    owner_network_name: str = ""
     #: Whether the owning device answered on the last projection read. ``True``
     #: for local rows, and the default for remote ones — a remote row is only
     #: ever stamped by a reader that just answered (§8.3: a peer that does not
@@ -3316,7 +3332,7 @@ def session_state_words(state: str) -> str:
     device with NO runtime behind it right now. It is also the token
     ``/network sessions`` printed in its STATE column (UX round 5, U29), where it
     was a third vocabulary for a state the rest of the app already shows: the
-    sidebar paints that same session under a ``⇄`` heading with a row mark, and
+    sidebar paints that same session behind a ``⇄`` mark, and
     the listing's reader had to infer three of its four columns from shape alone.
 
     "not running" is the app's own phrase for exactly this condition rather than
