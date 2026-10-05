@@ -4790,3 +4790,62 @@ async def test_the_picker_ask_total_can_be_restated_after_an_off_thread_read() -
         await pilot.pause()
         assert "asks:" not in screen._filter_text().plain
         assert screen._asks_span is None
+
+
+def _painted_span_style(text, index: int):
+    """The style of the span covering ``index`` in ``text``, or None."""
+    for span in text.spans:
+        if span.start <= index < span.end:
+            return span.style
+    return None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_note_lights_and_takes_the_hand_like_the_door_it_is() -> None:
+    """D14/U12: under the default config this note IS the fleet surface.
+
+    With `tui.sidebar_visible=False` the picker's count is the only fleet surface
+    a user ever sees, and it is a real press target — but it was painted ``dim``,
+    byte-identically to the inert ``N sessions`` legend two cells to its right,
+    with the same ``default`` pointer and no shape under the pointer. Measured:
+    ``dim`` on this row's ground is 2.72:1 on the light ramp. The door now wears
+    the sidebar note's own affordance (a style on its cells, never new text) and
+    an ink that clears the ground on both ramps.
+    """
+    app = _PickerHost([_row("first1", "one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        screen.set_asks_total(3)
+        await pilot.pause()
+        span = screen._asks_span
+        assert span is not None
+        painted = screen._filter_text()
+        style = _painted_span_style(painted, span[0])
+        assert style is not None and style.color is not None
+
+        def truecolor(value) -> tuple[int, int, int]:
+            colour = value if isinstance(value, Color) else Color.parse(str(value))
+            return colour.get_truecolor()
+
+        door = theme_mod.semantic_color("muted")
+        dim = theme_mod.semantic_color("dim")
+        assert truecolor(style.color) == truecolor(door), (style, door)
+        assert truecolor(style.color) != truecolor(dim), "the door wears the legend's ink"
+        assert style.underline is not True, "the resting state is not underlined"
+
+        # UNDER THE POINTER: the hand, and the underline on exactly the note's
+        # own cells (the same span the press target reads).
+        x = int(screen._filter.content_region.x) + span[0]
+        y = int(screen._filter.region.y)
+        screen.on_mouse_move(_Click(x, y))
+        await pilot.pause()
+        assert screen._asks_hover is True
+        assert screen.styles.pointer == "pointer"
+        hovered = _painted_span_style(screen._filter_text(), span[0])
+        assert hovered is not None and hovered.underline is True
+        # The separator one cell left is NOT the door: no shape, no hand.
+        screen.on_mouse_move(_Click(x - 1, y))
+        await pilot.pause()
+        assert screen._asks_hover is False
+        assert screen.styles.pointer == "default"

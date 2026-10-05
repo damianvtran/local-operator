@@ -1812,6 +1812,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         #: whenever the note is not painted — nothing outstanding, or a width
         #: that shed it — which is exactly when there is no door to press.
         self._asks_span: tuple[int, int] | None = None
+        #: Whether the pointer rests on that span (design round 2: D14/U12).
+        #: The note is a DOOR, and it used to be painted byte-identically to the
+        #: inert legends two cells to its right — no ground, no shape, and the
+        #: same `default` pointer — so under the default `sidebar_visible=False`
+        #: the only fleet surface a user ever sees read as a statement, not a
+        #: control. Same mechanism the Archived toggle and the sidebar's own
+        #: note already ship: the hand where the press works, and a shape on the
+        #: cells themselves (a style, never new text).
+        self._asks_hover = False
         # Soft matching reruns on every keystroke; a per-screen index caches each
         # digest's token set (and a deduplicated vocabulary over them) so the
         # bounded edit-distance search costs ~13 ms per query change at real
@@ -2371,11 +2380,20 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # now only the hand said so, so the mouse path was invisible until it was
         # used. Computed once because `_clicked_toggle` measures a region.
         on_toggle = index is None and self._clicked_toggle(event)
+        # The ask note is a control too (design round 2: U12), and this is the
+        # one hit test that decides both of its effects: the hand, and the
+        # underline `_filter_text` paints on exactly these cells. Measured
+        # against the SAME span the click reads, so the shape and the press
+        # target cannot disagree.
+        on_asks = index is None and self._clicked_asks_note(event)
         if index != self._hovered:
             self._hovered = index
             self._repaint()
         if on_toggle != self._toggle_hovered:
             self._toggle_hovered = on_toggle
+            self._repaint()
+        if on_asks != self._asks_hover:
+            self._asks_hover = on_asks
             self._repaint()
         # Hand pointer over a row only (a click resumes it); the card's
         # padding and headers keep the default shape — EXCEPT the Archived
@@ -2384,12 +2402,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # The inline-rule assignment drives `Screen.update_pointer_shape()`
         # through the property's own observer and no-ops when the shape did not
         # change.
-        self.styles.pointer = "pointer" if index is not None or on_toggle else "default"
+        self.styles.pointer = "pointer" if index is not None or on_toggle or on_asks else "default"
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._hovered is not None or self._toggle_hovered:
+        if self._hovered is not None or self._toggle_hovered or self._asks_hover:
             self._hovered = None
             self._toggle_hovered = False
+            self._asks_hover = False
             self._repaint()
         self.styles.pointer = "default"
 
@@ -3656,6 +3675,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
         terminals shed the tally and then the hints before they shed the query.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
+        # The door's own ink, one step above the inert legends it sits beside
+        # (design round 2: D14). `dim` on this row's ground is 3.43:1 dark and
+        # **2.72:1 light** — under AA, and byte-identical to the `N sessions`
+        # legend's paint, so the control could not be told from the statement.
+        # `muted` clears both grounds (6.51 dark / 5.18 light) and is still the
+        # quiet register: the row keeps its hierarchy with the DOOR on top.
+        door = Style(color=theme_mod.semantic_color("muted"))
         faint = Style(color=theme_mod.semantic_color("faint"))
         label = Style(color=theme_mod.semantic_color("label"))
         accent = Style(color=theme_mod.semantic_color("accent"))
@@ -3715,7 +3741,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # is what A2 forbids. It is prepended so the counter and the legends
         # keep their established order behind it.
         if self._asks_total > 0:
-            tail.append(f"   asks: {self._asks_total}", style=dim)
+            note = f"asks: {self._asks_total}"
+            tail.append("   ", style=door)
+            tail.append(
+                note,
+                style=Style(underline=True) + door if self._asks_hover else door,
+            )
         if counter is not None:
             first, last, total = counter
             tail.append("   showing ", style=dim)

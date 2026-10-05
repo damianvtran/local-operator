@@ -431,10 +431,17 @@ def delivering_chip(row: AskRow) -> tuple[str, str] | None:
 
     §10's second state, and the one the first cut of this header had no words
     for: an ask the user has ANSWERED whose response row the runtime has not
-    made durable yet. It is PENDING (it belongs in the middle segment and keeps
-    the session's mark — the queue is not finished until the agent has been
-    told) and it is NOT answerable, so the row carries this status word where a
-    settled row carries its chip (round 2: F3/Q1/U4).
+    made durable yet. It is PENDING (it belongs in the middle segment — the
+    queue is not finished until the agent has been told) and it is NOT
+    answerable, so the row carries this status word where a settled row carries
+    its chip (round 2: F3/Q1/U4).
+
+    IT DOES NOT HOLD THE SESSION'S MARK (round 2: F13). The mark is the index's
+    OUTSTANDING set (``open``/``timed_out``, §4.8) unioned with the current
+    session's answerable rows, so it clears the moment the user answers — which
+    is right, because it tracks a debt the USER owes and this ask's debt was
+    paid. The agent's own delivery lag is what this row states; the sidebar is
+    not the surface for it.
 
     The ink is the same `success`/`warning` role a settled answer uses, so a
     reader cannot tell the two apart by colour — they are told apart by the
@@ -1093,8 +1100,8 @@ class AskQueueList(Widget):
         answered — declining or re-answering it is not a gesture this surface
         offers, and it is exactly the window in which a second answer would
         contradict the first. The row still COUNTS as pending (it sits in the
-        middle segment and keeps the session's mark), it just is not a row the
-        picker opens.
+        middle segment; the session's mark cleared when it was answered, per
+        §4.8's outstanding set), it just is not a row the picker opens.
         """
         row = self.current()
         if row is None or row.ask_id != ask_id:

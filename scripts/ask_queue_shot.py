@@ -48,12 +48,16 @@ THE FLEET-SCOPE MODES (design §4/§11: settled rows, the three-way filter):
 THE ROUND-2 MODES (the fixes the reviews asked for):
 
     list-delivering    an ANSWERED ask whose response row is not durable yet:
-                 still PENDING (middle segment, session mark) and no longer
-                 answerable — the frame that used to read `1 settled` over it
+                 still PENDING (middle segment) and no longer answerable — the
+                 frame that used to read `1 settled` over it. The session's
+                 MARK has cleared by then (it tracks the user's debt)
     in-flight    one row mid-engage: `…` in the glyph cell, inert to every
                  gesture, which is the whole double-fire guard (F2/U5)
     list-fleet-capped  the FLEET list over an index at the projection cap: the
                  split is withheld and the backend tally stated (F6)
+    list-nocolor   the `list` state on a colour-less render (`NO_COLOR`), the
+                 D10 coverage frame — re-asserted above the app import, since
+                 the harness pops NO_COLOR by design (design round 2: D11)
 
 WHY THE TRANSCRIPT IS SEEDED FIRST. Every frame here has to answer "can the
 user still read the conversation behind this surface?" — the bar is one row in
@@ -78,6 +82,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
 isolate_capture()
+# THE COLOUR-LESS FRAME IS AN EXPLICIT MODE, NOT AN INHERITED VARIABLE (design
+# round 2: D11). `isolate_capture` POPS ``NO_COLOR`` on purpose — an operator's
+# shell must not silently grey every capture — and the consequence was that
+# "shoot the NO_COLOR frame" was impossible: invoking a mode with
+# ``NO_COLOR=1`` re-rendered the colour frame byte-for-byte, so the coverage
+# claim was disproven by its own artifact. The mode marker in ``argv`` is the
+# opt-in, re-asserted HERE (above the app import, because the ramp and the
+# console are built at MOUNT), and the frame's own filename states it.
+if any("nocolor" in argument for argument in sys.argv):
+    os.environ["NO_COLOR"] = "1"
 
 from local_operator.asks import policy  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
@@ -371,7 +385,7 @@ async def main() -> None:
             app._sync_ask_surface(ask_rows(THREE))
         elif mode == "bar-timeout":
             app._sync_ask_surface(ask_rows([THREE[2]]))
-        elif mode == "list":
+        elif mode in {"list", "list-nocolor"}:
             app._sync_ask_surface(ask_rows(THREE))
             await pilot.pause()
             app._expand_asks()

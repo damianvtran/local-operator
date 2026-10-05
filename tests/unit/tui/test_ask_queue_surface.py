@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.color import Color
+from rich.style import Style
 
 from local_operator.asks import policy
 from local_operator.tui.app import ASK_ANSWER_PLACEHOLDER, OperatorApp
@@ -1580,3 +1582,43 @@ def test_an_answer_that_landed_late_takes_the_warning_ink():
     # The same weight as the timeout row, which is the whole point of the ink.
     assert late._summary_ink() == AskResponseBlock({"text": "…"}, kind="timeout")._summary_ink()
     assert late._build_content(80).plain
+
+
+async def test_the_ask_marker_paints_the_derived_ink_not_the_raw_accent(enabled):
+    """F16: the palette gate guards the TOKENS; this guards the PAINT.
+
+    `test_palette_contrast.test_the_ask_panel_reads_on_its_own_ground` proves the
+    derived `chip-*` inks clear the panel's ground, but nothing tied
+    `AskQueueList.render` to them — so a revert to raw `accent`/`success` would
+    keep that gate green (the pre-fix code failed it only because the two tokens
+    did not exist). Asserted on the LIGHT ramp, where the two inks are different
+    values, so the assertion discriminates: the marker's own painted span must
+    carry the derived ink and not the raw hue.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        # TWO asks: one expands to its CARD, and this test is about the LIST
+        # (whose header paints the marker this asserts on).
+        app._sync_ask_surface(ask_rows([_row("a1", "Ship it?"), _row("a2", "And to where?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app._apply_theme("light")
+        await _settle(pilot)
+        derived = theme_mod.semantic_color("chip-live")
+        raw = theme_mod.semantic_color("accent")
+        assert derived != raw, "the light ramp is the one where these differ"
+        listing = app.query_one(AskQueueList)
+        text = listing.render()
+        marker_at = text.plain.index(ASK_MARKER)
+        span = next((span for span in text.spans if span.start <= marker_at < span.end), None)
+        assert span is not None, "the marker is painted with no style at all"
+        colour = span.style.color if isinstance(span.style, Style) else None
+        assert colour is not None
+        resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+        painted = resolved.get_truecolor()
+        assert painted == Color.parse(derived).get_truecolor(), (painted, derived)
