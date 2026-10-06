@@ -1,26 +1,32 @@
-# Served-asset checks for #2017 (fix build, 2026-10-06T09:14Z, worktree mobile-2017-focus-zoom)
+# Served-asset checks for #2017 (fix head a0abf8a82, 2026-10-06T12:55Z)
+# generated: 2026-10-06T12:55Z
+# served build (content hashes read from the SPA's own <link>/<script>):
+#   css: assets/index-CHPDfYVB.css
+#   js:  assets/index-CRwSKFzN.js
 
 ## SPA meta (dist/index.html, served at /)
 			name="viewport"
 			content="width=device-width, initial-scale=1, viewport-fit=cover"
 		/>
-		<!-- The brand's island ground; the address bar matches the canvas. -->
 
-## Tokens in served HTML (login page + authed SPA)
-login page:
-(empty = none)
-authed SPA /:
-(empty = none)
+## Tokens in served HTML (login page + authed SPA)  [maximum-scale|user-scalable|text-size-adjust]
+login page:   0
+authed SPA /: 0
 
-## Tokens in served CSS (local_operator/mobile/web/dist/assets/index-CUqFJHkk.css)
-   1 -webkit-text-size-adjust:100%
+## Tokens in served CSS (assets/index-CHPDfYVB.css)
+maximum-scale:            0
+user-scalable:            0
+-webkit-text-size-adjust: 1  (100% is preflight's inert default, not a suppression)
+touch-action:             1
 
-## New focus-zoom rules present in served CSS
-   1 font-size:calc(16px / var(--lo-fit-scale))
-   1 font-size:max(16px,1em)
+## Focus-zoom rules present in served CSS (exact built text)
+default floor:  1 x  font-size:max(16px,1em)
+wide rule:      1 x  font-size:max(calc(16px / var(--lo-fit-scale)),1em)
+bare wide rule (pre-guard, must be 0): 0
+var published by the bundle: 1 reference(s) in assets/index-CRwSKFzN.js
 
-## Tokens in served JS bundle
-(empty = none)
+## Tokens in served JS bundle (assets/index-CRwSKFzN.js)
+maximum-scale|user-scalable: 0
 
-## App source tokens
-(empty = none)
+## App source tokens (local_operator/mobile/web/src)
+(none — the fix adds neither)

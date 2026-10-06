@@ -23,17 +23,49 @@ ride the feature branch and never land on `main`.
   ask-card free-text input materialises in this fixture).
 - `before-*` / `after-*` — the same drivers, the same fixture, the same
   viewports, at the base build and at the fixed head.
-- `served-assets-checks-*.txt` — served HTML/CSS/JS token scans.
+- `served_assets_check.sh` + `served-assets-checks-{before,after}.txt` — what the
+  fixture actually serves (viewport meta, the focus-zoom tokens, the two CSS
+  rules as built). The script writes the SERVED ASSET CONTENT HASHES into the
+  file's own header, so each scan proves which bundle it read.
 
 ## Which build each artifact was captured on
 
-| artifact | build / head |
-|---|---|
-| `before-{vp}-*.png` (composer, `default-*`, `wide-*`) | base `7d612a2db` (pre-fix) |
-| `before-focus-zoom-report.json`, `before-focus-behavior-report.json` | base `7d612a2db` (pre-fix) |
-| `after-{vp}-*.png` (composer, `default-*`, `wide-*`) | head `a0abf8a82` (round-1 remediation) |
-| `after-focus-zoom-report.json`, `after-focus-behavior-report.json` | head `a0abf8a82` |
-| `before-st-second-card.png` | base `7d612a2db` |
+| artifact | build / head | served bundle (recorded in the artifact) |
+|---|---|---|
+| `before-{vp}-*.png` (composer, `default-*`, `wide-*`) | base `7d612a2db` (pre-fix) | `index-D_Q6hwPa.css` / `index-BamXnLrM.js` |
+| `before-focus-zoom-report.json`, `before-focus-behavior-report.json` | base `7d612a2db` | `"provenance"` field: `index-D_Q6hwPa.css` |
+| `after-{vp}-*.png` (composer, `default-*`, `wide-*`) | head `a0abf8a82` (round-1 remediation) | `index-CHPDfYVB.css` / `index-CRwSKFzN.js` |
+| `after-focus-zoom-report.json`, `after-focus-behavior-report.json` | head `a0abf8a82` | `"provenance"` field: `index-CHPDfYVB.css` |
+| `served-assets-checks-before.txt` | base `7d612a2db` | named in its own header |
+| `served-assets-checks-after.txt` | head `a0abf8a82` | named in its own header |
+| `before-st-second-card.png` | base `7d612a2db` | — |
+
+## Round-2 correction (provenance)
+
+The first revision of `served-assets-checks-after.txt` was a scan of the round-1
+head `ae758cbe9` — `index-CUqFJHkk.css`, and the wide rule as the bare
+`calc(16px / var(--lo-fit-scale))` — while this README claimed the `after-*` set
+was captured on `a0abf8a82`. The file was byte-identical across the two evidence
+commits, so nothing inside it could contradict the claim; that is the defect,
+not just the stale numbers. Both `after-*` report JSONs had the same weakness in
+kind: they recorded measurements and nothing about the build they came from, so
+"regenerated on `a0abf8a82`" was not checkable either (they were in fact
+re-run on `a0abf8a82`, and stayed byte-identical because neither change moves a
+computed font or the scale — which is exactly why the assertion needed proof
+rather than inspection).
+
+Fixed at the source, not in the sentence:
+
+- Both drivers now record the served asset hashes **inside every report**
+  (`"provenance": {"served_css": [...], "served_js": [...]}`), read from the
+  SPA's own `<link>`/`<script>` at capture time — a report can no longer assert a
+  build it did not read.
+- `served_assets_check.sh` is now the committed scan and puts the same hashes in
+  the file header; it also counts the bare pre-guard rule explicitly (must be
+  `0` on the fixed build).
+- Every `before-*`/`after-*` artifact was regenerated in a single-build rig run
+  (`after-*` on `a0abf8a82`, `before-*` on `7d612a2db`) and re-copied as a set,
+  so all six dozen artifacts of a side share one run and one build.
 
 The `after-*` set was first captured at `ae758cbe9`; its non-composer frames
 were the overwritten (wide-only) ones the round-1 review flagged (D3) and have
@@ -65,6 +97,8 @@ PYTHONPATH=. .venv/bin/python scripts/mobile_overflow_fixture.py 4317
 # second shell, same env var — the drivers read it and never print it:
 PYTHONPATH=. .venv/bin/python docs/evidence/mobile-2017-focus-zoom/capture_focus_zoom.py <outdir> 4317
 PYTHONPATH=. .venv/bin/python docs/evidence/mobile-2017-focus-zoom/probe_focus_zoom.py <outdir> 4317
+LOP_MOBILE_FIXTURE_PASSWORD=$LOP_MOBILE_FIXTURE_PASSWORD \
+  docs/evidence/mobile-2017-focus-zoom/served_assets_check.sh 4317 <outfile> "(<label>)" local_operator/mobile/web/src
 ```
 
 For the `before-*` set the tree is a throwaway worktree at the base
