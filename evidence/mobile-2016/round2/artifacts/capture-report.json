@@ -1,0 +1,664 @@
+{
+  "port": 4226,
+  "viewport": "390x844",
+  "steps": [
+    {
+      "step": "band-separator",
+      "control": {
+        "label": "mark all 2 read",
+        "rect": {
+          "top": 40,
+          "bottom": 84,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "plain": null,
+      "marking": null,
+      "receipt": null,
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 389,
+          "bottom": 406,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 440,
+          "bottom": 457,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 272,
+      "scrollHeight": 1015,
+      "clientHeight": 743,
+      "seenPosts": 0,
+      "band": {
+        "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+        "rect": {
+          "top": 40,
+          "bottom": 93,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 53
+        },
+        "borderBottomWidth": "1px",
+        "borderBottomColor": "rgb(53, 48, 34)",
+        "boxShadow": "none",
+        "zIndex": "10",
+        "position": "sticky"
+      },
+      "rowRects": [
+        {
+          "top": 40,
+          "bottom": 84,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        },
+        {
+          "top": -76,
+          "bottom": -25,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 51
+        },
+        {
+          "top": -25,
+          "bottom": 26,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 51
+        }
+      ],
+      "focus": {
+        "tag": "BODY",
+        "isBand": false,
+        "classes": "",
+        "outlineStyle": "none",
+        "outlineWidth": "3px",
+        "outlineColor": "rgb(241, 238, 230)",
+        "outlineOffset": "0px"
+      }
+    },
+    {
+      "step": "focus-ring",
+      "afterTab": {
+        "control": {
+          "label": "mark all 2 read",
+          "rect": {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          }
+        },
+        "plain": null,
+        "marking": null,
+        "receipt": null,
+        "markCount": 0,
+        "markRects": [],
+        "scrollTop": 0,
+        "scrollHeight": 743,
+        "clientHeight": 743,
+        "seenPosts": 0,
+        "band": {
+          "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+          "rect": {
+            "top": 92,
+            "bottom": 145,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 53
+          },
+          "borderBottomWidth": "1px",
+          "borderBottomColor": "rgb(53, 48, 34)",
+          "boxShadow": "none",
+          "zIndex": "10",
+          "position": "sticky"
+        },
+        "rowRects": [
+          {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          }
+        ],
+        "focus": {
+          "tag": "BUTTON",
+          "isBand": false,
+          "classes": "flex min-h-11 w-full items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium select-none active:bg-elevated text-ink",
+          "outlineStyle": "solid",
+          "outlineWidth": "2px",
+          "outlineColor": "rgb(56, 201, 106)",
+          "outlineOffset": "2px"
+        }
+      },
+      "control": null,
+      "plain": null,
+      "marking": null,
+      "receipt": {
+        "role": "status",
+        "text": "Marked 2 read.",
+        "rect": {
+          "top": 92,
+          "bottom": 120,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 28
+        }
+      },
+      "markCount": 0,
+      "markRects": [],
+      "scrollTop": 0,
+      "scrollHeight": 743,
+      "clientHeight": 743,
+      "seenPosts": 1,
+      "band": {
+        "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+        "rect": {
+          "top": 92,
+          "bottom": 145,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 53
+        },
+        "borderBottomWidth": "1px",
+        "borderBottomColor": "rgb(53, 48, 34)",
+        "boxShadow": "none",
+        "zIndex": "10",
+        "position": "sticky"
+      },
+      "rowRects": [
+        {
+          "top": 92,
+          "bottom": 136,
+          "left": 334,
+          "right": 378,
+          "w": 44,
+          "h": 44
+        }
+      ],
+      "focus": {
+        "tag": "DIV",
+        "isBand": true,
+        "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+        "outlineStyle": "solid",
+        "outlineWidth": "2px",
+        "outlineColor": "rgb(56, 201, 106)",
+        "outlineOffset": "2px"
+      }
+    },
+    {
+      "step": "degraded-no-count",
+      "postsBeforeStep": 0,
+      "control": null,
+      "plain": {
+        "label": "mark all as read",
+        "rect": {
+          "top": 92,
+          "bottom": 136,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "marking": null,
+      "receipt": {
+        "role": "alert",
+        "text": "Could not read what is unread \u2014 nothing was cleared. Try again.",
+        "rect": {
+          "top": 144,
+          "bottom": 191,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 47
+        }
+      },
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 716,
+          "bottom": 733,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 767,
+          "bottom": 784,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 0,
+      "scrollHeight": 1070,
+      "clientHeight": 743,
+      "seenPosts": 0,
+      "band": {
+        "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+        "rect": {
+          "top": 92,
+          "bottom": 200,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 108
+        },
+        "borderBottomWidth": "1px",
+        "borderBottomColor": "rgb(53, 48, 34)",
+        "boxShadow": "none",
+        "zIndex": "10",
+        "position": "sticky"
+      },
+      "rowRects": [
+        {
+          "top": 92,
+          "bottom": 136,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        },
+        {
+          "top": 144,
+          "bottom": 188,
+          "left": 334,
+          "right": 378,
+          "w": 44,
+          "h": 44
+        },
+        {
+          "top": 251,
+          "bottom": 302,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 51
+        }
+      ],
+      "focus": {
+        "tag": "BUTTON",
+        "isBand": false,
+        "classes": "flex min-h-11 w-full items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium select-none active:bg-elevated text-ink",
+        "outlineStyle": "none",
+        "outlineWidth": "3px",
+        "outlineColor": "rgb(241, 238, 230)",
+        "outlineOffset": "0px"
+      },
+      "settled": {
+        "control": null,
+        "plain": {
+          "label": "mark all as read",
+          "rect": {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          }
+        },
+        "marking": null,
+        "receipt": {
+          "role": "alert",
+          "text": "Could not read what is unread \u2014 nothing was cleared. Try again.",
+          "rect": {
+            "top": 144,
+            "bottom": 191,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 47
+          }
+        },
+        "markCount": 2,
+        "markRects": [
+          {
+            "top": 716,
+            "bottom": 733,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          },
+          {
+            "top": 767,
+            "bottom": 784,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          }
+        ],
+        "scrollTop": 0,
+        "scrollHeight": 1070,
+        "clientHeight": 743,
+        "seenPosts": 0,
+        "band": {
+          "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+          "rect": {
+            "top": 92,
+            "bottom": 200,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 108
+          },
+          "borderBottomWidth": "1px",
+          "borderBottomColor": "rgb(53, 48, 34)",
+          "boxShadow": "none",
+          "zIndex": "10",
+          "position": "sticky"
+        },
+        "rowRects": [
+          {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          },
+          {
+            "top": 144,
+            "bottom": 188,
+            "left": 334,
+            "right": 378,
+            "w": 44,
+            "h": 44
+          },
+          {
+            "top": 251,
+            "bottom": 302,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 51
+          }
+        ],
+        "focus": {
+          "tag": "BUTTON",
+          "isBand": false,
+          "classes": "flex min-h-11 w-full items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium select-none active:bg-elevated text-ink",
+          "outlineStyle": "none",
+          "outlineWidth": "3px",
+          "outlineColor": "rgb(241, 238, 230)",
+          "outlineOffset": "0px"
+        }
+      }
+    },
+    {
+      "step": "receipt-window",
+      "elapsedAwaySeconds": 15.8,
+      "cleared": {
+        "control": null,
+        "plain": null,
+        "marking": null,
+        "receipt": {
+          "role": "status",
+          "text": "Marked 2 read.",
+          "rect": {
+            "top": 92,
+            "bottom": 120,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 28
+          }
+        },
+        "markCount": 0,
+        "markRects": [],
+        "scrollTop": 0,
+        "scrollHeight": 1059,
+        "clientHeight": 743,
+        "seenPosts": 1,
+        "band": {
+          "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+          "rect": {
+            "top": 92,
+            "bottom": 145,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 53
+          },
+          "borderBottomWidth": "1px",
+          "borderBottomColor": "rgb(53, 48, 34)",
+          "boxShadow": "none",
+          "zIndex": "10",
+          "position": "sticky"
+        },
+        "rowRects": [
+          {
+            "top": 92,
+            "bottom": 136,
+            "left": 334,
+            "right": 378,
+            "w": 44,
+            "h": 44
+          },
+          {
+            "top": 248,
+            "bottom": 299,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 51
+          },
+          {
+            "top": 299,
+            "bottom": 350,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 51
+          }
+        ],
+        "focus": {
+          "tag": "BUTTON",
+          "isBand": false,
+          "classes": "flex min-h-11 w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated",
+          "outlineStyle": "none",
+          "outlineWidth": "3px",
+          "outlineColor": "rgb(241, 238, 230)",
+          "outlineOffset": "0px"
+        }
+      },
+      "whileAway": {
+        "control": null,
+        "plain": null,
+        "marking": null,
+        "receipt": null,
+        "markCount": 0,
+        "markRects": [],
+        "scrollTop": null,
+        "scrollHeight": null,
+        "clientHeight": null,
+        "seenPosts": 1,
+        "band": null,
+        "rowRects": [],
+        "focus": {
+          "tag": "BODY",
+          "isBand": false,
+          "classes": "",
+          "outlineStyle": "none",
+          "outlineWidth": "3px",
+          "outlineColor": "rgb(241, 238, 230)",
+          "outlineOffset": "0px"
+        }
+      },
+      "onReturn": {
+        "control": null,
+        "plain": null,
+        "marking": null,
+        "receipt": {
+          "role": "status",
+          "text": "Marked 2 read.",
+          "rect": {
+            "top": 92,
+            "bottom": 120,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 28
+          }
+        },
+        "markCount": 0,
+        "markRects": [],
+        "scrollTop": 0,
+        "scrollHeight": 1015,
+        "clientHeight": 743,
+        "seenPosts": 1,
+        "band": {
+          "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+          "rect": {
+            "top": 92,
+            "bottom": 145,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 53
+          },
+          "borderBottomWidth": "1px",
+          "borderBottomColor": "rgb(53, 48, 34)",
+          "boxShadow": "none",
+          "zIndex": "10",
+          "position": "sticky"
+        },
+        "rowRects": [
+          {
+            "top": 92,
+            "bottom": 136,
+            "left": 334,
+            "right": 378,
+            "w": 44,
+            "h": 44
+          },
+          {
+            "top": 196,
+            "bottom": 247,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 51
+          },
+          {
+            "top": 247,
+            "bottom": 298,
+            "left": 4,
+            "right": 386,
+            "w": 382,
+            "h": 51
+          }
+        ],
+        "focus": {
+          "tag": "BODY",
+          "isBand": false,
+          "classes": "",
+          "outlineStyle": "none",
+          "outlineWidth": "3px",
+          "outlineColor": "rgb(241, 238, 230)",
+          "outlineOffset": "0px"
+        }
+      },
+      "control": null,
+      "plain": null,
+      "marking": null,
+      "receipt": {
+        "role": "status",
+        "text": "Marked 2 read.",
+        "rect": {
+          "top": 92,
+          "bottom": 120,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 28
+        }
+      },
+      "markCount": 0,
+      "markRects": [],
+      "scrollTop": 0,
+      "scrollHeight": 1015,
+      "clientHeight": 743,
+      "seenPosts": 1,
+      "band": {
+        "classes": "sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent border-b border-hairline",
+        "rect": {
+          "top": 92,
+          "bottom": 145,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 53
+        },
+        "borderBottomWidth": "1px",
+        "borderBottomColor": "rgb(53, 48, 34)",
+        "boxShadow": "none",
+        "zIndex": "10",
+        "position": "sticky"
+      },
+      "rowRects": [
+        {
+          "top": 92,
+          "bottom": 136,
+          "left": 334,
+          "right": 378,
+          "w": 44,
+          "h": 44
+        },
+        {
+          "top": 196,
+          "bottom": 247,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 51
+        },
+        {
+          "top": 247,
+          "bottom": 298,
+          "left": 4,
+          "right": 386,
+          "w": 382,
+          "h": 51
+        }
+      ],
+      "focus": {
+        "tag": "BODY",
+        "isBand": false,
+        "classes": "",
+        "outlineStyle": "none",
+        "outlineWidth": "3px",
+        "outlineColor": "rgb(241, 238, 230)",
+        "outlineOffset": "0px"
+      }
+    }
+  ]
+}
