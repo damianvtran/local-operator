@@ -555,10 +555,14 @@ def queued_ask_engine_live(session: Any) -> bool:
       exactly on the blocking arm (the flag off, or no host that can show an
       ask), and constructing it is side-effect-free and already happens at
       turn binding;
-    * a VIEWER — a facade with no queue behind it — reads the ``asks`` wire
-      field's PRESENCE off its frontend state, which the owner publishes only
-      while queued asks are live in its process (``FrontendSessionState.asks``
-      documents the capability-proxy rule).
+    * a VIEWER — a facade with no queue behind it — reads the presence of the
+      ``asks`` OR ``asks_open`` wire field off its frontend state, which the
+      owner publishes only while the queued engine is live in its process
+      (``FrontendSessionState.asks`` documents the capability-proxy rule; the
+      WIRE FIX added ``asks_open`` to the read because a live-but-empty queue
+      publishes the tally with the rows absent, and a viewer that read only
+      ``asks`` would misclassify it as the blocking arm — painting a live ask
+      row that then vanished, the flash the settle-only rule exists to stop).
 
     An un-negotiated mixed build answers ``False``; callers keep today's
     mount and the settle marker still drops the trace (the flash residual the
@@ -579,7 +583,7 @@ def queued_ask_engine_live(session: Any) -> bool:
         return False
     if state is None:
         return False
-    return getattr(state, "asks", None) is not None
+    return getattr(state, "asks", None) is not None or getattr(state, "asks_open", None) is not None
 
 
 def is_harness_notice_row(row: Any) -> bool:

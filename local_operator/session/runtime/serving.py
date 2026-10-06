@@ -5898,8 +5898,9 @@ class ServingSessionHandle(SessionHandle):
         list rows cannot disagree about which asks are OUTSTANDING. Absence
         (``None``)
         is carried through rather than flattened to an empty list: presence is
-        the client-side capability proxy, and a runtime without queued asks must
-        look exactly like the old runtime it is.
+        the client-side capability proxy — of the rows OR the tally (the WIRE
+        FIX; ``(None, 0)`` is a live-but-empty queue) — and a runtime WITHOUT
+        the engine must look exactly like the old runtime it is.
         """
         from local_operator.session.frontend_state import ask_wire
 

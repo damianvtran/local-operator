@@ -8805,13 +8805,16 @@ class Session:
         values into the periodic snapshot, so the two can never disagree about
         which asks are OUTSTANDING.
 
-        PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
-        not an empty list — whenever the queue is not there (the flag is off, or
-        this host has no ask surface). A client keys "this runtime has queued
-        asks" on the field's presence, which is the design's own rule for the
-        whole A2→F window: while the server default is still blocking, a field
-        that shipped anyway would take a new client down the queued path against
-        a blocking backend.
+        PRESENCE IS THE CAPABILITY PROXY, so a queue that is NOT there (the flag
+        is off, or this host has no ask surface) publishes ABSENCE in BOTH
+        fields — ``None``, not an empty list. A client keys "this runtime runs
+        the queued-ask engine" on the presence of ``asks`` OR ``asks_open``
+        (the WIRE FIX), which is the design's own rule for the whole A2→F
+        window: while the server default is still blocking, a field that shipped
+        anyway would take a new client down the queued path against a blocking
+        backend. A live queue with nothing folded is not that case: it publishes
+        ``asks_open: 0`` with the rows absent, so a client can still read the
+        engine as live — see ``frontend_state.ask_wire`` for the split.
         """
         from local_operator.session.frontend_state import ask_wire
 
