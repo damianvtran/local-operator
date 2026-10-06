@@ -108,7 +108,9 @@ Four states at 390x844, each a rendered frame plus the numbers behind it
 - `artifacts/01-band-separator-max-scroll-390x844.png` — the pinned band at the
   list's own maximum scroll (`scrollTop` 272 of 1015), now carrying its own edge:
   computed **`border-bottom-width: 1px`** (was `0px`, `box-shadow: none`), band
-  rect 40–92, with two unread marks still visible beneath it. **Design D6.**
+  rect **40–93 (`h 53`)** — one pixel taller than the pre-fix band (`40–92`,
+  `h 52`) because the edge is part of the box (design round 3, D9) — with two
+  unread marks still visible beneath it. **Design D6.**
 - `artifacts/02-focus-ring-390x844.png` — keyboard activation with a query that
   registers no card: after a real `Tab` the focus is the control, and after a real
   `Enter` the batch clears and the fallback lands on the band **with a visible
