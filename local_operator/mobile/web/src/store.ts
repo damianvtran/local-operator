@@ -137,6 +137,55 @@ export function usePinMarks(): ReadonlyMap<string, boolean> {
 	return useSyncExternalStore(subscribe, () => pinMarks);
 }
 
+/** The mark-all receipt, as MODULE state rather than component state.
+
+    Two things the component-local version could not answer (design D3, UX
+    U2/U8): a glance into a conversation and back (``#/`` -> ``#/s/<id>`` ->
+    ``#/``) unmounted the screen and erased the receipt -- the only explanation
+    of a partial or failed clear -- and the receipt never expired, so it
+    outlived the gesture indefinitely. Module state carries it across a route
+    change; the TTL bounds it; ``null`` clears it (the next press, or the
+    dismiss control on the line itself).
+
+    Same shape as ``pinMarks`` above and for the same reason: this is a slice
+    of state with its own change signal, so a caller that only reads the list
+    must not be made to re-render by it. */
+export interface MarkNotice {
+	text: string;
+	danger: boolean;
+}
+
+let markNotice: MarkNotice | null = null;
+let markNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** How long a receipt survives without the reader dismissing it -- long enough
+    to read after a glance away, short enough that it does not outlive the
+    gesture it describes (UX round 1, U8). */
+export const MARK_NOTICE_TTL_MS = 12000;
+
+export function useMarkNotice(): MarkNotice | null {
+	return useSyncExternalStore(subscribe, () => markNotice);
+}
+
+/** Publish (``notice``) or clear (``null``) the receipt. Every publish re-arms
+    the TTL, so a second gesture's receipt gets its own full window; the timer
+    is cleared first so a superseded receipt can never expire its successor. */
+export function publishMarkNotice(notice: MarkNotice | null): void {
+	if (markNoticeTimer !== null) {
+		clearTimeout(markNoticeTimer);
+		markNoticeTimer = null;
+	}
+	markNotice = notice;
+	if (notice !== null) {
+		markNoticeTimer = setTimeout(() => {
+			markNotice = null;
+			markNoticeTimer = null;
+			emit();
+		}, MARK_NOTICE_TTL_MS);
+	}
+	emit();
+}
+
 /** The daemon's capability answer (``capabilities`` on the list payload). */
 export function useCapabilities(): Capabilities | null {
 	return useSyncExternalStore(subscribe, () => capabilities);

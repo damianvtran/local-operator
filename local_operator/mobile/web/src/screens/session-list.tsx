@@ -3,7 +3,7 @@
  * current by the list SSE; footer row with new session, past sessions,
  * projects and the theme picker.
  *
- * The unread pile gets ONE gesture (issue #2016): a `mark all as read` control
+ * The unread pile gets ONE gesture (issue #2016): a `mark all N read` control
  * rides above the sections only while the daemon's unread aggregate is
  * non-empty, clearing every rendered completion in a single write.
  *
@@ -41,7 +41,9 @@ import { navigate } from "../router";
 import {
 	applySessionPin,
 	clearSessionPinMark,
+	publishMarkNotice,
 	retainSessionListStream,
+	useMarkNotice,
 	usePinMarks,
 	useSessions,
 } from "../store";
@@ -78,7 +80,23 @@ function markAllReceipt(read: number, superseded: number, unknown: number): stri
 				: `${unknown} could not be found on this machine and stay unread.`,
 		);
 	}
-	return parts.join(" ") || "Nothing unread.";
+	return parts.join(" ") || "Nothing to clear.";
+}
+
+/** A failed bulk clear, in the reader's words (UX round 1, U5).
+
+    ``fetch`` rejects with a bare ``TypeError`` whose message is browser-ese
+    ("Failed to fetch"), and that string would be the only account the reader
+    gets of a clear that did not happen — so it must name what happened and what
+    to do. Any other failure keeps the daemon's own message, which is already a
+    sentence. */
+function markAllFailure(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	const unreachable =
+		message === "" ||
+		/failed to fetch|networkerror|load failed|network request failed/i.test(message);
+	const reason = unreachable ? "the daemon could not be reached" : message;
+	return `Nothing was cleared — ${reason}. Try again.`;
 }
 
 /** The shared noun for a delegated child, in the singular at one.
@@ -954,14 +972,21 @@ export function SessionListScreen() {
 	   population" — the route's count is pinned equal to the number of unseen
 	   rows in the same snapshot, tests/unit/mobile/test_attention_unread.py), so
 	   the row set IS the badge. The TOKENS such a gesture must name are the one
-	   thing a summary does not carry: they live on the unread read, taken at
-	   the moment of the press so listing and clearing are one set (the TUI's
-	   rule for /notifications read), and the store still compares every pair
-	   against the conversation's CURRENT completion inside one write — a result
-	   that landed after the read answers superseded and stays unread. */
+	   thing a summary does not carry: they live on the unread read, taken at the
+	   moment of the press — and then INTERSECTED with the pile this screen is
+	   painting, so the batch is the rows the reader rendered (the desktop route's
+	   own rule) rather than everything the read happened to enumerate. The store
+	   still compares every pair against the conversation's CURRENT completion
+	   inside one write, so a result that landed after the read answers superseded
+	   and stays unread. */
 	const unreadCount = sessions.filter((session) => session.unseen).length;
 	const [markingAll, setMarkingAll] = useState(false);
-	const [markNotice, setMarkNotice] = useState<{ text: string; danger: boolean } | null>(null);
+	/* The receipt is STORE state, not component state: this screen unmounts on the
+	   way into a conversation and back, and the receipt is the only explanation
+	   of a partial or failed clear, so it must outlive the route change (UX U2);
+	   the store bounds it with a TTL and offers a dismiss (UX U8). */
+	const markNotice = useMarkNotice();
+	const bandRef = useRef<HTMLDivElement>(null);
 	/* THE CONTROL IS MOUNTED ONLY WHILE IT HAS A PILE, with a short exit window so
 	   the collapse below still has content to slide away. Steady-state unmount,
 	   not a parked zero-height copy, for two reasons: a hidden-but-focusable
@@ -982,14 +1007,58 @@ export function SessionListScreen() {
 		const timer = setTimeout(() => setHeldControl(false), 220);
 		return () => clearTimeout(timer);
 	}, [unreadCount]);
+	/* KEEP THE KEYBOARD WHERE THE GESTURE WAS (UX round 1, U3). The control
+	   unmounts when the pile clears, and a focused element removed from the DOM
+	   drops focus to `<body>`, so the next Tab restarts at the top of the
+	   document. When that happens — and only when the focus we lost was ours —
+	   move it to the first card, whose DOM position continues the tab walk into
+	   the list. A pile cleared somewhere else must NOT steal the reader's focus,
+	   hence the guard on what was focused. */
+	const showMarkAllRef = useRef(false);
+	useEffect(() => {
+		if (showMarkAll) {
+			showMarkAllRef.current = true;
+			return;
+		}
+		if (!showMarkAllRef.current) return;
+		showMarkAllRef.current = false;
+		const active = document.activeElement;
+		const ours = active === null || active === document.body || bandRef.current?.contains(active);
+		if (!ours) return;
+		const firstCard = cardRefs.current.values().next().value;
+		if (firstCard) firstCard.focus();
+		else bandRef.current?.focus();
+	}, [showMarkAll]);
 	const markAllRead = async () => {
 		if (markingAll) return;
 		setMarkingAll(true);
-		setMarkNotice(null);
+		publishMarkNotice(null);
 		try {
 			const badge = await getAttentionUnread();
+			/* A DEGRADED READ IS NOT AN EMPTY PILE (agent MAJOR-1 = design D1).
+			   The route answers 200 with `degraded` naming the sources and NO
+			   `conversations` key at all — "we could not look", which this file's
+			   own `AttentionUnread` type says must never be served as "nothing
+			   unread". Read the failure BEFORE the empty-set branch, so the reader is
+			   told the truth and nothing is posted. */
+			if (badge.degraded?.length) {
+				publishMarkNotice({
+					text: "Could not read what is unread — nothing was cleared. Try again.",
+					danger: true,
+				});
+				return;
+			}
+			/* ONLY THE ROWS THE READER RENDERED (agent MINOR-2). The badge is read at
+			   the press for the TOKENS, but it is intersected with the pile this screen
+			   paints: a completion that landed between the last list frame and the
+			   press is not in the batch, which is the desktop route's own "only what
+			   the caller rendered" rule. The store's current-token compare still stops
+			   anything newer than the READ from clearing. */
+			const painted = new Set(
+				sessions.filter((session) => session.unseen).map((session) => session.session_id),
+			);
 			const items = (badge.conversations ?? []).flatMap((conversation) =>
-				conversation.completion_token
+				conversation.completion_token && painted.has(conversation.session_id)
 					? [
 							{
 								session_id: conversation.session_id,
@@ -999,11 +1068,12 @@ export function SessionListScreen() {
 					: [],
 			);
 			if (items.length === 0) {
-				setMarkNotice({ text: "Nothing unread.", danger: false });
+				// The desktop contract's own sentence for a genuinely empty pile.
+				publishMarkNotice({ text: "Nothing to clear.", danger: false });
 				return;
 			}
 			const receipt = await markAllSeen(items);
-			setMarkNotice({
+			publishMarkNotice({
 				text: markAllReceipt(
 					receipt.read.length,
 					receipt.superseded.length,
@@ -1012,12 +1082,7 @@ export function SessionListScreen() {
 				danger: false,
 			});
 		} catch (error) {
-			/* The daemon's own message, in the line beside the footer — the same
-			   honesty rule the new-session refusal follows. */
-			setMarkNotice({
-				text: `Could not mark read: ${String((error as Error).message ?? error)}`,
-				danger: true,
-			});
+			publishMarkNotice({ text: markAllFailure(error), danger: true });
 		} finally {
 			setMarkingAll(false);
 		}
@@ -1300,35 +1365,90 @@ export function SessionListScreen() {
 						placeholder="Search conversations…"
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
-					{/* THE ONE-GESTURE CLEAR. Collapses rather than vanishes, by the pin
-					    hint's own rule below: removing a node outright snapped the list up
-					    ~23px the moment the first pin landed (design D8), and the same snap
-					    would happen when the last unread clears under the reader's finger.
-					    The 0fr/1fr grid measures itself, so nothing jumps at either edge.
-					    THE BUTTON ITSELF UNMOUNTS once the pile is gone (`showMarkAll`
-					    above): only the exit animation needs it alive, and `inert` covers
-					    that window so a vanishing control cannot be tapped or tabbed. */}
+					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
+					    further down the scroller, and a control left inside the scrolling
+					    content is reachable only at the top of the list — measured at y=-179,
+					    entirely off-screen, at this content's own maximum scroll, while the
+					    green marks stay visible near the foot (design D5, UX U7). Sticking it
+					    keeps the gesture where the marks are. It also collapses rather than
+					    vanishes, by the pin hint's own rule below: removing a node outright
+					    snapped the list up ~23px the moment the first pin landed (design D8),
+					    and the same snap would happen when the last unread clears under the
+					    reader's finger. The 0fr/1fr grid measures itself, so nothing jumps at
+					    either edge, and the button itself unmounts once the pile is gone
+					    (`showMarkAll` above) — only the exit animation needs it alive, and
+					    `inert` covers that window so a vanishing control cannot be tapped or
+					    tabbed. */}
 					<div
-						className={cn(
-							"grid transition-[grid-template-rows] duration-200 ease-out",
-							unreadCount > 0 ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-						)}
-						aria-hidden={unreadCount > 0 ? undefined : true}
-						inert={unreadCount > 0 ? undefined : true}
+						ref={bandRef}
+						tabIndex={-1}
+						className="sticky top-0 z-10 bg-canvas outline-none"
 					>
-						<div className="overflow-hidden">
-							{showMarkAll ? (
+						<div
+							className={cn(
+								"grid transition-[grid-template-rows] duration-200 ease-out",
+								unreadCount > 0 ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+							)}
+							aria-hidden={unreadCount > 0 ? undefined : true}
+							inert={unreadCount > 0 ? undefined : true}
+						>
+							<div className="overflow-hidden">
+								{showMarkAll ? (
+									/* STRETCHED to the column, like the search field above and the footer
+									   buttons below: the pill shrink-wrapped to 99.5px against a 366px
+									   column (design D4), which also made the label jitter 100px ->
+									   63px while `marking…` (UX U6) — a full-width control moves
+									   neither edge. `aria-disabled`, NOT `disabled`: a disabled button
+									   drops focus to `<body>` the instant it is pressed (UX U3), so the
+									   re-entry guard is the state check in `markAllRead` and the button
+									   stays focusable. The COUNT is the pile the reader can see (the
+									   desktop's `Mark all N read`, #2016's "with a count"). */
+									<div className="px-2 pb-2">
+										<button
+											type="button"
+											onClick={() => void markAllRead()}
+											aria-disabled={markingAll}
+											aria-busy={markingAll}
+											className={cn(
+												"flex min-h-11 w-full items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium select-none active:bg-elevated",
+												markingAll ? "text-ink-dim" : "text-ink",
+											)}
+										>
+											{markingAll ? "marking…" : `mark all ${unreadCount} read`}
+										</button>
+									</div>
+								) : null}
+							</div>
+						</div>
+						{/* THE RECEIPT, in the band and directly under the finger that tapped —
+						    it used to render 646px away beside the footer (design D3, UX U1). It
+						    sits OUTSIDE the collapsing grid so a receipt outlives the control it
+						    came from, and carries its own dismiss on top of the store's TTL (UX
+						    U8). The TEXT is the live region (`status`/`polite`, `alert`/
+						    `assertive` when it is a failure), so the dismiss control is not part
+						    of what gets announced. */}
+						{markNotice ? (
+							<div className="mx-2 mb-2 flex items-start gap-2">
+								<span
+									role={markNotice.danger ? "alert" : "status"}
+									aria-live={markNotice.danger ? "assertive" : "polite"}
+									className={cn(
+										"flex-1 rounded-md px-2 py-1 text-body-sm",
+										markNotice.danger ? "text-danger" : "text-ink-dim",
+									)}
+								>
+									{markNotice.text}
+								</span>
 								<button
 									type="button"
-									onClick={() => void markAllRead()}
-									disabled={markingAll}
-									aria-busy={markingAll}
-									className="mx-2 mb-2 flex min-h-11 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
+									onClick={() => publishMarkNotice(null)}
+									aria-label="Dismiss"
+									className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-ink-dim"
 								>
-									{markingAll ? "marking…" : "mark all as read"}
+									×
 								</button>
-							) : null}
-						</div>
+							</div>
+						) : null}
 					</div>
 					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 					    round 1, D2). The session view's ☆ is one tap away and does the same
@@ -1425,18 +1545,6 @@ export function SessionListScreen() {
 					)}
 				</main>
 			</div>
-			{markNotice ? (
-				<p
-					role={markNotice.danger ? "alert" : "status"}
-					aria-live={markNotice.danger ? "assertive" : "polite"}
-					className={cn(
-						"px-3 pb-1 text-body-sm",
-						markNotice.danger ? "text-danger" : "text-ink-dim",
-					)}
-				>
-					{markNotice.text}
-				</p>
-			) : null}
 			{startError ? (
 				<p
 					role="alert"

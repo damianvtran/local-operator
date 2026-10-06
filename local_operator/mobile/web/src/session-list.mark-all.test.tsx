@@ -1,17 +1,18 @@
 // @vitest-environment happy-dom
 //
-// The one-gesture clear (issue #2016): the control is present only while the
-// pile is non-empty (and hidden from the accessibility tree when collapsed),
-// posts exactly the completions the daemon's unread read enumerated, and
-// reports the store's per-item verdicts rather than claiming a clean sweep it
-// did not get. Rendered against the REAL SessionListScreen, like the ladder
-// test next door.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+// The one-gesture clear (issue #2016), round-1 remediation: the control is
+// present only while the pile is non-empty, states HOW MANY it will clear, and
+// posts only the rows the reader rendered. The receipt names the store's
+// per-item verdicts, never claims a sweep it did not get, is reported as
+// unknown — not as an empty pile — when the unread read was degraded, lives in
+// the store so a glance into a conversation cannot erase it, and expires.
+// Rendered against the REAL SessionListScreen, like the ladder test next door.
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AttentionSeenManyReceipt } from "./api";
+import { MARK_NOTICE_TTL_MS, publishMarkNotice } from "./store";
 import { SessionListScreen } from "./screens/session-list";
-import type { CompletionAttention } from "./types";
-import type { SessionSummary } from "./types";
+import type { AttentionUnread, CompletionAttention, SessionSummary } from "./types";
 
 let sessionList: SessionSummary[] = [];
 vi.mock("./store", async (importOriginal) => {
@@ -64,15 +65,25 @@ function receipt(over: Partial<AttentionSeenManyReceipt>): AttentionSeenManyRece
 	return { ok: true, read: [], superseded: [], unknown: [], ...over };
 }
 
-/** The control by its accessible name — null while the pile is empty, when the
-    control is not rendered at all (with a brief exit window after it clears). */
-function control(): HTMLElement | null {
-	return screen.queryByRole("button", { name: "mark all as read" });
+function unread(over: Partial<AttentionUnread>): AttentionUnread {
+	return { count: 0, revision: [0, 0, 0], degraded: [], conversations: [], ...over };
+}
+
+function conversation(session_id: string, completion_token: string) {
+	return { session_id, completion_token, kind: "complete" as const, revision: [1, 0] as [number, number] };
+}
+
+/** The control by its accessible name — null while the pile is empty. The
+    label carries the COUNT (design D2 / UX U4 / QA Q1). */
+function control(): HTMLButtonElement | null {
+	return screen.queryByRole("button", { name: /mark all \d+ read/ }) as HTMLButtonElement | null;
 }
 
 afterEach(() => {
 	cleanup();
 	sessionList = [];
+	// The receipt is MODULE state now, so it outlives a test's unmount by design.
+	publishMarkNotice(null);
 	vi.mocked(getAttentionUnread).mockReset();
 	vi.mocked(markAllSeen).mockReset();
 });
@@ -88,20 +99,30 @@ describe("mark all as read", () => {
 		expect(control()).not.toBeNull();
 	});
 
-	it("posts every enumerated completion and reports the receipt", async () => {
+	it("states how many it will clear", () => {
 		sessionList = [
 			summary({ session_id: "u1", conversation_name: "Alpha", unseen: true }),
 			summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
 		];
-		vi.mocked(getAttentionUnread).mockResolvedValue({
-			count: 2,
-			revision: [2, 0, 0],
-			degraded: [],
-			conversations: [
-				{ session_id: "u1", completion_token: "t1", kind: "complete", revision: [1, 0] },
-				{ session_id: "u2", completion_token: "t2", kind: "complete", revision: [2, 0] },
-			],
-		});
+		const { rerender } = render(<SessionListScreen />);
+		expect(control()?.textContent).toBe("mark all 2 read");
+
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		rerender(<SessionListScreen />);
+		expect(control()?.textContent).toBe("mark all 1 read");
+	});
+
+	it("posts only the rows it is painting, and reports the receipt", async () => {
+		sessionList = [
+			summary({ session_id: "u1", conversation_name: "Alpha", unseen: true }),
+			summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
+		];
+		// The badge enumerates a THIRD conversation the list is not painting: a
+		// completion published since the last frame. The batch must be the
+		// rendered set (agent MINOR-2), so u3 is never posted.
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 3, conversations: [conversation("u1", "t1"), conversation("u2", "t2"), conversation("u3", "t3")] }),
+		);
 		vi.mocked(markAllSeen).mockResolvedValue(
 			receipt({
 				read: [
@@ -122,14 +143,9 @@ describe("mark all as read", () => {
 
 	it("names the buckets it could not clear instead of a clean sweep", async () => {
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
-		vi.mocked(getAttentionUnread).mockResolvedValue({
-			count: 1,
-			revision: [1, 0, 0],
-			degraded: [],
-			conversations: [
-				{ session_id: "u1", completion_token: "t1", kind: "complete", revision: [1, 0] },
-			],
-		});
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 1, conversations: [conversation("u1", "t1")] }),
+		);
 		vi.mocked(markAllSeen).mockResolvedValue(
 			receipt({ superseded: ["u1"], unknown: ["deadbeef1234"] }),
 		);
@@ -143,31 +159,140 @@ describe("mark all as read", () => {
 		);
 	});
 
-	it("surfaces a failed write in the alert line", async () => {
+	it("treats a DEGRADED read as unknown, never as an empty pile", async () => {
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
-		vi.mocked(getAttentionUnread).mockResolvedValue({
-			count: 1,
-			revision: [1, 0, 0],
-			degraded: [],
-			conversations: [
-				{ session_id: "u1", completion_token: "t1", kind: "complete", revision: [1, 0] },
-			],
-		});
-		vi.mocked(markAllSeen).mockRejectedValue(new Error("store busy"));
+		// The shape the route serves when a read behind the aggregate failed:
+		// no `count`, no `conversations` — only the sources that failed.
+		vi.mocked(getAttentionUnread).mockResolvedValue({ degraded: ["attention"] });
 		render(<SessionListScreen />);
 		fireEvent.click(control()!);
 
 		const alert = await screen.findByRole("alert");
-		expect(alert.textContent).toBe("Could not mark read: store busy");
+		expect(alert.textContent).toBe("Could not read what is unread — nothing was cleared. Try again.");
+		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
 	});
 
-	it("says so when the badge enumerates nothing, without posting", async () => {
+	it("says nothing to clear when the pile really is empty, without posting", async () => {
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
-		vi.mocked(getAttentionUnread).mockResolvedValue({ count: 0, conversations: [] });
+		vi.mocked(getAttentionUnread).mockResolvedValue(unread({ count: 0, conversations: [] }));
 		render(<SessionListScreen />);
 		fireEvent.click(control()!);
 
-		await screen.findByText("Nothing unread.");
+		await screen.findByText("Nothing to clear.");
 		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
+	});
+
+	it("surfaces a failed write in the reader's words, naming the recovery", async () => {
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 1, conversations: [conversation("u1", "t1")] }),
+		);
+		vi.mocked(markAllSeen).mockRejectedValue(new TypeError("Failed to fetch"));
+		render(<SessionListScreen />);
+		fireEvent.click(control()!);
+
+		const alert = await screen.findByRole("alert");
+		expect(alert.textContent).toBe(
+			"Nothing was cleared — the daemon could not be reached. Try again.",
+		);
+	});
+
+	it("keeps the control focusable while the write is in flight", async () => {
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 1, conversations: [conversation("u1", "t1")] }),
+		);
+		let release: (value: AttentionSeenManyReceipt) => void = () => {};
+		vi.mocked(markAllSeen).mockReturnValue(
+			new Promise<AttentionSeenManyReceipt>((resolve) => {
+				release = resolve;
+			}),
+		);
+		render(<SessionListScreen />);
+		const button = control()!;
+		button.focus();
+		fireEvent.click(button);
+
+		// `aria-disabled`, never `disabled`: a disabled button drops focus to
+		// <body> the instant it is pressed, which is UX round 1's U3. The label
+		// changes to `marking…` here, so this queries by that name rather than
+		// the count label `control()` matches.
+		await screen.findByText("marking…");
+		const marking = screen.getByRole("button", { name: "marking…" }) as HTMLButtonElement;
+		expect(marking.getAttribute("aria-disabled")).toBe("true");
+		expect(marking.disabled).toBe(false);
+		expect(document.activeElement).toBe(marking);
+
+		await act(async () => {
+			release(receipt({ read: [attentionState({ conversation_id: "session/u1", completion_token: "t1" })] }));
+		});
+	});
+
+	it("outlives a glance into a conversation and back", async () => {
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 1, conversations: [conversation("u1", "t1")] }),
+		);
+		vi.mocked(markAllSeen).mockResolvedValue(
+			receipt({ read: [attentionState({ conversation_id: "session/u1", completion_token: "t1" })] }),
+		);
+		const view = render(<SessionListScreen />);
+		fireEvent.click(control()!);
+		await screen.findByText("Marked 1 read.");
+
+		// Route away (the screen unmounts) and back: the receipt is the only
+		// explanation of a partial clear, so it must survive (UX U2).
+		view.unmount();
+		render(<SessionListScreen />);
+		expect(screen.getByText("Marked 1 read.")).toBeTruthy();
+	});
+
+	it("expires on the store's TTL and can be dismissed", async () => {
+		vi.useFakeTimers();
+		try {
+			render(<SessionListScreen />);
+			act(() => publishMarkNotice({ text: "Marked 2 read.", danger: false }));
+			expect(screen.getByText("Marked 2 read.")).toBeTruthy();
+
+			fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+			expect(screen.queryByText("Marked 2 read.")).toBeNull();
+
+			act(() => publishMarkNotice({ text: "Marked 2 read.", danger: false }));
+			act(() => {
+				vi.advanceTimersByTime(MARK_NOTICE_TTL_MS + 1);
+			});
+			expect(screen.queryByText("Marked 2 read.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("moves focus off <body> when the control unmounts under the reader", () => {
+		vi.useFakeTimers();
+		try {
+			sessionList = [
+				summary({ session_id: "u1", conversation_name: "Alpha", unseen: true }),
+				summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
+			];
+			const view = render(<SessionListScreen />);
+			control()!.focus();
+			expect(document.activeElement).toBe(control());
+
+			// The pile clears elsewhere: the control goes inert, then unmounts.
+			sessionList = [
+				summary({ session_id: "u1", conversation_name: "Alpha" }),
+				summary({ session_id: "u2", conversation_name: "Beta" }),
+			];
+			act(() => {
+				view.rerender(<SessionListScreen />);
+			});
+			act(() => {
+				vi.advanceTimersByTime(300);
+			});
+			expect(document.activeElement).not.toBe(document.body);
+			expect(document.activeElement?.tagName).toBe("BUTTON");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

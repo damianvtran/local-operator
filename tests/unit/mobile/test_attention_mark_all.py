@@ -174,6 +174,50 @@ def test_the_shape_contract_refuses_empty_and_malformed_batches(
     )
 
 
+def test_a_malformed_pair_is_refused_at_the_shape_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed identity is a 422, exactly as the desktop ``SeenItem`` answers it.
+
+    Agent NIT-2 and QA Q2/Q3: the route used to accept any string and let the
+    store answer ``unknown``, so a non-hex id or a non-UUID token diverged from
+    the contract this route claims to mirror. The accepted shapes are the
+    desktop's own (12 lowercase hex; the canonical UUID), and the id pattern is
+    the constant the store's receipt path uses -- so the two surfaces answer the
+    same malformed input the same way. A well-formed pair for a conversation
+    this machine does not have is still the per-item ``unknown`` verdict, never
+    a refusal for the call (the cell below pins that half).
+    """
+    cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa")
+    client = _logged_in(daemon)
+    token = str(uuid.uuid4())
+
+    def refuse(session_id: str, completion_token: str) -> int:
+        return _seen_many(
+            client, [{"session_id": session_id, "completion_token": completion_token}]
+        ).status_code
+
+    assert refuse("zzz-not-hex", token) == 422
+    assert refuse("ABCDEF012345", token) == 422, "uppercase hex is not a session id"
+    assert refuse("aaaaaaaaaaa", token) == 422, "11 characters is not a session id"
+    assert refuse("aaaaaaaaaaaa", "not-a-uuid") == 422
+    assert refuse("aaaaaaaaaaaa", "") == 422
+    assert refuse("aaaaaaaaaaaa", token.upper()) == 422, "uuids are lowercase"
+
+    # A WELL-FORMED pair this machine cannot acknowledge keeps the per-item
+    # verdict: the shape layer refuses malformed identity, not foreign identity.
+    unknown = _seen_many(
+        client, [{"session_id": "deadbeef1234", "completion_token": str(uuid.uuid4())}]
+    )
+    assert unknown.status_code == 200
+    assert unknown.json() == {
+        "ok": True,
+        "read": [],
+        "superseded": [],
+        "unknown": ["deadbeef1234"],
+    }
+
+
 def test_a_dead_or_foreign_item_is_unknown_for_that_item_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
