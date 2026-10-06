@@ -479,6 +479,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "relay-owned record keyed by session id (design note §5.4), deliberately "
         "outside ``sessions/`` and never copied",
     ),
+    "local_operator/network/readiness.py": (
+        1,
+        "``not_on_path`` is a failure-CODE value (the tooling row's state for a tool "
+        "that is installed but off the peer's PATH, 2026-10-06) — a machine token, "
+        "never a file name; nothing a session directory holds is named by it",
+    ),
     "local_operator/session/runtime/presence.py": (
         3,
         "the delivery record and its directory under ``run/desktop``: per-device runtime "

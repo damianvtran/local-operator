@@ -36,6 +36,8 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
+import shutil
 import socket
 import time
 from pathlib import Path
@@ -56,13 +58,17 @@ READINESS_SCHEMA = 1
 #: unknown rows rather than hanging the report (design §8.8).
 READINESS_OP_TIMEOUT_S = 5.0
 
-#: The capability ids a readiness row can carry — the design's checks (a)-(f).
+#: The capability ids a readiness row can carry — the design's checks (a)-(f),
+#: plus (g) tooling: the lane's tool inventory, added by the 2026-10-06 request
+#: (a lane on cloud-node-1 found node/npm/make/docker absent mid-task and the
+#: report had no rows for any of it).
 CAPABILITY_OPERATOR_AUTHORITY = "operator_authority"
 CAPABILITY_BUILD = "build"
 CAPABILITY_GIT = "git_identity"
 CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
+CAPABILITY_TOOLING = "tooling"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -79,11 +85,16 @@ CLASS_EQUIPMENT = "equipment"
 #: "every declared MCP server is signed in" is not "the device is onboarded".
 #: The sites that genuinely need an MCP login refuse at their own point of use
 #: (the share verb's ``no_local_credential`` refusal, the placement/borrow
-#: path, the interactive sign-in gate). Deliberately scoped to the MCP pair:
-#: operator/git/model are same-class candidates that keep gating by default
-#: until the operator decides — this set is a policy, never a per-call carve-out.
+#: path, the interactive sign-in gate). TOOLING joined this set with the same
+#: shape of reason (2026-10-06): a device missing docker/node is not LESS
+#: onboarded — which tools a lane will find is a finer-grained fit question it
+#: reads before it starts, and a missing tool is repaired at its own point of
+#: use (the lane acquires tooling through the product's console flow, which
+#: asks before installing). The rest of the equipment set keeps gating by
+#: default until the operator decides — this set is a policy, never a
+#: per-call carve-out.
 NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
-    {CAPABILITY_MCP_CREDENTIAL, CAPABILITY_MCP_SERVERS}
+    {CAPABILITY_MCP_CREDENTIAL, CAPABILITY_MCP_SERVERS, CAPABILITY_TOOLING}
 )
 
 #: The fixed set of peer-side checks that exist even when no answer arrived —
@@ -97,6 +108,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_GIT,
     CAPABILITY_MCP_SERVERS,
     CAPABILITY_MODEL_CREDENTIAL,
+    CAPABILITY_TOOLING,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -115,6 +127,11 @@ CODE_AHEAD = "ahead"
 CODE_NO_CREDENTIAL = "no_credential"
 CODE_NOT_SHARED = "not_shared"
 CODE_OBSERVED_FAILURE = "observed_failure"
+#: Tooling (2026-10-06): the distinct remedy-bearing states get distinct
+#: machine tokens — an install, a one-line PATH fix and a sign-in are
+#: different acts, and a consumer branches on which one it must arrange.
+CODE_NOT_ON_PATH = "not_on_path"
+CODE_NOT_AUTHENTICATED = "not_authenticated"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -293,6 +310,128 @@ def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
             return ""
 
     return {"user_name": value("name"), "user_email": value("email")}
+
+
+#: The command-line tools a lane is expected to find on a device it runs on.
+#: Ordered, and one fixed set: the row reads it in this order, so a consumer's
+#: checklist cannot drift from the run-time probe. The 2026-10-06 request: a
+#: lane on cloud-node-1 discovered node/npm/make/docker were absent — and gh
+#: was present but not on PATH and not signed in — only mid-task; this
+#: inventory lets a planner read all of it BEFORE it starts.
+TOOLING_TOOLS: tuple[str, ...] = ("gh", "glab", "node", "npm", "make", "docker")
+
+#: How much of ``hosts.yml`` the structural scan may read. gh's file is a few
+#: hundred bytes; the bound exists so a pathological file cannot make a report
+#: read it wholesale — the scan needs only the top-level keys.
+_GH_HOSTS_SCAN_LIMIT = 64 * 1024
+
+#: A TOP-LEVEL YAML key line in ``hosts.yml`` — ``github.com:`` — with no
+#: leading space and no inline value. The scan tests SHAPES ONLY: an indented
+#: value line (where the token sits, when the token is in this file at all)
+#: can never match, so no value is captured, and the match is folded to a
+#: boolean before anything can leave this module.
+_GH_HOSTS_ENTRY_RE = re.compile(rb"^[A-Za-z0-9][\w.:-]*:[ \t]*$", re.MULTILINE)
+
+
+def _probe_reason(exc: BaseException) -> str:
+    """The NAME of what went wrong, bounded — never the message it carries."""
+    return _safe_text(type(exc).__name__, limit=80)
+
+
+def _resolve_program(name: str, *, path: str | None = None) -> str | None:
+    """``shutil.which`` behind ONE name, so the probe has one seam.
+
+    Answers with the ABSOLUTE path (which is what the remedy's fact needs); the
+    wrapper exists so a test can pin the failure path without patching
+    ``shutil`` for the whole process, and so the PATH question is asked in
+    exactly one place.
+    """
+    return shutil.which(name, path=path)
+
+
+def _tool_location(name: str, local_bin: Path) -> dict[str, Any]:
+    """Where ``name`` resolves for this device, as a four-state cell.
+
+    ``on_path`` — ``shutil.which`` found it on THIS process's PATH, the same
+    environment an offloaded request executes in. ``off_path`` — the PATH probe
+    missed but the user-local bin directory has it. ``absent`` — neither probe
+    found it. ``unknown`` — a probe RAISED, so neither "present" nor "absent"
+    may be claimed (the never-a-false-ok discipline; the reason rides the cell).
+    """
+    try:
+        found = _resolve_program(name)
+    except Exception as exc:  # noqa: BLE001 — a broken probe is a fact, not a crash
+        return {"state": "unknown", "path": "", "reason": _probe_reason(exc)}
+    if found:
+        return {"state": "on_path", "path": _safe_text(found, limit=300)}
+    try:
+        local = _resolve_program(name, path=str(local_bin))
+    except Exception as exc:  # noqa: BLE001 — see above
+        return {"state": "unknown", "path": "", "reason": _probe_reason(exc)}
+    if local:
+        return {"state": "off_path", "path": _safe_text(local, limit=300)}
+    return {"state": "absent", "path": ""}
+
+
+def _gh_auth_fact(home: Path) -> dict[str, Any]:
+    """Whether a GitHub CLI login is STORED here — structure, never material.
+
+    The honest signals the 2026-10-06 request names: ``~/.config/gh/hosts.yml``
+    existence AND whether an entry exists — existence alone is not the second
+    (a file left behind by ``gh auth logout`` carries no entry), so the file is
+    opened READ-ONLY and scanned STRUCTURALLY: the scan tests top-level key
+    shapes and keeps ONE boolean. No value is parsed, retained, or carried, so
+    the token the file may hold cannot travel (the module's names-only rule);
+    that it is opened at all is deliberate, documented, and the reason the
+    signal can be called honest. An unreadable file answers ``None`` with the
+    reason — never ``False``, which would be a false "not signed in".
+
+    Deferred, like git's include/env resolution (§8.5): the DEFAULT path only,
+    so a ``GH_CONFIG_DIR``/``XDG_CONFIG_HOME`` relocation is not chased in v1.
+    That the token itself may live in the OS keychain (gh's secure-storage
+    default) does not move this signal: the host entry is what ``gh auth
+    login`` writes on every platform, and the keychain is not a fact this
+    report may read.
+    """
+    path = home / ".config" / "gh" / "hosts.yml"
+    fact: dict[str, Any] = {
+        "hosts_file": False,
+        "has_entry": False,
+        "config_path": _safe_text(str(path), limit=300),
+    }
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_GH_HOSTS_SCAN_LIMIT)
+    except FileNotFoundError:
+        return fact
+    except OSError as exc:  # the file is there but cannot be read: say why, never guess
+        fact["hosts_file"] = True
+        fact["has_entry"] = None
+        fact["reason"] = _probe_reason(exc)
+        return fact
+    fact["hosts_file"] = True
+    fact["has_entry"] = bool(_GH_HOSTS_ENTRY_RE.search(raw))
+    return fact
+
+
+def tooling_fact(home: Path | None = None) -> dict[str, Any]:
+    """What command-line tooling a lane would find here, as facts. Names only.
+
+    The probe reads THIS process's environment — its PATH and the home it is
+    given — because that is what the relay answering the ask can honestly
+    attest to; a tool present only in some other shell's PATH is not claimed
+    here (the system-tools guide's "a shell that answered command not found is
+    only evidence about THAT shell", applied to the reporter). Read-only: the
+    module's ``test_reads_create_nothing`` discipline applies to every fact
+    collected on a peer's request path, this one included.
+    """
+    root = Path.home() if home is None else home
+    local_bin = root / ".local" / "bin"
+    return {
+        "tools": {name: _tool_location(name, local_bin) for name in TOOLING_TOOLS},
+        "gh_auth": _gh_auth_fact(root),
+        "local_bin_dir": _safe_text(str(local_bin), limit=300),
+    }
 
 
 def _transport_of(raw: Mapping[str, Any]) -> str:
@@ -649,6 +788,7 @@ def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any
         "credential_placement": placement_fact(provider=provider, root=root),
         "mcp": mcp_servers_fact(root),
         "git": git_identity_fact(home),
+        "tooling": tooling_fact(home),
         "operator": operator_fact(),
     }
 
@@ -1205,6 +1345,165 @@ def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -
             f"servers on {peer_label} itself"
         ],
         source=SOURCE_PEER,
+    )
+
+
+def _name_list(names: Sequence[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — the register the tooling copy reads in."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _tool_cell(entry: Any) -> tuple[str, str]:
+    """``(state, path)`` from one tool's fact cell; anything else is ``unknown``.
+
+    A missing or malformed cell is read as NEITHER ``absent`` (that would send
+    the operator to install what may exist) NOR present: ``unknown`` is the
+    only claim left standing when the fact cannot be read — the same
+    discipline as the tri-state probes it carries.
+    """
+    if not isinstance(entry, Mapping):
+        return "unknown", ""
+    state = str(entry.get("state") or "")
+    if state not in ("on_path", "off_path", "absent", "unknown"):
+        return "unknown", ""
+    return state, _bounded(entry.get("path") or "", 300)
+
+
+def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(g) What command-line tooling would a lane find on this peer?
+
+    The 2026-10-06 request: a lane on cloud-node-1 discovered mid-task that
+    node/npm/make/docker were absent and ``gh`` was present but not on PATH and
+    not signed in — and the report said nothing about any of it. Three DISTINCT
+    remedy-bearing states, kept distinct here because they are different acts:
+    an install, a one-line PATH fix, and a sign-in. The row is non-gating
+    equipment (``NON_GATING_EQUIPMENT``): a device missing docker is not less
+    onboarded, and the missing tool is repaired at its own point of use — the
+    lane acquires tooling through the product's console flow, which asks first.
+    """
+    fact = facts.get("tooling")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_TOOLING,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    tools = fact.get("tools")
+    tools = tools if isinstance(tools, Mapping) else {}
+    cells = {name: _tool_cell(tools.get(name)) for name in TOOLING_TOOLS}
+    absent = [name for name in TOOLING_TOOLS if cells[name][0] == "absent"]
+    off_path = [name for name in TOOLING_TOOLS if cells[name][0] == "off_path"]
+    unknown = [name for name in TOOLING_TOOLS if cells[name][0] == "unknown"]
+    # The login question is asked only where a login could be USED: a gh that
+    # is absent or unreadable makes "signed in?" moot, and the row already
+    # names gh's own state. ``unknown`` covers both a login fact the answer
+    # did not carry and an unreadable hosts file — neither may pass as signed in.
+    auth = fact.get("gh_auth")
+    auth = auth if isinstance(auth, Mapping) else {}
+    gh_state = cells["gh"][0]
+    login = "moot"
+    login_reason = ""
+    if gh_state in ("on_path", "off_path"):
+        # NIT-1 (review round 1): only a real ``False`` reads "no stored login";
+        # None, a missing key, or a malformed value (a skewed peer's shape) is
+        # UNKNOWN WITH ITS REASON — a fact that cannot be read is never a claim.
+        has_entry = auth.get("has_entry") if auth else None
+        if has_entry is True:
+            login = "ok"
+        elif has_entry is False:
+            login = "absent"
+        else:
+            login = "unknown"
+            carried = auth.get("reason") if auth else None
+            if isinstance(carried, str) and carried:
+                login_reason = _bounded(carried, 80)
+            elif auth and "has_entry" in auth:
+                login_reason = "the reported value was not a boolean"
+            else:
+                login_reason = "the answer did not carry the login fact"
+    if not absent and not off_path and not unknown and login == "ok":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_TOOLING,
+            ok=True,
+            detail=(
+                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}) and a "
+                "stored GitHub CLI login"
+            ),
+            source=SOURCE_PEER,
+        )
+    clauses: list[str] = []
+    if absent:
+        # The clause carries the PROBE'S SCOPE, never "not installed" (review
+        # round 1, MINOR-1): neither probe sees everywhere (an nvm-managed node
+        # off PATH reads absent), so the sentence says where the check looked,
+        # and the remedy below covers the installed-but-invisible possibility.
+        clauses.append(f"has no {_name_list(absent)} on its PATH or in ~/.local/bin")
+    if off_path:
+        clauses.append(f"has {_name_list(off_path)} installed but not on its PATH")
+    if unknown:
+        clauses.append(f"could not complete its tooling check for {_name_list(unknown)}")
+    if login == "absent":
+        clauses.append("has no stored GitHub CLI login")
+    elif login == "unknown":
+        clause = "could not read its stored GitHub CLI login"
+        if login_reason:
+            clause += f" ({login_reason})"
+        clauses.append(clause)
+    if absent or off_path or login == "absent":
+        tail = ": offloaded work that needs them will fail there"
+    else:
+        tail = ": whether that would block offloaded work is not known"
+    # The code cell picks the FIRST fix in this order — an install, then a PATH
+    # fix, then the login, then "could not read" last: a concrete repair a
+    # reader can start on outranks a probe that could not answer.
+    if absent:
+        code = CODE_NOT_INSTALLED
+    elif off_path:
+        code = CODE_NOT_ON_PATH
+    elif login == "absent":
+        code = CODE_NOT_AUTHENTICATED
+    else:
+        code = CODE_UNKNOWN
+    local_bin = _bounded(fact.get("local_bin_dir") or "", 300)
+    remedies: list[str] = []
+    if absent:
+        remedies.append(
+            f"ask Local Operator to install {_name_list(absent)} on {peer_label} — or, if "
+            "one is already installed off its PATH there, to put it on the PATH (it asks "
+            "before changing anything there)"
+        )
+    for name in off_path:
+        remedy = f"on {peer_label}, {name} is installed at {cells[name][1]} but not on its PATH"
+        if local_bin:
+            remedy += f" — ask Local Operator to add {local_bin} to the PATH there"
+        else:
+            remedy += " — ask Local Operator to put its folder on the PATH there"
+        remedy += " (work can use that path directly meanwhile)"
+        remedies.append(remedy)
+    if login == "absent":
+        remedies.append(
+            f"gh on {peer_label} is not signed in — ask Local Operator to sign it in there"
+        )
+    if unknown or login == "unknown":
+        remedies.append(f"check the tooling on {peer_label} and re-check")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_TOOLING,
+        ok=False,
+        code=code,
+        detail=f"{peer_label} " + "; ".join(clauses) + tail,
+        remedies=remedies,
+        source=SOURCE_PEER,
+        observed={"absent": absent, "off_path": off_path, "unknown": unknown, "gh_login": login},
     )
 
 
@@ -2595,6 +2894,7 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
     return rows
 
@@ -2790,7 +3090,12 @@ def equipment_note(checks: Iterable[Mapping[str, Any]]) -> str:
     """One line naming failed non-gating equipment, for the verify receipt.
 
     Shape (F8 ruling): ``mcp logins: slack — not required for onboarding``.
-    Empty when no non-gating row failed. The note names WHAT is not set up and
+    Empty when no named non-gating row failed. TOOLING joined the non-gating
+    set on 2026-10-06 and is deliberately NOT named here: this note exists for
+    the VERIFY receipt, an onboarding surface, while a tooling gap is a fit
+    question for a lane's work — it is reported on the ready rows and the
+    agent digest themselves, and it is repaired at its own point of use. The
+    note names WHAT is not set up and
     defers the state to the rows themselves (their details carry the branch —
     no login, not shared, an unreadable store), so it cannot misdescribe a
     branch it does not read — WHICH IS WHY THE SERVERS BRANCH READS THE CODE

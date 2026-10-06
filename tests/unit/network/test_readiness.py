@@ -653,6 +653,306 @@ def test_shareable_lines_render_every_login_state_once() -> None:
 
 
 # ---------------------------------------------------------------------------
+# (g) tooling — the lane's inventory: absence, off-PATH, and the gh login
+# ---------------------------------------------------------------------------
+
+
+def _fake_tool(path: Path) -> None:
+    """An executable file a ``shutil.which`` probe will find."""
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _tooling_home(tmp_path: Path) -> Path:
+    home = tmp_path / "peer-home"
+    home.mkdir()
+    return home
+
+
+def test_tooling_fact_resolves_on_path_off_path_and_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-10-06 anchor, at the fact level: node present, gh OFF-PATH.
+
+    The two probe states the request separates — "not installed" and "installed
+    but not on PATH" — must be distinguishable from the FACTS, and the off-PATH
+    one must carry the absolute path the remedy will name.
+    """
+    tool_bin = tmp_path / "bin"
+    tool_bin.mkdir()
+    _fake_tool(tool_bin / "node")
+    home = _tooling_home(tmp_path)
+    (home / ".local" / "bin").mkdir(parents=True)
+    _fake_tool(home / ".local" / "bin" / "gh")
+    monkeypatch.setenv("PATH", str(tool_bin))
+
+    fact = readiness.tooling_fact(home)
+
+    assert fact["tools"]["node"] == {"state": "on_path", "path": str(tool_bin / "node")}
+    assert fact["tools"]["gh"] == {
+        "state": "off_path",
+        "path": str(home / ".local" / "bin" / "gh"),
+    }
+    assert fact["tools"]["glab"]["state"] == "absent"
+    assert fact["local_bin_dir"] == str(home / ".local" / "bin")
+
+
+def test_tooling_fact_answers_unknown_when_a_probe_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that RAISES is neither a pass nor an absence (the tri-state rule)."""
+
+    def _boom(name: str, *, path: str | None = None) -> str | None:
+        raise PermissionError(name)
+
+    monkeypatch.setattr(readiness, "_resolve_program", _boom)
+    fact = readiness.tooling_fact(tmp_path)
+    assert {cell["state"] for cell in fact["tools"].values()} == {"unknown"}
+    assert fact["tools"]["gh"]["reason"] == "PermissionError"
+
+
+def test_tooling_fact_reads_the_gh_login_structurally_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hosts.yml: existence AND an entry, from structure, never material.
+
+    The shaped token is assembled at runtime (the ``AKIA`` discipline): a
+    literal would be rewritten by the session's own scrubber before this file
+    could pin that it never travels.
+    """
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    home = _tooling_home(tmp_path)
+    hosts = home / ".config" / "gh" / "hosts.yml"
+    hosts.parent.mkdir(parents=True)
+    token = "".join(("gho_", "F" * 16))
+    hosts.write_text(
+        f"github.com:\n    user: octocat\n    oauth_token: {token}\n    git_protocol: https\n",
+        encoding="utf-8",
+    )
+    fact = readiness.tooling_fact(home)
+    assert fact["gh_auth"]["hosts_file"] is True
+    assert fact["gh_auth"]["has_entry"] is True
+    assert fact["gh_auth"]["config_path"].endswith("hosts.yml")
+    assert token not in json.dumps(fact)
+
+    # Logged out: the file remains, the entry is gone — the state the request
+    # says existence alone cannot answer.
+    hosts.write_text("", encoding="utf-8")
+    assert readiness.tooling_fact(home)["gh_auth"]["has_entry"] is False
+
+    # A file that cannot be read answers None with the reason — never False.
+    hosts.unlink()
+    hosts.mkdir()
+    unreadable = readiness.tooling_fact(home)["gh_auth"]
+    assert unreadable["hosts_file"] is True and unreadable["has_entry"] is None
+    assert unreadable["reason"], unreadable
+
+    # No file at all: a definite "no stored login".
+    hosts.rmdir()
+    missing = readiness.tooling_fact(home)["gh_auth"]
+    assert missing["hosts_file"] is False and missing["has_entry"] is False
+
+
+def test_tooling_fact_creates_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read-only discipline, applied to the new fact collector."""
+    home = _tooling_home(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    before = sorted(str(path.relative_to(home)) for path in home.rglob("*"))
+    readiness.tooling_fact(home)
+    after = sorted(str(path.relative_to(home)) for path in home.rglob("*"))
+    assert after == before
+
+
+def _tooling_section(
+    *,
+    absent: list[str] | None = None,
+    off_path: dict[str, str] | None = None,
+    unknown: list[str] | None = None,
+    has_entry: Any = True,
+    hosts_file: bool = True,
+    reason: str = "",
+) -> dict[str, Any]:
+    """A ``tooling`` fact section, state by state, the way the collector ships it."""
+    absent = absent or []
+    off_path = dict(off_path or {})
+    unknown = unknown or []
+    tools: dict[str, Any] = {}
+    for name in readiness.TOOLING_TOOLS:
+        if name in absent:
+            tools[name] = {"state": "absent", "path": ""}
+        elif name in off_path:
+            tools[name] = {"state": "off_path", "path": off_path[name]}
+        elif name in unknown:
+            tools[name] = {"state": "unknown", "path": "", "reason": "PermissionError"}
+        else:
+            tools[name] = {"state": "on_path", "path": f"/usr/local/bin/{name}"}
+    gh_auth: dict[str, Any] = {
+        "hosts_file": hosts_file,
+        "has_entry": has_entry,
+        "config_path": "/home/x/.config/gh/hosts.yml",
+    }
+    if reason:
+        gh_auth["reason"] = reason
+    return {
+        "tools": tools,
+        "gh_auth": gh_auth,
+        "local_bin_dir": "/home/x/.local/bin",
+    }
+
+
+def test_tooling_row_is_unknown_when_the_answer_lacked_the_section() -> None:
+    row = readiness.tooling_row(_member(), _facts(tooling=None), peer_label="cloud-node-1")
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert "did not carry this check" in row["detail"]
+
+
+def test_tooling_row_ok_names_the_toolchain() -> None:
+    row = readiness.tooling_row(
+        _member(), _facts(tooling=_tooling_section()), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is True
+    assert row["capability"] == readiness.CAPABILITY_TOOLING
+    assert row["class"] == readiness.CLASS_EQUIPMENT
+    assert "gh, glab, node, npm, make, docker" in row["detail"]
+    assert "stored GitHub CLI login" in row["detail"]
+    assert row["remedies"] == []
+
+
+def test_tooling_row_separates_absent_off_path_and_login_states() -> None:
+    """Three remedy-bearing states, three codes — an install, a PATH fix, a sign-in."""
+    absent_row = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(absent=["node", "npm", "make", "docker"])),
+        peer_label="cloud-node-1",
+    )
+    assert absent_row["ok"] is False and absent_row["code"] == readiness.CODE_NOT_INSTALLED
+    # The scope rides the clause (review round 1, MINOR-1): never "not installed".
+    assert (
+        "has no node, npm, make and docker on its PATH or in ~/.local/bin" in absent_row["detail"]
+    )
+    install_remedies = " ".join(absent_row["remedies"])
+    assert "install node, npm, make and docker on cloud-node-1" in install_remedies
+    assert "put it on the PATH" in install_remedies  # covers an off-PATH install
+
+    off_path_row = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(off_path={"gh": "/Users/x/.local/bin/gh"})),
+        peer_label="cloud-node-1",
+    )
+    assert off_path_row["ok"] is False and off_path_row["code"] == readiness.CODE_NOT_ON_PATH
+    joined = " ".join(off_path_row["remedies"])
+    assert "/Users/x/.local/bin/gh" in joined and "/Users/x/.local/bin" in joined
+    assert "PATH" in joined
+
+    login_row = readiness.tooling_row(
+        _member(), _facts(tooling=_tooling_section(has_entry=False)), peer_label="cloud-node-1"
+    )
+    assert login_row["ok"] is False and login_row["code"] == readiness.CODE_NOT_AUTHENTICATED
+    assert "has no stored GitHub CLI login" in login_row["detail"]
+    assert "sign it in" in " ".join(login_row["remedies"])
+
+
+def test_tooling_row_names_the_anchor_devices_gaps() -> None:
+    """cloud-node-1 as the request describes it: node/npm/make/docker absent, gh
+    present but off-PATH and not signed in — ONE row, all three fixes named."""
+    row = readiness.tooling_row(
+        _member(),
+        _facts(
+            tooling=_tooling_section(
+                absent=["node", "npm", "make", "docker"],
+                off_path={"gh": "/Users/x/.local/bin/gh"},
+                has_entry=False,
+            )
+        ),
+        peer_label="cloud-node-1",
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NOT_INSTALLED
+    detail = row["detail"]
+    assert "has no node, npm, make and docker on its PATH or in ~/.local/bin" in detail
+    assert "gh installed but not on its PATH" in detail
+    assert "has no stored GitHub CLI login" in detail
+    assert row["observed"] == {
+        "absent": ["node", "npm", "make", "docker"],
+        "off_path": ["gh"],
+        "unknown": [],
+        "gh_login": "absent",
+    }
+    assert len(row["remedies"]) == 3
+
+
+def test_a_login_fact_that_cannot_be_read_is_unknown_with_its_reason() -> None:
+    """Review round 1, NIT-1: only a real ``False`` reads "no stored login".
+
+    A skewed peer's non-boolean value, ``None`` from an unreadable file, and an
+    answer that carried no login fact at all all map to ``unknown`` — each with
+    the reason it has — never to a claim the fact does not support.
+    """
+    malformed = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry="yes")),
+        peer_label="cloud-node-1",
+    )
+    assert malformed["ok"] is False and malformed["code"] == readiness.CODE_UNKNOWN
+    assert malformed["observed"]["gh_login"] == "unknown"
+    assert (
+        "could not read its stored GitHub CLI login (the reported value was not a boolean)"
+        in malformed["detail"]
+    )
+
+    unreadable = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry=None, reason="IsADirectoryError")),
+        peer_label="cloud-node-1",
+    )
+    assert unreadable["code"] == readiness.CODE_UNKNOWN
+    assert "could not read its stored GitHub CLI login (IsADirectoryError)" in unreadable["detail"]
+
+    # An answer that carried no ``has_entry`` at all: unknown, named as such.
+    no_login_fact = {
+        "tools": {
+            name: {"state": "on_path", "path": f"/usr/local/bin/{name}"}
+            for name in readiness.TOOLING_TOOLS
+        },
+        "gh_auth": {"hosts_file": True, "config_path": "/home/x/.config/gh/hosts.yml"},
+        "local_bin_dir": "/home/x/.local/bin",
+    }
+    uncarried = readiness.tooling_row(
+        _member(), _facts(tooling=no_login_fact), peer_label="cloud-node-1"
+    )
+    assert (
+        "could not read its stored GitHub CLI login (the answer did not carry the login fact)"
+        in uncarried["detail"]
+    )
+
+
+def test_a_failed_tooling_row_is_warn_named_and_never_holds_onboarding() -> None:
+    """Non-gating (2026-10-06): the lane reads the gap; the onboarding fold must not."""
+    row = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(absent=["docker"])),
+        peer_label="cloud-node-1",
+    )
+    assert readiness.CAPABILITY_TOOLING in readiness.NON_GATING_EQUIPMENT
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert row["ok"] is False  # reported, not rewritten
+    assert readiness.onboarding_failures([row]) == []
+    line = readiness.render_check_lines([row])[0]
+    assert line.startswith("warn readiness tooling cloud-node-1:")
+    assert line.endswith(f"— {readiness.NON_GATING_NOTE}")
+
+
+def test_the_checklist_gains_the_tooling_cell_for_a_peer_that_cannot_answer() -> None:
+    member = _member()
+    assert readiness.CAPABILITY_TOOLING in readiness.PEER_SIDE_CHECKS
+    too_old = readiness._peer_too_old_rows(member)  # noqa: SLF001 — the cell's subject
+    tooling = next(row for row in too_old if row["capability"] == readiness.CAPABILITY_TOOLING)
+    assert tooling["code"] == readiness.CODE_PEER_TOO_OLD
+    assert "ask Local Operator to update it" in " ".join(tooling["remedies"])
+
+
+# ---------------------------------------------------------------------------
 # (b) build parity
 # ---------------------------------------------------------------------------
 
@@ -1712,6 +2012,30 @@ def test_peer_facts_never_carry_a_scrubber_marker_or_a_shaped_value(tmp_path: Pa
     for marker in ("token", "secret", "password"):
         assert marker not in serialised.lower(), marker
     assert facts["mcp"]["withheld"] == ["shaped"]
+
+
+def test_peer_facts_carry_the_tooling_inventory_names_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tooling section rides ``collect_peer_facts`` — names and booleans only."""
+    tool_bin = tmp_path / "bin"
+    tool_bin.mkdir()
+    _fake_tool(tool_bin / "node")
+    home = _tooling_home(tmp_path)
+    hosts = home / ".config" / "gh" / "hosts.yml"
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text("github.com:\n    user: octocat\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tool_bin))
+    root = tmp_path / "root"
+    root.mkdir()
+
+    facts = readiness.collect_peer_facts(root, home=home)
+
+    assert set(facts["tooling"]["tools"]) == set(readiness.TOOLING_TOOLS)
+    assert facts["tooling"]["tools"]["node"]["state"] == "on_path"
+    assert facts["tooling"]["gh_auth"]["has_entry"] is True
+    # The username the hosts file holds is NOT carried — one boolean is the fact.
+    assert "octocat" not in json.dumps(facts)
 
 
 # ---------------------------------------------------------------------------
