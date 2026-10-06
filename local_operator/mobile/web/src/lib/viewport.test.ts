@@ -39,6 +39,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// Through the public path so the scale LISTENERS are detached too, not just
+	// the property: a leaked listener would let one test's event reach the next.
+	applyWideView(false);
 	localStorage.clear();
 	delete document.documentElement.dataset.view;
 	document.documentElement.style.removeProperty(FIT_SCALE_PROP);
@@ -113,11 +116,49 @@ describe("wide view fit scale (issue #2017)", () => {
 		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("");
 	});
 
+	it("recomputes the fit scale on orientationchange and resize while wide", () => {
+		screenWidth(390);
+		applyWideView(true);
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("0.761");
+
+		// An engine whose screen.width follows the orientation.
+		screenWidth(844);
+		window.dispatchEvent(new Event("orientationchange"));
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("1");
+
+		screenWidth(360);
+		window.dispatchEvent(new Event("resize"));
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("0.703");
+	});
+
+	it("stops listening once wide view is turned off", () => {
+		screenWidth(390);
+		applyWideView(true);
+		applyWideView(false);
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("");
+
+		screenWidth(360);
+		window.dispatchEvent(new Event("orientationchange"));
+		window.dispatchEvent(new Event("resize"));
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("");
+	});
+
+	it("does not stack listeners across re-applies (a leaked one would rewrite the var)", () => {
+		screenWidth(390);
+		applyWideView(true);
+		applyWideView(true);
+		applyWideView(false);
+
+		screenWidth(360);
+		window.dispatchEvent(new Event("resize"));
+		expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("");
+	});
+
 	it("pins the stylesheet's half of the contract as source text, like the meta pair", () => {
 		const css = readFileSync(join(process.cwd(), "src/styles/index.css"), "utf8").replace(/\s+/g, " ");
 		expect(css).toContain(":is(input, textarea, select) { font-size: max(16px, 1em); }");
 		expect(css).toContain(
-			'html[data-view="wide"] :is(input, textarea, select) { font-size: calc(16px / var(--lo-fit-scale)); }',
+			'html[data-view="wide"] :is(input, textarea, select) { font-size: max(calc(16px / var(--lo-fit-scale)), 1em); }',
 		);
 	});
 });
