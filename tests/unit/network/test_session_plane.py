@@ -620,6 +620,68 @@ def test_a_promptless_create_is_still_a_row_on_both_devices(
         _stop_all(served)
 
 
+def test_a_created_id_resolves_without_waiting_for_the_next_federated_read(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE OPERATOR'S DEFECT over the real pair: resolution right after the create.
+
+    Every route resolves a peer id through ``remote_open.remote_row_for``, and
+    that path asked the federated listing — TTL-cached against the sidebar's
+    poll — so inside the window it answered with the listing read BEFORE the
+    create. Live, that was: create 02:25:52, events/command-entities/messages
+    404ing at .631-.640, resolved only by the 02:26:39 federated read, with the
+    send refused "This conversation no longer exists". Here the creator's cache
+    is primed with a real federated read first (the entry the unit repro caches
+    by hand), the create then mints on the peer over the product's own frame,
+    and the resolution must find it IMMEDIATELY — without the next federated
+    read, which this cell never waits for.
+    """
+    from local_operator.session.peer_rows import (
+        clear_cache,
+        peer_session_row,
+        peer_session_rows,
+        unanswered_peers,
+    )
+    from local_operator.session.remote_open import remote_row_for
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        # The sidebar's federated read just before the create: the cached entry
+        # the id cannot be in yet, from a peer that IS answering.
+        clear_cache()
+        assert peer_session_rows(server_a.root) == ()
+        assert unanswered_peers(server_a.root) == (), "the peer must be answering"
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 11,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": "resolve me",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        session_id = reply["detail"]["session_id"]
+        assert session_id
+
+        row = remote_row_for(session_id, server_a.root)
+        assert row is not None and row.id == session_id, (
+            "the id the create answered with resolved to nothing — exactly the "
+            "'This conversation no longer exists' the operator hit"
+        )
+        assert row.owner_device == server_b.identity.device_id
+        # The live answer was merged back: the next resolution is a cache hit.
+        assert peer_session_row(session_id, server_a.root) is not None
+        link.close("test")
+    finally:
+        _stop_all(served)
+
+
 def test_a_named_create_writes_the_sidecar_the_product_reads(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
