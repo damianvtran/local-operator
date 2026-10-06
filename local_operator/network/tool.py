@@ -485,6 +485,16 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
                     f"name; '{clash}' would act on another, so this call would do one "
                     "of the two."
                 )
+        if not pilot_act and params.text.strip():
+            # A SILENTLY DROPPED FIELD is the class this branch refuses two
+            # guards down for `all_peers`: `text` has exactly three homes
+            # (send/steer/slash), so words on a call that named none of them
+            # are a misspelled intent — refused with the fix named, never
+            # discarded behind a plain listing (round 1, MINOR).
+            return [], (
+                "action='sessions' carries 'text' only with a pilot act: name one "
+                "of 'send'/'steer'/'slash', or drop 'text'."
+            )
         if mutation and not peer:
             return [], (
                 f"action='sessions' with '{mutation}' needs 'peer': the session lives on "

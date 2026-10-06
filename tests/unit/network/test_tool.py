@@ -1522,6 +1522,31 @@ def test_the_pilot_guards_are_the_clis_one_act_rule_in_the_tools_words() -> None
     )
 
 
+def test_text_without_a_pilot_act_is_refused_not_dropped() -> None:
+    """Round-1 review (MINOR): `text` has exactly three homes — send/steer/
+    slash — and a call that carried words while naming none of them silently
+    lost them behind a plain listing: the dropped-field class the `all_peers`
+    guard beside this one already refuses."""
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="device-b", text="say this")
+    )
+    assert argv == []
+    assert problem == (
+        "action='sessions' carries 'text' only with a pilot act: name one of "
+        "'send'/'steer'/'slash', or drop 'text'."
+    )
+    # Beside a non-pilot verb the words are equally homeless.
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="device-b", stop="s1", text="say this")
+    )
+    assert argv == [] and "only with a pilot act" in problem
+    # And with a pilot act the text still rides (the guard is not a blanket).
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="device-b", steer="s1", text="say this")
+    )
+    assert problem == "" and argv[-2:] == ["--", "say this"]
+
+
 def test_this_front_end_never_reaps_a_child_the_cli_is_still_working_inside() -> None:
     """The TUI's own derivation, mirrored for the tool (design §3A).
 

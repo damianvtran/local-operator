@@ -1626,6 +1626,13 @@ async def test_help_returns_the_reference_and_refuses_an_address() -> None:
     result = await execute_sessions("t", {"op": "help"}, None, None, None)
     assert not result.is_error, result.text
     assert result.text == render_sessions_reference()
+    # Round 1 (NIT): the reference's refusal line must match behavior —
+    # `include_stored` widens only the LOCAL half (refused beside
+    # `scope='remote'` alone), while `query` is refused beside `peer` too.
+    assert (
+        "`include_stored` widens only the local half and is refused beside `scope='remote'`."
+        in result.text
+    )
 
     refusal = await execute_sessions("t", {"op": "help", "session": "a1"}, None, None, None)
     assert refusal.is_error

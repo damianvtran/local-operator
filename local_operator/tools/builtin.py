@@ -13956,8 +13956,9 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " alone.",
         example="sessions(op='list', include_stored=True)",
         refusals=(
-            "takes no address and no `prompt`/`name`; `query`/`include_stored` are"
-            " THIS machine's store and are refused beside `peer`/`scope='remote'`.",
+            "takes no address and no `prompt`/`name`; `query` reads THIS machine's"
+            " store and is refused beside `peer`/`scope='remote'`; `include_stored`"
+            " widens only the local half and is refused beside `scope='remote'`.",
         ),
     ),
     "info": _SessionsOpDoc(
