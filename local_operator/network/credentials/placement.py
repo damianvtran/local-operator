@@ -44,7 +44,7 @@ import os
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from local_operator.network.credentials.types import (
     DEVICE_BOUND_PROVIDERS,
@@ -776,6 +776,67 @@ def merge_from_peer(
             network_id, changed, self_device=self_device, root=root
         )
     return changed
+
+
+def grant_key_set(
+    document: PlacementDocument,
+    *,
+    device: str,
+    keys: Sequence[str],
+    config: Path,
+    self_device: str,
+    owner_name: str = "",
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Grant ``device`` a holder row for each of ``keys``, through :meth:`grant`.
+
+    THE TRANSACTION'S BULK WRITE (``mesh-consent-provisioning.md`` §1.2 row 1):
+    the same per-key discipline ``relay._grant_pair_shares`` walks at a pairing
+    admission, called with the DEFAULT share set instead of a both-ends decision
+    — a run-only approval has no offer/decision to intersect with, and the
+    approval gesture itself is the authorisation (§1.1).
+
+    * A key with no local credential is DROPPED with ``no_local_credential``:
+      the document would refuse it anyway, and the drop names the reason.
+    * The entry is ``declare``d only when absent — never re-declared, so a
+      re-run does not rewrite ownership.
+    * The grant scope is the share verb's per-kind default (``device`` for the
+      GitHub App key, which the document refuses at session scope by name;
+      ``session`` for everything else).
+    * One key's refusal never costs the others: it is collected as a
+      ``{"key", "reason"}`` row and the loop continues — the caller decides how
+      loud a skipped key is.
+
+    THE CALLER HOLDS THE LOCK: wrap this in :func:`mutate` so all keys land
+    under one read-modify-write. Returns ``(granted, skipped)``.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.credentials import offers as offers_mod
+    from local_operator.network.types import MeshRefusal
+
+    granted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for key in keys:
+        try:
+            if not offers_mod.credential_here(key, config):
+                skipped.append({"key": key, "reason": "no_local_credential"})
+                continue
+            kind, provider, label = offers_mod.shape_for_key(key, config)
+            if document.entry(key) is None:
+                document.declare(
+                    key,
+                    owner_device=self_device,
+                    owner_device_name=owner_name,
+                    provider=provider,
+                    kind=kind,
+                    identity_label=label,
+                    by=self_device,
+                )
+            scope = "device" if github_mod.is_github_key(key) else "session"
+            document.grant(key, device, scope=scope, by=self_device)
+            granted.append(key)
+        except MeshRefusal as refusal:
+            skipped.append({"key": key, "reason": refusal.code or "refused"})
+    return granted, skipped
 
 
 def _clear_refusals_the_merge_contradicts(

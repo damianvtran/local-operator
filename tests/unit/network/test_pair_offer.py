@@ -87,14 +87,14 @@ def _seed_mcp_json(root: Path, servers: dict[str, dict[str, Any]]) -> None:
 
 
 def test_offer_carries_candidates_kinds_labels_defaults(root: Path) -> None:
-    """One row per serveable credential, each classified and defaulted per §2.3.
+    """One row per serveable credential, each classified and defaulted per §1.4.
 
     Seeded: an OAuth provider login (default YES), a pasted static key (default
-    NO), a device-bound provider (excluded by name — a grant would be refused),
-    the Radient org login (never auto-offered — §1.1 "there is no join-time
-    default"), an MCP login (its kind is conservative in v1) and an MCP server
-    with NO login row (excluded — offering it would promise a row the admission
-    re-check drops).
+    YES since the §1.4 flip — the class that works from a second device), a
+    device-bound provider (excluded by name — a grant would be refused), the
+    Radient org login (offered by default since §1.4, reduce-only), an MCP login
+    (default YES since §1.4) and an MCP server with NO login row (excluded —
+    offering it would promise a row the admission re-check drops).
     """
     _seed(root, "openai", {"refresh": "r", "access": "a", "email": "damian@example.com"})
     _seed(root, "anthropic", {"key": "sk-ant-1", "type": "api_key"})
@@ -121,13 +121,13 @@ def test_offer_carries_candidates_kinds_labels_defaults(root: Path) -> None:
             "key": "anthropic",
             "kind": "api-key-static",
             "label": "",
-            "share": False,
+            "share": True,
         },
         {
             "key": "mcp:https://mcp.example/sse",
             "kind": "mcp-rotating",
             "label": "",
-            "share": False,
+            "share": True,
         },
         {
             "key": "openai",
@@ -135,11 +135,17 @@ def test_offer_carries_candidates_kinds_labels_defaults(root: Path) -> None:
             "label": "d***@example.com",
             "share": True,
         },
+        {
+            "key": "radient",
+            "kind": "oauth-rotating",
+            "label": "o***@corp.example",
+            "share": True,
+        },
     ]
-    # The exclusions are pinned BY NAME so a future filter change re-reads the
-    # reason comment rather than flipping silently.
+    # The remaining exclusion is pinned BY NAME so a future filter change re-reads
+    # the reason comment rather than flipping silently.
     keys = [item["key"] for item in items]
-    assert "kimi" not in keys and "radient" not in keys
+    assert "kimi" not in keys
     assert not any(key.startswith("mcp:https://cold.example") for key in keys)
 
 

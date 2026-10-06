@@ -16,21 +16,41 @@ is on the joiner's OWN advertisement), the owner may only REDUCE what it sent,
 and the grants are written at admission from the owner's own store. A per-kind
 default is a renderer's mark on a row, not a grant.
 
-``share`` DEFAULTS per the design's §2.3 table (mesh-credentials.md:322-329):
+``share`` DEFAULTS per ``docs/design/mesh-consent-provisioning.md`` §1.4, which
+supersedes the §2.3 table this module was originally built on: **approval of a
+device IS the authorisation**, so the join-time list is the default provisioning
+set and every row stays reduce-only (the owner may drop rows; ``credential
+share|revoke`` remain as adjustment surfaces, never prerequisites):
 
-* ``oauth-rotating`` — **yes**: R13's core case (a peer with no login must work
-  without the operator re-authenticating), and ``scope: "session"`` at grant
-  time keeps it the smallest useful authority.
-* ``api-key-static`` — **no**: a static key is a bearer with no expiry and no
-  rotation, so granting it is a permanent capability increase; one keystroke
-  (``credential share``) when the operator wants it.
-* ``mcp-rotating`` — **no for v1**: MCP scopes vary per server and the Radient
-  precedent (broad-authority OAuth is explicit-only) cuts this way; one constant
-  flips it when the design round argues the other way.
-* ``secret`` (class 2) is NEVER a candidate — it is not brokered at all — and
-  the Radient org login is never auto-offered (§1.1: "there is no join-time
-  default"; its bearer carries organization-write authority, so the operator's
-  explicit ``credential share`` is the only grant path).
+* ``oauth-rotating`` — **yes** (unchanged): R13's core case (a peer with no login
+  must work without the operator re-authenticating), and ``scope: "session"`` at
+  grant time keeps it the smallest useful authority.
+* ``api-key-static`` — **yes** (flipped from no): a static key is the class that
+  *works* from a second device, and the concern that kept it off ("a permanent
+  capability increase", mesh-credentials.md:328) is answered by the approval gate
+  and the revoke/rotate surfaces, not by making the operator type ``share`` per
+  key.
+* ``mcp-rotating`` — **yes** (flipped from no): the access token was always
+  brokerable and the refresh grant never moves (the ``_oauth_refresh_lock`` stays
+  host-local), so the v1 scope-surface caution is spent.
+* ``github-app`` — **yes when the adapter resolves a source** (§3): the
+  candidate gate is the source ladder (``resolve_source``: the App secret, a
+  ``GITHUB_TOKEN``-class secret, or the ``gh`` login), and the ladder widens
+  which devices grow the row, not this default. The "one App covers every
+  designated repository" concern is bounded by the repository allow-list and the
+  helper's path check.
+* ``radient`` — **offered by default** for ``device`` members (flipped from
+  never-auto-offered): the org bearer carries organization-write authority, but
+  the operator's directive covers exactly this login — a node that cannot publish
+  an agent cannot do the work it was onboarded for — and the reduce step is the
+  narrowing surface. Pool exclusion is structural and unchanged (§1.3: pool
+  members declare no credentials and are excluded from every credential path).
+* ``secret`` (class 2) remains NEVER a candidate — it is not brokered at all.
+
+The two exclusions that do NOT move, because they are facts rather than
+postures: device-bound providers (kimi, below) and host-local credentials (the
+mobile portal password lives only in the macOS Keychain and never enters the
+candidate set).
 
 Stdlib only at import (``credentials/__init__.py`` states the rule): everything
 heavy — the readiness store read, the placement document, the MCP token storage —
@@ -79,25 +99,28 @@ KIND_LABELS: dict[str, str] = {
     "github-app": "GitHub",
 }
 
-#: The per-kind default posture (§2.3). A kind absent here has no default and is
-#: not offered; ``share_default`` answers ``False`` for it, which is the closed
-#: direction.
+#: The per-kind default posture (§1.4 of ``mesh-consent-provisioning.md``,
+#: which supersedes the §2.3 table: approval of a device is the authorisation,
+#: so the join-time list is the default provisioning set). A kind absent here has
+#: no default and is not offered; ``share_default`` answers ``False`` for it,
+#: which is the closed direction.
 SHARE_DEFAULT_BY_KIND: dict[str, bool] = {
     "oauth-rotating": True,
-    "api-key-static": False,
-    "mcp-rotating": False,
-    # Closed — and closed hardest: one App covers every designated repository for
-    # EVERY command on the borrower while the share stands, so the join-time
-    # default never offers it; the operator's explicit ``credential share`` is
-    # the only grant path (the same posture §2.3 gives the static key).
-    "github-app": False,
+    # Flipped from False (S1 of the provisioning design): static keys are the
+    # class that works from a second device, and the approval gate + revoke/rotate
+    # surfaces bound them where the old default made the operator share per key.
+    "api-key-static": True,
+    # Flipped from False: the access token was always brokerable, the refresh
+    # grant is host-local by construction, and the MCP defs push already reports
+    # the server set the node will run.
+    "mcp-rotating": True,
+    # Flipped from False, conditional on the adapter resolving a source (§3):
+    # the candidate gate is the source ladder (``resolve_source``), so the row
+    # exists whenever an arm can serve; the ladder widens which devices grow the
+    # row. The "one App covers every designated repository" concern is bounded by
+    # the repository allow-list and the helper's path check.
+    "github-app": True,
 }
-
-#: Providers whose logins are NEVER auto-offered in a join list. ``radient`` is
-#: the one name today (§1.1, "Share is explicit... there is no join-time
-#: default"): the org bearer carries publish/delete authority, so the operator's
-#: own ``credential share radient --with <device>`` is the only grant path.
-NEVER_AUTO_OFFERED_PROVIDERS: frozenset[str] = frozenset({"radient"})
 
 #: The candidate cap. 64 is far above any real store and keeps a hostile or
 #: broken store from producing a frame that strains the record budget; an
@@ -337,11 +360,14 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
 
     Excluded BY NAME, each for a reason the broker would refuse anyway: MCP rows
     under the ``mcp-oauth`` provider (the server candidates below are their
-    ledger), device-bound providers (``kimi`` — a grant would be refused by name
-    at placement time), and the never-auto-offered providers above. An MCP server
-    is a candidate only when a login row exists HERE: offering a server with
-    nothing behind it would promise the joiner something the admission's re-check
-    drops.
+    ledger) and device-bound providers (``kimi`` — a grant would be refused by
+    name at placement time). Radient was a third exclusion until S1 of the
+    provisioning design flipped it: it is now an ordinary candidate (its kind's
+    default decides, and §1.4 decided yes for device members), while the pool
+    exclusion stays structural — pool members never reach this list because they
+    declare no credentials at all (§1.3). An MCP server is a candidate only when
+    a login row exists HERE: offering a server with nothing behind it would
+    promise the joiner something the admission's re-check drops.
 
     Raises :class:`OfferEnumerationError` when the store exists but cannot be
     read — the caller sends an empty offer and records WHY.
@@ -357,8 +383,6 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
     for credential in _strict_provider_rows(config):
         provider = str(getattr(credential, "provider", "") or "")
         if not provider or provider == "mcp-oauth" or provider in DEVICE_BOUND_PROVIDERS:
-            continue
-        if provider in NEVER_AUTO_OFFERED_PROVIDERS:
             continue
         by_provider.setdefault(provider, []).append(credential)
     for provider in sorted(by_provider):
