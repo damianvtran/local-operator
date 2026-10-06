@@ -231,10 +231,13 @@ html[data-view="wide"] {
    16px floor is divided by that scale: the field's CSS font grows until its
    focus-zoom TARGET scale equals the scale the page already sits at — no
    movement on focus, and the text still shows at 16 physical px. The scale is
-   published by `lib/viewport.ts` (`applyWideView`); `wideFitScale` carries the
-   rounding margin. */
+   published by `lib/viewport.ts` (`applyWideView`, and recomputed on rotation
+   and resize); `wideFitScale` carries the rounding margin. `max(…, 1em)` is the
+   same guard the floor above keeps, so a field inside larger text is not shrunk
+   by the wide rule — its target then sits at or under the current scale, so the
+   guard cannot reintroduce a zoom-in. */
 html[data-view="wide"] :is(input, textarea, select) {
-	font-size: calc(16px / var(--lo-fit-scale));
+	font-size: max(calc(16px / var(--lo-fit-scale)), 1em);
 }
 
 html :focus-visible {

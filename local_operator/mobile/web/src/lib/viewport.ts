@@ -97,6 +97,30 @@ export function wideFitScale(): number {
 	return Math.min(1, Math.max(0.1, Math.floor(raw * 1000) / 1000));
 }
 
+/** Re-read the fit scale onto the root — the listener half of `wideFitScale`.
+ *
+ * WHY LISTENERS AND NOT A ONE-SHOT SNAPSHOT: the var is what the wide field
+ * rule divides by, so a value captured only at boot or at the toggle is a stale
+ * scale the moment the view changes — the same stale-scale defect this fix
+ * exists to remove, one layer down. Engines that report `screen.width` per
+ * orientation (Chrome/Android) need the recompute after a rotation; on iOS
+ * `screen.width` is the native portrait width at every orientation, so the
+ * event is a no-op there. The equality guard makes it cheap either way.
+ *
+ * The handler is a MODULE-LEVEL reference, so registering it twice is still one
+ * registration and the OFF path's `removeEventListener` removes exactly that
+ * pair: no stacked listeners, no stale closure. A page unload needs nothing —
+ * the listener dies with the document. */
+function recomputeFitScale(): void {
+	const style = document.documentElement.style;
+	const next = String(wideFitScale());
+	// Guarded: iOS fires `resize` on every URL-bar move, and re-setting an
+	// unchanged value would dirty style for a recomputation that cannot differ.
+	if (style.getPropertyValue(FIT_SCALE_PROP) !== next) {
+		style.setProperty(FIT_SCALE_PROP, next);
+	}
+}
+
 const KEY = "lo-mobile-wide-view";
 
 /** Not content-bearing, so it deliberately survives sign-out like the theme. */
@@ -115,11 +139,15 @@ export function applyWideView(wide: boolean): void {
 	if (meta) meta.setAttribute("content", wide ? WIDE_VIEWPORT_CONTENT : DEFAULT_VIEWPORT_CONTENT);
 	if (wide) {
 		document.documentElement.dataset.view = "wide";
-		document.documentElement.style.setProperty(FIT_SCALE_PROP, String(wideFitScale()));
+		recomputeFitScale();
+		window.addEventListener("orientationchange", recomputeFitScale);
+		window.addEventListener("resize", recomputeFitScale);
 		localStorage.setItem(KEY, "1");
 	} else {
 		delete document.documentElement.dataset.view;
 		document.documentElement.style.removeProperty(FIT_SCALE_PROP);
+		window.removeEventListener("orientationchange", recomputeFitScale);
+		window.removeEventListener("resize", recomputeFitScale);
 		localStorage.removeItem(KEY);
 	}
 }
