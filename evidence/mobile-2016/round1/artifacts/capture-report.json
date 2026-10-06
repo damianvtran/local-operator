@@ -1,0 +1,349 @@
+{
+  "port": 4216,
+  "viewport": "390x844",
+  "steps": [
+    {
+      "step": "control-with-count",
+      "control": {
+        "label": "mark all 2 read",
+        "rect": {
+          "top": 92,
+          "bottom": 136,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "marking": null,
+      "receipt": {
+        "role": "status",
+        "text": "working",
+        "rect": {
+          "top": 261,
+          "bottom": 262,
+          "left": 11,
+          "right": 12,
+          "w": 1,
+          "h": 1
+        }
+      },
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 660,
+          "bottom": 677,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 711,
+          "bottom": 728,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 0,
+      "scrollHeight": 1014,
+      "clientHeight": 743,
+      "dismiss": false
+    },
+    {
+      "step": "scrolled",
+      "control": {
+        "label": "mark all 2 read",
+        "rect": {
+          "top": 40,
+          "bottom": 84,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "marking": null,
+      "receipt": {
+        "role": "status",
+        "text": "working",
+        "rect": {
+          "top": 261,
+          "bottom": 262,
+          "left": 11,
+          "right": 12,
+          "w": 1,
+          "h": 1
+        }
+      },
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 389,
+          "bottom": 406,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 440,
+          "bottom": 457,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 271,
+      "scrollHeight": 1014,
+      "clientHeight": 743,
+      "dismiss": false
+    },
+    {
+      "step": "receipt-near-gesture",
+      "control": null,
+      "marking": null,
+      "receipt": {
+        "role": "status",
+        "text": "Marked 2 read.",
+        "rect": {
+          "top": 92,
+          "bottom": 120,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 28
+        }
+      },
+      "markCount": 0,
+      "markRects": [],
+      "scrollTop": 0,
+      "scrollHeight": 1014,
+      "clientHeight": 743,
+      "dismiss": true,
+      "settled": {
+        "control": null,
+        "marking": null,
+        "receipt": {
+          "role": "status",
+          "text": "Marked 2 read.",
+          "rect": {
+            "top": 92,
+            "bottom": 120,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 28
+          }
+        },
+        "markCount": 0,
+        "markRects": [],
+        "scrollTop": 0,
+        "scrollHeight": 1058,
+        "clientHeight": 743,
+        "dismiss": true
+      }
+    },
+    {
+      "step": "degraded-receipt",
+      "control": {
+        "label": "mark all 2 read",
+        "rect": {
+          "top": 92,
+          "bottom": 136,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "marking": null,
+      "receipt": {
+        "role": "alert",
+        "text": "Could not read what is unread \u2014 nothing was cleared. Try again.",
+        "rect": {
+          "top": 144,
+          "bottom": 191,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 47
+        }
+      },
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 715,
+          "bottom": 732,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 766,
+          "bottom": 783,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 0,
+      "scrollHeight": 1069,
+      "clientHeight": 743,
+      "dismiss": true,
+      "settled": {
+        "control": {
+          "label": "mark all 2 read",
+          "rect": {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          }
+        },
+        "marking": null,
+        "receipt": {
+          "role": "alert",
+          "text": "Could not read what is unread \u2014 nothing was cleared. Try again.",
+          "rect": {
+            "top": 144,
+            "bottom": 191,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 47
+          }
+        },
+        "markCount": 2,
+        "markRects": [
+          {
+            "top": 715,
+            "bottom": 732,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          },
+          {
+            "top": 766,
+            "bottom": 783,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          }
+        ],
+        "scrollTop": 0,
+        "scrollHeight": 1069,
+        "clientHeight": 743,
+        "dismiss": true
+      }
+    },
+    {
+      "step": "failure-line",
+      "control": {
+        "label": "mark all 2 read",
+        "rect": {
+          "top": 92,
+          "bottom": 136,
+          "left": 12,
+          "right": 378,
+          "w": 366,
+          "h": 44
+        }
+      },
+      "marking": null,
+      "receipt": {
+        "role": "alert",
+        "text": "Nothing was cleared \u2014 the daemon could not be reached. Try again.",
+        "rect": {
+          "top": 144,
+          "bottom": 191,
+          "left": 12,
+          "right": 326,
+          "w": 314,
+          "h": 47
+        }
+      },
+      "markCount": 2,
+      "markRects": [
+        {
+          "top": 715,
+          "bottom": 732,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        },
+        {
+          "top": 766,
+          "bottom": 783,
+          "left": 355,
+          "right": 378,
+          "w": 23,
+          "h": 17
+        }
+      ],
+      "scrollTop": 0,
+      "scrollHeight": 1069,
+      "clientHeight": 743,
+      "dismiss": true,
+      "settled": {
+        "control": {
+          "label": "mark all 2 read",
+          "rect": {
+            "top": 92,
+            "bottom": 136,
+            "left": 12,
+            "right": 378,
+            "w": 366,
+            "h": 44
+          }
+        },
+        "marking": null,
+        "receipt": {
+          "role": "alert",
+          "text": "Nothing was cleared \u2014 the daemon could not be reached. Try again.",
+          "rect": {
+            "top": 144,
+            "bottom": 191,
+            "left": 12,
+            "right": 326,
+            "w": 314,
+            "h": 47
+          }
+        },
+        "markCount": 2,
+        "markRects": [
+          {
+            "top": 715,
+            "bottom": 732,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          },
+          {
+            "top": 766,
+            "bottom": 783,
+            "left": 355,
+            "right": 378,
+            "w": 23,
+            "h": 17
+          }
+        ],
+        "scrollTop": 0,
+        "scrollHeight": 1069,
+        "clientHeight": 743,
+        "dismiss": true
+      }
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 # Evidence — issue #2016: mobile one-gesture "mark all as read" (PR #2023)
 
-This branch carries the runnable evidence for PR #2023 (`feat/mobile-mark-all-read`,
-head `f46ee0cf8`). It contains **no product code** and is never merged; the files
+This branch carries the runnable evidence for PR #2023 (`feat/mobile-mark-all-read`;
+head `f46ee0cf8` for the original slice, `522fc80e6` for the round-1 remediation).
+It contains **no product code** and is never merged; the files
 exist so the PR thread can link frames and raw logs at a pinned commit, and so QA
 can re-execute the rigs.
 
@@ -58,6 +59,42 @@ can re-execute the rigs.
 - `logs/` — the two fixture runs' stdout (generation A: capture; generation B:
   transcript — the capture consumes the unread pile, hence two generations).
 
+### `round1/` — round-1 remediation (head `522fc80e6`)
+
+Five states at 390x844, each a rendered frame plus the numbers behind it
+(`artifacts/capture-report.json`), captured with the same rig:
+
+- `artifacts/01-control-with-count-390x844.png` — the control now states the pile
+  size: **`mark all 2 read`**, measured **366x44 at (12, 92)** — stretched to the
+  column like the search field (design D4/UX U6; it was a 99.5px shrink-wrapped
+  pill).
+- `artifacts/02-scrolled-sticky-390x844.png` — at the list's **own maximum scroll
+  (`scrollTop` 271 of 1014)**, both unread marks are visible near the foot and the
+  control is still on screen at y=92 of the viewport: the band is sticky. Before
+  this round the control measured **y=-179** — entirely off-screen — in exactly
+  this state (design D5/UX U7).
+- `artifacts/03-receipt-near-gesture-390x844.png` — after one real pointer tap:
+  marks 0, and the receipt **"Marked 2 read."** renders **in the band at the top
+  (y=92, with a Dismiss control)** instead of 646px away beside the footer
+  (design D3/UX U1).
+- `artifacts/04-degraded-receipt-390x844.png` — **the MAJOR fix.** With the
+  unread read genuinely failing (the fixture raises from
+  `AttentionStore.state_many_and_revision` — the seam the repo's own unread test
+  injects, so this is the daemon's real degraded aggregate), the control is still
+  mounted over two painted marks and the press answers, in danger ink,
+  **"Could not read what is unread — nothing was cleared. Try again."** — never
+  "Nothing unread." (agent MAJOR-1 = design D1). No POST is made.
+- `artifacts/05-failure-line-390x844.png` — with the bulk write blocked at the
+  network layer, the marks stay at 2 and the alert reads **"Nothing was cleared —
+  the daemon could not be reached. Try again."**, naming the recovery instead of
+  echoing `Failed to fetch` (UX U5).
+- `artifacts/transcript.log` / `.json` + `shape-readings.json` — the wire pass on a
+  fresh generation: badge **2 → 0** on the happy path, and the SHAPE layer pinned —
+  `zzz-not-hex`, `ABCDEF012345`, an 11-char id, a non-UUID token and an empty token
+  each answer **422** with the same sentence (agent NIT-2 / QA Q2/Q3), while a
+  well-formed but unknown id keeps the per-item **`unknown`** verdict at 200.
+- `logs/` — the two fixture generations' stdout (capture, then transcript).
+
 ## Re-running (QA)
 
 From a worktree of the **PR head** (never the shared root checkout), with this
@@ -84,3 +121,18 @@ PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/postfix/scripts
 
 The repro-phase scripts under `repro/scripts/` run the same way (their transcript
 asserts the pre-fix contract: the bulk route absent).
+
+The round-1 rigs add one capability hook each and run identically:
+
+```sh
+# fixture with the degraded seam + the out-of-band publish hook
+PYTHONPATH=. LOP_2016_SEED_OUT="$SCRATCH/artifacts/seed.json" \
+  .venv/bin/python <this-branch>/evidence/mobile-2016/round1/scripts/mobile_2016_fixture_r1.py 4216
+
+# five captures (same generation; each tap consumes the pile, so the script
+# republishes and reloads before the degraded and failure states)
+PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/round1/scripts/mobile_2016_capture_r1.py 4216 "$SCRATCH/artifacts"
+
+# wire transcript (RESTART the fixture first — fresh generation)
+.venv/bin/python <this-branch>/evidence/mobile-2016/round1/scripts/mobile_2016_transcript_r1.py 4216 "$SCRATCH/artifacts"
+```
