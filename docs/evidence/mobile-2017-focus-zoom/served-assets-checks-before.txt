@@ -1,0 +1,25 @@
+# Served-asset checks for #2017 (2026-10-06, worktree mobile-2017-focus-zoom @ 7d612a2)
+
+## Built dist/index.html meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<!-- The brand's island ground; the address bar matches the canvas. -->
+
+## Tokens in served HTML (login page + authed SPA)
+login page:
+(empty = none found)
+authed SPA (/):
+(empty = none found)
+
+## Tokens in served CSS (dist/assets/index-D_Q6hwPa.css)
+   1 -webkit-text-size-adjust:100%
+
+## Tokens in served JS bundle
+(empty = none found)
+
+## Provenance of -webkit-text-size-adjust:100% (Tailwind v4 preflight)
+node_modules/tailwindcss/preflight.css:31:  -webkit-text-size-adjust: 100%; /* 2 */
+
+## Source tree (app code) tokens
+(empty = none found)
