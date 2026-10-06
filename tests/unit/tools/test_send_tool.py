@@ -1441,3 +1441,143 @@ async def test_a_wedged_match_never_asks_the_peer_catalogue(
     )
     assert result.is_error is True
     assert "has not reported for 4m" in result.text
+
+
+# ---------------------------------------------------------------------------
+# the target= spelling of an exact-id miss (round-1 extend)
+# ---------------------------------------------------------------------------
+#
+# The reviewer's round-1 finding, decision EXTEND: `target=<full remote id>`
+# addresses the same session as `session=<id>`, so the miss must name the peer
+# exactly as the session= spelling does. The hint stays ID-SPECIFIC — a
+# name-shaped target keeps its sentence and pays no read — and the new trigger
+# must not add reads anywhere except the existing miss path.
+
+
+@pytest.mark.asyncio
+async def test_a_full_id_target_names_the_peer_from_the_warm_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`target=<full remote id>` — the miss names the peer. Warm cache, read
+    poisoned, so a cache-only hit is the only way this passes."""
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    _poison_peer_reads(
+        monkeypatch, "a warm cache hit paid a listing read; the cached row must answer"
+    )
+
+    result = await execute_send(
+        "t", {"target": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_cache_pays_one_bounded_read_for_a_full_id_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The target spelling pays the SAME one bounded read on a cold cache:
+    exactly one read (counted at the catalogue), then the peer is named."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Row:
+        session_id = "ffff12345678"
+        device_id = "d_cloud_node_1"
+        conversation_name = "remote work"
+        state = "idle"
+        pending = None
+        kind = "tui"
+        started = 10.0
+
+    dials: list[str] = []
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _federated_fakes(dials, rows=[_Row()]))
+
+    result = await execute_send(
+        "t", {"target": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+    assert dials == ["built", "peers", "rows"], "the miss is ONE read, no more and no less"
+
+
+@pytest.mark.asyncio
+async def test_a_name_target_miss_pays_no_peer_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CONTROL for the extension: the hint is id-specific. A name that matches
+    nothing locally keeps the rewritten sentence and never touches the
+    catalogue — both entry points are poisoned, so any lookup fails the cell."""
+    _poison_peer_reads(monkeypatch, "a name target miss asked the peer catalogue", both=True)
+    result = await execute_send(
+        "t", {"target": "nothing-here", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "no session matches 'nothing-here' (searched live and stored sessions)"
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_full_id_target_never_asks_the_peer_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tail gate: the needle IS a full id, but the refusal is about a
+    record this device REACHED (the wedged form) — not the miss. The sentence
+    stands and the catalogue is never consulted."""
+    from local_operator.mobile import peer_send
+
+    def _wedged(**_kwargs: Any) -> tuple[None, list[Any], str]:
+        return (
+            None,
+            [],
+            "target session ffff12345678 has not reported for 4m (pid 4242), so a "
+            "plain send will not dial it; it may report again on its own",
+        )
+
+    monkeypatch.setattr(peer_send, "resolve_peer_target", _wedged)
+    _poison_peer_reads(monkeypatch, "a wedged refusal asked the peer catalogue", both=True)
+    result = await execute_send(
+        "t", {"target": "ffff12345678", "message": "hello", "wake": False}, None, None, _context()
+    )
+    assert result.is_error is True
+    assert "has not reported for 4m" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_locally_resolved_full_id_target_pays_no_peer_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ZERO-READ, the new trigger's success side: an id-shaped target that
+    resolves and delivers HERE must not consult the catalogue first — both
+    entry points are poisoned, so any 'is this id remote?' check raises."""
+    registrant, alias, handle = await _start_peer()
+    try:
+        # A second addressable record, this one with a session id the shape
+        # check accepts, so the resolution under test is the id tier.
+        registry.publish(
+            registry.SessionRecord(
+                pid=os.getppid(),
+                kind="tui",
+                session_id="ffff12345678",
+                conversation_name="id-addressed",
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=alias.control_port,
+                control_key=alias.control_key,
+                started=True,
+            )
+        )
+        _poison_peer_reads(monkeypatch, "a local resolution paid a peer read", both=True)
+        result = await execute_send(
+            "t", {"target": "ffff12345678", "message": "id delivered"}, None, None, _context()
+        )
+        assert not result.is_error, result.text
+        call = await _last_peer_call(handle)
+        assert call["text"] == "id delivered"
+    finally:
+        registrant.close()
