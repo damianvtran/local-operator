@@ -1128,3 +1128,316 @@ async def test_a_family_refusal_comes_back_verbatim(monkeypatch: pytest.MonkeyPa
         "t", {"peer": PEER, "target": "ghost", "message": "hi"}, None, None, _context()
     )
     assert result.is_error and result.text == message
+
+
+# ---------------------------------------------------------------------------
+# the peer hint — a bare remote id names the peer that holds it
+# ---------------------------------------------------------------------------
+#
+# The defect (operator-visible, Aida's acceptance run, 2026-10-06): ``send``
+# called with a REMOTE session id and no ``peer`` answered "no session found
+# with session id '<id>'" — the session exists, just on a peer, and the caller
+# spent a turn concluding it did not. The refusal now becomes "`<id>` is held
+# by <device> — pass `peer=<device>`" when the id is in a peer's catalogue.
+#
+# The arms below pin the whole policy: a warm cache answers with ZERO reads; a
+# cold cache pays ONE bounded federated read; no relay record (no catalogue
+# built) and an unreadable relay both leave the sentence byte for byte; an id
+# the mesh does not hold is still "unknown"; a local success pays nothing; and
+# every non-miss refusal — the conflict form, the wedged form — is untouched.
+
+
+def _remote_peer_row(
+    session_id: str = "ffff12345678",
+    *,
+    name: str = "remote work",
+    device_id: str = "d_cloud_node_1",
+    device_name: str = "cloud-node-1",
+):
+    """One peer-held row, shaped as the federated read builds them."""
+    from local_operator.resume import SessionRow
+
+    return SessionRow(
+        session_id,
+        1.0,
+        name,
+        locality="remote",
+        owner_device=device_id,
+        owner_device_name=device_name,
+    )
+
+
+def _poison_peer_reads(
+    monkeypatch: pytest.MonkeyPatch, message: str, *, both: bool = False
+) -> None:
+    """Make peer-catalogue touches loud, so "no read" is measured.
+
+    ``both`` also poisons the cache-only lookup, which the zero-read guards use
+    so ANY touch fails the cell. The warm-cache cells leave the lookup live on
+    purpose — it is the thing that must answer — and poison only the read.
+    """
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(message)
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+    if both:
+        monkeypatch.setattr(peer_rows_mod, "peer_session_row", _forbidden)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_remote_id_names_the_peer_from_the_warm_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row the last federated listing already reported costs no read at all.
+
+    The read is poisoned, so a cache-only hit is the ONLY way this can pass.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    _poison_peer_reads(
+        monkeypatch, "a warm cache hit paid a listing read; the cached row must answer"
+    )
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+
+
+def _federated_fakes(dials: list[str], *, rows):
+    """A ``RelayPeerCatalog`` double counting every phase of one read.
+
+    ``_read`` builds the catalogue once and calls ``peers()``/``rows()`` on it;
+    the counter makes a second dial — or a skipped read — visible.
+    """
+
+    class _Facts:
+        device_id = "d_cloud_node_1"
+        name = "cloud-node-1"
+        network_id = "n_1"
+        reachable = True
+        reason = ""
+
+    class _Catalog:
+        def __init__(self, root: Any = None) -> None:
+            dials.append("built")
+
+        def peers(self):  # noqa: ANN201
+            dials.append("peers")
+            return [_Facts()]
+
+        def rows(self, device_id: str = ""):  # noqa: ANN201
+            dials.append("rows")
+            return list(rows)
+
+    return _Catalog
+
+
+@pytest.mark.asyncio
+async def test_a_cold_cache_pays_one_bounded_read_then_names_the_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a miss, ONE bounded federated read (the sidebar/CLI projection), and
+    the sentence names the device the read answered with. The phase count is
+    the receipt: exactly one read."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Row:
+        session_id = "ffff12345678"
+        device_id = "d_cloud_node_1"
+        conversation_name = "remote work"
+        state = "idle"
+        pending = None
+        kind = "tui"
+        started = 10.0
+
+    dials: list[str] = []
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _federated_fakes(dials, rows=[_Row()]))
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+    assert dials == ["built", "peers", "rows"], "the miss is ONE read, no more and no less"
+
+
+@pytest.mark.asyncio
+async def test_a_device_with_no_relay_keeps_the_resolver_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The zero-peer property, measured on the call: no relay record means the
+    record is looked for, NO catalogue is built, and the sentence does not
+    move — every install outside a mesh stays byte-identical."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    asked: list[str] = []
+
+    def _find(root: Any = None) -> None:
+        asked.append("asked")
+        return None
+
+    monkeypatch.setattr(net_store, "find_own_relay", _find)
+    built: list[object] = []
+
+    class _Spy:
+        def __init__(self, root: Any = None) -> None:
+            built.append(self)
+            raise AssertionError("a device in no mesh must not build a projection reader")
+
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _Spy)
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "no session found with session id 'ffff12345678'"
+    assert asked == ["asked"], "the relay record must be looked for, not assumed"
+    assert built == [], "no catalogue may be built when there is no relay record"
+
+
+@pytest.mark.asyncio
+async def test_a_relay_that_cannot_answer_keeps_the_resolver_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused/timed-out/unreadable relay is an empty answer (``peer_rows``'s
+    contract), not a new failure mode: the ORIGINAL refusal stands, and no
+    exception escapes the tool."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Broken:
+        def __init__(self, root: Any = None) -> None:
+            pass
+
+        def peers(self):  # noqa: ANN201
+            raise RuntimeError("the relay went away")
+
+        def rows(self, device_id: str = ""):  # noqa: ANN201
+            raise RuntimeError("the relay went away")
+
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _Broken)
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "no session found with session id 'ffff12345678'"
+
+
+@pytest.mark.asyncio
+async def test_an_id_the_mesh_does_not_hold_keeps_the_resolver_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A catalogue that ANSWERED without the id is still "unknown": the read is
+    what tells the two apart, and the sentence is not replaced by a guess."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Row:
+        session_id = "aaaa11112222"  # the mesh holds a DIFFERENT session
+        device_id = "d_cloud_node_1"
+        conversation_name = "someone else"
+        state = "idle"
+        pending = None
+        kind = "tui"
+        started = 10.0
+
+    dials: list[str] = []
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _federated_fakes(dials, rows=[_Row()]))
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert result.text == "no session found with session id 'ffff12345678'"
+    assert dials == ["built", "peers", "rows"], "the read is the only way to learn 'unknown'"
+
+
+@pytest.mark.asyncio
+async def test_a_locally_resolved_send_pays_no_peer_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE ZERO-READ GUARD (the series' "resolution paid a listing read"
+    discipline): a send that resolves and delivers HERE must not touch the peer
+    catalogue at all — both catalogue entry points are poisoned, so any touch
+    raises. The hint belongs to refusals, never to successes."""
+    registrant, _alias, handle = await _start_peer()
+    try:
+        _poison_peer_reads(monkeypatch, "a local resolution paid a peer read", both=True)
+        result = await execute_send(
+            "t", {"target": "peer-target", "message": "gates are green"}, None, None, _context()
+        )
+        assert not result.is_error, result.text
+        call = await _last_peer_call(handle)
+        assert call["text"] == "gates are green"
+        assert call["wake"] is True
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_conflicting_selector_pair_never_asks_the_peer_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint's trigger is the exact-id MISS and nothing else: a refusal
+    about an address this device DID resolve (a target+pid conflict) stays a
+    local answer, with no peer read."""
+    _poison_peer_reads(monkeypatch, "a conflict refusal asked the peer catalogue", both=True)
+    result = await execute_send(
+        "t",
+        {"target": "credential", "pid": 12345, "message": "hello", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+    assert result.is_error is True
+    assert "not both" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_match_never_asks_the_peer_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wedged form is the other side of the same rule: the id was REACHED
+    (a record exists, its owner did not answer), so the refusal stands and the
+    peer catalogue is never consulted."""
+    from local_operator.mobile import peer_send
+
+    def _wedged(**_kwargs: Any) -> tuple[None, list[Any], str]:
+        return (
+            None,
+            [],
+            "the only match for 'credential' has not reported for 4m (pid 4242), so a "
+            "plain send will not dial it; it may report again on its own",
+        )
+
+    monkeypatch.setattr(peer_send, "resolve_peer_target", _wedged)
+    _poison_peer_reads(monkeypatch, "a wedged refusal asked the peer catalogue", both=True)
+    result = await execute_send(
+        "t", {"target": "credential", "message": "hello", "wake": False}, None, None, _context()
+    )
+    assert result.is_error is True
+    assert "has not reported for 4m" in result.text
