@@ -2343,8 +2343,17 @@ class OnboardRun:
                 if "=" in line:
                     key, _, value = line.partition("=")
                     node_git[key.strip()] = value.strip()
-            if node_git.get("git") != "yes":
+            # THREE states, never two (agent review round 1, F1): ``no`` is the
+            # printf's own word — printed only by a machine that ANSWERED and has
+            # no git on PATH. Empty output is a probe that never ran (an
+            # unreachable node, or the ssh timeout above), and reading it as "git
+            # is not installed there" asserts a fact never observed — misdirecting
+            # a reader exactly where a link problem is being diagnosed.
+            state = node_git.get("git", "")
+            if state == "no":
                 git["note"] = "git is not installed there; nothing was seeded"
+            elif state != "yes":
+                git["note"] = "the git probe did not answer on that machine; nothing was seeded"
             else:
                 failures: list[str] = []
                 for option, value, slot in (

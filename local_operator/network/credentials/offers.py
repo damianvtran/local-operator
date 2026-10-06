@@ -407,8 +407,10 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
 
     if github_mod.source_present(config):
         # A ladder arm resolves, so there is something to serve: the row has no
-        # store row, so it is named here directly. The kind's default decides
-        # its posture on the join list; this gate only says the row exists.
+        # store row, so it is named here directly. The kind's default decides its
+        # posture on the join list — its ``share`` resolves through
+        # ``share_default`` like every row, True for ``github-app`` since the
+        # §1.4 flip — and this gate only says the row exists.
         rows.append({"key": github_mod.GITHUB_KEY, "kind": github_mod.GITHUB_KIND, "label": ""})
 
     rows.sort(key=lambda row: row["key"])

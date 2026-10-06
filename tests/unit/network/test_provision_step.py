@@ -482,6 +482,51 @@ def test_the_git_identity_is_seeded_only_where_the_node_has_none(
     assert not any("git config --global user.name" in line for line in writes2)
 
 
+def test_the_git_probe_splits_no_from_no_answer(
+    provision_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Agent review round 1 (F1): ``no`` is a fact the node's own printf states —
+    printed only by a machine that ANSWERED, without git on PATH; a probe that
+    never answered (unreachable, timed out) must not borrow the sentence."""
+    _seed(provision_root, "openai", {"refresh": "r", "access": "a", "email": "d@example.com"})
+    _operator_record(provision_root)
+    _real_networks(monkeypatch)
+    owner_home = tmp_path / "owner-home"
+    owner_home.mkdir()
+    (owner_home / ".gitconfig").write_text(
+        "[user]\n\tname = Damian Tran\n\temail = damian@example.com\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(owner_home))
+
+    # The machine answered, and its own word is "no": absence is a fact.
+    absent = FakeTransport(
+        outputs=[
+            ("git=", {"stdout": "git=no\nname=\nemail=\n"}),
+            ("network credentials", {"stdout": json.dumps(_listing(held=["openai"]))}),
+            ("mcp state", {"stdout": json.dumps({"ok": True, "servers": []})}),
+        ]
+    )
+    outcome = _run(_view(), absent, _pushes_ok([])).step_provision()
+    assert outcome.ok, outcome.detail
+    assert outcome.data["git"]["note"] == "git is not installed there; nothing was seeded"
+
+    # No answer at all (the ssh shape: rc 255, empty stdout): the receipt names
+    # the probe's silence instead of asserting anything about the node.
+    silent = FakeTransport(
+        outputs=[
+            ("command -v git", {"stdout": "", "rc": 255}),
+            ("network credentials", {"stdout": json.dumps(_listing(held=["openai"]))}),
+            ("mcp state", {"stdout": json.dumps({"ok": True, "servers": []})}),
+        ]
+    )
+    outcome2 = _run(_view(), silent, _pushes_ok([])).step_provision()
+    assert outcome2.ok, outcome2.detail
+    assert (
+        outcome2.data["git"]["note"]
+        == "the git probe did not answer on that machine; nothing was seeded"
+    )
+
+
 def test_the_mcp_needs_list_is_recorded_for_the_later_copy_decision(
     provision_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
