@@ -137,17 +137,36 @@ class _Opened:
         return _open
 
 
-def _remote_row(*, reachable: bool = True, reason: str = "") -> SessionRow:
+def _remote_row(
+    *,
+    session_id: str = SESSION,
+    name: str = "pilot",
+    live_state: str = "busy",
+    reachable: bool = True,
+    reason: str = "",
+    device_id: str = "d_428cb39f92ebbd094acf5d30a2db7bfb",
+    device_name: str = PEER,
+) -> SessionRow:
     return SessionRow(
-        id=SESSION,
+        id=session_id,
         mtime=1.0,
-        name="pilot",
+        name=name,
+        live_state=live_state,
         locality="remote",
-        owner_device="d_428cb39f92ebbd094acf5d30a2db7bfb",
-        owner_device_name=PEER,
+        owner_device=device_id,
+        owner_device_name=device_name,
         reachable=reachable,
         unreachable_reason=reason,
     )
+
+
+def _patch_peer_rows(monkeypatch: pytest.MonkeyPatch, rows: list[SessionRow]) -> None:
+    """Stand in for the name tier's catalogue read, as ``_patch_unresolved`` does
+    for the failure path's: the rows the named peer reported, no relay dialled."""
+
+    import local_operator.session.peer_rows as peer_rows_mod
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", lambda _root=None: tuple(rows))
 
 
 def _patch(monkeypatch: pytest.MonkeyPatch, viewer: _FakeViewer | None, row: Any = None) -> _Opened:
@@ -157,12 +176,17 @@ def _patch(monkeypatch: pytest.MonkeyPatch, viewer: _FakeViewer | None, row: Any
     imports them from at call time — the same seam ``test_remote_open.py`` drives
     the app through (`remote_open.open_remote_viewer`), so a change of entry point
     breaks this test rather than silently moving under it.
+
+    The name tier's read is stubbed to NOTHING here as well: every cell that
+    wants name resolution overrides it via :func:`_patch_peer_rows`, and a cell
+    that does not must never reach a live relay through this seam.
     """
     import local_operator.session.remote_open as remote_open
 
     opened = _Opened()
     monkeypatch.setattr(remote_open, "open_remote_viewer", opened(viewer, row))
     monkeypatch.setattr(remote_open, "remote_row_for", lambda _session_id, _root: row)
+    _patch_peer_rows(monkeypatch, [])
     return opened
 
 
@@ -285,6 +309,11 @@ def _patch_unresolved(
         return answer or {}
 
     monkeypatch.setattr(net_cli, "_relay_answer", _answer)
+    # The NAME tier reads the catalogue itself (``_resolve_act_target``), so a
+    # cell that wants an unresolved target must stub that read too — otherwise
+    # this helper would stand in for one read while a second one dialled a real
+    # relay. Empty rows are the unresolved state; name cells override this.
+    _patch_peer_rows(monkeypatch, [])
 
 
 #: The three states one ``None`` from the resolver can mean, and the sentence each
@@ -981,3 +1010,319 @@ def test_a_receipt_this_build_cannot_read_is_unreported(
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "slash_unreported"
     assert payload["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# id-or-name targets (sessions-remote-tools.md §3B)
+#
+# A pilot target may be an id OR a conversation name: the exact id resolves
+# anywhere on the mesh (unchanged), and a name resolves through the pure
+# selector over the rows THIS --peer reported. What these cells pin is the
+# wiring: which read runs, what the receipt names, and that an ambiguous word
+# refuses BEFORE a viewer exists or a frame is written.
+
+
+def test_a_send_target_resolves_a_name_through_the_peers_rows(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--send <name>`: the selector resolves, and the act lands on the RESOLVED id.
+
+    The typed word is a name no wire op in this family has ever taken, so the
+    receipt must read back the session's own id — two callers who addressed one
+    conversation two ways must get one answer.
+    """
+    viewer = _FakeViewer()
+    opened = _patch(monkeypatch, viewer, None)
+    _patch_peer_rows(monkeypatch, [_remote_row(name="pilot-run")])
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", "pilot-run", "hello"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["ok"] is True, payload
+    assert payload["session_id"] == SESSION, "the receipt names the resolved id"
+    assert viewer.waited == ["hello"]
+    assert opened.calls == 1
+
+
+def test_a_slash_target_resolves_a_name_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same resolution for `--slash`: one helper, so every pilot verb agrees."""
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, None)
+    _patch_peer_rows(monkeypatch, [_remote_row(name="slash-by-name")])
+    assert (
+        _run(["sessions", "--json", "--peer", PEER, "--slash", "slash-by-name", "/rename better"])
+        == 0
+    )
+    payload = ok(capsys.readouterr().out)
+    assert payload["session_id"] == SESSION, payload
+    assert viewer.slashes and viewer.slashes[0][0] == "rename", viewer.slashes
+
+
+def test_an_ambiguous_name_lists_the_candidates_and_opens_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two whole conversations behind one word: refuse WITH the rows, guess at neither.
+
+    This is the wrong-recipient case the whole resolution exists for, so the
+    cell asserts all three halves: the code, BOTH retypeable ids in the
+    sentence, and that no viewer was opened for either of them.
+    """
+    viewer = _FakeViewer()
+    opened = _patch(monkeypatch, viewer, None)
+    _patch_peer_rows(
+        monkeypatch,
+        [
+            _remote_row(session_id="aaaa11112222", name="checklist one"),
+            _remote_row(session_id="bbbb33334444", name="checklist two"),
+        ],
+    )
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", "checklist", "hello"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_ambiguous", payload
+    assert "aaaa11112222" in payload["message"], payload
+    assert "bbbb33334444" in payload["message"], payload
+    assert "checklist one" in payload["message"], payload
+    assert opened.calls == 0, "an ambiguous target must not open a viewer"
+    assert viewer.waited == []
+
+
+def test_a_name_on_another_device_is_not_this_peers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The name tier is scoped to the device the caller NAMED (`--peer`).
+
+    A conversation is only addressed on the device that holds it, and reaching
+    for it elsewhere is how an act lands on a namesake: the rows the OTHER
+    device reported must not satisfy a name resolved against this one.
+    """
+    _patch(monkeypatch, _FakeViewer(), None)
+    _patch_unresolved(
+        monkeypatch,
+        answer={"peers": {PEER: {"name": PEER, "reachable": True, "reason": ""}}},
+    )
+    _patch_peer_rows(
+        monkeypatch,
+        [_remote_row(name="on-elsewhere", device_id="d_other", device_name="other-node")],
+    )
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", "on-elsewhere", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_unknown", payload
+    assert "does not hold" in payload["message"], payload
+
+
+def test_a_stop_target_may_be_the_conversations_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--stop`` gets the same id-or-name translation: the relay sees the id."""
+    frames: list[dict[str, Any]] = []
+
+    def _capture(op: str, **fields: Any) -> dict[str, Any]:
+        frames.append({"op": op, **fields})
+        return {"rung": "socket", "outcome": "stopped", "pid": 1, "detail": "stopped"}
+
+    monkeypatch.setattr(net_cli, "_relay_answer", _capture)
+    _patch(monkeypatch, None, None)
+    _patch_peer_rows(monkeypatch, [_remote_row(name="the-session")])
+    assert _run(["sessions", "--json", "--peer", PEER, "--stop", "the-session"]) == 0
+    capsys.readouterr()
+    assert len(frames) == 1, frames
+    assert frames[0]["op"] == "peer_session_stop"
+    assert frames[0]["session_id"] == SESSION, "the frame carries the RESOLVED id"
+    assert frames[0]["peer"] == PEER
+    assert frames[0]["mode"] == "graceful"
+
+
+def test_an_ambiguous_stop_is_refused_before_any_frame(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ambiguous stop refuses locally; nothing was sent to the peer."""
+    frames: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        net_cli, "_relay_answer", lambda op, **fields: frames.append(op) or {}  # noqa: ARG005
+    )
+    _patch(monkeypatch, None, None)
+    _patch_peer_rows(
+        monkeypatch,
+        [
+            _remote_row(session_id="aaaa11112222", name="checklist one"),
+            _remote_row(session_id="bbbb33334444", name="checklist two"),
+        ],
+    )
+    assert _run(["sessions", "--json", "--peer", PEER, "--stop", "checklist"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_ambiguous", payload
+    assert "aaaa11112222" in payload["message"] and "bbbb33334444" in payload["message"]
+    assert frames == [], "an ambiguous stop must not reach the relay"
+
+
+def test_an_unresolved_stop_target_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A miss is NOT this side's verdict: the peer answers for what it holds (§9.2).
+
+    The cache that resolved nothing may be seconds old, and for these two verbs
+    the owner runs the ladder — so the typed value travels unchanged and the
+    owner's own answer comes back (the pinned contract these verbs already had).
+    """
+    frames: list[dict[str, Any]] = []
+
+    def _capture(op: str, **fields: Any) -> dict[str, Any]:
+        frames.append({"op": op, **fields})
+        return {"rung": "socket", "outcome": "stopped", "pid": 1, "detail": "stopped"}
+
+    monkeypatch.setattr(net_cli, "_relay_answer", _capture)
+    _patch(monkeypatch, None, None)
+    _patch_peer_rows(monkeypatch, [])
+    assert _run(["sessions", "--json", "--peer", PEER, "--stop", "deadbeefcafe"]) == 0
+    capsys.readouterr()
+    assert frames[0]["session_id"] == "deadbeefcafe", frames
+
+
+def test_an_engage_target_may_be_the_conversations_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--engage`` too: the same translation, one spelling."""
+    frames: list[dict[str, Any]] = []
+
+    def _capture(op: str, **fields: Any) -> dict[str, Any]:
+        frames.append({"op": op, **fields})
+        return {"engaged": True, "session_id": SESSION, "detail": "warm"}
+
+    monkeypatch.setattr(net_cli, "_relay_answer", _capture)
+    _patch(monkeypatch, None, None)
+    _patch_peer_rows(monkeypatch, [_remote_row(name="warm-me", live_state="")])
+    assert _run(["sessions", "--json", "--peer", PEER, "--engage", "warm-me"]) == 0
+    capsys.readouterr()
+    assert frames[0]["op"] == "peer_session_engage"
+    assert frames[0]["session_id"] == SESSION, frames
+
+
+# ---------------------------------------------------------------------------
+# --peek: the tail window, and the live-only gate (§3C/§8.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_peek_reads_the_requested_tail_window(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The newest `--steps` rows, in order, with has_older telling the truth."""
+    viewer = _FakeViewer(
+        rows=[
+            _Message("user", "one"),
+            _Message("assistant", "two"),
+            _Message("user", "three"),
+            _Message("assistant", "four"),
+        ]
+    )
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION, "--steps", "2"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["ok"] is True and payload["verb"] == "peek", payload
+    assert payload["session_id"] == SESSION
+    assert payload["steps"] == 2
+    assert [row["text"] for row in payload["rows"]] == ["three", "four"]
+    assert payload["has_older"] is True
+    assert viewer.bound is True and viewer.disposed is True
+
+
+def test_a_peek_defaults_to_twelve_steps(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No `--steps`: the sessions tool's own default, so one verb, one window size."""
+    viewer = _FakeViewer(rows=[_Message("user", f"line {i}") for i in range(20)])
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["steps"] == 12
+    assert [row["text"] for row in payload["rows"]] == [f"line {i}" for i in range(8, 20)]
+
+
+def test_a_stored_session_refuses_peek_and_is_never_bound(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§8.3, LOCKED: a read never starts a runtime on a device nobody is watching.
+
+    The refusal must land BEFORE the viewer exists — whether a bind ever ran is
+    what this cell proves, because a gate that merely raised after opening
+    would still have warmed the runtime a peek must not wake. The sentence
+    names the route out (``--engage`` / the agent's resume) so the next action
+    is a warm, not a retried read.
+    """
+    viewer = _FakeViewer(rows=[_Message("assistant", "should not be seen")])
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_stored", payload
+    assert SESSION in payload["message"] and PEER in payload["message"], payload
+    assert "--engage" in payload["message"], payload
+    assert "resume" in payload["message"], payload
+    assert opened.calls == 0, "the gate must fire before a viewer exists"
+    assert viewer.bound is False, "a stored session must never be bound or warmed"
+    assert viewer.waited == []
+
+
+def test_peek_takes_no_text_and_never_reads_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A read has no payload — and skipping the text path is load-bearing.
+
+    ``_pilot_text`` reads STDIN when the positional is empty and stdin is not a
+    TTY, so a peek that went through it would hang a script on a pipe it never
+    asked for; this cell's stdin raises the moment anything reads it.
+    """
+    viewer = _FakeViewer(rows=[_Message("assistant", "x")])
+    _patch(monkeypatch, viewer, _remote_row())
+
+    class _NoRead(io.StringIO):
+        def read(self, *args: Any, **kwargs: Any) -> str:  # noqa: ARG002
+            raise AssertionError("--peek read stdin")
+
+    piped = _NoRead("a body that must not be consumed")
+    monkeypatch.setattr("sys.stdin", piped)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 0
+    capsys.readouterr()
+    assert _run(["sessions", "--peer", PEER, "--peek", SESSION, "loud", "words"]) == 2
+    assert "takes no text" in capsys.readouterr().err
+
+
+def test_a_peek_beside_another_act_is_two_acts(capsys: pytest.CaptureFixture[str]) -> None:
+    """The one-act rule covers the read too."""
+    assert _run(["sessions", "--peer", PEER, "--peek", SESSION, "--send", SESSION, "hi"]) == 2
+    assert "not a pipeline" in capsys.readouterr().err
+
+
+def test_steps_without_peek_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """Same class as ``--force`` without ``--stop``: meaning one thing, dropped otherwise."""
+    assert _run(["sessions", "--peer", PEER, "--steps", "5"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--steps applies to --peek only" in captured.err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "51", "1000"])
+def test_steps_out_of_range_reads_nothing(value: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """The window's bounds are the family's (1..``comms.PEEK_MAX_STEPS``), enforced."""
+    assert _run(["sessions", "--peer", PEER, "--peek", SESSION, "--steps", value]) == 2
+    assert "1..50" in capsys.readouterr().err
+
+
+def test_the_peek_bound_carries_no_spawn_and_no_turn() -> None:
+    """§3A's budget table, one row over: the READ rung is what bounds a peek.
+
+    The driving act's bound pays for a spawn and an unbounded turn; a peek can
+    reach neither (the gate above refuses stored sessions before any bind), so
+    its bound is the same derivation with the REPLY rung in place of the turn,
+    and it must actually be SMALLER — a bound that kept the 540 s spawn budget
+    would be a budget for work this verb never does.
+    """
+    from local_operator.tui import network_cli as tui_mod
+
+    assert (
+        net_cli.PILOT_PEEK_TIMEOUT_S
+        == 2 * net_cli.PILOT_BIND_TIMEOUT_S + net_cli.PILOT_REPLY_TIMEOUT_S
+    )
+    assert net_cli.PILOT_PEEK_TIMEOUT_S < net_cli.PILOT_ACT_TIMEOUT_S
+    # And the TUI's child budget still outlasts it, so a composer shows THIS
+    # verb's own answer rather than a timeout about a call that was working.
+    assert net_cli.PILOT_PEEK_TIMEOUT_S < tui_mod.PILOT_CALL_TIMEOUT_S
