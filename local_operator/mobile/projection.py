@@ -54,6 +54,7 @@ from local_operator.harness.message_types import (
 # the convergence review found was a decision one surface made and the other
 # did not (docs/design/history-fold-convergence.md §3).
 from local_operator.harness.rows import (
+    ask_gate_diverted_call_ids,
     ask_response_notice,
     ask_timeout_notice,
     assistant_row_text,
@@ -61,8 +62,10 @@ from local_operator.harness.rows import (
     compaction_refused_notice,
     gate_timeout_notice,
     held_delivery_notice,
+    is_ask_gate_divert_details,
     is_harness_chrome,
     is_harness_notice_row,
+    is_settle_only_ask,
     output_limit_call_receipt,
     sessions_row_summary,
     turn_cut_tool_call,
@@ -1235,6 +1238,11 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
         for message in history
         if isinstance(message, Message) and message.role == "tool" and message.tool_call_id
     }
+    # Call ids whose RESULT is an ask-gate divert (design docs/design/
+    # ask-gate.md §3): those calls paint NO chip and settle NO row — a diverted
+    # ask leaves no trace on any surface. One up-front pass, like `settled`:
+    # the marked result can sit several messages after the call it names.
+    diverted = ask_gate_diverted_call_ids(history)
     # Message ids whose assistant turn opened a bang-mode (`! cmd`) command,
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
@@ -1514,6 +1522,12 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     # `send`'s result settles into nothing rather than
                     # becoming a new silent path.
                     continue
+                if call.id in diverted:
+                    # THE ASK GATE (design docs/design/ask-gate.md §3): the
+                    # diverted call's chip never paints either, and its
+                    # marked result settles into nothing through the same
+                    # missing-row tolerance the hidden `send` above documents.
+                    continue
                 entry = TranscriptEntry(
                     id=f"{message.id}:{call.id}",
                     kind="tool",
@@ -1623,8 +1637,19 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
 class ProjectionFold:
     """Incremental fold of one session's events into a SessionProjection."""
 
-    def __init__(self, projection: SessionProjection) -> None:
+    def __init__(self, projection: SessionProjection, *, queued_engine: bool = False) -> None:
         self.projection = projection
+        #: Whether the session this fold serves runs the queued-ask engine
+        #: (design docs/design/ask-gate.md §3 row 8). ``True`` makes an ask
+        #: call's rows SETTLE-ONLY: no live row while it composes or runs, one
+        #: row at settle (the receipt for a raise, nothing for a divert — the
+        #: marker is read there). ``False`` keeps today's mount AND still
+        #: drops a marker-carrying result, which is the fallback for the
+        #: blocking arm and for an un-negotiated mixed build alike — the
+        #: serving layers that own a session read it with
+        #: ``harness.rows.queued_ask_engine_live`` at construction, because a
+        #: fold has no session to ask later.
+        self._queued_engine = bool(queued_engine)
         # tool_call_id -> transcript entry id, so start/update/end land on
         # the same row regardless of interleaving.
         self._tool_rows: dict[str, str] = {}
@@ -1904,7 +1929,18 @@ class ProjectionFold:
             # AFTER the rekey above, so a promotion frame (the real id arriving
             # for a placeholder row) is correctly seen as an existing row.
             pre_existing = event.tool_call_id in self._tool_rows
-            row = self._tool_row(event.tool_call_id, event.tool_name)
+            # THE NEVER-RUN ENDING IS EXEMPT from the settle-only refusal, the
+            # same contract line the TUI's composing gate carries (design
+            # review): a compose frame with `not_run_reason` is a verdict, not
+            # a dictation — no gate ran, a divert is impossible, and a call
+            # that died before asking the user must stay visible exactly as
+            # with the engine off. `settle=True` admits the mint; the arm
+            # below settles it.
+            row = self._tool_row(
+                event.tool_call_id,
+                event.tool_name,
+                settle=bool(event.not_run_reason),
+            )
             if row is None:
                 # `display.hide_cross_session`: the frame is consumed with
                 # nothing painted — `_tool_row` refused to mint (see there),
@@ -1989,6 +2025,20 @@ class ProjectionFold:
                 # `display.hide_cross_session`: a start with no row to run —
                 # nothing painted, and no start bookkeeping for a row that
                 # does not exist (see `_tool_row`).
+                #
+                # THE SETTLE-ONLY ASK IS THE ONE EXCEPTION, and it is not a
+                # row: the fold refuses to mint under the queued engine (§3),
+                # but the identity THIS frame carries — args and the start
+                # instant — is exactly what the settle arm's mint later reads
+                # for the raise's receipt row (`_tool_details`, `elapsed_s`),
+                # and the END frame does not carry it. Recorded here, popped
+                # by the end arm either way (a divert's `_drop_tool_row`).
+                if is_settle_only_ask(event.tool_name, queued_engine=self._queued_engine):
+                    stated = _stated_epoch(event.started_at_epoch)
+                    self._tool_started_at[event.tool_call_id] = (
+                        monotonic_from_epoch(stated) if stated is not None else time.monotonic()
+                    )
+                    self._tool_args[event.tool_call_id] = event.args
                 return
             row.tool_state = "running"
             # The failure TEXT goes with the failure STATE. This row may have
@@ -2033,12 +2083,25 @@ class ProjectionFold:
             if text:
                 row.details["partial"] = text[-TOOL_OUTPUT_TAIL_CHARS:]
         elif isinstance(event, ToolExecutionEndEvent):
-            row = self._tool_row(event.tool_call_id, event.tool_name)
+            if is_ask_gate_divert_details(event.result.details):
+                # THE DIVERT SETTLES NOTHING (design docs/design/ask-gate.md
+                # §3): the result carries the gate's hidden marker, so no row
+                # may settle for the call — under the queued engine none was
+                # minted (the settle-only refusal in `_tool_row`), and a fold
+                # that mounted one before the mode was knowable drops it here
+                # (the settle-marker half of the mixed-build fallback).
+                self._drop_tool_row(event.tool_call_id)
+                return
+            row = self._tool_row(event.tool_call_id, event.tool_name, settle=True)
             if row is None:
                 # `display.hide_cross_session`: an end for a row that was never
                 # minted — there is nothing to settle, and nothing was ever
                 # tracked for it (see `_tool_row`).
                 return
+            # An end is where a settle-only ask's ONE row is created: the
+            # `settle=True` above admits the mint for a RAISE (a divert
+            # returned before it), so the receipt row appears at settle on the
+            # phone exactly as it does in the TUI.
             result = event.result
             # The call's FAULT class, when its emitter marked one, decides the
             # tier first: {skipped, aborted} is an interruption (the user
@@ -3234,7 +3297,9 @@ class ProjectionFold:
                 row.final = True
             self._open_reasoning_id = None
 
-    def _tool_row(self, tool_call_id: str, tool_name: str) -> TranscriptEntry | None:
+    def _tool_row(
+        self, tool_call_id: str, tool_name: str, *, settle: bool = False
+    ) -> TranscriptEntry | None:
         """The live row for a tool call, minting one when absent.
 
         Returns ``None`` instead of minting a ``send`` row under
@@ -3245,11 +3310,20 @@ class ProjectionFold:
         constructed. A frame whose row EXISTS — built while the flag was off —
         resolves through the lookup above and keeps updating; forward-only,
         matching the TUI (see ``tui/settings.py``'s ``_DEFAULT_NOTES``).
+
+        ``settle`` admits the second refusal the same way: under the queued
+        engine an ask call is SETTLE-ONLY (design docs/design/ask-gate.md §3),
+        so compose/start/update frames mint nothing — the row is created at
+        SETTLE instead, by the end arm (``settle=True``) for a raise and never
+        for a divert (the marker returns before the mint). One refusal, at the
+        one place all four arms share, is what keeps the four from drifting.
         """
         entry_id = self._tool_rows.get(tool_call_id)
         row = self._find(entry_id) if entry_id else None
         if row is None:
             if cross_session_hidden() and tool_name == SEND_TOOL_NAME:
+                return None
+            if is_settle_only_ask(tool_name, queued_engine=self._queued_engine) and not settle:
                 return None
             row = TranscriptEntry(
                 id=f"tc-{tool_call_id}",
@@ -3260,6 +3334,25 @@ class ProjectionFold:
             self._append(row)
             self._tool_rows[tool_call_id] = row.id
         return row
+
+    def _drop_tool_row(self, tool_call_id: str) -> None:
+        """Remove a call's row and correlation state (the ask gate's drop).
+
+        The phone's arm of the settle-marker contract (design
+        docs/design/ask-gate.md §3 row 8): a diverted ask's result must leave
+        no row behind. Under the queued engine none was minted (the
+        settle-only refusal in `_tool_row`); a fold that mounted one before the
+        mode was knowable — the mixed-build fallback — drops it here, together
+        with the start/duration/args bookkeeping its end arm would otherwise
+        read.
+        """
+        self._tool_args.pop(tool_call_id, None)
+        self._tool_started_at.pop(tool_call_id, None)
+        entry_id = self._tool_rows.pop(tool_call_id, None)
+        if entry_id:
+            self.projection.transcript = [
+                row for row in self.projection.transcript if row.id != entry_id
+            ]
 
     def _tool_details(
         self, args: dict[str, Any], output: str, result_details: dict[str, Any] | None

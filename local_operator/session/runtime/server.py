@@ -8622,7 +8622,26 @@ class RuntimeServer:
         performed itself, never an injected sink."""
         sink = self._projection_sink
         if sink is None:
-            sink = ProjectionFold(self._handle.session_projection_seed)
+            # THE ASK GATE's mode (design docs/design/ask-gate.md §3 row 8):
+            # the default fold is told once, from the session the HANDLE
+            # owns, so this runtime's phone/web projection skips a diverted
+            # ask's rows. ``_session`` is an attribute on some handles and a
+            # method on others — the idiom and its reasons are stated at the
+            # boot seed's own read — and a handle that cannot answer yet
+            # keeps the conservative False: today's mount plus the
+            # settle-marker drop.
+            from local_operator.harness.rows import queued_ask_engine_live
+
+            owned_session = getattr(self._handle, "_session", None)
+            if callable(owned_session):
+                try:
+                    owned_session = owned_session()
+                except Exception:  # noqa: BLE001 — a boot that cannot answer yet is not an error
+                    owned_session = None
+            sink = ProjectionFold(
+                self._handle.session_projection_seed,
+                queued_engine=queued_ask_engine_live(owned_session),
+            )
             self._projection_sink = sink
             self.projection_sinks_built += 1
             logger.info(
