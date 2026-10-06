@@ -1188,8 +1188,12 @@ it up" and *does the work*):
    strong local dependency (a repo only on this machine, an attached browser)
    should stay put.
 4. **`## Driving a session on a peer`** — the commands that work identically
-   against a remote session (`lop sessions --all-peers --json`, `lop send --peer
-   <peer> <session> …`, and the TUI's slash commands, which run on the owner).
+   against a remote session (`lop sessions --all-peers --json`; sending,
+   steering and slashing through the TOOLS — the `send` tool's `peer` field, or
+   the `network` tool's `sessions` action with `send`/`steer`/`slash` — and the
+   TUI's slash commands, which run on the owner). The CLI's designed `lop send
+   --peer` route is still UNBUILT; the tools' `peer` is the delivery path
+   (design: `sessions-remote-tools.md` §8.1).
    States explicitly that quitting the local TUI does not stop it (R9).
 5. **`## Credentials on a peer`** — the A5 rule in operational words: the agent
    never copies a token, never runs a login on a peer, and never re-authenticates

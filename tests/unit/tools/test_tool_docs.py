@@ -186,6 +186,14 @@ _WALK_DEPTH_CAP = 2
 #: byte-identical, and the same schema is the whole of
 #: ``scripts/bench_context_budget.py``'s raise (``35,937 -> 36,552``, the
 #: clean-arm arithmetic in its entry) — the two ledgers move together.
+#: RE-MEASURED 2026-10-06 by the sessions-remote tool surfaces
+#: (``feat/sessions-remote-tools-b``, PR #2011): ``network`` 742 -> 877,
+#: ``send`` 639 -> 728 and ``sessions`` 864 -> 981 — the three docs whose
+#: schemas and reference text the mesh surfaces grew (the §4 field strings;
+#: ``sessions`` also renders the per-op reference, which gained the peer/scope
+#: refusals and summaries). Every other entry is byte-identical, and the same
+#: three tools are the whole of ``scripts/bench_context_budget.py``'s raise
+#: (``36,552 -> 37,094``) — the two ledgers move together.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 849,
     "ask": 1205,
@@ -211,15 +219,15 @@ MEASURED_TOKENS: dict[str, int] = {
     "list_variables": 61,
     "lsp": 303,
     "monitor": 420,
-    "network": 742,
+    "network": 877,
     "patience": 361,
     "project": 1077,
     "project_delete": 98,
     "read": 358,
     "read_variable": 74,
     "secret": 209,
-    "send": 639,
-    "sessions": 864,
+    "send": 728,
+    "sessions": 981,
     "task": 505,
     "team": 540,
     "team_delete": 93,

@@ -64,6 +64,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.network.cli import PILOT_ACT_TIMEOUT_S
 from local_operator.tools.builtin import (
     _error,
     _guard,
@@ -104,11 +105,14 @@ WRITE_ACTIONS = frozenset({"init", "invite", "join", "member_rm", "disconnect", 
 
 #: The one action whose tier depends on WHICH verb it carries: ``sessions`` presents
 #: one peer's session list, which is a read, and can create, engage, stop or delete a
-#: session on it, which are not. The split is therefore made on the arguments the
-#: model actually sent, rather than on a second family of action names it would have
-#: to keep in step with its own flags — a ``sessions_create`` that forgot ``peer``
-#: would be the same call under a friendlier name.
-_SESSION_MUTATIONS = ("create", "engage", "stop", "delete")
+#: session on it, which are not — as can the pilot verbs (``send``/``steer``/``slash``),
+#: which start or touch work on another device's runtime. The split is therefore made
+#: on the arguments the model actually sent, rather than on a second family of action
+#: names it would have to keep in step with its own flags — a ``sessions_create`` that
+#: forgot ``peer`` would be the same call under a friendlier name. Tier and argv read
+#: this ONE tuple (``_session_verbs``), so a tier that stays silent for a call whose
+#: argv spells a mutation cannot be written without failing the tests that pin both.
+_SESSION_MUTATIONS = ("create", "engage", "stop", "delete", "send", "steer", "slash")
 
 #: Local reads answer in well under a second; ``doctor`` dials endpoints. The
 #: bound exists so a wedged subprocess can never hold a turn open.
@@ -116,6 +120,27 @@ _DEFAULT_TIMEOUT_S = 30.0
 #: ``join`` performs a real handshake against the far device, which is bounded by
 #: that relay's own timers, not by ours.
 _JOIN_TIMEOUT_S = 120.0
+
+#: The bound for a PILOT act (``send``/``steer``/``slash``): the CLI bounds the
+#: whole act at ``PILOT_ACT_TIMEOUT_S`` and reports its own honest expiry inside
+#: that ("took the turn and is still running it", or "session_unreachable … within
+#: 540s"), so the tool's bound must sit ABOVE it or this call would pre-empt a
+#: report the CLI was about to make — the class of rc=124 the design names. The
+#: +60 is the TUI's own derivation (``tui/network_cli.PILOT_CALL_TIMEOUT_S``,
+#: from the same constant), kept identical so both front ends grant one act the
+#: same room. A test pins the derivation, so a future edit to any of the three
+#: CLI budgets cannot leave this number stale.
+_PILOT_TIMEOUT_S = PILOT_ACT_TIMEOUT_S + 60.0
+
+#: ``stop`` renders the owner's own ladder, whose SIGTERM rung waits out a drain
+#: the receiver owns (the CLI relays it with a 240 s budget); a bound at the
+#: socket default would report "nothing happened" about a stop that was working.
+_STOP_TIMEOUT_S = 300.0
+
+#: ``create``/``engage``: a spawn plus that device's own registry work, which the
+#: CLI relays with a 120 s budget of its own (``--create``'s first-turn admission,
+#: ``--engage``'s connect).
+_CREATE_ENGAGE_TIMEOUT_S = 180.0
 
 #: How long a parked pairing's FIRST body may take. A dial and a handshake, which the
 #: CLI bounds internally — so this is the "the pairing never announced itself" bound,
@@ -227,6 +252,29 @@ class NetworkParams(BaseModel):
             "run — a real delete needs the user's `--yes`, so report no deletion."
         ),
     )
+    send: str = Field(
+        default="",
+        description=(
+            "For sessions: deliver a turn to this session on `peer` (an id or name), "
+            "and wait for its outcome."
+        ),
+    )
+    steer: str = Field(
+        default="",
+        description="For sessions: inject into the turn that session is running there.",
+    )
+    slash: str = Field(
+        default="",
+        description=(
+            "For sessions: run a slash command in that session (e.g. '/rename a " "better name')."
+        ),
+    )
+    text: str = Field(
+        default="",
+        description=(
+            "For send/steer/slash: the words to deliver, taken as the CLI's positional text."
+        ),
+    )
     trust_state: Literal["active", "untrusted"] = Field(
         default="active",
         description="For trust: 'active' re-admits an untrusted network, 'untrusted' refuses it.",
@@ -306,7 +354,7 @@ def _session_verbs(args: dict[str, Any]) -> dict[str, str]:
     (``"0"`` being the text spelling of "no") while argv still spelled ``--stop 0``,
     so a mutation rode a call that raised no approval. That is latent rather than live
     only because session ids are ``uuid4().hex[:12]`` and none of those literals can
-    name one — luck, not safety. ``create`` is a boolean and the other three are
+    name one — luck, not safety. ``create`` is a boolean and the rest are
     operands; a falsy spelling is no verb at all.
     """
     verbs: dict[str, str] = {}
@@ -413,6 +461,40 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         verbs = _session_verbs(params.model_dump())
         mutation = next(iter(verbs), "")
         peer = params.peer.strip()
+        # THE PILOT VERBS ARE ONE-ACT-ONLY, in the CLI's own words: they are the
+        # only verbs here that open a viewer, and a call that asked for two acts
+        # (or for a pilot act AND a create/engage/stop/delete) would run one
+        # while silently dropping the other — the class of untruth the CLI
+        # refuses its own command lines for (``_cmd_sessions``'s pilot guard),
+        # restated here because the tool is a second front door to that parser.
+        pilot = [name for name in ("send", "steer", "slash") if name in verbs]
+        if len(pilot) > 1:
+            return [], (
+                "action='sessions' takes one act at a time: name one of "
+                "'send'/'steer'/'slash' — each is one act on one session, and they "
+                "are not a pipeline."
+            )
+        pilot_act = pilot[0] if pilot else ""
+        if pilot_act:
+            clash = next(
+                (name for name in ("create", "engage", "stop", "delete") if name in verbs), ""
+            )
+            if clash:
+                return [], (
+                    f"action='sessions' with '{pilot_act}' acts on the session you "
+                    f"name; '{clash}' would act on another, so this call would do one "
+                    "of the two."
+                )
+        if not pilot_act and params.text.strip():
+            # A SILENTLY DROPPED FIELD is the class this branch refuses two
+            # guards down for `all_peers`: `text` has exactly three homes
+            # (send/steer/slash), so words on a call that named none of them
+            # are a misspelled intent — refused with the fix named, never
+            # discarded behind a plain listing (round 1, MINOR).
+            return [], (
+                "action='sessions' carries 'text' only with a pilot act: name one "
+                "of 'send'/'steer'/'slash', or drop 'text'."
+            )
         if mutation and not peer:
             return [], (
                 f"action='sessions' with '{mutation}' needs 'peer': the session lives on "
@@ -435,6 +517,34 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
                 "action='sessions' needs 'peer' (one device you are paired with) or "
                 "'all_peers' (every device), or one of create/engage/stop/delete."
             )
+        if pilot_act:
+            if not params.text.strip():
+                # PRE-REFUSED, because the child cannot read one in: ``_run_cli``
+                # binds the child's stdin to /dev/null, so the CLI's own
+                # stdin-fallback for the text can never fire — its "needs some
+                # text" usage error would name a route this tool does not have.
+                return [], (
+                    f"action='sessions' with '{pilot_act}' needs 'text': the words to "
+                    "deliver (this tool cannot pipe a body in)."
+                )
+            # ``--json`` GOES BEFORE THE ACT, and the text ALWAYS after ``--``:
+            # the CLI takes the payload as a REMAINDER from the first non-option
+            # token to the end of the line, so a trailing ``--json`` would be
+            # delivered to the peer AS TEXT — and the words after ``--`` are
+            # DATA, so a payload that opens with a dash-shaped word cannot become
+            # a flag (no ``--yes``/``--force`` is spelled anywhere here, and
+            # after ``--`` nothing could be read as one either).
+            return [
+                "network",
+                "sessions",
+                "--json",
+                "--peer",
+                peer,
+                f"--{pilot_act}",
+                verbs[pilot_act],
+                "--",
+                params.text,
+            ], ""
         argv = ["network", "sessions"]
         if "create" in verbs:
             argv += ["--create"]
@@ -469,6 +579,28 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         return [], f"{action!r} is not a network action."
 
     return argv + ["--json"], ""
+
+
+def _timeout_for(params: NetworkParams) -> float:
+    """The child's bound for this call, per what the verb will actually do.
+
+    Read beside ``_argv_for`` because it is decided from the SAME verb predicate:
+    a call whose argv spells a pilot act must be granted the pilot act's room, or
+    the tool would reap a child the CLI was still working inside (the rc=124
+    class §3A names). ``join`` keeps its own handshake budget and everything else
+    the socket default.
+    """
+    if params.action == "join":
+        return _JOIN_TIMEOUT_S
+    if params.action == "sessions":
+        verbs = _session_verbs(params.model_dump())
+        if any(name in verbs for name in ("send", "steer", "slash")):
+            return _PILOT_TIMEOUT_S
+        if "stop" in verbs:
+            return _STOP_TIMEOUT_S
+        if "create" in verbs or "engage" in verbs:
+            return _CREATE_ENGAGE_TIMEOUT_S
+    return _DEFAULT_TIMEOUT_S
 
 
 def _describe_approval(args: dict[str, Any], _cwd: str) -> str:
@@ -666,6 +798,66 @@ def _networks_block(payload: dict[str, Any]) -> list[str]:
         + membership_marker(row)
         for row in rows
     ]
+
+
+def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
+    """A pilot act's receipt (``send``/``steer``/``slash``) as digest lines.
+
+    The receipt is the OWNER's outcome, reported honestly: ``finished`` carries
+    the reply (the answer the whole call was for), and ``running``/``queued``/
+    ``failed``/``lost`` are NON-completions that say which — the same rule the
+    CLI's own non-zero exit follows, kept readable for a model that branches on
+    the structured fields riding ``details``.
+    """
+    session_id = str(payload.get("session_id") or "")
+    peer = str(payload.get("peer") or "")
+    lines: list[str] = []
+    if verb == "send":
+        outcome = str(payload.get("outcome") or "")
+        error = str(payload.get("error") or "")
+        if outcome == "finished":
+            lines.append(f"{session_id} on {peer}: the turn finished.")
+            reply = str(payload.get("reply") or "")
+            if reply:
+                lines.append(reply)
+        elif outcome == "running":
+            lines.append(f"{session_id} on {peer} took the turn and is still running it.")
+            lines.append(
+                "It was admitted there, so the work is happening — this call stopped waiting; "
+                f"open it to watch it: `lop --resume {session_id}`"
+            )
+        elif outcome == "queued":
+            lines.append(f"{peer} is retiring that session's runtime, so no turn ran here.")
+            if error:
+                lines.append(error)
+        elif outcome == "failed":
+            lines.append(f"{session_id} on {peer} ran the turn and it failed:")
+            lines.append(error or "no error text was reported")
+        elif outcome == "lost":
+            lines.append(f"the connection to {peer} for {session_id} was lost during the turn:")
+            if error:
+                lines.append(error)
+            lines.append(
+                "the turn may still be running there — "
+                f"`lop --resume {session_id}` shows how far it got."
+            )
+        else:
+            lines.append(json.dumps(payload, sort_keys=True))
+    elif verb == "steer":
+        because = str(payload.get("receipt") or "").strip() or "accepted"
+        lines.append(f"{session_id} on {peer}: {because}")
+        lines.append(
+            "a steer is delivered at the owner's next tool boundary; it does not "
+            "interrupt the step already running."
+        )
+    else:  # slash
+        command = str(payload.get("command") or "")
+        said = str(payload.get("text") or "").strip()
+        lines.append(f"{session_id} on {peer}: /{command} — {said or 'no receipt'}")
+    named = str(payload.get("peer_named") or "")
+    if named:
+        lines.append(f"you named {named}; {session_id} is held by {peer}, which is where this ran")
+    return lines
 
 
 def _render(action: str, payload: dict[str, Any]) -> list[str]:
@@ -928,6 +1120,13 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         lines[1:1] = extras
         return lines
     if action == "sessions":
+        verb = str(payload.get("verb") or "")
+        if verb in ("send", "steer", "slash"):
+            # A PILOT RECEIPT carries the same action's --json shape as the
+            # listing and is discriminated by ``verb`` — listing rows never have
+            # one — so the receipt renders as what it is rather than through the
+            # listing branch below.
+            return _pilot_receipt_lines(verb, payload)
         rows = payload.get("sessions")
         if rows is None:
             # A MUTATION's receipt: the peer's own sentence, never a re-rendering
@@ -1150,7 +1349,7 @@ async def execute_network(
         # one rather than reported.
         argv = ["network", "join", token_arg, "--park", "--json"]
 
-    timeout = _JOIN_TIMEOUT_S if params.action == "join" else _DEFAULT_TIMEOUT_S
+    timeout = _timeout_for(params)
     try:
         if parked:
             code, stdout, stderr = await _start_parked_join(argv)
@@ -1203,6 +1402,21 @@ async def execute_network(
             body = "\n".join(_render(params.action, scrubbed))
             text, spill = spill_truncate(body, _TOOL, context)
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
+        if params.action == "sessions" and str(scrubbed.get("verb") or "") in (
+            "send",
+            "steer",
+            "slash",
+        ):
+            # A PILOT RECEIPT IS NOT A REFUSAL even when its ``ok`` is false: the
+            # owner ran the act and reported a NON-completion (running/queued/
+            # failed/lost, or a routed slash the owner refused), and the CLI's
+            # non-zero exit is exactly the "do not read this as done" signal. The
+            # generic branch below would keep only ``code: message`` and drop the
+            # outcome — and, for a finished send, the owner's reply. Rendering the
+            # receipt keeps them; the error result still marks the non-completion.
+            body = "\n".join(_render(params.action, scrubbed))
+            text, spill = spill_truncate(body, _TOOL, context)
+            return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
         # before ``error`` (which only the install/uninstall diagnostics still
         # use) and before stderr, which in ``--json`` mode is empty BY DESIGN —
@@ -1240,8 +1454,9 @@ def build_network_tool(context: ToolContext) -> AgentTool | None:
         name=_TOOL,
         label="Mesh network",
         description=(
-            "Read and drive a lop mesh network from this device: peers, their sessions, "
-            "creating a session on a peer, and the network's own lifecycle. Pairing and "
+            "Read and drive a lop mesh network from this device: peers, their sessions "
+            "(list, create, engage, stop, and send/steer/slash a conversation), and "
+            "the network's own lifecycle. Pairing and "
             "incident controls need a human: `join` parks a pairing and returns the code "
             "for the user to read out, answering it is theirs to run, and this tool "
             "reports what the CLI refused and why."

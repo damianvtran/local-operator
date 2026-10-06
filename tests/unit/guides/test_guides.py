@@ -471,9 +471,44 @@ def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
     assert "--park" in body
     assert "You cannot do this step" in body
     assert "pairing_unanswered" in body
+    # PR-B: the TOOL paths are named where an agent looks (design §4's tool-first
+    # line), and the inbound leg is the owner's own prompt admission — never a
+    # second wire protocol (§9.1's wording, verbatim once whitespace is flattened).
+    flat = " ".join(body.split())
+    assert "INSIDE A SESSION the same acts are one tool call" in flat
+    assert "the `network` tool's `sessions` action carries" in flat
+    assert "delivered through the owner's own prompt admission" in flat
+    assert "no separate inbound wire op" in flat
     # Shareable prompt text: no machine-shaped absolute paths, and no home dir.
     assert "/Users/" not in body
     assert "/home/" not in body
+
+
+def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() -> None:
+    """PR-B's other two guides (design §4, §9.1).
+
+    The `sessions` guide must teach the remote ops — the union list with the
+    holding device on each row, the no-mesh note, the tail-only peek and the
+    no-force stop — and peer-messaging must carry the `send` tool's `peer`
+    bullet and the loopback-only limit, so an agent reading the message
+    protocol learns the mesh path exists instead of inventing one.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    sessions = resolver("guide://sessions")
+    assert sessions is not None
+    flat = " ".join(sessions.split())
+    assert "Remote sessions (mesh)" in flat
+    assert "each remote row names the device that holds it" in flat
+    assert "ONE note saying why no remote rows could be" in flat
+    assert "`query`/`regex`/`digest` stay local" in flat
+    assert "`lop network sessions --stop <id> --force` is the escalation" in flat
+
+    messaging = resolver("guide://peer-messaging")
+    assert messaging is not None
+    flat = " ".join(messaging.split())
+    assert "a device on your **mesh** (a name or id)" in flat
+    assert "drives a turn there and the owner's reply comes back in the result" in flat
+    assert "The mailbox is loopback-only; `send(peer=…)` is the mesh path." in flat
 
 
 def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:

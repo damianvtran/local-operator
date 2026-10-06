@@ -206,6 +206,20 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "rows gloss through doctor_detail_words; the readiness rows moved to "
         "readiness.render_check_lines)",
     ),
+    # The sessions TOOL's remote receipts (PR-B, ``sessions-remote-tools.md``
+    # §3C): ``detail`` is the RELAY's own sentence for the act — the engage
+    # sentence, and the stop ladder's outcome line — rendered verbatim as the
+    # tool receipt, exactly the vocabulary the ``network/tool.py`` ``_render``
+    # entry above declares; the machine facts (``engaged``/``outcome``) are
+    # the structured keys beside it.
+    ("local_operator/tools/builtin.py", "_sessions_resume_mesh", "detail"): (
+        1,
+        "the relay's own sentence for the engage, rendered verbatim as the receipt",
+    ),
+    ("local_operator/tools/builtin.py", "_sessions_stop_mesh", "detail"): (
+        1,
+        "the stop ladder's own outcome sentence, rendered verbatim as the receipt",
+    ),
     # The readiness report's own sentences. Capability rows are COMPOSED as prose in
     # ``readiness.py`` (the machine token rides ``code``, which no surface here
     # prints); the CLI renders those sentences and the summary fragments reuse them.
