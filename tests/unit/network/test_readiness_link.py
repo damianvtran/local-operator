@@ -736,6 +736,20 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     home = tmp_path / "peer-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # The peer's tooling inventory (2026-10-06): a complete lane toolchain on a
+    # controlled PATH plus a stored gh login, so the new row reads ok — and the
+    # block after the fixes drops a tool to watch the NON-GATING warn over the
+    # same live link.
+    tool_bin = tmp_path / "tool-bin"
+    tool_bin.mkdir()
+    for tool in readiness.TOOLING_TOOLS:
+        executable = tool_bin / tool
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    hosts = home / ".config" / "gh" / "hosts.yml"
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text("github.com:\n    user: octocat\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tool_bin))
     monkeypatch.setattr(
         "local_operator.operator.operator_authority_report",
         lambda **kwargs: {
@@ -803,6 +817,22 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     assert not failures, failures
     assert rc == 0, payload
     assert payload["ok"] is True
+
+    # The tooling row rides the SAME report: ok when the toolchain is complete...
+    tooling = _capability(payload, readiness.CAPABILITY_TOOLING)
+    assert tooling["ok"] is True, tooling
+
+    # ...and a dropped tool flips it to a named, NON-GATING warn: the report
+    # stays ready (rc 0) while the gap is readable — the lane learns before it
+    # starts, and lane tooling never reddens the onboarding fold (2026-10-06).
+    (tool_bin / "node").unlink()
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    tooling = _capability(payload, readiness.CAPABILITY_TOOLING)
+    assert tooling["ok"] is False and tooling["code"] == readiness.CODE_NOT_INSTALLED
+    assert tooling["state"] == readiness.ROW_STATE_WARN  # the row's own cell, stamped by ready
+    assert "lacks node" in tooling["detail"]
+    assert f"install node on {server_b.identity.name}" in " ".join(tooling["remedies"])
+    assert rc == 0 and payload["ok"] is True
     server_b.stop()
 
 
