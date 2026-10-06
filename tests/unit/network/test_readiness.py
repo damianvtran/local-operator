@@ -768,8 +768,9 @@ def _tooling_section(
     absent: list[str] | None = None,
     off_path: dict[str, str] | None = None,
     unknown: list[str] | None = None,
-    has_entry: bool | None = True,
+    has_entry: Any = True,
     hosts_file: bool = True,
+    reason: str = "",
 ) -> dict[str, Any]:
     """A ``tooling`` fact section, state by state, the way the collector ships it."""
     absent = absent or []
@@ -785,13 +786,16 @@ def _tooling_section(
             tools[name] = {"state": "unknown", "path": "", "reason": "PermissionError"}
         else:
             tools[name] = {"state": "on_path", "path": f"/usr/local/bin/{name}"}
+    gh_auth: dict[str, Any] = {
+        "hosts_file": hosts_file,
+        "has_entry": has_entry,
+        "config_path": "/home/x/.config/gh/hosts.yml",
+    }
+    if reason:
+        gh_auth["reason"] = reason
     return {
         "tools": tools,
-        "gh_auth": {
-            "hosts_file": hosts_file,
-            "has_entry": has_entry,
-            "config_path": "/home/x/.config/gh/hosts.yml",
-        },
+        "gh_auth": gh_auth,
         "local_bin_dir": "/home/x/.local/bin",
     }
 
@@ -811,6 +815,7 @@ def test_tooling_row_ok_names_the_toolchain() -> None:
     assert row["capability"] == readiness.CAPABILITY_TOOLING
     assert row["class"] == readiness.CLASS_EQUIPMENT
     assert "gh, glab, node, npm, make, docker" in row["detail"]
+    assert "stored GitHub CLI login" in row["detail"]
     assert row["remedies"] == []
 
 
@@ -822,8 +827,13 @@ def test_tooling_row_separates_absent_off_path_and_login_states() -> None:
         peer_label="cloud-node-1",
     )
     assert absent_row["ok"] is False and absent_row["code"] == readiness.CODE_NOT_INSTALLED
-    assert "lacks node, npm, make and docker" in absent_row["detail"]
-    assert "install node, npm, make and docker on cloud-node-1" in " ".join(absent_row["remedies"])
+    # The scope rides the clause (review round 1, MINOR-1): never "not installed".
+    assert (
+        "has no node, npm, make and docker on its PATH or in ~/.local/bin" in absent_row["detail"]
+    )
+    install_remedies = " ".join(absent_row["remedies"])
+    assert "install node, npm, make and docker on cloud-node-1" in install_remedies
+    assert "put it on the PATH" in install_remedies  # covers an off-PATH install
 
     off_path_row = readiness.tooling_row(
         _member(),
@@ -839,7 +849,7 @@ def test_tooling_row_separates_absent_off_path_and_login_states() -> None:
         _member(), _facts(tooling=_tooling_section(has_entry=False)), peer_label="cloud-node-1"
     )
     assert login_row["ok"] is False and login_row["code"] == readiness.CODE_NOT_AUTHENTICATED
-    assert "no stored GitHub login" in login_row["detail"]
+    assert "has no stored GitHub CLI login" in login_row["detail"]
     assert "sign it in" in " ".join(login_row["remedies"])
 
 
@@ -860,9 +870,9 @@ def test_tooling_row_names_the_anchor_devices_gaps() -> None:
     assert row["ok"] is False
     assert row["code"] == readiness.CODE_NOT_INSTALLED
     detail = row["detail"]
-    assert "lacks node, npm, make and docker" in detail
+    assert "has no node, npm, make and docker on its PATH or in ~/.local/bin" in detail
     assert "gh installed but not on its PATH" in detail
-    assert "gh has no stored GitHub login" in detail
+    assert "has no stored GitHub CLI login" in detail
     assert row["observed"] == {
         "absent": ["node", "npm", "make", "docker"],
         "off_path": ["gh"],
@@ -870,6 +880,51 @@ def test_tooling_row_names_the_anchor_devices_gaps() -> None:
         "gh_login": "absent",
     }
     assert len(row["remedies"]) == 3
+
+
+def test_a_login_fact_that_cannot_be_read_is_unknown_with_its_reason() -> None:
+    """Review round 1, NIT-1: only a real ``False`` reads "no stored login".
+
+    A skewed peer's non-boolean value, ``None`` from an unreadable file, and an
+    answer that carried no login fact at all all map to ``unknown`` — each with
+    the reason it has — never to a claim the fact does not support.
+    """
+    malformed = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry="yes")),
+        peer_label="cloud-node-1",
+    )
+    assert malformed["ok"] is False and malformed["code"] == readiness.CODE_UNKNOWN
+    assert malformed["observed"]["gh_login"] == "unknown"
+    assert (
+        "could not read its stored GitHub CLI login (the reported value was not a boolean)"
+        in malformed["detail"]
+    )
+
+    unreadable = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry=None, reason="IsADirectoryError")),
+        peer_label="cloud-node-1",
+    )
+    assert unreadable["code"] == readiness.CODE_UNKNOWN
+    assert "could not read its stored GitHub CLI login (IsADirectoryError)" in unreadable["detail"]
+
+    # An answer that carried no ``has_entry`` at all: unknown, named as such.
+    no_login_fact = {
+        "tools": {
+            name: {"state": "on_path", "path": f"/usr/local/bin/{name}"}
+            for name in readiness.TOOLING_TOOLS
+        },
+        "gh_auth": {"hosts_file": True, "config_path": "/home/x/.config/gh/hosts.yml"},
+        "local_bin_dir": "/home/x/.local/bin",
+    }
+    uncarried = readiness.tooling_row(
+        _member(), _facts(tooling=no_login_fact), peer_label="cloud-node-1"
+    )
+    assert (
+        "could not read its stored GitHub CLI login (the answer did not carry the login fact)"
+        in uncarried["detail"]
+    )
 
 
 def test_a_failed_tooling_row_is_warn_named_and_never_holds_onboarding() -> None:

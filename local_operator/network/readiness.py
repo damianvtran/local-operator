@@ -1408,11 +1408,25 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
     auth = auth if isinstance(auth, Mapping) else {}
     gh_state = cells["gh"][0]
     login = "moot"
+    login_reason = ""
     if gh_state in ("on_path", "off_path"):
-        if not auth or auth.get("has_entry") is None:
-            login = "unknown"
+        # NIT-1 (review round 1): only a real ``False`` reads "no stored login";
+        # None, a missing key, or a malformed value (a skewed peer's shape) is
+        # UNKNOWN WITH ITS REASON — a fact that cannot be read is never a claim.
+        has_entry = auth.get("has_entry") if auth else None
+        if has_entry is True:
+            login = "ok"
+        elif has_entry is False:
+            login = "absent"
         else:
-            login = "ok" if auth.get("has_entry") is True else "absent"
+            login = "unknown"
+            carried = auth.get("reason") if auth else None
+            if isinstance(carried, str) and carried:
+                login_reason = _bounded(carried, 80)
+            elif auth and "has_entry" in auth:
+                login_reason = "the reported value was not a boolean"
+            else:
+                login_reason = "the answer did not carry the login fact"
     if not absent and not off_path and not unknown and login == "ok":
         return _capability_row(
             device_id=member.device_id,
@@ -1420,22 +1434,29 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
             capability=CAPABILITY_TOOLING,
             ok=True,
             detail=(
-                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}) and gh "
-                "has a stored GitHub login"
+                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}) and a "
+                "stored GitHub CLI login"
             ),
             source=SOURCE_PEER,
         )
     clauses: list[str] = []
     if absent:
-        clauses.append(f"lacks {_name_list(absent)}")
+        # The clause carries the PROBE'S SCOPE, never "not installed" (review
+        # round 1, MINOR-1): neither probe sees everywhere (an nvm-managed node
+        # off PATH reads absent), so the sentence says where the check looked,
+        # and the remedy below covers the installed-but-invisible possibility.
+        clauses.append(f"has no {_name_list(absent)} on its PATH or in ~/.local/bin")
     if off_path:
         clauses.append(f"has {_name_list(off_path)} installed but not on its PATH")
     if unknown:
         clauses.append(f"could not complete its tooling check for {_name_list(unknown)}")
     if login == "absent":
-        clauses.append("gh has no stored GitHub login")
+        clauses.append("has no stored GitHub CLI login")
     elif login == "unknown":
-        clauses.append("its GitHub login state could not be read")
+        clause = "could not read its stored GitHub CLI login"
+        if login_reason:
+            clause += f" ({login_reason})"
+        clauses.append(clause)
     if absent or off_path or login == "absent":
         tail = ": offloaded work that needs them will fail there"
     else:
@@ -1455,8 +1476,9 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
     remedies: list[str] = []
     if absent:
         remedies.append(
-            f"ask Local Operator to install {_name_list(absent)} on {peer_label} (it asks "
-            "before installing anything there)"
+            f"ask Local Operator to install {_name_list(absent)} on {peer_label} — or, if "
+            "one is already installed off its PATH there, to put it on the PATH (it asks "
+            "before changing anything there)"
         )
     for name in off_path:
         remedy = f"on {peer_label}, {name} is installed at {cells[name][1]} but not on its PATH"

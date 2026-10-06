@@ -830,7 +830,7 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     tooling = _capability(payload, readiness.CAPABILITY_TOOLING)
     assert tooling["ok"] is False and tooling["code"] == readiness.CODE_NOT_INSTALLED
     assert tooling["state"] == readiness.ROW_STATE_WARN  # the row's own cell, stamped by ready
-    assert "lacks node" in tooling["detail"]
+    assert "has no node" in tooling["detail"]
     assert f"install node on {server_b.identity.name}" in " ".join(tooling["remedies"])
     assert rc == 0 and payload["ok"] is True
     server_b.stop()
