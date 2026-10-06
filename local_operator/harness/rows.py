@@ -417,6 +417,171 @@ def is_hidden_tool_message(message: Any) -> bool:
     return all(is_hidden_tool_call(call) for call in calls)
 
 
+def is_ask_gate_divert_details(details: Any) -> bool:
+    """Whether a tool result's ``details`` mapping carries the divert marker.
+
+    THE ASK GATE'S MARKER (design ``docs/design/ask-gate.md`` §3). A diverted
+    ask's tool result carries ``{"ask_gate": {"hidden": True, "verdict": …,
+    "reason": …}}`` — the ONE fact every human surface reads to decide "this
+    call/result pair never happened for the user". The marker is read through
+    this predicate set rather than re-derived per host, so a surface cannot
+    disagree with another about what a divert looks like.
+    """
+    if not isinstance(details, Mapping):
+        return False
+    gate = details.get("ask_gate")
+    if not isinstance(gate, Mapping):
+        return False
+    return bool(gate.get("hidden"))
+
+
+def is_ask_gate_divert_row(row: Any) -> bool:
+    """Whether a stored ``{type, payload}`` row is a diverted ask's RESULT row.
+
+    The desktop rows path's shape: ``Message.tool_result`` writes the marker
+    into ``provider_payload.details`` and ``encode_message_payload``
+    serializes it, so a stored row carries it at
+    ``payload.provider_payload.details`` — the same key the transcript replay
+    reads off the rendered message (:func:`is_ask_gate_divert_message`), seen
+    one serialization earlier. Filtering SERVER-side is the point (design §3
+    row 5): the client reducer has no filter of its own, so a build that
+    predates the marker would otherwise paint it.
+    """
+    payload = row.get("payload") if isinstance(row, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return False
+    provider_payload = payload.get("provider_payload")
+    if not isinstance(provider_payload, Mapping):
+        return False
+    return is_ask_gate_divert_details(provider_payload.get("details"))
+
+
+def is_ask_gate_divert_message(message: Any) -> bool:
+    """Whether a rendered ``Message`` is a diverted ask's RESULT row.
+
+    The replay-side twin of :func:`is_ask_gate_divert_row`, and deliberately a
+    SEPARATE function for the reason :func:`is_hidden_tool_message` states —
+    the two read different shapes (a stored row wrapping a ``payload``, this
+    one the ``build_llm_history`` output every fold walks), and merging them
+    would make a stored-row caller silently depend on ``Message`` attributes.
+    """
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return False
+    return is_ask_gate_divert_details(payload.get("details"))
+
+
+def ask_gate_diverted_call_ids(messages: Iterable[Any]) -> set[str]:
+    """The ``tool_call_id``s whose RESULT carries the divert marker.
+
+    ONE derivation for every fold's call-chip skip (design §3: "one helper, no
+    per-fold drift"): a diverted ask leaves TWO rows — its result (marked) and
+    the assistant call that made it — and the only place a fold can learn the
+    call id is the marker on its result. Folds that hold a message set compute
+    this once and consult it for the call chip, the settle skip and the
+    up-front indexes alike.
+    """
+    call_ids: set[str] = set()
+    for message in messages:
+        if not is_ask_gate_divert_message(message):
+            continue
+        call_id = getattr(message, "tool_call_id", None)
+        if isinstance(call_id, str) and call_id:
+            call_ids.add(call_id)
+    return call_ids
+
+
+def without_ask_gate_divert(message: Any, call_ids: set[str]) -> Any | None:
+    """``message`` with any ask-gate divert subtracted; ``None`` when it goes.
+
+    A diverted ask contributes two rows — the marked result and the assistant
+    row that made the call — and an owner-side display seam must subtract
+    BOTH so every viewer build, an older one that cannot read the marker
+    included, receives clean rows (design §3 row 4, the wake-fire id-set
+    helper's shape). An assistant row keeps its prose and any other calls and
+    loses only the diverted ones; a row left with no prose and no calls is
+    dropped, exactly the rule :func:`is_hidden_tool_message` applies to a
+    prose-free hidden call. ``call_ids`` comes from
+    :func:`ask_gate_diverted_call_ids` over the whole message set — the marker
+    can sit several messages away from the call it names.
+    """
+    if is_ask_gate_divert_message(message):
+        return None
+    if not call_ids:
+        return message
+    calls = list(getattr(message, "tool_calls", None) or ())
+    if not calls:
+        return message
+    kept = [call for call in calls if str(getattr(call, "id", "") or "") not in call_ids]
+    if len(kept) == len(calls):
+        return message
+    if kept:
+        return message.model_copy(update={"tool_calls": kept})
+    if str(getattr(message, "text", "") or "").strip():
+        return message.model_copy(update={"tool_calls": []})
+    return None
+
+
+#: The ``ask`` tool's name, spelled once for the settle-only predicate. The
+#: literal lives with the tool's builder (``tools/builtin.py``); this module
+#: only ever compares against it, so a rename shows up here as a predicate
+#: that stops matching rather than as a silent pass.
+_ASK_TOOL_NAME = "ask"
+
+
+def is_settle_only_ask(tool_name: Any, *, queued_engine: bool) -> bool:
+    """Whether a call's rows are SETTLE-ONLY on a human surface (design §3).
+
+    While the queued engine is live an ``ask`` call gets NO live row — the
+    forked clearance check may divert it, and a row that flashed for the
+    gate's whole duration on every surface is what the design rejects — so
+    its one row is created at SETTLE: the receipt for a raise, nothing for a
+    divert (the marker is read there). ``queued_engine`` is the caller's mode
+    read;
+    ``False`` means today's mounting plus the settle-marker drop, which is the
+    fallback for the blocking arm and for an un-negotiated mixed build alike.
+    """
+    return bool(queued_engine) and str(tool_name or "") == _ASK_TOOL_NAME
+
+
+def queued_ask_engine_live(session: Any) -> bool:
+    """Whether the session behind a surface runs the queued-ask engine.
+
+    THE modal read for the ask-gate seams (design §3), one function so the
+    owner probe and the viewer probe cannot drift into two answers about one
+    session:
+
+    * a session that OWNS its queue answers ``ask_queue()`` — ``None``
+      exactly on the blocking arm (the flag off, or no host that can show an
+      ask), and constructing it is side-effect-free and already happens at
+      turn binding;
+    * a VIEWER — a facade with no queue behind it — reads the ``asks`` wire
+      field's PRESENCE off its frontend state, which the owner publishes only
+      while queued asks are live in its process (``FrontendSessionState.asks``
+      documents the capability-proxy rule).
+
+    An un-negotiated mixed build answers ``False``; callers keep today's
+    mount and the settle marker still drops the trace (the flash residual the
+    design records, §5). Never raises: a probe that cannot answer is a
+    ``False`` — the settle-only read only decides WHEN a row is created, and
+    "cannot say" must land on today's behaviour, not on an exception in a
+    paint path.
+    """
+    probe = getattr(session, "ask_queue", None)
+    if callable(probe):
+        try:
+            return probe() is not None
+        except Exception:  # noqa: BLE001 — an unreadable queue reads as the blocking arm
+            return False
+    try:
+        state = getattr(session, "frontend_state", None)
+    except Exception:  # noqa: BLE001 — a facade that cannot say
+        return False
+    if state is None:
+        return False
+    return getattr(state, "asks", None) is not None
+
+
 def is_harness_notice_row(row: Any) -> bool:
     """Whether this row is harness-authored and must not paint as the user's words.
 
