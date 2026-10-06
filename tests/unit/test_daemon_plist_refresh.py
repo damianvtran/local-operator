@@ -1384,9 +1384,11 @@ def test_the_relay_job_teaches_the_same_gh_directories_find_gh_probes() -> None:
     launchd hands a job PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured), so the
     job itself must carry the directories the forge ladder probes for gh —
     user-local bin first, then the two standard install prefixes — or the arm
-    cannot serve a Homebrew gh even though one is installed. The two spellings
-    are asserted AGAINST EACH OTHER (the plan reads the same constant the probe
-    does) so they cannot drift apart in either direction.
+    cannot serve a Homebrew gh even though one is installed. ``_launchd_path``
+    hardcodes its list while the probe reads ``GH_FALLBACK_BIN_DIRS``; this cell
+    CROSS-PINS the two spellings (expected entries read from the constant,
+    compared against the rendered PATH), so a drift in either direction fails
+    here rather than at a relay that cannot find gh.
     """
     from local_operator.network import relay as relay_install
     from local_operator.network.credentials import github as github_mod

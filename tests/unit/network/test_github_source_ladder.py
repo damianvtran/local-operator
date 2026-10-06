@@ -482,7 +482,17 @@ def test_find_gh_probes_the_standard_prefixes_under_the_launchd_env(
 
     assert github_mod.GH_FALLBACK_BIN_DIRS == ("/opt/homebrew/bin", "/usr/local/bin")
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    assert shutil.which("gh") is None, "this machine has a gh on the launchd PATH"
+    if shutil.which("gh") is not None:
+        # The cell's premise is that the ONLY gh lives in the fallback prefix.
+        # A distro package (e.g. the ubuntu runner image's gh deb at /usr/bin/gh)
+        # makes that premise false — state it instead of assuming it; the
+        # fallback-dirs behaviour itself is pinned platform-independently by
+        # ``test_find_gh_probes_fallback_dirs_in_order_platform_independently``.
+        pytest.skip(
+            "a gh already sits on the launchd-shaped PATH (a distro package): "
+            "this cell exercises the fallback-prefix discovery on hosts where "
+            "the launchd PATH carries none"
+        )
 
     prefix = env.tmp / "opt-homebrew-bin"
     prefix.mkdir()
@@ -507,6 +517,50 @@ def test_find_gh_probes_the_standard_prefixes_under_the_launchd_env(
     with _owner_for(env, github_api, source="") as rig:
         detail = _ask(rig)
     assert detail["access_token"] == GHO
+
+
+def test_find_gh_probes_fallback_dirs_in_order_platform_independently(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback LOOP and its order, seam-only: runs on every platform.
+
+    ``find_gh`` probes this process's PATH, then ``~/.local/bin``, then
+    ``GH_FALLBACK_BIN_DIRS`` in order. This cell drives the real loop against a
+    fake file tree (the seam mirrors ``shutil.which`` truthfully against the
+    fixture), so it neither needs a gh-installed host nor the absence of one —
+    the launchd-env cell above owns the restricted-PATH story, and this one
+    owns the order, which must hold everywhere.
+    """
+    from pathlib import Path as _Path
+
+    real_dirs = github_mod.GH_FALLBACK_BIN_DIRS
+    assert real_dirs == ("/opt/homebrew/bin", "/usr/local/bin"), "the standard prefixes"
+
+    prefix = env.tmp / "prefix-bin"
+    prefix.mkdir()
+    stub = _install_stub_gh(env.home, GHO)  # lands in ~/.local/bin
+    (prefix / "gh").write_bytes(stub.read_bytes())
+    (prefix / "gh").chmod(0o755)
+
+    calls: list[str | None] = []
+
+    def fake(name: str, path: str | None = None) -> str | None:
+        calls.append(path)
+        if path is None:
+            return None  # the process-PATH probe misses
+        candidate = _Path(path) / name
+        return str(candidate) if candidate.exists() else None
+
+    monkeypatch.setattr(github_mod, "_resolve_program", fake)
+    monkeypatch.setattr(github_mod, "GH_FALLBACK_BIN_DIRS", (str(prefix),))
+
+    # User-local bin wins over the prefixes when both exist.
+    assert github_mod.find_gh(env.home) == str(stub)
+    stub.unlink()
+    # With it gone, the prefix answers — and NOT before the user-local probe ran.
+    assert github_mod.find_gh(env.home) == str(prefix / "gh")
+    local_bin = str(env.home / ".local" / "bin")
+    assert calls == [None, local_bin, None, local_bin, str(prefix)], calls
 
 
 def test_gh_that_cannot_answer_refuses_with_a_structural_message(
