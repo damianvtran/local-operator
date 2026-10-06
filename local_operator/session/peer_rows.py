@@ -260,7 +260,8 @@ def select_peer_session(
       match, and is refused WITH the candidates when it is not.
 
     Returns ``(row, ())`` for a resolution, ``(None, candidates)`` for an
-    ambiguity (ordered by the field that matched, then by input order), and
+    ambiguity (EXACT-tier ambiguities are ordered by the field that matched,
+    then by input order; substring ambiguities keep input order), and
     ``(None, ())`` for no match.
 
     THE CWD-BASENAME ARM IS ABSENT BY DATA, not by choice: the local resolver

@@ -277,7 +277,7 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --peek <session> [--steps N]` | read the newest N steps of that conversation's history, as its own viewer holds them (default 12, max 50; live sessions only) |
 
 A PILOT VERB TARGETS AN ID **OR A NAME** on that device: an exact id or
-conversation name wins, then a case-insensitive substring of the name; an
+conversation name wins, then a case-insensitive substring of the name or id; an
 ambiguous name is refused with the candidate rows rather than guessed. `--stop`
 and `--engage` accept the same spellings.
 
@@ -287,9 +287,9 @@ written to the peer. It reads LIVE sessions only — a stored one REFUSES and
 names the warm-up (`--engage`) rather than starting a runtime on a device nobody
 is watching — and it takes no text.
 
-THE THREE PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is the
-one that starts a new one, and `--peek` is the one that only reads). They open the
-same viewer the TUI's sidebar pick and `lop
+THE DRIVING PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is
+the one that starts a new one, and `--peek` is the one that only reads). They open
+the same viewer the TUI's sidebar pick and `lop
 --resume <a peer's id>` open, so what they act on is the OWNER's runtime: a routed
 slash changes the peer's own record (a rename is visible in that device's listing),
 and `--send` waits for the owner's terminal turn outcome rather than returning on
