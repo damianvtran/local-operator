@@ -73,16 +73,9 @@ def _no_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(secrets_client, "ensure_broker", lambda *a, **k: False)
 
 
-@pytest.fixture(autouse=True)
-def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No cell may discover or run the REAL gh (it can reach the operator's keychain).
-
-    Discovery is pinned to "not found" by default; cells that exercise the ask-gh
-    path install a stub and override ``_resolve_program`` explicitly. The real gh's
-    keychain lookup is user-global, so a stray discovery here would read the
-    operator's login into a test process — the pin is a guard, not a convenience.
-    """
-    monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
+# The suite-wide ``_no_real_gh`` guard lives in ``tests/unit/network/conftest.py``
+# (widened there in review round 2, n3); cells that exercise the ask-gh path
+# override it with ``_pin_gh``.
 
 
 @pytest.fixture()
@@ -359,7 +352,8 @@ def test_read_gh_token_arms(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(github_mod.GithubGhError) as tokenless:
         github_mod.read_gh_token(env.home)
     assert tokenless.value.kind == "unusable"
-    assert "was not found to ask" in str(tokenless.value)
+    assert "no gh executable was found to ask" in str(tokenless.value)
+    assert "probed PATH" in str(tokenless.value), "the message must say where it looked"
 
     # The default macOS shape WITH gh: asked directly, the answer is served.
     log = env.home / "gh-invocations.log"
@@ -470,6 +464,51 @@ def test_gh_found_off_path_is_still_asked(
     assert log.read_text(encoding="utf-8").splitlines() == ["fired"]
 
 
+def test_find_gh_probes_the_standard_prefixes_under_the_launchd_env(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2's repro shape, isolated: launchd's PATH, gh ONLY in a standard prefix.
+
+    launchd hands the relay PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured on the
+    operator's machine), and a Homebrew gh lives at /opt/homebrew/bin/gh —
+    outside every probe that existed before this fix. The prefix fallback must
+    find it anyway and the arm must serve. The prefix is a temp directory
+    monkeypatched over ``GH_FALLBACK_BIN_DIRS`` (a test must not write into the
+    real /opt/homebrew); the REAL constant is pinned first, and the discovery
+    seam is put back to the real ``shutil.which`` for this cell so the fallback
+    probe itself is exercised rather than a stub pin.
+    """
+    import shutil
+
+    assert github_mod.GH_FALLBACK_BIN_DIRS == ("/opt/homebrew/bin", "/usr/local/bin")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    assert shutil.which("gh") is None, "this machine has a gh on the launchd PATH"
+
+    prefix = env.tmp / "opt-homebrew-bin"
+    prefix.mkdir()
+    stub = _install_stub_gh(env.home, GHO)
+    (prefix / "gh").write_bytes(stub.read_bytes())
+    (prefix / "gh").chmod(0o755)
+    stub.unlink()  # gh exists ONLY in the prefix, as on the relay's machine
+    monkeypatch.setattr(github_mod, "GH_FALLBACK_BIN_DIRS", (str(prefix),))
+    # Undo the suite guard for this cell: exercise the REAL discovery seam.
+    monkeypatch.setattr(
+        github_mod, "_resolve_program", lambda name, path=None: shutil.which(name, path=path)
+    )
+
+    assert github_mod.find_gh(env.home) == str(prefix / "gh")
+    # And the arm serves through the normal door under this environment.
+    hosts = env.home / ".config" / "gh" / "hosts.yml"
+    hosts.parent.mkdir(parents=True, exist_ok=True)
+    hosts.write_text(
+        yaml.safe_dump({"github.com": {"user": "operator", "git_protocol": "https"}}),
+        encoding="utf-8",
+    )
+    with _owner_for(env, github_api, source="") as rig:
+        detail = _ask(rig)
+    assert detail["access_token"] == GHO
+
+
 def test_gh_that_cannot_answer_refuses_with_a_structural_message(
     env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -528,24 +567,31 @@ def test_a_broken_token_secret_refuses_and_never_downgrades_to_gh(
         assert github_mod.TOKEN_SECRET_NAME in detail["message"]
 
 
+@pytest.mark.parametrize("layer", ["master_key", "store_db"])
 def test_a_corrupt_store_stops_the_ladder_and_never_serves_the_gh_login(
-    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch, layer: str
 ) -> None:
-    """M1 / QA-Q2, reproduced: a scoped arm that cannot be READ is never skipped.
+    """M1 / QA-Q2, reproduced at BOTH corruption layers (m2).
 
-    The QA door's exact shape: a ``GITHUB_TOKEN`` in the store, a full gh login
-    present, the master key corrupted-but-present. Before the fix, resolution
+    The QA door's shape: a ``GITHUB_TOKEN`` in the store, a full gh login
+    present, one store layer corrupted-but-present. Before the fix, resolution
     fell through and the broker SERVED the gh login (a wider credential than the
     one sitting unreadable on disk); now the ladder stops and refuses by name.
-    """
-    from local_operator.secrets.keys import store_path
 
+    Both layers are pinned because they exercise DIFFERENT except arms: a zeroed
+    ``master.key`` makes ``open_store`` itself raise (the first arm), while a
+    zeroed ``store.db`` lets ``open_store`` succeed and the metadata read raise
+    (the second) — a regression in either classification would otherwise pass CI.
+    """
+    from local_operator.secrets.keys import key_path, store_path
+
+    target = key_path if layer == "master_key" else store_path
     log = env.home / "gh-invocations.log"
     _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, PAT)
     _seed_gh_keyring(env, monkeypatch, token=GHO, log=log)
     assert github_mod.resolve_source(env.root) == github_mod.SOURCE_TOKEN  # control
-    original = store_path(env.root).read_bytes()
-    store_path(env.root).write_bytes(b"\x00" * 32)
+    original = target(env.root).read_bytes()
+    target(env.root).write_bytes(b"\x00" * 32)
     try:
         assert github_mod.resolve_source(env.root) == github_mod.SOURCE_UNREADABLE
         assert github_mod.source_present(env.root) is False
@@ -561,7 +607,7 @@ def test_a_corrupt_store_stops_the_ladder_and_never_serves_the_gh_login(
             github_mod.read_token_secret(env.root)
         assert broken.value.kind == "unusable", "present-but-unreadable is not 'absent'"
     finally:
-        store_path(env.root).write_bytes(original)
+        target(env.root).write_bytes(original)
     assert github_mod.resolve_source(env.root) == github_mod.SOURCE_TOKEN  # restored
 
 
@@ -597,7 +643,7 @@ def test_a_tokenless_gh_login_refuses_by_name(env: _Env, github_api: _FakeGithub
     with _owner_for(env, github_api, source="") as rig:
         detail = _ask(rig)
         assert detail["code"] == github_mod.CODE_GH_UNUSABLE, detail
-        assert "was not found to ask" in detail["message"]
+        assert "no gh executable was found to ask" in detail["message"]
 
 
 def test_an_empty_ladder_refuses_with_the_one_ladder_sentence(

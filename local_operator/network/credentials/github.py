@@ -549,6 +549,16 @@ def gh_login_present(home: Path | None = None) -> bool:
     return isinstance(hosts.get("github.com"), dict)
 
 
+#: Absolute fallback directories for gh discovery, after this process's PATH and
+#: the user-local bin: the two standard install prefixes (Homebrew on arm64 and
+#: on x86_64, plus locally-built installs). The relay's launchd job hands it
+#: PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured on the operator's machine), where
+#: a Homebrew gh is invisible to a PATH probe — this fallback is what lets the
+#: arm serve there (review round 2, B2), and ``relay.render_plist`` teaches the
+#: job the same directories so the two cannot disagree.
+GH_FALLBACK_BIN_DIRS: tuple[str, ...] = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
 def _resolve_program(name: str, *, path: str | None = None) -> str | None:
     """``shutil.which`` behind ONE name, so the probe has one seam.
 
@@ -564,23 +574,30 @@ def _resolve_program(name: str, *, path: str | None = None) -> str | None:
 def find_gh(home: Path | None = None) -> str | None:
     """The gh executable as this device would run it — off-PATH included.
 
-    Two probes, mirroring readiness's tooling row: this PROCESS's PATH, then
-    the user-local bin directory. The relay runs under launchd with a minimal
-    PATH on macOS and gh is commonly installed where that PATH does not reach;
-    the borrower never runs this (owner-side only), so the probe answers for
-    the same ambient user the broker serves as.
+    Probes, in order: this PROCESS's PATH; the user-local bin directory; then
+    the standard install prefixes (:data:`GH_FALLBACK_BIN_DIRS`). The order is
+    the one ``relay._launchd_path`` teaches the relay's own job, so the job's
+    environment and this fallback agree about which gh wins. The relay runs
+    under launchd with a minimal PATH on macOS and gh is commonly installed
+    where that PATH does not reach; the borrower never runs this (owner-side
+    only), so the probe answers for the same ambient user the broker serves as.
     """
     try:
         found = _resolve_program("gh")
     except Exception:  # noqa: BLE001 — a broken probe is "not found here"
-        return None
+        found = None
     if found:
         return found
     root = Path.home() if home is None else home
-    try:
-        return _resolve_program("gh", path=str(root / ".local" / "bin")) or None
-    except Exception:  # noqa: BLE001 — see above
-        return None
+    fallbacks = (root / ".local" / "bin", *(Path(entry) for entry in GH_FALLBACK_BIN_DIRS))
+    for directory in fallbacks:
+        try:
+            found = _resolve_program("gh", path=str(directory))
+        except Exception:  # noqa: BLE001 — see above
+            continue
+        if found:
+            return found
+    return None
 
 
 def read_gh_token(home: Path | None = None) -> str:
@@ -614,9 +631,11 @@ def read_gh_token(home: Path | None = None) -> str:
         if isinstance(entry, dict):
             raise GithubGhError(
                 "unusable",
-                "the gh CLI's github.com login stores no token in its file and the gh CLI "
-                "was not found to ask (looked on PATH and in ~/.local/bin): install gh "
-                "or put it there, then retry (the network guide has the ladder)",
+                "the gh CLI's github.com login stores no token in its file and no gh "
+                "executable was found to ask (probed PATH, ~/.local/bin, "
+                "/opt/homebrew/bin and /usr/local/bin): install gh if it is genuinely "
+                "absent, and check that directory list if it is not — nothing was lent "
+                "(the network guide has the ladder)",
             )
         raise GithubGhError("absent", "the gh CLI stores no github.com login here")
     try:
