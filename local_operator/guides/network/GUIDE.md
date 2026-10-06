@@ -603,31 +603,63 @@ rotated at the provider; rotating it is the only way to end it.
 
 ### GitHub push and PR-write (the `github` credential)
 
-Push and PR-write through the mesh ride a GitHub **App**, brokered like any
-other credential — and like every credential here, the DEVICE is the trust
-unit: while the share stands, **any process or session on the borrowing device
-(same user) can use it**, because there is no per-session secret on a node for
-the design to bound.
+Push and PR-write through the mesh ride the owner's own GitHub login, brokered
+like any other credential — and like every credential here, the DEVICE is the
+trust unit: while the share stands, **any process or session on the borrowing
+device (same user) can use it**, because there is no per-session secret on a
+node for the design to bound.
 
-On a node today: **public clones work and non-GitHub work is unaffected; push
-and PR-write are unavailable until a GitHub App exists** — a short one-time
-setup, below. That is the actual state: `lop network credentials` lists no `github`
-row until the App is configured, and a share attempt says exactly this instead
-of "not implemented" or "blocked".
+**The source ladder** (strongest first; resolved fresh on the owner at every
+command, so a re-login or a token rotation needs no gesture on the node):
 
-Once the App is configured the flow is: `lop network credential share github
+1. **A GitHub App**, if one is configured — the strongest route, and the only
+   one GitHub-side narrowing and per-token revocation apply to (setup below).
+2. **A `GITHUB_TOKEN`-class token** in the owner's secret store — the durable
+   route: `lop secret set GITHUB_TOKEN`, then paste a **fine-grained PAT**
+   scoped to the designated repositories with an expiry. It can be revoked at
+   GitHub on its own, without touching anything else.
+3. **The owner's `gh` CLI login** — the zero-setup route: if that device is
+   already signed in with `gh`, there is nothing to configure. The broker reads
+   the login gh itself stores (the owner is the trusted side; the borrowing
+   device never reads it).
+
+**Designate the repositories first** — on **every node that borrows or serves**:
+`network.credentials.github.repositories` (search it in `/settings`),
+`owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
+allow-list, and it is the enforced bound on every route: empty is a refusal,
+never "everything".
+
+Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),
 and then any command on the borrowing device gets `GH_TOKEN`/`GITHUB_TOKEN` plus
 a git credential helper that serves `https://github.com` for the designated
 repositories and nothing else — no credential file is written on the borrower,
-and no other host's helpers see the token. Where a borrowed GitHub token differs
-from the paragraph above: it is the one credential that CAN be ended early — it
-is revoked at GitHub at its window end, and immediately when `credential
-revoke` runs (`DELETE /installation/token`; verified, idempotent). Only if no
-revoke can be delivered (neither device running at window end, or the call
-fails) does it fall back to its own 60-minute ceiling.
+and no other host's helpers see the token. A source that is configured but
+broken refuses BY NAME (e.g. a malformed App key) and is never silently
+downgraded to a wider one; the refusal sentence and `lop network doctor` name
+the arm and the repair.
 
-**The one-time App setup:**
+What ends a borrowed GitHub token **depends on the source that served it**,
+and the `credential revoke` receipt says which applies:
+
+- **App**: revoked at GitHub at the grant's window end, and immediately when
+  `credential revoke` runs (`DELETE /installation/token`; verified, idempotent).
+  Only if no revoke can be delivered (neither device running at window end, or
+  the call fails) does it fall back to its own 60-minute ceiling.
+- **`GITHUB_TOKEN`-class token or the `gh` login**: lop did not mint these, so
+  there is no server-side revoke here and no window-end DELETE — a grant
+  already lent is dropped by the borrowing device within the grant window, but
+  the token itself keeps working at GitHub until it expires or **you revoke it
+  there** (Settings → Developer settings → Personal access tokens; for the gh
+  login, Settings → Applications, or signing out of `gh`).
+
+**Scope, honestly:** only the App route is narrowed at GitHub. For the token
+routes, the borrowing device can use the token against any repository the git
+helper is configured to serve, and nothing else *through lop's own paths* — but
+the token itself is your full login, so **treat a share like a copy of your
+login**.
+
+**The App route (optional, stronger):**
 
 1. github.com → Settings → Developer settings → **GitHub Apps** → New GitHub
    App. Turn **Webhook → Active off** (none is needed). Repository permissions:
@@ -637,16 +669,23 @@ fails) does it fall back to its own 60-minute ceiling.
    and the **Installation ID** (the number in the installation's URL).
 3. Generate a **private key** (App settings → Generate a private key) — a `.pem`
    download.
-4. Store the three values as ONE secret on the owner, `GITHUB_APP` — a single
-   JSON line whose `private_key` string keeps its `\n` escapes:
-   `lop secret set GITHUB_APP`, then paste
-   `{"app_id": "…", "installation_id": "…", "private_key": "-----BEGIN RSA PRIVATE KEY-----\n…\n-----END RSA PRIVATE KEY-----"}`
-5. Designate the repositories on **every node that borrows or serves** — the
-   `network.credentials.github.repositories` setting (search it in `/settings`),
-   `owner/repo` entries, e.g. `damianvtran/scratch`. Empty is a refusal at mint
-   time, never "no narrowing".
-6. On the owner: `lop network credential share github --with <device>`. The
+4. Store the three values as ONE secret on the owner, `GITHUB_APP`: run
+   `lop secret set GITHUB_APP`, then paste a single JSON line carrying
+   `app_id`, `installation_id` and the PEM under `private_key` (keep the
+   `\n` escapes exactly as the downloaded key has them).
+5. On the owner: `lop network credential share github --with <device>`. The
    borrower needs nothing else — the next command picks the share up.
+
+### GitLab push and PR-write (not yet brokered)
+
+GitLab's equivalent is designed but not built yet (`glab` gets a sibling
+adapter, a dedicated slice): `GITLAB_TOKEN` or the owner's `glab`-stored
+login as the sources, `GITLAB_TOKEN` plus a **gitlab.com-scoped** helper as the
+delivery, and the same lease/refresh rules. GitLab's token model is closer to
+the App route than GitHub's OAuth token is — a scoped token can be minted for
+the mesh and revoked alone — so the strong path will mint-or-use a dedicated
+token rather than share the primary login. Until then, GitLab push through the
+mesh is unavailable; public clones and everything non-GitLab are unaffected.
 
 ## When something looks wrong
 

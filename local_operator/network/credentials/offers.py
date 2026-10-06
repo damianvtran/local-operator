@@ -73,8 +73,10 @@ KIND_LABELS: dict[str, str] = {
     "oauth-rotating": "OAuth",
     "api-key-static": "API key",
     "mcp-rotating": "MCP login",
-    # The github adapter's row (github.py): a GitHub App's installation tokens.
-    "github-app": "GitHub App",
+    # The github adapter's row (github.py). "GitHub", not "GitHub App": the row
+    # can be served from any ladder arm (§3.2) — the label names the row, and
+    # the receipt names the arm that actually served.
+    "github-app": "GitHub",
 }
 
 #: The per-kind default posture (§2.3). A kind absent here has no default and is
@@ -243,10 +245,11 @@ def shape_for_key(key: str, config: Path) -> tuple[str, str, str]:
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
     if github_mod.is_github_key(key):
-        # The App key is not a store row, so its shape is the key's own name. The
-        # identity label stays empty on purpose: the App is not an account a person
-        # signs into, and inventing a label would be display data with nothing
-        # behind it.
+        # github has no store row, so its shape is the key's own name. The
+        # identity label stays empty on purpose: the row is served from whichever
+        # ladder arm resolves (§3.2) — an App, a token, or a gh login — and a
+        # label naming one of them would become display data that is wrong the
+        # moment the device's sources change.
         return github_mod.GITHUB_KIND, github_mod.GITHUB_KEY, ""
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
@@ -281,10 +284,11 @@ def credential_here(key: str, config: Path) -> bool:
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
     if github_mod.is_github_key(key):
-        # "Does this device hold it" for the App key is the secret's presence —
-        # the same read-only guard as every other candidate (never constructs a
-        # store, never creates one).
-        return github_mod.app_secret_present(config)
+        # "Does this device hold it" for github is whether ANY ladder arm
+        # resolves (§3.2) — the App secret, a ``GITHUB_TOKEN``-class secret, or
+        # the gh CLI's stored login — read read-only, the same guard as every
+        # other candidate (never constructs a store, never creates one).
+        return bool(github_mod.resolve_source(config))
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         store = open_store(config)
@@ -375,10 +379,10 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
 
     from local_operator.network.credentials import github as github_mod
 
-    if github_mod.app_secret_present(config):
-        # The App key, when one is configured: it has no store row, so it is named
-        # here directly. Not ``share_default``'d — it rides the list as an
-        # explicit-only row whose remedy is the operator's own share verb.
+    if github_mod.resolve_source(config):
+        # A ladder arm resolves, so there is something to serve: the row has no
+        # store row, so it is named here directly. The kind's default decides
+        # its posture on the join list; this gate only says the row exists.
         rows.append({"key": github_mod.GITHUB_KEY, "kind": github_mod.GITHUB_KIND, "label": ""})
 
     rows.sort(key=lambda row: row["key"])

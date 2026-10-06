@@ -102,16 +102,15 @@ def render_broker_error(
     if is_github:
         # THE GITHUB ARMS COME FIRST, and each says only what is true for this
         # credential. It has no local-login remedy (there is no 'lop login github'
-        # in this build), and its "the owner has nothing" state is the INTERIM
-        # state an operator actually meets — a node's push and PR-write wait for a
-        # GitHub App, which is a documented one-time setup, while everything else keeps
-        # working. 'not "implemented", not "blocked" — the actual state'.
+        # in this build), and after the source ladder (§3.2) its "the owner has
+        # nothing" state means NO arm is configured — gh CLI login, GITHUB_TOKEN
+        # secret, or App — so the fix sentence names all three in taught order.
         if error.code == "no_local_credential":
             return (
                 f"{owner} holds no GitHub credential: push and PR-write through the "
-                "mesh are unavailable until a GitHub App is configured there (a short "
-                "one-time setup — the network guide has the checklist). Public clones "
-                "and non-GitHub work are unaffected."
+                "mesh are unavailable until one is configured there (a GITHUB_TOKEN-class "
+                "token, the gh CLI's own login, or the stronger GitHub App — the network "
+                "guide has the ladder). Public clones and non-GitHub work are unaffected."
             )
         if error.code == "not_a_holder":
             return (
@@ -139,7 +138,7 @@ def render_broker_error(
         return (
             f"{owner} could not use its GitHub App credential, so nothing was minted "
             f"(re-store the key there: 'lop secret update GITHUB_APP' on {owner} — the "
-            "network guide has the checklist). Nothing was lent."
+            "network guide has the App section). Nothing was lent."
         )
     if error.code == "github_repositories_unset":
         return (
@@ -153,6 +152,20 @@ def render_broker_error(
             f"GitHub refused the mint for a repository {owner} designated{detail}. "
             f"Check that the App installation on {owner} covers the designated "
             "repositories; nothing was lent."
+        )
+    if error.code == "github_token_unusable":
+        return (
+            f"{owner} could not use the GITHUB_TOKEN-class credential it stores, so "
+            f"nothing was lent: re-store the token on {owner} (the network guide has "
+            "the ladder), or set up the stronger GitHub App there."
+        )
+    if error.code == "github_gh_unusable":
+        return (
+            f"{owner} could not use the login its gh CLI stores, so nothing was lent: "
+            f"the owner needs to sign in again with the gh CLI (the network guide has "
+            "the ladder). Push and PR-write through the mesh are unavailable until "
+            "that source works or another one is configured; public clones and "
+            "non-GitHub work are unaffected."
         )
 
     if error.code == "owner_offline":
