@@ -1,0 +1,16 @@
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+Fixture mobile: http://127.0.0.1:4216
+phone listing could not read attention state
+Traceback (most recent call last):
+  File "/Users/damian/local-operator-worktrees/mobile-2016-mark-all-read/local_operator/mobile/daemon.py", line 872, in _build
+    self._attention_states, revision = await asyncio.to_thread(
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/ff0c7f344314/scratchpad/mobile-2016/round1/scripts/mobile_2016_fixture_r1.py", line 76, in possibly_degraded
+    raise OSError("fixture: the unread store could not be read")
+OSError: fixture: the unread store could not be read

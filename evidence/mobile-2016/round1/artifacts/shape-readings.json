@@ -1,0 +1,16 @@
+{
+  "count_before": 2,
+  "count_after": 0,
+  "shape_statuses": {
+    "SHAPE: 'zzz-not-hex' session id": 422,
+    "SHAPE: uppercase hex session id": 422,
+    "SHAPE: 11-character session id": 422,
+    "SHAPE: token is not a UUID": 422,
+    "SHAPE: empty token": 422
+  },
+  "shape_error": "session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID",
+  "unknown_status": 200,
+  "unknown_body": "{\"ok\":true,\"read\":[],\"superseded\":[],\"unknown\":[\"deadbeef1234\"]}",
+  "happy_status": 200,
+  "happy_body": "{\"ok\":true,\"read\":[{\"conversation_id\":\"session/c0ffee000016\",\"completion_token\":\"b1df4886-2abe-4e48-a0e5-b991a50b4325\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[1,1]},{\"conversation_id\":\"session/c0ffee000017\",\"completion_token\":\"ff0dc906-34fc-4214-9adf-78398861da3d\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[2,2]}],\"superseded\":[],\"unknown\":[]}"
+}

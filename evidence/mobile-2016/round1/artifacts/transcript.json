@@ -1,0 +1,97 @@
+{
+  "port": 4216,
+  "steps": [
+    {
+      "note": "login",
+      "request": "POST /login",
+      "status": 303,
+      "content_type": "",
+      "set_cookie_names": [
+        "lop_mobile"
+      ],
+      "request_body": "<password redacted>",
+      "body": "<password redacted>"
+    },
+    {
+      "note": "badge BEFORE (count 2)",
+      "request": "GET /api/attention/unread",
+      "status": 200,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": null,
+      "body": "{\"count\":2,\"revision\":[2,0,0],\"degraded\":[],\"conversations\":[{\"session_id\":\"c0ffee000017\",\"completion_token\":\"ff0dc906-34fc-4214-9adf-78398861da3d\",\"kind\":\"complete\",\"revision\":[2,0],\"push_handle\":\"lDI48YU-duHEOUf35dIFHv\"},{\"session_id\":\"c0ffee000016\",\"completion_token\":\"b1df4886-2abe-4e48-a0e5-b991a50b4325\",\"kind\":\"complete\",\"revision\":[1,0],\"push_handle\":\"O4xsOVCawJbkMcpjz8j11A\"}]}"
+    },
+    {
+      "note": "SHAPE: 'zzz-not-hex' session id",
+      "request": "POST /api/attention/seen",
+      "status": 422,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"zzz-not-hex\", \"completion_token\": \"f2e520f0-8dcc-4be6-b8ce-39be0cdbabac\"}]}",
+      "body": "{\"error\":\"session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID\"}"
+    },
+    {
+      "note": "SHAPE: uppercase hex session id",
+      "request": "POST /api/attention/seen",
+      "status": 422,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"ABCDEF012345\", \"completion_token\": \"0d1d12be-0ac6-4c64-9aee-d6512bb447e0\"}]}",
+      "body": "{\"error\":\"session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID\"}"
+    },
+    {
+      "note": "SHAPE: 11-character session id",
+      "request": "POST /api/attention/seen",
+      "status": 422,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"aaaaaaaaaaa\", \"completion_token\": \"0e8bd5d0-b4ec-4352-9c84-cac20f31a521\"}]}",
+      "body": "{\"error\":\"session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID\"}"
+    },
+    {
+      "note": "SHAPE: token is not a UUID",
+      "request": "POST /api/attention/seen",
+      "status": 422,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"aaaaaaaaaaaa\", \"completion_token\": \"not-a-uuid\"}]}",
+      "body": "{\"error\":\"session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID\"}"
+    },
+    {
+      "note": "SHAPE: empty token",
+      "request": "POST /api/attention/seen",
+      "status": 422,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"aaaaaaaaaaaa\", \"completion_token\": \"\"}]}",
+      "body": "{\"error\":\"session_id must be 12 lowercase hex characters and completion_token must be the completion's UUID\"}"
+    },
+    {
+      "note": "WELL-FORMED but unknown id -> per-item unknown",
+      "request": "POST /api/attention/seen",
+      "status": 200,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"deadbeef1234\", \"completion_token\": \"aa3f8989-0c05-44cd-9765-a710b5cf8aa1\"}]}",
+      "body": "{\"ok\":true,\"read\":[],\"superseded\":[],\"unknown\":[\"deadbeef1234\"]}"
+    },
+    {
+      "note": "HAPPY PATH: the two rendered pairs",
+      "request": "POST /api/attention/seen",
+      "status": 200,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": "{\"items\": [{\"session_id\": \"c0ffee000016\", \"completion_token\": \"b1df4886-2abe-4e48-a0e5-b991a50b4325\"}, {\"session_id\": \"c0ffee000017\", \"completion_token\": \"ff0dc906-34fc-4214-9adf-78398861da3d\"}]}",
+      "body": "{\"ok\":true,\"read\":[{\"conversation_id\":\"session/c0ffee000016\",\"completion_token\":\"b1df4886-2abe-4e48-a0e5-b991a50b4325\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[1,1]},{\"conversation_id\":\"session/c0ffee000017\",\"completion_token\":\"ff0dc906-34fc-4214-9adf-78398861da3d\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[2,2]}],\"superseded\":[],\"unknown\":[]}"
+    },
+    {
+      "note": "badge AFTER (count 0)",
+      "request": "GET /api/attention/unread",
+      "status": 200,
+      "content_type": "application/json",
+      "set_cookie_names": [],
+      "request_body": null,
+      "body": "{\"count\":0,\"revision\":[2,3,0],\"degraded\":[],\"conversations\":[]}"
+    }
+  ]
+}

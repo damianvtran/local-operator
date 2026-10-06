@@ -1,0 +1,16 @@
+{
+  "seed": [
+    {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "completion_token": "7ec2ba55-dddf-4b2a-a117-84824b62c304",
+      "anchor_id": "fixture-completion"
+    },
+    {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "completion_token": "557ebe1c-1f6b-4e4e-87ba-0ccfe17b9f48",
+      "anchor_id": "fixture-completion"
+    }
+  ]
+}
