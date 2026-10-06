@@ -131,7 +131,7 @@ def test_never_run_ending_paints_under_the_queued_engine() -> None:
 # --- the history fold --------------------------------------------------------
 
 
-def _history(*, marker: bool) -> list[object]:
+def _history(*, marker: bool) -> list[Any]:
     return [
         Message.user("deploy it"),
         Message(
