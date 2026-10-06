@@ -8,6 +8,7 @@
  */
 import { clearPrivateSessionStorage } from "./private-storage";
 import type {
+	AttentionUnread,
 	Capabilities,
 	CommandOp,
 	CompletionAttention,
@@ -210,6 +211,50 @@ export function markSessionSeen(
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ completion_token: completionToken }),
+	});
+}
+
+/** The unread badge, as ``GET /api/attention/unread`` serves it.
+
+    Why the client wants it apart from the list frames: the summaries carry the
+    ``unseen`` FLAG but never the completion TOKEN, and the one-gesture clear
+    must name the completions it rendered (see ``markAllSeen``). Read at the
+    moment of the press, so the pair the store compares is one read's set —
+    listing and clearing are one set, the TUI's own rule. */
+export function getAttentionUnread(): Promise<AttentionUnread> {
+	return request("/api/attention/unread");
+}
+
+/** What the bulk seen route answers with: one entry per input item, bucketed.
+
+    ``read`` entries are the store's own post-write states (the caller needs no
+    second read to learn what its rows now say); ``superseded`` and ``unknown``
+    name the two verdicts that mean "not cleared", by session id, so a caller
+    can name the remainder instead of reporting a clean sweep it did not get. */
+export type AttentionSeenManyReceipt = {
+	ok: boolean;
+	read: CompletionAttention[];
+	superseded: string[];
+	unknown: string[];
+};
+
+/** Clear several rendered completions in ONE write (issue #2016).
+
+    The bulk half of ``markSessionSeen``, and the same receipt rule: each pair
+    names a completion the caller actually RENDERED, and the daemon compares it
+    against the conversation's CURRENT token inside one transaction, so a newer
+    result stays unread (it answers ``superseded``). A batch that clears nothing
+    is still a resolved 2xx — the three buckets ARE the answer — so callers must
+    read the buckets rather than the status, exactly as the single call's caller
+    reads ``attention.unseen`` rather than the resolution. Mirrors the desktop
+    plane's ``POST /v1/desktop/attention/seen``. */
+export function markAllSeen(
+	items: { session_id: string; completion_token: string }[],
+): Promise<AttentionSeenManyReceipt> {
+	return request("/api/attention/seen", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ items }),
 	});
 }
 

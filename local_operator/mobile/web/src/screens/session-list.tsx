@@ -3,6 +3,10 @@
  * current by the list SSE; footer row with new session, past sessions,
  * projects and the theme picker.
  *
+ * The unread pile gets ONE gesture (issue #2016): a `mark all as read` control
+ * rides above the sections only while the daemon's unread aggregate is
+ * non-empty, clearing every rendered completion in a single write.
+ *
  * Visual contract: a streaming session shimmers its name (the row itself is
  * the indicator — no spinner); a session waiting on the user carries the
  * danger dot and a word ("approval" / "question"), because that is the one
@@ -28,7 +32,7 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getDirectories, setSessionPin, startSession } from "../api";
+import { getAttentionUnread, getDirectories, markAllSeen, setSessionPin, startSession } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
@@ -48,6 +52,34 @@ import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
+
+/** What a successful bulk clear says it did — naming every bucket it missed.
+
+    THE THREE BUCKETS ARE THE RECEIPT, per the shared rule
+    (``AttentionStore.acknowledge_many``): a count that silently dropped the
+    leftovers would be the silent partial success the design refuses, so
+    ``superseded`` and ``unknown`` are named whenever they are non-zero. The
+    sentences are the TUI's own (``tui/app.py`` ``_notifications_cleared``),
+    phone-terse where the terminal pads. */
+function markAllReceipt(read: number, superseded: number, unknown: number): string {
+	const parts: string[] = [];
+	if (read > 0) parts.push(`Marked ${read} read.`);
+	if (superseded > 0) {
+		parts.push(
+			superseded === 1
+				? "1 has a newer result and stays unread."
+				: `${superseded} have newer results and stay unread.`,
+		);
+	}
+	if (unknown > 0) {
+		parts.push(
+			unknown === 1
+				? "1 could not be found on this machine and stays unread."
+				: `${unknown} could not be found on this machine and stay unread.`,
+		);
+	}
+	return parts.join(" ") || "Nothing unread.";
+}
 
 /** The shared noun for a delegated child, in the singular at one.
 
@@ -915,6 +947,81 @@ export function SessionListScreen() {
 			setStarting(false);
 		}
 	};
+
+	/* THE ONE-GESTURE CLEAR (issue #2016). The control is GATED on the painted
+	   pile rather than a second read: the daemon's unread aggregate counts
+	   EXACTLY the rows whose `unseen` this screen renders ("one predicate, one
+	   population" — the route's count is pinned equal to the number of unseen
+	   rows in the same snapshot, tests/unit/mobile/test_attention_unread.py), so
+	   the row set IS the badge. The TOKENS such a gesture must name are the one
+	   thing a summary does not carry: they live on the unread read, taken at
+	   the moment of the press so listing and clearing are one set (the TUI's
+	   rule for /notifications read), and the store still compares every pair
+	   against the conversation's CURRENT completion inside one write — a result
+	   that landed after the read answers superseded and stays unread. */
+	const unreadCount = sessions.filter((session) => session.unseen).length;
+	const [markingAll, setMarkingAll] = useState(false);
+	const [markNotice, setMarkNotice] = useState<{ text: string; danger: boolean } | null>(null);
+	/* THE CONTROL IS MOUNTED ONLY WHILE IT HAS A PILE, with a short exit window so
+	   the collapse below still has content to slide away. Steady-state unmount,
+	   not a parked zero-height copy, for two reasons: a hidden-but-focusable
+	   control is an accessibility defect, and this screen's own tests read
+	   every `main button` as a session card. `heldControl` extends the window
+	   across the wrapper's own 200ms easing (220ms here), after which the row is
+	   already zero-height and removing the button changes nothing visually. The
+	   gate below is the store's live set, so it turns on in the SAME render the
+	   first unseen row appears (the entry animation needs the content present
+	   when 0fr becomes 1fr); only the exit is held. */
+	const [heldControl, setHeldControl] = useState(false);
+	const showMarkAll = unreadCount > 0 || heldControl;
+	useEffect(() => {
+		if (unreadCount > 0) {
+			setHeldControl(true);
+			return;
+		}
+		const timer = setTimeout(() => setHeldControl(false), 220);
+		return () => clearTimeout(timer);
+	}, [unreadCount]);
+	const markAllRead = async () => {
+		if (markingAll) return;
+		setMarkingAll(true);
+		setMarkNotice(null);
+		try {
+			const badge = await getAttentionUnread();
+			const items = (badge.conversations ?? []).flatMap((conversation) =>
+				conversation.completion_token
+					? [
+							{
+								session_id: conversation.session_id,
+								completion_token: conversation.completion_token,
+							},
+						]
+					: [],
+			);
+			if (items.length === 0) {
+				setMarkNotice({ text: "Nothing unread.", danger: false });
+				return;
+			}
+			const receipt = await markAllSeen(items);
+			setMarkNotice({
+				text: markAllReceipt(
+					receipt.read.length,
+					receipt.superseded.length,
+					receipt.unknown.length,
+				),
+				danger: false,
+			});
+		} catch (error) {
+			/* The daemon's own message, in the line beside the footer — the same
+			   honesty rule the new-session refusal follows. */
+			setMarkNotice({
+				text: `Could not mark read: ${String((error as Error).message ?? error)}`,
+				danger: true,
+			});
+		} finally {
+			setMarkingAll(false);
+		}
+	};
 	const visible = rows.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
@@ -1193,6 +1300,36 @@ export function SessionListScreen() {
 						placeholder="Search conversations…"
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
+					{/* THE ONE-GESTURE CLEAR. Collapses rather than vanishes, by the pin
+					    hint's own rule below: removing a node outright snapped the list up
+					    ~23px the moment the first pin landed (design D8), and the same snap
+					    would happen when the last unread clears under the reader's finger.
+					    The 0fr/1fr grid measures itself, so nothing jumps at either edge.
+					    THE BUTTON ITSELF UNMOUNTS once the pile is gone (`showMarkAll`
+					    above): only the exit animation needs it alive, and `inert` covers
+					    that window so a vanishing control cannot be tapped or tabbed. */}
+					<div
+						className={cn(
+							"grid transition-[grid-template-rows] duration-200 ease-out",
+							unreadCount > 0 ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+						)}
+						aria-hidden={unreadCount > 0 ? undefined : true}
+						inert={unreadCount > 0 ? undefined : true}
+					>
+						<div className="overflow-hidden">
+							{showMarkAll ? (
+								<button
+									type="button"
+									onClick={() => void markAllRead()}
+									disabled={markingAll}
+									aria-busy={markingAll}
+									className="mx-2 mb-2 flex min-h-11 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
+								>
+									{markingAll ? "marking…" : "mark all as read"}
+								</button>
+							) : null}
+						</div>
+					</div>
 					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 					    round 1, D2). The session view's ☆ is one tap away and does the same
 					    thing, but a reader has to already be in a conversation to find it, so
@@ -1288,6 +1425,18 @@ export function SessionListScreen() {
 					)}
 				</main>
 			</div>
+			{markNotice ? (
+				<p
+					role={markNotice.danger ? "alert" : "status"}
+					aria-live={markNotice.danger ? "assertive" : "polite"}
+					className={cn(
+						"px-3 pb-1 text-body-sm",
+						markNotice.danger ? "text-danger" : "text-ink-dim",
+					)}
+				>
+					{markNotice.text}
+				</p>
+			) : null}
 			{startError ? (
 				<p
 					role="alert"
