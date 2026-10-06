@@ -968,9 +968,10 @@ def test_the_batch_env_reader_is_one_fork_and_keys_by_pid(
     # LIVE ``/proc/<pid>/environ`` read to every row, and a busy CI runner can hold an
     # unrelated process at exactly that pid. Measured: run 37247490071 (test (3.12, 2),
     # Oct 5) and run 37404837806 (test (3.13, 2), Oct 6) both failed here with
-    # ``assert '/home/runner/.local-operator' == ''`` — the runner's own pid 4243 (a
-    # ``/bin/zsh``) held ``HOME=/home/runner``, so the live read supplied a config root
-    # the fabricated row never named. The reader was correct; the cell was not
+    # ``assert '/home/runner/.local-operator' == ''`` — some live process happened to
+    # hold pid 4243 with ``HOME=/home/runner``, so the live read supplied a config root
+    # the fabricated row never named. (The logs carry the DERIVED root only; what the
+    # process was is not observable in them.) The reader was correct; the cell was not
     # hermetic, and it failed only when the load happened to put a live process on
     # that pid. Pinning the seam (rather than hunting for "rarer" pids) makes the read
     # deterministic on both platforms and keeps every assertion below unchanged: the

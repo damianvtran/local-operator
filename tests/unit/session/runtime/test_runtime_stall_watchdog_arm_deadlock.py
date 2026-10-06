@@ -481,8 +481,9 @@ class _ArmPathChild:
             # child died silently, so a runner fault could not be told from a real
             # crash. PYTHONFAULTHANDLER makes the child print its own fatal-error
             # report (the thread and the frame it died in) into the captured
-            # output through the merged stderr. It only engages on a fatal signal;
-            # a death still reds the cell and nothing here retries or loosens.
+            # output through the merged stderr. It only engages on a fatal signal,
+            # and a death still names itself by rc; the retry is the DRIVER's
+            # (:func:`_run_leg`) and only for the pre-sentinel signal shape.
             env=_child_env(tmp_path, PYTHONFAULTHANDLER="1"),
             cwd=str(tmp_path),
             stdout=subprocess.PIPE,
@@ -622,6 +623,16 @@ class _ArmPathChild:
 #: gets a bounded second look rather than reding main on evidence it never produced;
 #: three is the ceiling — a THIRD consecutive signal death is no longer transient,
 #: and an unbounded retry would hide a real, deterministic crash behind a green run.
+#:
+#: THE CLASS THE GATE ACCEPTS IS WIDER THAN SIGSEGV/SIGBUS: it is ANY negative
+#: returncode, an external SIGKILL included, so the gate cannot tell "the child
+#: faulted on its own" from "something killed it". That is bounded here — three
+#: attempts, each still under the leg's own ``CHILD_BOUND_S`` — and every consumed
+#: retry warns. The trade is accepted because the shapes it could otherwise mask are
+#: covered elsewhere: the guarded regression PARKS and a park is never retried, a
+#: deterministic crash exhausts all attempts and reds, and the one shape this cannot
+#: separate — a real crash that reproduces only SOME of the time — stays visible in
+#: the warning rather than being dropped.
 LEG_ATTEMPTS = 3
 
 #: The marker CPython's crash handler prints when ``PYTHONFAULTHANDLER=1`` catches a
@@ -654,9 +665,12 @@ class _LegAttempt:
     """One attempt's evidence, kept whether or not the attempt is retried.
 
     ``output`` is the child's captured output — what a failure message has to carry and
-    what the leg's own pins read. ``sentinels_present`` is the leg's verdict on its
+    what the leg's own pins read. ``fired`` records whether the dump was ever seen in
+    flight, which is what separates a control that never produced a fire from one that
+    fired and then went silent — two different rig failures that used to print the same
+    message (F3, review round 1). ``sentinels_present`` is the leg's verdict on its
     markers. ``exited_by_signal`` is the RETRY GATE, read BEFORE ``close()``: the child
-    had EXITED (``poll() is not None``) with a negative returncode. ``returncode`` and
+    had EXITED (``poll()`` non-``None``) with a negative returncode. ``returncode`` and
     ``death_report`` are the child's own reading, snapshotted before close — close
     SIGKILLs the child, so a reading taken after it can only ever say ``rc=-9``, the one
     value that cannot tell a parked arm path from a child that died on its own.
@@ -664,6 +678,7 @@ class _LegAttempt:
 
     __slots__ = (
         "output",
+        "fired",
         "sentinels_present",
         "exited_by_signal",
         "returncode",
@@ -675,6 +690,7 @@ class _LegAttempt:
         self,
         *,
         output: str,
+        fired: bool,
         sentinels_present: bool,
         exited_by_signal: bool,
         returncode: int | None,
@@ -682,6 +698,7 @@ class _LegAttempt:
         pid: int | None,
     ) -> None:
         self.output = output
+        self.fired = fired
         self.sentinels_present = sentinels_present
         self.exited_by_signal = exited_by_signal
         self.returncode = returncode
@@ -750,8 +767,8 @@ def _leg_failure(label: str, note: str, history: "list[_LegAttempt]", *, all_die
             f"not retried: {history[-1].death_report}"
         )
     bodies = [
-        f"[attempt {index} pid {attempt.pid}] {attempt.death_report}; output tail "
-        f"{attempt.output.splitlines()[-4:]!r}"
+        f"[attempt {index} pid {attempt.pid} fired={attempt.fired}] {attempt.death_report}; "
+        f"output tail {attempt.output.splitlines()[-4:]!r}"
         for index, attempt in enumerate(history, start=1)
     ]
     return f"{head}. {note}\n" + "\n".join(bodies)
@@ -769,17 +786,20 @@ def _measure_leg(child: Any, *, sentinels: tuple[str, ...]) -> _LegAttempt:
     fired = child.wait_for_fire_then_release()
     bound = CHILD_BOUND_S if (fired or child.process.poll() is None) else 0.0
     output = child.wait_for(sentinels[-1], bound)
-    returncode = child.process.returncode
+    # ONE read, AFTER the wait, for both the gate and the stored value: ``poll()`` is
+    # what sets ``returncode``, so a separate ``returncode`` read plus a poll inside
+    # the gate was redundant and could go stale if the waits were ever reordered (N4,
+    # review round 1).
+    returncode = child.process.poll()
     return _LegAttempt(
         output=output,
+        fired=fired,
         sentinels_present=fired and all(marker in output for marker in sentinels),
-        # THE RETRY GATE, read before the caller's close(): EXITED (``poll() is not
-        # None``) with a negative returncode — a signal death. Every other shape is a
-        # real failure and is never retried: still alive at the bound (the park shape),
-        # a clean ``rc >= 0`` exit, or a sentinel that DID appear.
-        exited_by_signal=(
-            child.process.poll() is not None and returncode is not None and returncode < 0
-        ),
+        # THE RETRY GATE, read before the caller's close(): EXITED (``poll()``
+        # non-``None``) with a negative returncode — a signal death. Every other shape
+        # is a real failure and is never retried: still alive at the bound (the park
+        # shape), a clean ``rc >= 0`` exit, or a sentinel that DID appear.
+        exited_by_signal=returncode is not None and returncode < 0,
         returncode=returncode,
         death_report=child.death_report(),
         pid=child.pid,
@@ -880,6 +900,15 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
     while main stays green. Our 2026-10-06 occurrence (37404837806) carried NO
     fatal-error report, so a report present in a retried death is surfaced and its
     absence is never read as evidence about the cause.
+
+    THE SHAPE THIS CANNOT SEPARATE: the gate takes ANY negative returncode — an
+    external SIGKILL included — so it cannot tell "the child faulted on its own" from
+    "something killed it", and a REAL crash that reproduces only some of the time is
+    retried as well and can pass green behind the warning. Accepted because the blast
+    radius is bounded and named: three attempts, each under the leg's own
+    ``CHILD_BOUND_S``, with the warning carrying the rc, signal, dump state and output
+    tail of every death; the guarded regression PARKS and a park is never retried; and
+    a deterministic crash exhausts all attempts and reds.
 
     MUTATION THIS CELL CATCHES: any arm path that reaches a C timer call again -> red.
     """
@@ -1095,7 +1124,7 @@ def test_all_attempts_dying_by_signal_fail_with_every_attempt_aggregated(
     message = str(excinfo.value)
     assert f"DIED BY SIGNAL in all {LEG_ATTEMPTS} attempts" in message
     for index in range(1, LEG_ATTEMPTS + 1):
-        assert f"[attempt {index} pid {10_000 + index}]" in message
+        assert f"[attempt {index} pid {10_000 + index} fired=True]" in message
     assert message.count("rc=-11 (SIGSEGV)") == LEG_ATTEMPTS
     assert len(calls) == LEG_ATTEMPTS
 
@@ -1122,6 +1151,7 @@ def test_a_park_shape_is_not_retried(tmp_path: Path) -> None:
     message = str(excinfo.value)
     assert "NOT a signal death" in message
     assert "still running" in message
+    assert "fired=True" in message, "the park cell did fire; say so"
 
 
 def test_a_child_that_exits_cleanly_is_not_retried(tmp_path: Path) -> None:
@@ -1139,7 +1169,39 @@ def test_a_child_that_exits_cleanly_is_not_retried(tmp_path: Path) -> None:
             spawn=_scripted_spawn(shapes, calls, []),
         )
     assert calls == [("wedge", False, 1)]
-    assert "rc=0" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "rc=0" in message
+    # F3: a leg that never fired says so, so it cannot be confused with one that fired
+    # and then went silent — the two rig failures this cell and the park cell separate.
+    assert "fired=False" in message
+
+
+def test_a_positive_non_zero_exit_is_not_retried(tmp_path: Path) -> None:
+    """``rc=1`` is NOT the retry class either — the gate is ``rc < 0``, not ``rc != 0``.
+
+    rc=0 alone does not pin that: ``returncode != 0`` excludes 0 as well and would pass
+    every other cell in this file (measured in review round 1 — a gate mutated to
+    ``returncode is not None and returncode != 0`` kept all six green). Widened that
+    way, a genuine clean failure would be retried twice and then reported as ``DIED BY
+    SIGNAL in all N attempts`` — a real break, mislabelled and behind two warnings, in
+    exactly the cell this PR exists to keep honest.
+    """
+    shapes = [_FakeChildShape(fired=True, output=_DEAD_OUTPUT, returncode=1)]
+    calls: list[tuple[str, bool, int]] = []
+    with pytest.raises(AssertionError) as excinfo:
+        _run_leg(
+            tmp_path=tmp_path,
+            label="rig",
+            mode="wedge",
+            keep_draining=False,
+            sentinels=_RIG_SENTINELS,
+            note=_RIG_NOTE,
+            spawn=_scripted_spawn(shapes, calls, []),
+        )
+    assert calls == [("wedge", False, 1)], "a positive rc must fail on the first attempt"
+    message = str(excinfo.value)
+    assert "rc=1" in message
+    assert "NOT a signal death" in message
 
 
 def test_the_signal_leg_is_one_registration_and_nothing_else() -> None:
