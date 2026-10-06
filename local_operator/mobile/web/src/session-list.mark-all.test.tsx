@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 //
-// The one-gesture clear (issue #2016), round-1 remediation: the control is
-// present only while the pile is non-empty, states HOW MANY it will clear, and
-// posts only the rows the reader rendered. The receipt names the store's
-// per-item verdicts, never claims a sweep it did not get, is reported as
-// unknown — not as an empty pile — when the unread read was degraded, lives in
-// the store so a glance into a conversation cannot erase it, and expires.
-// Rendered against the REAL SessionListScreen, like the ladder test next door.
+// The one-gesture clear (issue #2016), round-2 remediation: the control is
+// present only while the pile is non-empty, states HOW MANY it will clear (and
+// stops stating it once a read could not be verified), and posts the badge rows
+// for conversations this list carries. The receipt names the store's per-item
+// verdicts, never claims a sweep it did not get, is reported as unknown — not as
+// an empty pile — when the unread read was degraded, lives in the store so a
+// glance into a conversation cannot erase it, and expires from the moment the
+// reader is actually looking at it. Rendered against the REAL SessionListScreen,
+// like the ladder test next door.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AttentionSeenManyReceipt } from "./api";
@@ -77,6 +79,19 @@ function conversation(session_id: string, completion_token: string) {
     label carries the COUNT (design D2 / UX U4 / QA Q1). */
 function control(): HTMLButtonElement | null {
 	return screen.queryByRole("button", { name: /mark all \d+ read/ }) as HTMLButtonElement | null;
+}
+
+/** The control when it has dropped the count (UX round 2, U11: after a read that
+    could not be verified it stops asserting a number as fact). */
+function unnumberedControl(): HTMLButtonElement | null {
+	return screen.queryByRole("button", { name: "mark all as read" }) as HTMLButtonElement | null;
+}
+
+/** The sticky band the control sits in — its own element, the class list is what
+    the separator and focus-ring findings are about (design round 2, D6 / D7).
+    It is the only `sticky` element on the screen. */
+function band(): HTMLDivElement {
+	return document.querySelector("div.sticky") as HTMLDivElement;
 }
 
 afterEach(() => {
@@ -291,6 +306,150 @@ describe("mark all as read", () => {
 			});
 			expect(document.activeElement).not.toBe(document.body);
 			expect(document.activeElement?.tagName).toBe("BUTTON");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("suppresses the count once a read could not be verified, and restores it when one can", async () => {
+		// UX round 2, U11. The number is derived from the painted pile, so in the
+		// one state where this screen has just said it could not read unread state,
+		// the control must stop asserting it — and may only state it again once a
+		// read has answered for real.
+		sessionList = [
+			summary({ session_id: "u1", conversation_name: "Alpha", unseen: true }),
+			summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
+		];
+		vi.mocked(getAttentionUnread).mockResolvedValue({ degraded: ["attention"] });
+		render(<SessionListScreen />);
+		expect(control()!.textContent).toBe("mark all 2 read");
+
+		fireEvent.click(control()!);
+		await screen.findByRole("alert");
+		expect(unnumberedControl()!.textContent).toBe("mark all as read");
+		expect(control()).toBeNull();
+
+		vi.mocked(getAttentionUnread).mockResolvedValue(
+			unread({ count: 2, conversations: [conversation("u1", "t1"), conversation("u2", "t2")] }),
+		);
+		vi.mocked(markAllSeen).mockResolvedValue(receipt({ read: [] }));
+		fireEvent.click(unnumberedControl()!);
+		await screen.findByRole("button", { name: "mark all 2 read" });
+	});
+
+	it("pauses the receipt's window while the reader is away, and restarts it on return", async () => {
+		// UX round 2, U9: a store-owned timer armed at the tap kept ticking through
+		// a route change, so a glance longer than the TTL still erased the receipt.
+		// The window is the reader's own viewing time now.
+		vi.useFakeTimers();
+		try {
+			const view = render(<SessionListScreen />);
+			act(() => publishMarkNotice({ text: "Marked 2 read.", danger: false }));
+			expect(screen.queryByText("Marked 2 read.")).toBeTruthy();
+
+			// Away for LONGER than the TTL: nothing is on screen to expire.
+			view.unmount();
+			act(() => {
+				vi.advanceTimersByTime(MARK_NOTICE_TTL_MS * 2);
+			});
+
+			// Back: the receipt is still there, and gets a full fresh window.
+			render(<SessionListScreen />);
+			expect(screen.queryByText("Marked 2 read.")).toBeTruthy();
+			act(() => {
+				vi.advanceTimersByTime(MARK_NOTICE_TTL_MS - 1000);
+			});
+			expect(screen.queryByText("Marked 2 read.")).toBeTruthy();
+
+			// Still bounded: the window closes TTL after the reader returned (U8).
+			act(() => {
+				vi.advanceTimersByTime(2000);
+			});
+			expect(screen.queryByText("Marked 2 read.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("leaves the focus alone when the pile was cleared by someone else", () => {
+		// The guard U3 promises: a pile cleared from another surface must not steal
+		// the reader's focus (agent round 2, NIT-3 — this path was unpinned).
+		vi.useFakeTimers();
+		try {
+			sessionList = [
+				summary({ session_id: "u1", conversation_name: "Alpha", unseen: true }),
+				summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
+			];
+			const view = render(<SessionListScreen />);
+			const search = screen.getByPlaceholderText("Search conversations…") as HTMLInputElement;
+			search.focus();
+
+			sessionList = [
+				summary({ session_id: "u1", conversation_name: "Alpha" }),
+				summary({ session_id: "u2", conversation_name: "Beta" }),
+			];
+			act(() => {
+				view.rerender(<SessionListScreen />);
+			});
+			act(() => {
+				vi.advanceTimersByTime(300);
+			});
+			expect(document.activeElement).toBe(search);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("lands the keyboard on the band — with a visible ring — when no card is registered", () => {
+		// The fallback half of U3 (design round 2, D7 / QA Q-2): with a query that
+		// registers no card, the focus goes to the band, and the band must SHOW it
+		// (WCAG 2.4.7) — Tailwind's `outline-none` would have neutralised the ring.
+		vi.useFakeTimers();
+		try {
+			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+			const view = render(<SessionListScreen />);
+			fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
+				target: { value: "zzz-no-such-conversation" },
+			});
+			control()!.focus();
+
+			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha" })];
+			act(() => {
+				view.rerender(<SessionListScreen />);
+			});
+			act(() => {
+				vi.advanceTimersByTime(300);
+			});
+
+			expect(document.activeElement).toBe(band());
+			expect(band().className).toContain("focus:outline-accent");
+			expect(band().className).not.toContain("outline-none");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("separates the pinned band from the rows sliding under it", () => {
+		// Design round 2, D6: with no edge on an opaque `bg-canvas`, a row slides
+		// under the band and its text is cut mid-glyph against a flat fill.
+		vi.useFakeTimers();
+		try {
+			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+			const view = render(<SessionListScreen />);
+			expect(band().className).toContain("border-hairline");
+
+			// The edge goes with the band's content: while the control is still
+			// sliding out the band holds something, and an emptied band leaves no
+			// stray line across the top of the list.
+			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha" })];
+			act(() => {
+				view.rerender(<SessionListScreen />);
+			});
+			expect(band().className).toContain("border-hairline");
+			act(() => {
+				vi.advanceTimersByTime(300);
+			});
+			expect(band().className).not.toContain("border-hairline");
 		} finally {
 			vi.useRealTimers();
 		}
