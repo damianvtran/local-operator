@@ -61,12 +61,12 @@ never holds the epoch secret**.
    **Radient account**, which is already the billing identity. Their **mesh device
    identity** is bound to each request. The service turns a `PoolRequest` into one
    Fargate task, signs an attestation binding the pod's self-minted key to the user's
-   home device and relay route, enforces TTL, idle and budget limits, records start and stop times from AWS, and charges
-   Radient credits. It also runs a **blind relay** so a NATed laptop and a private pod
-   can link without either accepting inbound connections. The mesh still holds no capacity
-   credential (`mesh-compute-pool.md` §7), and the control plane never holds a network's
-   epoch secret: the pod is admitted by a new `pool` handshake mode, not an invite
-   token (§3.2, §5).
+   home device and relay route, enforces TTL, idle and budget limits, records start and
+   stop times from AWS, and charges Radient credits. It also runs a **blind relay** so a
+   NATed laptop and a private pod can link without either accepting inbound connections.
+   The mesh still holds no capacity credential (`mesh-compute-pool.md` §7), and the
+   control plane never holds a network's epoch secret: the pod is admitted by a new
+   `pool` handshake mode, not an invite token (§3.2, §5).
 3. **Credentials:** the default is **hosted model access through the Radient gateway**
    with a per-task, budget-capped token. Radient already fronts OpenRouter as a provider
    (`providers/clients.py` "Radient fronts OpenRouter") and already holds the credit
@@ -392,15 +392,15 @@ container.
 
 ### 7.2 Egress
 
-v1 (blind-relay path, §3.2 option A): tasks in private subnets with **only** a security group to an egress proxy (an
-Envoy/Squid task with a domain allowlist: package registries, the Radient gateway, the
-git proxy) plus VPC endpoints (ECR, S3, Logs). The default allowlist follows Codex's
-"Common dependencies" idea [O1] and Copilot's default firewall [G2]. An agent that tries
-an unlisted domain gets a clear refusal recorded in the transcript. AWS Network Firewall
-is the managed alternative at **$0.395/endpoint-hour + $0.065/GB** in `ca-central-1`
-(Price List API) ≈ $288/month per AZ. That is overkill for the POC and worth evaluating
-for production. A sidecar proxy inside the same task is **not** a boundary, because the
-agent can bypass it.
+v1 (blind-relay path, §3.2 option A): tasks in private subnets with **only** a security
+group to an egress proxy (an Envoy/Squid task with a domain allowlist: package
+registries, the Radient gateway, the git proxy) plus VPC endpoints (ECR, S3, Logs). The
+default allowlist follows Codex's "Common dependencies" idea [O1] and Copilot's default
+firewall [G2]. An agent that tries an unlisted domain gets a clear refusal recorded in
+the transcript. AWS Network Firewall is the managed alternative at
+**$0.395/endpoint-hour + $0.065/GB** in `ca-central-1` (Price List API) ≈ $288/month per AZ. That is overkill
+for the POC and worth evaluating for production. A sidecar proxy inside the same task is
+**not** a boundary, because the agent can bypass it.
 
 ### 7.3 Tenant isolation
 
@@ -650,12 +650,13 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 5. Whether `lop exec`'s headless gate plus `--tools` covers the toolset agents actually
    need without `--yolo` (`docs/EXEC.md` "Approvals and lifetime").
 6. The `pool` handshake mode (C2): exact transcript binding for the attestation digest,
-   the attestation-then-row ordering ahead of `verify_auth` step 6, the signature-only auth
-   frame, the listener-side signature (signed `welcome` or bidirectional `auth`) so both
-   ends authenticate, pinning `home_pubkey` from the attestation, the rotation carve-out,
-   and the number-only epoch advance. This needs a design note amending `mesh-transport-identity.md` §6/§12.4 and `mesh-compute-pool.md`
-   §3.1–3.2 before any P1 code. The verdict that it is implementable rests on the
-   authorizer needing no secret: the pool capability set's `list` already admits
+   the attestation-then-row ordering ahead of `verify_auth` step 6, the signature-only
+   auth frame, the listener-side signature (signed `welcome` or bidirectional `auth`) so
+   both ends authenticate, pinning `home_pubkey` from the attestation, the rotation
+   carve-out, and the number-only epoch advance. This needs a design note amending
+   `mesh-transport-identity.md` §6/§12.4 and `mesh-compute-pool.md` §3.1–3.2 before any
+   P1 code. The verdict that it is implementable rests on the authorizer needing no
+   secret: the pool capability set's `list` already admits
    `net_reconcile`, and the absence of `admin` already refuses `net_epoch`.
 
 ## 13. Doc-hygiene findings (stale comments; out of scope here, noted for a follow-up)
