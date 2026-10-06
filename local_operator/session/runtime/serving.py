@@ -840,7 +840,15 @@ class ServingSessionHandle(SessionHandle):
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
         )
-        self._fold = ProjectionFold(self._projection)
+        # THE ASK GATE's mode, read where the session is at hand (design
+        # docs/design/ask-gate.md §3 row 8): the serving layer that builds the
+        # fold OWNS the session, so the fold is told once — settle-only ask
+        # rows while the queued engine is live, today's mount plus the
+        # settle-marker drop otherwise. See
+        # ``harness.rows.queued_ask_engine_live`` for the one decision.
+        from local_operator.harness.rows import queued_ask_engine_live
+
+        self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
         #: The broker registration that authorizes THIS process's descendants to
         #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
         #: promptly rather than waiting for the process's socket to close: a

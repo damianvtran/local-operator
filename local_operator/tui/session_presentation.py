@@ -1018,6 +1018,7 @@ def project_settled_rows(
         compaction_refused_notice,
         gate_timeout_notice,
         held_delivery_notice,
+        is_ask_gate_divert_message,
         is_harness_chrome,
         is_harness_notice_row,
         is_hidden_tool_call,
@@ -1610,6 +1611,19 @@ def project_settled_rows(
                 # the context (the model reads what it armed) and its result
                 # is still paired; only the settled row is skipped.
                 if is_hidden_tool_call(call):
+                    continue
+                # THE ASK GATE (design docs/design/ask-gate.md §3): a diverted
+                # ask paints NOTHING on replay — its result carries the hidden
+                # marker, and no row may settle for it. The per-call skip sits
+                # beside the hidden-tool check so the two suppression decisions
+                # stay one shape; the result itself paints no row of its own
+                # (it exists here only as the outcome a call's card settles
+                # with), so skipping the call is the whole subtraction on this
+                # seam. The card a live path painted before the mode was
+                # knowable is dropped by `_settle_painted_tool_card`'s marker
+                # arm instead.
+                call_result = results.get(getattr(call, "id", "") or "")
+                if call_result is not None and is_ask_gate_divert_message(call_result):
                     continue
                 # Only the FIRST call of a bang assistant message is the
                 # command's own card; the shape record_shell writes has
