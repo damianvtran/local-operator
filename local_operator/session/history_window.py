@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-from local_operator.harness.rows import is_harness_notice_row, is_hidden_tool_message
+from local_operator.harness.rows import (
+    ask_gate_diverted_call_ids,
+    is_harness_notice_row,
+    is_hidden_tool_message,
+    without_ask_gate_divert,
+)
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
@@ -546,6 +551,23 @@ def _capture_audit_window(
     ]
     messages = [message for message, _ in kept]
     indices = [index for _, index in kept]
+    # THE ASK GATE's divert rows (design docs/design/ask-gate.md §3): a
+    # diverted ask leaves NO user-visible trace, so the owner subtracts BOTH
+    # of its rows here — the marked result by the message predicate and the
+    # call chip by the call-id set those results name — and every viewer
+    # build, old included, receives clean rows. The same owner-side shape the
+    # patience pair and the wake fire above take, and the reason it must be
+    # owner-side: a plan-less client cannot read a marker it predates.
+    divert_ids = ask_gate_diverted_call_ids(messages)
+    if divert_ids:
+        kept = []
+        for message, index in zip(messages, indices):
+            stripped = without_ask_gate_divert(message, divert_ids)
+            if stripped is None:
+                continue
+            kept.append((stripped, index))
+        messages = [message for message, _ in kept]
+        indices = [index for _, index in kept]
     if hoisted:
         kept = [
             (message, index)
@@ -710,6 +732,20 @@ def _capture_display_window(
     # 'patience'`` rows straight to desktop clients). Display-only: the model's
     # replay keeps the pair, or the agent cannot see the wait it armed.
     history = [message for message in history if not is_hidden_tool_message(message)]
+    # THE ASK GATE's divert rows (design docs/design/ask-gate.md §3), the
+    # context phase's arm of the same owner-side subtraction the audit phase
+    # above runs: a diverted ask's RESULT (the marker) and its CALL chip both
+    # go, so every viewer build renders nothing for it. The model's own
+    # replay is untouched — it is built by the session, not from this page,
+    # and the model must read the decision-point note.
+    divert_ids = ask_gate_diverted_call_ids(history)
+    if divert_ids:
+        cleaned: list[AgentMessage] = []
+        for message in history:
+            stripped = without_ask_gate_divert(message, divert_ids)
+            if stripped is not None:
+                cleaned.append(stripped)
+        history = cleaned
     # These identities belong to the SAME durable cut as the page. Derive
     # them before discarding the full replay, including on an oversized page;
     # a subscribing session must not reconstruct history a second time.

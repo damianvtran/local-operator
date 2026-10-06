@@ -175,6 +175,13 @@ class PrintRenderer:
         #: itself on stderr. One line per phase, not per fragment -- see
         #: :meth:`_render` for why exec does not stream the text itself.
         self._reasoning_announced: bool = False
+        #: THE ASK GATE's stashed start lines (design docs/design/ask-gate.md
+        #: §3 row 11): while the queued engine is live an ask call is
+        #: SETTLE-ONLY, so the start line is withheld and kept here under the
+        #: call id — the end branch emits it for a RAISE ("today's line",
+        #: just later; the design records the timing consequence) and emits
+        #: nothing for a divert (the hidden marker). Popped at settle.
+        self._ask_gate_lines: dict[str, str] = {}
         #: The attached session, held so an auth-error line can name the active
         #: provider in its recovery hint. ``None`` until :meth:`attach`.
         self._session: SessionProtocol | None = None
@@ -215,6 +222,19 @@ class PrintRenderer:
             return
         self._render(event)
         self._track_outcome(event)
+
+    def _queued_ask_engine_live(self) -> bool:
+        """Whether the attached session runs the queued-ask engine (the gate's mode).
+
+        ``attach`` holds the session (design §3 row 11: "the mode read is
+        direct"), and the shared probe makes the answer the same one the TUI
+        and the projections read. Before ``attach`` — a bare renderer in a
+        test — the conservative ``False`` keeps today's lines; the settle
+        marker still suppresses whatever a mixed build shows.
+        """
+        from local_operator.harness.rows import queued_ask_engine_live
+
+        return queued_ask_engine_live(self._session)
 
     def attach(self, session: SessionProtocol) -> Callable[[], None]:
         """Subscribe to a session, returning the unsubscribe callable."""
@@ -301,8 +321,35 @@ class PrintRenderer:
             # generalised the rule and it should hold for every branch that
             # renders model-controlled text, not just the newest one (R14-2,
             # agent review round 14).
+            #
+            # THE ASK GATE (design docs/design/ask-gate.md §3 row 11): while
+            # the queued engine is live an ask call is SETTLE-ONLY — its line
+            # is withheld here and emitted at the END branch instead, because
+            # a forked clearance check may divert it and output that appeared
+            # and then had to be taken back is exactly the trace the design
+            # rejects. The line is STASHED, not dropped: a raise must print
+            # exactly today's bytes, just at settle; a divert prints nothing.
+            from local_operator.harness.rows import is_settle_only_ask
+
+            if is_settle_only_ask(event.tool_name, queued_engine=self._queued_ask_engine_live()):
+                self._ask_gate_lines[event.tool_call_id] = line[:_TOOL_LINE_WIDTH]
+                return
             self.console.print(line[:_TOOL_LINE_WIDTH], style="dim", highlight=False, markup=False)
         elif isinstance(event, ToolExecutionEndEvent):
+            # THE ASK GATE's settle (design §3 row 11): the stashed start line
+            # is emitted HERE for a raise — byte-identical to the line today's
+            # stream would have printed at start — and suppressed for a
+            # divert (the marker). A stashed line that is never popped (a
+            # died turn) is bounded by the run's own ask count. The JSON
+            # stream is deliberately untouched: it is a MACHINE surface that
+            # keeps every frame, and the marker rides `details` so a
+            # supervisor filters it (the `FAULT_KEY` precedent).
+            stashed = self._ask_gate_lines.pop(event.tool_call_id, None)
+            if stashed is not None:
+                from local_operator.harness.rows import is_ask_gate_divert_details
+
+                if not is_ask_gate_divert_details(getattr(event.result, "details", None)):
+                    self.console.print(stashed, style="dim", highlight=False, markup=False)
             if event.is_error:
                 name = strip_control_sequences(event.tool_name)
                 # A MARKED abort/skip is not a failure: the user stopped it or

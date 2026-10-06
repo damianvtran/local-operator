@@ -295,6 +295,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the tool registry, never a file in a session directory (the reply-channel/"
         "action-tool precedent)",
     ),
+    "local_operator/harness/rows.py": (
+        1,
+        "``_ASK_TOOL_NAME``: the ``ask`` TOOL's name — an identifier resolved through "
+        "the tool registry (the predicate reads it against event/row tool names), "
+        "never a file in a session directory (the ``SEND_TOOL_NAME`` precedent)",
+    ),
     "local_operator/evaluation/runner/action_tool.py": (1, "the action tool's name"),
     "local_operator/evaluation/action_server.py": (
         1,

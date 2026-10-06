@@ -1372,3 +1372,102 @@ async def test_the_opener_and_the_retitle_unit_skip_a_carried_notice(tmp_path):
         if getattr(message, "role", "") in ("user", "assistant")
         and not is_harness_notice_row(message)
     )
+
+
+# ---------------------------------------------------------------------------
+# The ask gate's divert rows
+# ---------------------------------------------------------------------------
+
+_ASK_MARKER = {"ask_gate": {"hidden": True, "verdict": "clear", "reason": "plainly best"}}
+
+
+def _diverted_ask_and_read_pairs() -> tuple[list[Message], Message, Message, Message, Message]:
+    """The design's shapes: a diverted ask pair, and an ordinary control pair.
+
+    The divert is written exactly as the product writes it — a text-less
+    assistant row carrying the ``ask`` call, its marked result (the marker
+    lives in ``provider_payload.details``), and NOTHING else a client could
+    render. The read pair is the CONTROL: an over-broad filter fails this test
+    too.
+    """
+    ask_call = Message.assistant(
+        "",
+        tool_calls=[ToolCall(id="call-ask", name="ask", arguments={"questions": []})],
+    )
+    ask_result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-ask",
+            tool_name="ask",
+            content=[TextContent(text="[Ask clearance] No question was put to the user.")],
+            details={"ask_gate": {"hidden": True, "verdict": "clear", "reason": "plainly best"}},
+        )
+    )
+    read_call = Message.assistant(
+        "", tool_calls=[ToolCall(id="call-read", name="read", arguments={"path": "f"})]
+    )
+    read_result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-read",
+            tool_name="read",
+            content=[TextContent(text="file body")],
+        )
+    )
+    return (
+        [ask_call, ask_result, read_call, read_result],
+        ask_call,
+        ask_result,
+        read_call,
+        read_result,
+    )
+
+
+@pytest.mark.asyncio
+async def test_diverted_ask_rows_never_reach_the_display_window(tmp_path: Path) -> None:
+    """A diverted ask leaves NO trace on any viewer build (design §3 row 4).
+
+    Both of its rows are subtracted owner-side — the marked result AND the
+    call chip — because a client that predates the marker cannot read it and
+    would otherwise paint an unsettled ``ask`` row or the decision note as a
+    receipt. Display-only: the model's own replay keeps the pair, or the agent
+    cannot read the note.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    pair, ask_call, ask_result, read_call, read_result = _diverted_ask_and_read_pairs()
+    await transcript.append_messages([Message.user("deploy"), Message.assistant("on it")])
+    await transcript.append_messages(pair)
+
+    page = window(transcript)
+    ids = {str(getattr(m, "id", "")) for m in page.messages}
+    assert ask_call.id not in ids and ask_result.id not in ids, "the divert's rows painted"
+    assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
+    rendered = " ".join(
+        (getattr(m, "text", "") or "") + " " + json.dumps(m.model_dump(mode="json"))
+        for m in page.messages
+    )
+    assert "[Ask clearance]" not in rendered and "ask_gate" not in rendered
+    # Display-only: the model's replay still carries the pair (the note must
+    # reach the agent).
+    llm_ids = {str(getattr(m, "id", "")) for m in transcript.build_llm_history(through_id=None)}
+    assert ask_call.id in llm_ids and ask_result.id in llm_ids
+
+
+@pytest.mark.asyncio
+async def test_diverted_ask_rows_are_stripped_from_audit_pages_too(tmp_path: Path) -> None:
+    """The audit phase serves stored rows verbatim — the second arm.
+
+    The pair is appended BEFORE a compaction whose kept window starts after
+    it, so reaching it requires the audit phase; the control pair's presence
+    in the walked rows proves that phase really was walked.
+    """
+    transcript = Transcript(tmp_path / "s")
+    pair, ask_call, ask_result, read_call, read_result = _diverted_ask_and_read_pairs()
+    await transcript.append_messages(pair)
+    batch = [Message.user(f"kept row {index}") for index in range(4)]
+    await transcript.append_messages(batch)
+    await transcript.append_compaction("summary", batch[0].id, 500)
+
+    rows, pages = _walk(transcript, max_messages=3)
+    assert any(page.audit for page in pages), "the walk never entered the audit phase"
+    ids = {str(getattr(m, "id", "")) for m in rows}
+    assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
+    assert ask_call.id not in ids and ask_result.id not in ids, "the divert's rows painted"

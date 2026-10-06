@@ -136,12 +136,29 @@ def test_the_frontend_state_omits_the_ask_fields_while_dark() -> None:
 
     The whole A2→F rollout rests on this: the field would otherwise ship while
     the server default was still blocking, and a new client would take the
-    queued path against a blocking backend.
+    queued path against a blocking backend. All THREE keys go together — the
+    rows, the tally and the truncation flag — because the pair's presence is
+    the capability read (the WIRE FIX).
     """
     state = FrontendSessionState(session_id="s1", epoch="e")
     payload = state.model_dump(mode="json")
     assert "asks" not in payload
     assert "asks_open" not in payload
+    assert "asks_truncated" not in payload
+
+
+def test_the_frontend_state_publishes_a_live_empty_tally() -> None:
+    """Live-but-empty ⇒ ``asks_open: 0`` present, rows absent (the WIRE FIX).
+
+    The desktop live-trace companion (local-operator-ui#860) reads exactly this
+    shape: the tally's presence is how a surface tells a live queued engine
+    from a blocking one when there is nothing waiting to show.
+    """
+    state = FrontendSessionState(session_id="s1", epoch="e", asks_open=0)
+    payload = state.model_dump(mode="json")
+    assert "asks" not in payload
+    assert payload["asks_open"] == 0
+    assert "asks_truncated" not in payload
 
 
 def test_the_frontend_state_publishes_them_once_live() -> None:
@@ -193,6 +210,64 @@ def test_ask_wire_reports_the_fold_and_the_outstanding_count(
     # The full question rides (options and flags included), because a surface
     # that can only see an id cannot draw a picker.
     assert rows[0]["questions"][0]["options"][0]["label"] == "yes"
+
+
+def test_ask_wire_on_a_live_empty_queue_publishes_only_the_tally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live-but-empty ⇒ ``(None, 0)`` — rows absent, the tally present.
+
+    THE WIRE FIX (cross-repo contract with the desktop live-trace companion):
+    the capability proxy is the presence of ``asks`` OR ``asks_open``, so a live
+    queued engine with nothing to fold publishes a present ``0`` rather than the
+    dark runtime's ``(None, None)``. The rows stay absent — old clients read
+    only ``asks`` and keep seeing today's view.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session, _queue_ = _live_session(tmp_path)
+    assert ask_wire(session) == (None, 0)
+
+    # And the settled-row fold keeps the rows arm: one declined ask means a list
+    # is carried (with a tally of 0 outstanding), not the empty shape.
+    session, queue = _live_session(tmp_path)
+    outcome = queue.enqueue(_questions(), None)
+    queue.decline(str(outcome["details"]["ask_id"]), by="test")
+    rows, outstanding = ask_wire(session)
+    assert rows is not None and outstanding == 0
+
+
+async def _noop_hook(questions: list[Any]) -> dict[str, list[str]] | None:
+    return {questions[0].id: ["Ship it"]}
+
+
+def test_the_real_publish_path_carries_a_live_empty_tally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The FULL publisher: a real Session's ``publish_ask_state`` rides the
+    WIRE FIX through the store's own ``mutate`` — no hand-setting of the field,
+    so a serializer or validation regression cannot hide behind the fake.
+
+    The queue is real (built by ``Session.ask_queue`` under the isolated
+    config dir); the session's ``frontend_state`` is what every wire surface
+    reads off the store, and it must carry a present ``asks_open: 0`` with no
+    rows."""
+    from tests.unit.session.test_aside import RecordingStream, make_session
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = make_session(tmp_path, RecordingStream())
+    session.set_ask_handler(_noop_hook)  # type: ignore[arg-type]
+
+    async def _drive() -> dict[str, Any]:
+        try:
+            assert session.ask_queue() is not None
+            session.publish_ask_state()
+            return session.frontend_state.model_dump(mode="json")
+        finally:
+            await session.dispose()
+
+    payload = asyncio.run(_drive())
+    assert "asks" not in payload
+    assert payload["asks_open"] == 0
 
 
 def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
@@ -391,6 +466,23 @@ def test_absence_clears_the_mirror_without_a_false_count() -> None:
     fold.set_asks(None, None)
     assert projection.asks is None and projection.asks_open is None
     assert projection.pending is None
+
+
+def test_a_live_empty_queue_keeps_the_tally_and_clears_the_mirror() -> None:
+    """``(None, 0)`` is LIVE-but-empty (the WIRE FIX): the tally rides as the
+    capability signal and the legacy mirror clears; only ``(None, None)`` — a
+    runtime that cannot say — clears the tally too, which the sibling above
+    pins."""
+    projection = SessionProjection(session_id="s1", pid=1, kind="daemon")
+    fold = ProjectionFold(projection)
+    fold.set_asks([{"ask_id": "a-9", "status": "open", "created_at": 5, "questions": []}], 1)
+    fold.set_asks(None, 0)
+    assert projection.asks is None
+    assert projection.asks_open == 0, "a live empty queue keeps its tally"
+    assert projection.pending is None
+    payload = projection.to_json()
+    assert "asks" not in payload
+    assert payload["asks_open"] == 0, "0 is a value, and it survives to_json"
 
 
 def test_the_mirrored_request_id_maps_back_to_the_queue() -> None:
@@ -1097,6 +1189,21 @@ def test_the_delta_route_is_bounded_too() -> None:
     assert update is not None
     assert len(update.changes["asks"]) < 20
     assert update.changes["asks_truncated"] is True
+
+
+def test_a_rows_yield_keeps_the_live_tally() -> None:
+    """The WIRE FIX's rows-yield arm: when NO row survives the bound the ROW key
+    goes absent but ``asks_open`` stays — it is the live-engine signal a
+    renderer reads, and only the last-resort frame yield may drop it (see
+    ``_yield_asks_when_the_frame_has_no_room``). The truncation flag goes with
+    the rows it describes."""
+    from local_operator.session import frontend_state as fs
+
+    snapshot: dict[str, object] = {"asks": [], "asks_open": 0, "asks_truncated": True}
+    fs._bound_asks_in_place(snapshot)
+    assert "asks" not in snapshot
+    assert "asks_open" in snapshot and snapshot["asks_open"] == 0
+    assert "asks_truncated" not in snapshot
 
 
 def test_the_yield_measures_the_real_payload_not_a_rebuilt_envelope() -> None:
