@@ -365,7 +365,7 @@ F = explicit follow-up; N = structurally absent, nothing to do):
 | # | Surface | Seam (file:line) | Disposition |
 |---|---|---|---|
 | 1 | Core marker + predicates | `harness/rows.py:344-417` block; `tools/builtin.py:26048` result details | **C** |
-| 2 | TUI live paint | `tui/app.py` `on_tool_composing` (`:53056`, gate at `:53070`): suppress an `ask` mount while the queued engine is live (register nothing — the source-suppression rule the patience arm documents); `on_tool_started` (`:53194`, gate at `:53201`): same belt; `on_tool_ended` (`:53304`): marker → drop; else → mount the settled receipt row (same row replay paints). In-flight restore `_mark_pending_tool_rows` (`:14159`, skip site `:14513`): skip ask calls while gating. Mode read: `self._session.ask_queue() is not None` when the app owns the session (construction is side-effect-free and already happens at turn binding); a viewer uses the presence of the `asks` wire field (`session/frontend_state.py:2963-2965`: presence ⇔ queued asks live in the owner's process). Unknown mode (an un-negotiated mixed build): keep today's mount and drop on the settle marker (flash residual, §5). | **C** |
+| 2 | TUI live paint | `tui/app.py` `on_tool_composing` (`:53056`, gate at `:53070`): suppress an `ask` mount while the queued engine is live (register nothing — the source-suppression rule the patience arm documents); `on_tool_started` (`:53194`, gate at `:53201`): same belt; `on_tool_ended` (`:53304`): marker → drop; else → mount the settled receipt row (same row replay paints). In-flight restore `_mark_pending_tool_rows` (`:14159`, skip site `:14513`): skip ask calls while gating. Mode read: `self._session.ask_queue() is not None` when the app owns the session (construction is side-effect-free and already happens at turn binding); a viewer uses the presence of the `asks` OR `asks_open` wire field (`session/frontend_state.py:2963-2965`; see the 2026-10-06 amendment below: presence ⇔ the queued engine is live in the owner's process). Unknown mode (an un-negotiated mixed build): keep today's mount and drop on the settle marker (flash residual, §5). | **C** |
 | 3 | TUI replay fold | `tui/session_presentation.py` — per-call skip beside `is_hidden_tool_call` (`:1612`; the fold holds `results` keyed by call id); skip a call whose result carries the marker, and never settle a row for it. | **C** |
 | 4 | TUI display pages (owner side) | `session/history_window.py:545,:712` (`is_hidden_tool_message` sites): add the message predicate; the wake-fire id-set helper (`_hidden_wake_entry_ids`, `:613-637`) is the shape to mirror (owner-side filtering so every viewer build receives clean rows). | **C** |
 | 5 | Desktop (rows path) | `server/utils/desktop_sessions.py::visible_transcript_rows` (`:1191-1215`; called from `history` at `:3354`): extend the filter with `is_ask_gate_divert_row`. Server-side is the seam that covers every desktop build ("the client reducer has no filter of its own"). | **C** |
@@ -377,6 +377,31 @@ F = explicit follow-up; N = structurally absent, nothing to do):
 | 11 | Headless print | `local_operator/headless_print.py`: start branch (`:286`) suppressed for a settle-only ask; end branch (`:305`): emit the raised row only. `PrintRenderer.attach` holds the session (`:214-222`), so the mode read is direct. The JSON (`json_mode`) stream is a MACHINE surface: it keeps the frames; the marker rides `details` so supervisors filter (the `FAULT_KEY` precedent). | **C** |
 | 12 | Search / find | tool rows are never documents ("``transcript_index``'s own rule", `session/transcript_find.py` docstring) — structurally absent. | **N** |
 | 13 | Subagent panels | children have no ask hook (existing guarantee, `build_ask_tool` docstring `tools/builtin.py:25983+`); `exec --control` children ride 7. | **V** |
+
+**Amendment — 2026-10-06 (round-1 remediation, the WIRE FIX; cross-repo contract with
+`local-operator-ui#860`).** The capability read is the presence of ``asks`` OR
+``asks_open``, not ``asks`` alone. A live queue that folds to ZERO rows publishes
+``asks_open: 0`` with ``asks`` absent — the tally key is ~30 B, and the rows stay
+absent-on-empty so old clients (which read only ``asks``) keep seeing today's view —
+because a client must be able to tell a live queued engine from a blocking one EVEN
+WHEN the queue is empty (the desktop live-trace companion's settle-only paint keys on
+exactly that bit). Concretely, server-side: ``frontend_state.ask_wire`` returns
+``(None, 0)`` for a live-empty fold; the serializer rides the present ``0``; the phone
+fold carries it (``set_asks(None, 0)``) and the daemon list row sends ``0``; the
+``_bound_asks_in_place`` rows-yield keeps the tally; and the LAST-RESORT frame yield
+(``_yield_asks_when_the_frame_has_no_room``, a frame at the socket line cap) is the one
+documented place the tally drops with the rows — the bounded-frame residual. Row 2's
+viewer arm reads both fields; every consumer audit and its pins ride the remediation
+round's commits.
+
+**Amendment — 2026-10-06 (round-1 remediation, NIT 1).** §2.7's "ask behavior is
+today's" means the GATE reverts: no fork calls, no diverts, no fingerprint reads —
+every ask queues exactly as today. It does NOT revert the settle-only PAINT timing:
+that is keyed on the queued ENGINE alone (``is_settle_only_ask`` /
+``queued_ask_engine_live`` read the queue, never ``LOP_ASK_GATE``), deliberately — the
+owner and the viewer must not be able to reach different mode answers about one
+session, and a gate-off runtime still must not flash a row that a gate-on runtime would
+hide. The uniform key is the contract; this note closes the wording gap.
 
 **What "code in this PR" means for 2/3/4/8/11:** the shared work (predicates, deferral
 switch, the settle-mount path) is core-repo, so it lands here; the QA matrix (§4)
@@ -486,6 +511,11 @@ the mobile/web and desktop stills ride their own lanes (§6) for the follow-up.
 - **Verdict quality is model judgment**: fail-open caps the cost of a bad verdict at one
   extra ask; watch the honored re-raise rate (fingerprint hits) as the signal that the
   gate is being fought, and the divert:raise ratio for the "material reduction" claim.
+- **Live-empty capability** (the WIRE FIX, 2026-10-06): a live-but-empty queue is now
+  distinguishable from a dark runtime by a present ``asks_open: 0``. The one residual is
+  the last-resort frame yield (a frame at the socket line cap), which may drop the tally
+  with the rows; a re-sync restores it, and the desktop companion's live trace treats
+  absence as "act as today" — never as "divert possible".
 - **Cost furniture**: one extra request per gated ask (cache read of the prefix + small
   write). If a session's asks are already rare, the gate's savings are attention, not
   tokens — the memo does not claim a token win.

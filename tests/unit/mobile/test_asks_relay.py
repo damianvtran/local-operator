@@ -13,9 +13,11 @@ invisible in a green unit suite and load-bearing on the client:
 
 * ``GET /api/asks`` is INDEX-BACKED: it must answer with no runtime running at
   all, because a queued ask outlives the runtime that asked it.
-* ``asks_open`` is ABSENT — not ``0`` — when the runtime does not publish asks,
-  because the phone's capability proxy is the field's PRESENCE (a ``0`` would
-  say "supported, nothing waiting" about a runtime that cannot say anything).
+* ``asks_open`` is ABSENT when the runtime does not publish asks — and it may
+  be a present ``0``, which the WIRE FIX made a LIVE value: a runtime running
+  the queued engine with nothing waiting says exactly that, while a runtime
+  that cannot say anything at all omits the key. The phone's capability proxy
+  is the presence of ``asks`` OR ``asks_open``, never the count.
 
 Nothing here touches the operator's machine: the config root is the isolated
 one ``conftest`` installs, the records are this test's own pids, and the one
@@ -155,11 +157,14 @@ def _entry(daemon: MobileDaemon, record: SessionRecord, projection: SessionProje
 
 
 def test_the_list_row_carries_asks_open_only_when_the_runtime_publishes_asks() -> None:
-    """PRESENCE is the capability proxy (design §4): a runtime that does not
-    publish asks must be indistinguishable from an old one, so the key is
-    OMITTED rather than sent as 0."""
+    """PRESENCE is the capability proxy (design §4, the WIRE FIX): a runtime that
+    does not publish asks must be indistinguishable from an old one, so the key
+    is OMITTED — and a LIVE runtime with nothing waiting sends a present ``0``,
+    which is now legal and load-bearing (it is how the phone tells a live
+    queued engine from a blocking one on an empty queue)."""
     _session_dir(SESSION_A)
     _session_dir(SESSION_B)
+    _session_dir("sess-empty-live")
     daemon = MobileDaemon(port=0, password="pw123")
     publishing = SessionProjection(
         session_id=SESSION_A, pid=101, kind="tui", conversation_name="publishing"
@@ -173,11 +178,20 @@ def test_the_list_row_carries_asks_open_only_when_the_runtime_publishes_asks() -
     )
     _entry(daemon, _record(SESSION_B, 102), silent)
 
+    # Live-but-empty: the queue runs, nothing is waiting. The tally rides as a
+    # present 0 (the WIRE FIX); only a runtime that cannot answer omits it.
+    empty_live = SessionProjection(
+        session_id="sess-empty-live", pid=103, kind="tui", conversation_name="live empty"
+    )
+    empty_live.asks_open = 0
+    _entry(daemon, _record("sess-empty-live", 103), empty_live)
+
     client = TestClient(build_app(daemon), follow_redirects=False)
     assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
     rows = {row["session_id"]: row for row in client.get("/api/sessions").json()["sessions"]}
     assert rows[SESSION_A]["asks_open"] == 2
     assert "asks_open" not in rows[SESSION_B]
+    assert rows["sess-empty-live"]["asks_open"] == 0
 
 
 class _AskHandle(FakeHandle):

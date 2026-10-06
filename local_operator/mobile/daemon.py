@@ -1285,10 +1285,12 @@ class SessionTable:
                     # would be a second answer to "how many questions are
                     # waiting". None while the runtime does not publish asks at
                     # all (the feature is dark there), and the row then OMITS
-                    # the key rather than sending 0: the client must be able to
-                    # tell "nothing waiting" from "this runtime cannot say",
-                    # which is the same presence rule the projection and the
-                    # frontend state follow.
+                    # the key; a LIVE runtime with nothing outstanding sends 0
+                    # instead (the WIRE FIX), which the client reads as "engine
+                    # is live, nothing waiting" — so the row can tell "nothing
+                    # waiting" from "this runtime cannot say", which is the
+                    # same presence rule the projection and the frontend state
+                    # follow.
                     #
                     # It is NOT ``needs_attention``/``pending_kind``: those stay
                     # the APPROVAL signals, and an ask is a question the agent
@@ -1304,7 +1306,7 @@ class SessionTable:
         # The id tie-break inside ``entry_for``'s key makes the order total, so
         # two rows of equal birth cannot swap places between polls.
         for summary in out:
-            # Absence, not ``null``/``0``: see the ``asks_open`` comment above.
+            # Absence, not ``null``: see the ``asks_open`` comment above.
             if summary.get("asks_open") is None:
                 summary.pop("asks_open", None)
         out.sort(key=lambda summary: ranks[summary["session_id"]][0])

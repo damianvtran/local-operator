@@ -174,13 +174,29 @@ def test_mode_probe_owner_and_viewer() -> None:
 
     assert queued_ask_engine_live(SimpleNamespace(ask_queue=_boom)) is False
 
-    # The viewer: the ``asks`` wire field's PRESENCE on the frontend state.
+    # The viewer: the presence of the ``asks`` OR ``asks_open`` wire field on
+    # the frontend state (the WIRE FIX added the tally, which a live-but-empty
+    # queue publishes with the rows absent).
     assert (
         queued_ask_engine_live(SimpleNamespace(frontend_state=SimpleNamespace(asks=[{"id": "a1"}])))
         is True
     )
     assert (
         queued_ask_engine_live(SimpleNamespace(frontend_state=SimpleNamespace(asks=None))) is False
+    )
+    # Live-but-empty: rows absent, the tally present — engine is live.
+    assert (
+        queued_ask_engine_live(
+            SimpleNamespace(frontend_state=SimpleNamespace(asks=None, asks_open=0))
+        )
+        is True
+    )
+    # Both absent: a runtime that cannot say — today's blocking-arm answer.
+    assert (
+        queued_ask_engine_live(
+            SimpleNamespace(frontend_state=SimpleNamespace(asks=None, asks_open=None))
+        )
+        is False
     )
     # A facade that cannot say, and a bare object: False, never a raise.
     assert queued_ask_engine_live(SimpleNamespace()) is False

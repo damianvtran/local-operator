@@ -3036,11 +3036,14 @@ class ProjectionFold:
     def set_asks(self, rows: list[dict[str, Any]] | None, outstanding_count: int | None) -> None:
         """Install the runtime's ask fold and re-front the legacy mirror.
 
-        ``None`` is ABSENCE, not "no asks": it is what a runtime that does not
-        publish the field sends (the feature is dark there), and this fold keeps
-        the distinction because the whole client-side capability proxy rests on
-        it — an old/new client deciding whether to render the ask surfaces reads
-        presence, never the length.
+        ``None`` for the ROWS is ABSENCE, not "no asks": a runtime that does
+        not publish the field (the feature is dark there) sends
+        ``(None, None)``, while a LIVE queue with nothing to fold sends
+        ``(None, 0)`` — rows absent, the tally present — because the client's
+        capability proxy is the presence of EITHER field (the WIRE FIX, the
+        cross-repo contract with the desktop live-trace companion): an empty
+        runtime must still be distinguishable from a blocking one. This fold
+        keeps that distinction rather than collapsing the pair to absence.
 
         ``outstanding_count`` is the runtime's own tally of asks still wanting
         the user (open + timed-out-and-answerable), passed through verbatim
@@ -3056,7 +3059,12 @@ class ProjectionFold:
         """
         if rows is None:
             self.projection.asks = None
-            self.projection.asks_open = None
+            # ``(None, count)`` is LIVE-BUT-EMPTY (see the docstring): the tally
+            # rides as the capability signal. Only ``(None, None)`` — a runtime
+            # that cannot say — clears it.
+            self.projection.asks_open = (
+                None if outstanding_count is None else int(outstanding_count)
+            )
         else:
             known = {name for name in PendingAskWire.__dataclass_fields__}
             self.projection.asks = [

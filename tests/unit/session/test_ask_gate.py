@@ -13,6 +13,7 @@ mirroring ``test_aside.py``'s enforcement style.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -366,11 +367,103 @@ async def test_complete_clearance_request_shape(tmp_path) -> None:
     # ``isolated`` stays absent/False — load-bearing: isolation would strip the
     # session's cache key and put the gate on a cold namespace (design §2.1).
     assert request.isolated is False
-    assert request.prompt_cache_key is None  # the session's stream fn stamps the lineage
+    # ``None`` HERE is correct and half the lineage story: the built request is
+    # unprefixed by construction, and the session's stream fn stamps
+    # ``prompt_cache_key = _cache_lineage_id`` one layer down — the cell below
+    # drives that layer on the real ``SessionStreamFn`` so the pair is pinned.
+    assert request.prompt_cache_key is None
     assert request.tool_choice == "none"
     # Tools mirror the live set — the front of the cached prefix (never []).
     assert request.tools == session._context.tools
     assert [m.text for m in request.messages] == ["port it", "gate message"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_clearance_rides_the_sessions_cache_lineage(tmp_path, monkeypatch) -> None:
+    """The lineage reaches the wire, driven through the REAL stream fn (§4).
+
+    The shape test above stops at the built request, whose ``prompt_cache_key``
+    is ``None`` — so on its own it cannot see a regression that keeps the
+    request shape and loses the lineage. The stamp lives in
+    ``SessionStreamFn.__call__`` (``prompt_cache_key = _cache_lineage_id``,
+    SKIPPED for ``isolated`` requests), so this drives a real stream fn with
+    the provider boundary patched out and reads the stamped request off that
+    boundary. A fork's ``cache_lineage_id`` is its PARENT's id; this session
+    stands in with a synthetic one.
+    """
+    from local_operator.model.configure import create_stream_fn
+    from local_operator.providers import failover as failover_module
+
+    class _Auth:  # only the resolved ids are inspected; nothing is streamed
+        pass
+
+    captured: list[Any] = []
+
+    async def _fake_stream_with_failover(request: Any, *args: Any, **kwargs: Any):
+        captured.append(request)
+        yield StreamTextDelta(delta="VERDICT: clear\nREASON: lineage")
+
+    # Patched at the SOURCE module: ``__call__`` imports the name at call time
+    # (``from local_operator.providers.failover import stream_with_failover``),
+    # so the failover module's attribute is the one it reads.
+    monkeypatch.setattr(failover_module, "stream_with_failover", _fake_stream_with_failover)
+
+    stream = create_stream_fn(
+        _Auth(),  # type: ignore[arg-type]
+        settings={},
+        session_id="s-lineage",
+        cache_lineage_id="s-parent-lineage",
+    )
+    session = make_session(tmp_path, stream)
+    answer = await session.complete_clearance([Message.user("gate message")])
+
+    assert answer == "VERDICT: clear\nREASON: lineage"
+    assert captured, "the clearance request must reach the provider boundary"
+    request = captured[-1]
+    assert request.prompt_cache_key == "s-parent-lineage"
+    # And the wire-visible shape survived the real pipeline: no isolation was
+    # re-introduced by a layer below the session.
+    assert request.isolated is False and request.purpose == "clearance"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_clearance_prefix_is_byte_identical_to_the_context(tmp_path) -> None:
+    """The cache READ this design exists to preserve (§2.1, §4 item 6's unit
+    half): the request's message prefix IS the session's rendered context —
+    byte-for-byte under the canonical JSON dump — with exactly one message
+    appended after it.
+
+    ``expected`` is built through the two functions the TURN's own seam uses
+    (``harness/loop.py``: ``_render_history`` + the replay bound), so a
+    transformation that leaked into only one of the two paths (an extra
+    summary, a changed bound) fails here even though both still \"work\". The
+    LIVE byte-identity read is the measure-script clearance arm (§4 item 6),
+    which QA drives against a real warm session.
+    """
+    from local_operator.harness.replay_bound import bound_replay_payloads
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, stream)
+    session._context.messages.extend([Message.user("port it"), Message.assistant("done.")])
+
+    before = list(session._context.messages)
+    expected = bound_replay_payloads(session._render_history(before))
+
+    await session.complete_clearance([Message.user("gate message")])
+
+    request = stream.requests[-1]
+    assert len(request.messages) == len(expected) + 1, "exactly one message is appended"
+
+    def _bytes(messages: list[Any]) -> bytes:
+        return json.dumps([m.model_dump(mode="json") for m in messages]).encode()
+
+    assert _bytes(request.messages[:-1]) == _bytes(expected)
+    assert request.messages[-1].text == "gate message"
+    # Nothing was mutated to build the fork: the context is untouched by
+    # identity, the same contract the no-trace cell pins.
+    assert all(a is b for a, b in zip(session._context.messages, before))
     await session.dispose()
 
 

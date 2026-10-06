@@ -255,6 +255,64 @@ async def test_ended_drops_on_the_divert_marker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_diverted_ask_does_not_linger_in_the_working_line() -> None:
+    """MINOR-1(c): the working line and every registry drop a diverted ask.
+
+    The marker branch re-derives the activity before returning, so a call the
+    gate hid must leave the working line naming no ask-shaped work — and the
+    START frame's stash (the one registry a settle-only ask ever touches) must
+    be empty afterwards. The mid-sequence assert proves the stash was really
+    populated, so the final emptiness is a DROP rather than a never-wrote; the
+    blocking-arm control in ``test_ended_on_the_blocking_arm_is_todays_settle``
+    is what keeps the suppressed shape from passing on an empty app.
+    """
+    session = FakeSession()
+    _queued(session)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._start_working_block()
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="call-ask", tool_name="ask", intent="asking")
+            )
+        )
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="call-ask",
+                    tool_name="ask",
+                    args=ASK_ARGS,
+                    started_at_epoch=1_000.0,
+                )
+            )
+        )
+        for _ in range(10):
+            await pilot.pause()
+        assert "call-ask" in app._ask_gate_settled_calls, "the start frame stashed the identity"
+
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="call-ask",
+                    tool_name="ask",
+                    result=_ask_result("[Ask clearance] x", marker=True),
+                )
+            )
+        )
+        for _ in range(10):
+            await pilot.pause()
+
+        assert "call-ask" not in app._ask_gate_settled_calls
+        assert "call-ask" not in app._tool_cards and "call-ask" not in app._composing_cards
+        label = app._current_activity()[0]
+        assert "ask" not in label.lower(), "the working line re-derived off the ask"
+        working = app._working_block
+        if working is not None:
+            assert working.activity == label, "the refresh pushed the re-derived label"
+
+
+@pytest.mark.asyncio
 async def test_ended_on_the_blocking_arm_is_todays_settle() -> None:
     """The control: without the queued engine an ask settles like every tool."""
     session = FakeSession()

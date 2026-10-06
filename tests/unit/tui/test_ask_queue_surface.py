@@ -214,6 +214,30 @@ async def test_bar_is_absent_at_zero_asks(enabled):
         assert not app.query_one(AskBar).display
 
 
+async def test_a_live_empty_queue_renders_no_surface_and_keeps_the_tally(enabled):
+    """The WIRE FIX on the TUI: ``asks_open: 0`` present is LIVE-but-empty.
+
+    Nothing new may render for it — the bar and the clock derive from ROWS, so
+    a present ``0`` must be indistinguishable from the old absence on screen
+    ("0-present renders nothing wrong") — while the tally itself is kept for
+    the list header, exactly as the wire's own count is.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface([], open_count=0, truncated=False)
+        await _settle(pilot)
+        assert not app.query_one(AskBar).display, "empty rows paint no bar"
+        assert app._ask_tick is None, "no rows, no clock"
+        assert app._ask_open_count == 0, "the wire's own tally rides"
+        assert app._ask_rows == []
+        # ...and a later ask still mounts normally off the same surface.
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]), open_count=1)
+        await _settle(pilot)
+        assert app.query_one(AskBar).display
+
+
 def test_the_surface_takes_the_composer_row_only_when_it_has_something():
     """The bar paints zero rows at rest — the dock must not grow for nothing.
 

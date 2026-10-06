@@ -113,6 +113,59 @@ def test_the_blocking_arm_settles_a_normal_result_as_today() -> None:
     assert len(rows) == 1 and rows[0].tool_state == "done"
 
 
+#: The three fields the §4 byte-identity line's unit substitution excludes, each
+#: for a MEASURED reason rather than convenience (the literal claim that the
+#: queued and blocking arms serialize identically is false on exactly these):
+#: ``version`` counts a row's fold updates and the settle-only arm legitimately
+#: makes fewer (its row is born at settle); ``intent``/``summary`` are the
+#: compose/start frames' live annotations, and the settle-only contract refuses
+#: to REGISTER at compose by design, while the END frame — the only one the
+#: queued arm folds into a row — carries neither. Everything else (ids, order,
+#: states, details, output, flags) must be byte-equal, which is what this pins;
+#: the wire-level ``LOP_ASK_GATE=0`` parity is QA's cell 2b.
+_PARITY_ASIDE_FIELDS = ("version", "intent", "summary")
+
+
+def _masked(rows: list[dict[str, Any]]) -> bytes:
+    import json
+
+    masked: list[dict[str, Any]] = []
+    for row in rows:
+        copy = dict(row)
+        for field in _PARITY_ASIDE_FIELDS:
+            if field in copy:
+                copy[field] = None
+        masked.append(copy)
+    return json.dumps(masked, sort_keys=True, default=str).encode()
+
+
+def test_a_non_diverted_ask_is_projection_identical_to_the_gate_off_run() -> None:
+    """A raise leaves NO trace: queued-engine fold == blocking-arm fold.
+
+    The §4 line's "``SessionProjection`` byte-identical for a probe session
+    without diverts" as a unit cell: the SAME event sequence (compose with an
+    intent, start with args, unmarked end) folded twice — once under the queued
+    engine, once on the blocking arm that never probes — and compared after the
+    documented field mask above. Anything the gate could leak (a marker, a
+    changed state, a dropped detail) fails here.
+    """
+
+    def run(*, queued: bool) -> list[dict[str, Any]]:
+        fold = make_fold(queued=queued)
+        fold.fold_event(
+            ToolCallComposeEvent(tool_call_id="call-ask", tool_name="ask", intent="asking")
+        )
+        fold.fold_event(
+            ToolExecutionStartEvent(tool_call_id="call-ask", tool_name="ask", args=ASK_ARGS)
+        )
+        _end(fold, marker=False)
+        return [row.to_json() for row in fold.projection.transcript]
+
+    assert _masked(run(queued=True)) == _masked(
+        run(queued=False)
+    ), "a raise differing beyond the masked lifecycle fields is a gate leak"
+
+
 def test_never_run_ending_paints_under_the_queued_engine() -> None:
     """The contract line: a died-before-asking call must stay visible."""
     fold = make_fold(queued=True)
