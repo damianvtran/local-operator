@@ -13425,6 +13425,16 @@ async def execute_send(
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"
+        # THE PEER HINT: an exact id that is nowhere on this device may be a
+        # session a PEER is holding — the miss then names that device instead
+        # of sending the caller back to look locally again (one turn was
+        # spent on exactly that, 2026-10-06). BOTH spellings of an exact id
+        # (`session=`, and `target=` when the needle is a full id) are
+        # covered; every other error form returns None before any read; see
+        # _peer_holder_hint.
+        hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+        if hint:
+            error = hint
         return _error(tool_call_id, "send", error or "no target resolved")
 
     # Self-send guard: the tool runs INSIDE the sender's session process, so
@@ -14607,7 +14617,143 @@ async def _sessions_target(
             return _SessionsTarget(None, "", [], False, stored_error)
     if error and peer_send.live_scan_found_nothing(error):
         error = f"no session matches {params.target!r} (searched live and stored sessions)"
+    # THE PEER HINT: the exact-id miss may name a session a PEER holds — in
+    # either spelling, `session=` or a full-id `target=`; every other error
+    # form is untouched (see _peer_holder_hint).
+    hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+    if hint:
+        error = hint
     return _SessionsTarget(None, "", [], False, error or "no session resolved")
+
+
+# ---------------------------------------------------------------------------
+# the peer hint — an exact-id miss names the device that holds it
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT IT ANSWERS (operator-visible, 2026-10-06): ``send`` called with a
+# REMOTE session id and no ``peer`` answered "no session found with session id
+# '<id>'" — accurate for this device and MISLEADING anywhere it was read: the
+# session exists, on a peer, and the caller spent a turn concluding it did
+# not. Wanted, and what this section composes: "`<id>` is held by <device> —
+# pass `peer=<device>`".
+#
+# BOTH SPELLINGS OF AN EXACT ID reach it (review round 1, decision EXTEND):
+# ``session=<id>`` (the repro) and ``target=<id>`` when the needle IS a full
+# id — the same address arrives both ways and the same miss misleads either
+# way. A name-shaped target is NOT the hint's business: it returns before any
+# lookup.
+#
+# THE SENTENCE STAYS OUT OF ``mobile/peer_send``: that module is deliberately
+# import-light and loopback-scoped, and a peer catalogue is a mesh concern.
+# The refusal it produces is unchanged; the hint is composed by the CONSUMERS
+# (the ``send`` tool and the ``sessions`` ops), which is also the only layer
+# that can afford the fan-out and knows which refusals are exact-id misses.
+
+#: The live resolver's exact-id MISS form, verbatim from
+#: ``mobile/peer_send.resolve_peer_target`` (its ``session`` branch), and the
+#: ``session=<id>`` spelling's half of the trigger. No OTHER resolver refusal
+#: qualifies — a wedged record, the stale form, the unengaged gate and a
+#: conflicting selector pair are each a fact about a session this device
+#: REACHED, and a peer read would be answering a different question. Matching
+#: the sentence rather than re-deriving the state follows the tool's own
+#: predicates (``session_id_unowned``, ``live_scan_found_nothing``): the
+#: refusal IS the interface here.
+_EXACT_ID_MISS = "no session found with session id"
+
+#: The id shape the session store mints — ``uuid4().hex[:12]``
+#: (``session_factory``) — i.e. what makes a ``target=`` needle "a full
+#: session id" rather than a name or a partial one. The hint stays id-specific
+#: (review round 1): a substring search of the peer catalogue is exactly the
+#: wrong-recipient ambiguity the local resolver exists to refuse, so anything
+#: that does not match this shape keeps the local sentence and pays no read.
+_FULL_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+#: The tail of the miss BOTH consumers rewrite the resolver's target no-match
+#: into (``no session matches <target> (searched live and stored sessions)``).
+#: The ``target=<id>`` spelling must be THIS refusal — a wedged or stored
+#: refusal about a session the device reached is left standing.
+_TARGET_MISS_TAIL = "(searched live and stored sessions)"
+
+
+def _peer_holder_sentence(session_id: str) -> str | None:
+    """The sentence naming the peer that holds ``session_id``, else ``None``.
+
+    Blocking (a cache read, and on a miss one bounded relay fan-out): call
+    off the event loop — :func:`_peer_holder_hint` is the wrapper the tools
+    use. What reaches ``session_id`` differs by spelling: a ``target=``
+    needle is gated to the minted full-id shape before the call
+    (``_FULL_ID_RE``), while a ``session=`` address arrives as typed — the
+    resolver's miss names any string that matched no record — and exact
+    equality below is its only gate, so a value that is not a row's id can
+    never match one (the worst case is the miss's bounded read spent for
+    nothing).
+
+    THE LOOKUP, and every way it stays cheap:
+
+    * cache-first — ``peer_session_row`` never reads and never dials, so an id
+      the last federated listing reported costs nothing;
+    * on a miss, ONE bounded federated read (``peer_session_rows`` at
+      ``ttl_s=0`` — a genuine read, the same relay projection the sidebar's
+      poll and the CLI listings ride). The relay gate lives inside that
+      machinery: with no relay record on this device it issues NO call at
+      all, and a relay that refuses, times out or cannot be read is an empty
+      answer, never an exception (``peer_rows``'s own contract). Both
+      properties are what keep a device outside any mesh — every existing
+      install — byte-identical;
+    * exact FULL-ID matching only: the row's id must equal ``session_id``.
+      Names are deliberately not searched on the peer side — a name can match
+      sessions on two devices, which is the wrong-recipient ambiguity the mesh
+      surfaces locally, and a diagnostic sentence must not pick between them;
+    * the row must be a remote row that NAMES its device, or there is no
+      sentence: ``None`` keeps the caller's refusal byte for byte.
+
+    The device is ``owner_device_name or owner_device`` — the two spellings
+    the tool's own ``peer`` argument accepts ("a peer name or id"), NEVER
+    ``owner_label``, whose fallback truncates the id to an 8-character
+    fragment that would resolve nowhere.
+    """
+    from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+
+    root = config_dir()
+    row = peer_session_row(session_id, root)
+    if row is None:
+        peer_session_rows(root, ttl_s=0)
+        row = peer_session_row(session_id, root)
+    if row is None or not row.is_remote or not row.owner_device:
+        return None
+    device = row.owner_device_name or row.owner_device
+    return f"`{session_id}` is held by {device} — pass `peer={device}`"
+
+
+async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | None:
+    """``_peer_holder_sentence`` for an exact-id miss refusal, else ``None``.
+
+    TWO SPELLINGS of one exact id reach the hint, and both mean "this id,
+    nowhere on this device":
+
+    * ``session=<id>`` — the refusal is the resolver's own miss form; the
+      address is used as an exact id and its shape is not re-gated here
+      (exact equality below can only match a row's id);
+    * ``target=<id>`` — the needle must BE a full id (``_FULL_ID_RE``, on the
+      stripped needle: the resolver strips a target the same way) and the
+      refusal must be the rewritten target miss (``_TARGET_MISS_TAIL``). A
+      name-shaped or partial needle returns here, before any lookup.
+
+    THE ONE CALL the ``send`` tool and the ``sessions`` ops both make, so the
+    trigger and the lookup cannot drift between them. Every non-matching
+    spelling/error form — and every caller that still has a record — returns
+    before a thread is spawned, so a local success, a name-shaped miss and
+    every non-miss refusal stay at zero peer reads.
+    """
+    if session_id:
+        if _EXACT_ID_MISS not in error:
+            return None
+        needle = session_id
+    else:
+        needle = target.strip()
+        if not _FULL_ID_RE.match(needle) or not error.endswith(_TARGET_MISS_TAIL):
+            return None
+    return await asyncio.to_thread(_peer_holder_sentence, needle)
 
 
 def _sessions_candidates_text(target: _SessionsTarget) -> str:
