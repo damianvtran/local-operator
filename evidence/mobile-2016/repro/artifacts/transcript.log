@@ -1,0 +1,107 @@
+# Raw HTTP transcript — issue #2016 (fixture daemon, isolated)
+
+=== [1] login ===
+> POST /login
+> (request body: password=<redacted>)
+< 303  content-type: 
+< set-cookie names: ['lop_mobile'] (value redacted)
+
+=== [2] badge BEFORE any mark ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":2,"revision":[2,0,0],"degraded":[],"conversations":[{"session_id":"c0ffee000017","completion_token":"2d3a4e09-444d-4693-9d15-b800adb3d297","kind":"complete","revision":[2,0],"push_handle":"Q6FydQaoctXz6MFkc6lO33"},{"session_id":"c0ffee000016","completion_token":"b7416a0b-e623-42e4-8958-778ded2bf9e1","kind":"complete","revision":[1,0],"push_handle":"bextDB5K7YdpCIBCXvpPfg"}]}
+
+=== [3] list frame BEFORE any mark ===
+> GET /api/sessions
+< 200  content-type: application/json
+< body: {"sessions":[{"session_id":"asks","section":"active","pinned":false,"conversation_name":"Queued asks","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0,"mtime":1791277087.32128,"created_at":1791277087.3189056,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"asks-stacked","section":"active","pinned":false,"conversation_name":"Asks behind a decision","cwd":"","model_label":"","streaming":true,"leaving":"","updating":"","needs_attention":true,"pending_kind":"approval","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":12,"mtime":1791277087.315707,"created_at":1791277087.3172214,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"stale","section":"active","pinned":false,"conversation_name":"Stale tap","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0
+
+=== [4] projection frame for c0ffee000016 (the token the phone reads) ===
+> GET /api/sessions/c0ffee000016/events
+< 200  content-type: text/event-stream; charset=utf-8
+< sse head:
+<   event: projection
+<   data: {"session_id": "c0ffee000016", "pid": 0, "kind": "daemon", "conversation_name": "", "cwd": "", "model_label": "", "model_selector": "", "effort": "", "effort_ladder": [], "streaming": false, "activity": "", "activity_started_s": null, "stop_reason": "", "cut_off": false, "queued_count": 0, "ended": false, "degraded": false, "transcript": [{"id": "fixture-c0ffee000016", "kind": "user", "text": "Mobile parity audit \u2014 the phone should clear its unread pile in one gesture.", "tool_call_id": "", "tool_name": "", "tool_state": "interrupted", "summary": "", "intent": "", "diff_added": 0, "diff_removed": 0, "elapsed_s": 0.0, "error": "", "details": {}, "images": [], "final": true, "text_complete": true}], "todos": [], "subagents": [], "pending": null, "pending_count": 0, "usage": {}, "cumulative_parent_cost": null, "child_costs": {}, "subagent_cost": null, "subagent_cost_knowledge": null, "cost_knowledge": "unknown", "context_tokens": null, "context_window": null, "context_is_estimate": null, "version": 1, "attention": {"conversation_id": "session/c0ffee000016", "completion_token": "b7416a0b-e623-42e4-8958-778ded2bf9e1", "anchor_id": "fixture-completion", "kind": "complete", "reason": "", "cause": "", "notify": true, "unseen": true, "revision": [1, 0]}}
+
+=== [5] projection frame for c0ffee000017 (the token the phone reads) ===
+> GET /api/sessions/c0ffee000017/events
+< 200  content-type: text/event-stream; charset=utf-8
+< sse head:
+<   event: projection
+<   data: {"session_id": "c0ffee000017", "pid": 0, "kind": "daemon", "conversation_name": "", "cwd": "", "model_label": "", "model_selector": "", "effort": "", "effort_ladder": [], "streaming": false, "activity": "", "activity_started_s": null, "stop_reason": "", "cut_off": false, "queued_count": 0, "ended": false, "degraded": false, "transcript": [{"id": "fixture-c0ffee000017", "kind": "user", "text": "Release notes draft \u2014 one unread completion is waiting here.", "tool_call_id": "", "tool_name": "", "tool_state": "interrupted", "summary": "", "intent": "", "diff_added": 0, "diff_removed": 0, "elapsed_s": 0.0, "error": "", "details": {}, "images": [], "final": true, "text_complete": true}], "todos": [], "subagents": [], "pending": null, "pending_count": 0, "usage": {}, "cumulative_parent_cost": null, "child_costs": {}, "subagent_cost": null, "subagent_cost_knowledge": null, "cost_knowledge": "unknown", "context_tokens": null, "context_window": null, "context_is_estimate": null, "version": 1, "attention": {"conversation_id": "session/c0ffee000017", "completion_token": "2d3a4e09-444d-4693-9d15-b800adb3d297", "anchor_id": "fixture-completion", "kind": "complete", "reason": "", "cause": "", "notify": true, "unseen": true, "revision": [2, 0]}}
+
+=== [6] bulk sibling attempt POST /api/attention/seen (expected: route absent) ===
+> POST /api/attention/seen
+> request body: {"items": [{"session_id": "c0ffee000016", "completion_token": "b7416a0b-e623-42e4-8958-778ded2bf9e1"}, {"session_id": "c0ffee000017", "completion_token": "2d3a4e09-444d-4693-9d15-b800adb3d297"}]}
+< 404  content-type: text/plain; charset=utf-8
+< body: Not Found
+
+=== [7] single-session mark POST /api/sessions/c0ffee000016/seen ===
+> POST /api/sessions/c0ffee000016/seen
+> request body: {"completion_token": "b7416a0b-e623-42e4-8958-778ded2bf9e1"}
+< 200  content-type: application/json
+< body: {"ok":true,"attention":{"conversation_id":"session/c0ffee000016","completion_token":"b7416a0b-e623-42e4-8958-778ded2bf9e1","anchor_id":"fixture-completion","kind":"complete","reason":"","cause":"","notify":true,"unseen":false,"revision":[1,1]}}
+
+=== [8] badge AFTER the single mark ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":1,"revision":[2,1,0],"degraded":[],"conversations":[{"session_id":"c0ffee000017","completion_token":"2d3a4e09-444d-4693-9d15-b800adb3d297","kind":"complete","revision":[2,0],"push_handle":"Q6FydQaoctXz6MFkc6lO33"}]}
+
+=== [9] list frame AFTER the single mark ===
+> GET /api/sessions
+< 200  content-type: application/json
+< body: {"sessions":[{"session_id":"asks","section":"active","pinned":false,"conversation_name":"Queued asks","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0,"mtime":1791277087.32128,"created_at":1791277087.3189056,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"asks-stacked","section":"active","pinned":false,"conversation_name":"Asks behind a decision","cwd":"","model_label":"","streaming":true,"leaving":"","updating":"","needs_attention":true,"pending_kind":"approval","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":12,"mtime":1791277087.315707,"created_at":1791277087.3172214,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"stale","section":"active","pinned":false,"conversation_name":"Stale tap","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0
+
+=== READINGS ===
+{
+  "token_source": {
+    "c0ffee000016": "daemon SSE projection frame",
+    "c0ffee000017": "daemon SSE projection frame"
+  },
+  "unread_before": "{\"count\":2,\"revision\":[2,0,0],\"degraded\":[],\"conversations\":[{\"session_id\":\"c0ffee000017\",\"completion_token\":\"2d3a4e09-444d-4693-9d15-b800adb3d297\",\"kind\":\"complete\",\"revision\":[2,0],\"push_handle\":\"Q6FydQaoctXz6MFkc6lO33\"},{\"session_id\":\"c0ffee000016\",\"completion_token\":\"b7416a0b-e623-42e4-8958-778ded2bf9e1\",\"kind\":\"complete\",\"revision\":[1,0],\"push_handle\":\"bextDB5K7YdpCIBCXvpPfg\"}]}",
+  "unread_after": "{\"count\":1,\"revision\":[2,1,0],\"degraded\":[],\"conversations\":[{\"session_id\":\"c0ffee000017\",\"completion_token\":\"2d3a4e09-444d-4693-9d15-b800adb3d297\",\"kind\":\"complete\",\"revision\":[2,0],\"push_handle\":\"Q6FydQaoctXz6MFkc6lO33\"}]}",
+  "rows_before": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  },
+  "rows_after": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": false,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  },
+  "bulk_status": 404,
+  "bulk_body": "Not Found",
+  "single_status": 200,
+  "single_body": "{\"ok\":true,\"attention\":{\"conversation_id\":\"session/c0ffee000016\",\"completion_token\":\"b7416a0b-e623-42e4-8958-778ded2bf9e1\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[1,1]}}"
+}

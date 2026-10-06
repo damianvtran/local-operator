@@ -1,0 +1,201 @@
+{
+  "url": "http://127.0.0.1:4216/#/",
+  "title": "(11) local operator",
+  "viewport": [
+    390,
+    844
+  ],
+  "controlCount": 21,
+  "controls": [
+    {
+      "tag": "button",
+      "text": "Queued asks\n2 asks",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "working\nAsks behind a decision\napproval\n12 todo\n2 asks",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Stale tap\nquestion",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "working\nFailing fan-out, decision waiting\napproval\n12 todo",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "working\nStacked panels\napproval\n12 todo",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "working\nStacked panels\nquestion\n12 todo",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Secret ask\nquestion",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Approval overflow\napproval",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Ask overflow\nquestion",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Release notes draft\nnew\n/synthetic\nfixture",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Mobile parity audit\nnew\n/synthetic\nfixture",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Asks elsewhere\n1 ask",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Asks settled",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Failing fan-out",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Roster overflow",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "Ask me the second one too.\nended",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "new session",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "past",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "projects",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "\u25d0",
+      "aria": "choose theme",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "wide",
+      "aria": "wide view",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    }
+  ],
+  "bulkControlMatches": [],
+  "bulkTextMatches": [],
+  "newMarks": [
+    {
+      "row": "Release notes draft | new",
+      "rect": {
+        "top": 608,
+        "bottom": 625,
+        "left": 355
+      },
+      "visible": true
+    },
+    {
+      "row": "Mobile parity audit | new",
+      "rect": {
+        "top": 659,
+        "bottom": 676,
+        "left": 355
+      },
+      "visible": true
+    }
+  ]
+}
