@@ -31,6 +31,7 @@ its bound would only make that signal slower to read.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,39 @@ from tests.e2e.watchdog import bounded
 pytestmark = pytest.mark.e2e
 
 BOUND_S = 90.0
+
+#: How long a cell waits for a row the runtime OWES — a response/timeout row after
+#: ``respond_ask`` / ``withdraw_ask`` / ``reconcile_asks``, delivered by a spawned
+#: turn (and, for the boot cells, by the boot reconcile).
+#:
+#: CALIBRATION, from CI junits as of 2026-10-06: three healthy samples of this CELL —
+#: the testcase as a whole, of which a wait is a subset — read 0.100 s (macos-latest,
+#: run 37411607304), 0.107 s and 0.082 s (ubuntu-latest / macos-latest, run
+#: 37404837806), and the one known failure read >=30.421 s — i.e. it hit its own 30 s
+#: deadline — in run 37411607304
+#: (``test_an_answer_racing_a_withdrawal_wins_in_both_orders``, the Direction-2 wait).
+#: The job duration that run was normal (505 s against 512 s on the prior green run),
+#: so this is not a slow runner.
+#:
+#: 60 s is ~600x the healthy cell samples and 2x the observed floor of the stall, and
+#: it is deliberately BELOW the cell's stage bound (``BOUND_S``, 90 s) so that the FIRST
+#: wait in a stage fails with its own state block rather than letting the outer watchdog
+#: end the stage with a stack dump and no account of what was owed. THE GUARANTEE IS
+#: PER-WAIT, NOT PER-BLOCK: two bounded blocks hold more than one wait
+#: (``test_an_answer_racing_a_withdrawal_wins_in_both_orders`` has two delivery waits —
+#: 120 s of backstop — and ``test_a_deadline_delivers_a_notice_into_the_model_context``
+#: two delivery waits plus a plain 30 s one, 150 s), so a SECOND stalled wait in the
+#: same block can be pre-empted by the 90 s stage bound, and the stage watchdog's dump
+#: is the instrument for that case. In practice each earlier wait costs ~0.1 s, so a
+#: single stall still reaches its own backstop and renders the block.
+#:
+#: WHAT THIS STOPS CATCHING: a stall between 31 s and 60 s now PASSES where it used to
+#: red. Accepted, because this wait is an EVENT BACKSTOP and not a timing assertion
+#: (AGENTS.md, "wait on the event, never on the clock"): what it asserts is that the
+#: row eventually arrives, and 60 s still refuses to call a stuck delivery green. A
+#: stall at or beyond 60 s still fails — and now fails with the state block below
+#: rather than with a bare deadline.
+DELIVERY_WAIT_S = 60.0
 SENTINEL = "sk-live-QA-SENTINEL-9f31"
 
 
@@ -68,20 +102,142 @@ def _secret_args(key: str = "API_KEY") -> dict[str, Any]:
     return {"questions": [{"id": key, "question": "Paste the key", "secret": True}]}
 
 
-async def _wait_until(predicate, *, timeout_s: float = 30.0, what: str = "condition") -> None:
-    """Poll ``predicate`` until true, bounded and LOUD about what never happened.
+async def _poll_until(predicate, timeout_s: float) -> bool:
+    """Poll ``predicate`` on a 20 ms cadence, bounded; ``True`` iff it became true.
 
-    The queued path delivers from a spawned turn, so a test cannot await the
-    delivery handle directly; polling on the OBSERVABLE (a transcript row, a
-    provider request) is what keeps the assertion about the effect rather than
-    about a task object.
+    The one loop under both waits below. The queued path delivers from a spawned
+    turn, so a test cannot await the delivery handle directly; polling on the
+    OBSERVABLE (a transcript row, a provider request) is what keeps the assertion
+    about the effect rather than about a task object. The predicate is re-checked
+    once AFTER the deadline, because "it arrived just as we gave up" must not be
+    reported as "it never arrived".
     """
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
         if predicate():
-            return
+            return True
         await asyncio.sleep(0.02)
-    raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
+    return predicate()
+
+
+async def _wait_until(predicate, *, timeout_s: float = 30.0, what: str = "condition") -> None:
+    """Poll ``predicate`` until true, bounded and LOUD about what never happened.
+
+    The plain backstop, for waits that are NOT about a row the runtime owes (see
+    :func:`_wait_for_delivery` for the ones that are).
+    """
+    if not await _poll_until(predicate, timeout_s):
+        raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
+
+
+async def _wait_for_delivery(session: Session, predicate, *, what: str) -> None:
+    """Wait for a row the runtime OWES, and on timeout say what the runtime held.
+
+    THE CLASS THIS IS FOR: a predicate waiting for a response/timeout row after
+    ``respond_ask`` / ``withdraw_ask`` / ``reconcile_asks``, where the row is
+    produced by a spawned delivery turn. It uses :data:`DELIVERY_WAIT_S` and, on
+    timeout, appends :func:`_delivery_state` — so a stall arrives with evidence
+    instead of a bare deadline.
+
+    The file's OTHER waits were audited against this class and classified: the
+    waits whose predicate is a DOWNSTREAM provider request (the model's turn
+    reading the report, not the row the runtime owes) are a different class and
+    keep the plain :func:`_wait_until` backstop. The per-site verdicts are in the
+    PR; the split is stated here so a later reader does not have to re-derive it.
+    """
+    started = asyncio.get_running_loop().time()
+    if not await _poll_until(predicate, DELIVERY_WAIT_S):
+        elapsed = asyncio.get_running_loop().time() - started
+        raise AssertionError(
+            f"timed out after {DELIVERY_WAIT_S}s waiting for {what}\n"
+            + _delivery_state(session, predicate, elapsed=elapsed)
+        )
+
+
+#: Tokens a delivery-path task name is expected to carry, matched per SEGMENT of the
+#: name (split on non-alphanumerics) rather than as a bare substring: the substring
+#: form matched ``task-worker`` on the ``ask`` inside ``task`` (QA round 1, Q-1).
+#: Nothing on the delivery path is NAMED today — its tasks are anonymous
+#: ``create_task`` calls — so this is a heuristic for a future named task and for a
+#: rig's own probe; it is a prefix match on a segment so ``delivery-probe`` and
+#: ``ask-settle`` count while ``task-worker`` does not.
+_DELIVERY_TASK_TOKENS = ("deliver", "prompt", "ask")
+
+
+def _delivery_task_names(limit: int = 8) -> list[str]:
+    """Names of pending tasks on the delivery paths, bounded.
+
+    asyncio names an unnamed task ``Task-<n>``, whose segments are ``task`` and the
+    number — neither matches a token, so the default names cannot flood this line,
+    and it shows a DELIVERY task still pending (the stall signature) or the absence
+    of one.
+    """
+    names: set[str] = set()
+    for task in asyncio.all_tasks():
+        if task is asyncio.current_task():
+            continue
+        name = task.get_name()
+        segments = [part for part in re.split(r"[^a-z0-9]+", name.lower()) if part]
+        if any(segment.startswith(_DELIVERY_TASK_TOKENS) for segment in segments):
+            names.add(name)
+    return sorted(names)[:limit]
+
+
+def _delivery_state(session: Session, predicate, *, elapsed: float) -> str:
+    """A BOUNDED snapshot of what the runtime owed when a delivery wait timed out.
+
+    Every part is bounded so the block cannot itself become the failure, and each
+    line answers a question the bare deadline could not: did the row arrive just as
+    the wait gave up; did the ask FOLD without delivering; is the transcript's tail
+    still moving; and is a delivery task still pending. That last one is the stall
+    SIGNATURE the ask-gate lane asked for — an event-loop stall leaves the delivery
+    task alive and unfinished, where a dropped turn leaves it gone.
+
+    Read-only, and deliberately outside the assertion it annotates: a diagnostic
+    that raised would replace the real failure with its own.
+    """
+
+    def _safe(read, default):
+        try:
+            return read()
+        except Exception:  # noqa: BLE001 -- a diagnostic must never replace the failure
+            return default
+
+    lines = ["--- delivery state at timeout ---"]
+    lines.append(f"elapsed: {elapsed:.1f}s (backstop {DELIVERY_WAIT_S}s)")
+    # 1. The predicate, re-checked: `_poll_until` already re-checks once past its
+    #    deadline, and this is the SECOND read on the timeout path (these predicates
+    #    are pure reads). "It arrived as we gave up" is a too-tight backstop, not a
+    #    stall, and the later of the two readings is the one to trust.
+    lines.append(f"predicate at re-check: {bool(_safe(predicate, False))}")
+    # 2. The fold, for the ids this session's log holds (last 4, bounded).
+    ids = _safe(lambda: _ask_ids(session.transcript.directory)[-4:], [])
+    fold = _safe(
+        lambda: [(ask_id, session.ask_queue().find(ask_id)) for ask_id in ids],
+        [],
+    )
+    lines.append(
+        "asks (status, delivered): "
+        + (
+            "; ".join(
+                f"{ask_id}={row.get('status') if row else None},"
+                f"{row.get('delivered') if row else None}"
+                for ask_id, row in fold
+            )
+            or "(none)"
+        )
+    )
+    # 3. The transcript tail (bounded, ids and kinds only — never message text).
+    tail = _safe(lambda: session.transcript.entries()[-8:], [])
+    lines.append(
+        "transcript tail: " + ("; ".join(f"{entry.id}:{entry.type}" for entry in tail) or "(empty)")
+    )
+    # 4. Pending tasks on the delivery paths (bounded), the stall signature.
+    lines.append(
+        "pending tasks (deliver|prompt|ask): "
+        + (", ".join(_safe(_delivery_task_names, [])) or "(none)")
+    )
+    return "\n".join(lines)
 
 
 def _ask_ids(directory: Path) -> list[str]:
@@ -196,7 +352,8 @@ async def test_three_asks_accumulate_while_the_agent_works_and_answer_out_of_ord
                 assert outcome["ok"] is True, outcome
                 await session.reconcile_asks()
 
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: all(
                     session.transcript.has_entry(store.response_row_id(ask_id))
                     for ask_id in ask_ids
@@ -254,7 +411,8 @@ async def test_a_multi_question_ask_is_answered_atomically(
             outcome = session.respond_ask(ask_id, {"q0": ["a"], "q1": ["c"]}, by="terminal")
             assert outcome["ok"] is True
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the response row",
             )
@@ -305,7 +463,8 @@ async def test_a_deadline_delivers_a_notice_into_the_model_context(
             started_at = int(queue.find(ask_id)["created_at"])
             queue._now = lambda: started_at + 700_000
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.timeout_row_id(ask_id)),
                 what="the ask_timeout row",
             )
@@ -322,7 +481,8 @@ async def test_a_deadline_delivers_a_notice_into_the_model_context(
             outcome = session.respond_ask(ask_id, {"q0": ["yes"]}, by="phone")
             assert outcome["ok"] is True, outcome
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the late response row",
             )
@@ -456,7 +616,8 @@ async def test_answered_in_chat_records_the_users_words_and_delivers_the_respons
             assert record["answered_by"] == {"surface": "chat"}
             # The standard response row delivers through decide-reconcile, and
             # the model reads it: the report's own framing, not the user's turn.
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the chat answer's response row",
             )
@@ -530,7 +691,8 @@ async def test_an_answer_racing_a_withdrawal_wins_in_both_orders(
             kinds = [event["kind"] for event in store.read_events(session.transcript.directory)]
             assert kinds.count(store.EVENT_WITHDRAWN) == 0
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(first)),
                 what="the winning answer's response row",
             )
@@ -560,7 +722,8 @@ async def test_an_answer_racing_a_withdrawal_wins_in_both_orders(
             )
             assert session.ask_queue().find(second)["status"] == store.STATUS_ANSWERED
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(second)),
                 what="the racing answer's response row",
             )
@@ -611,7 +774,8 @@ async def test_an_answer_recorded_before_the_runtime_died_is_delivered_once_on_b
     try:
         with bounded(BOUND_S, "boot reconcile delivers once"):
             await second.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                second,
                 lambda: second.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the delivered response row",
             )
@@ -703,7 +867,8 @@ async def test_a_secret_answer_never_reaches_disk(
             outcome = session.respond_ask(ask_id, {"API_KEY": [SENTINEL]}, by="terminal")
             assert outcome["ok"] is True, outcome
             await session.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the secret response row",
             )
@@ -781,7 +946,8 @@ async def test_the_aggregate_read_the_fleet_scope_uses_reports_a_real_sessions_a
             # rewritten on the owner's next publish, so it may lag one write —
             # which is exactly why the SESSION scope reads the wire first and the
             # fleet scope (no wire to read) is the one that falls back to it.
-            await _wait_until(
+            await _wait_for_delivery(
+                session,
                 lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the delivered response row for the fleet read",
             )
@@ -845,7 +1011,8 @@ async def test_a_fleet_scope_sees_a_stopped_sessions_ask_and_can_answer_it_by_id
     try:
         with bounded(BOUND_S, "the cold answer is delivered on boot"):
             await revived.reconcile_asks()
-            await _wait_until(
+            await _wait_for_delivery(
+                revived,
                 lambda: revived.transcript.has_entry(store.response_row_id(ask_id)),
                 what="the delivered response row for a cold fleet answer",
             )
