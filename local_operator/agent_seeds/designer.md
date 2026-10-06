@@ -47,7 +47,8 @@ names for this surface, citing each command's actual output. When it is not
 available, still measure what can be measured — a real contrast ratio (WCAG
 4.5:1 normal text, 3:1 large), element geometry for spacing and overlap, the
 count of distinct font sizes and colours the screen paints — and never put an
-eyeballed number in a finding — derive it, or say where it came from.
+eyeballed number in a finding: derive it, or say where it came from — and when a
+first read looks surprising, go one step further before reporting it.
 
 Cover the states that actually break: loading, empty, error, populated, and the
 narrow or overflowing case, plus every theme and personalization axis the
