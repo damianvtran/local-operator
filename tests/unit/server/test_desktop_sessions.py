@@ -8374,11 +8374,44 @@ async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) 
     The bridge is the real one and the read takes the real wire branch (``is_cold``
     False keeps it on the window); only the facade that would hold a live runtime
     is stood in for.
+
+    ALL THREE CLASSES, not just the patience pair (agent review round 2, F4). The
+    filter is one predicate set over three markers, and a wire half that dropped
+    only the rows its round-1 cell happened to build would pass here while leaking
+    a hidden wake delivery and a diverted ask's RESULT over the mesh — the exact
+    asymmetry this cell exists to catch. Each row is asserted by its own id, so a
+    rename of the marker cannot make the cell pass by dropping nothing.
     """
-    from local_operator.harness.types import Message, TextContent, ToolCall, ToolResult
+    from local_operator.harness.types import (
+        CustomMessage,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    # A hidden wake delivery: the ``wake_prompt`` custom row ``fire_details``
+    # stamps with ``hidden`` (``wakes/patience.py``), which stays in the model's
+    # context and on no human surface.
+    wake_row = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        details={"kind": "patience", "hidden": True, "episode_id": "w1", "attempt": 1},
+    )
+    # A diverted ask's RESULT: the gate's marker rides ``provider_payload.details``
+    # (``session/session.py``), which is where the stored-row predicate reads it.
+    gate_row = Message.tool_result(
+        ToolResult(
+            tool_call_id="a1",
+            tool_name="ask",
+            content=[TextContent(text="gate: diverted")],
+            details={"ask_gate": {"hidden": True, "verdict": "diverted", "reason": "queued"}},
+        )
+    )
 
     wire_window = [
         Message.user("morning"),
+        wake_row,
         Message.assistant("", tool_calls=[ToolCall(id="p1", name="patience", arguments={})]),
         Message.tool_result(
             ToolResult(
@@ -8387,6 +8420,7 @@ async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) 
                 content=[TextContent(text="armed 5m")],
             )
         ),
+        gate_row,
         Message.tool_result(
             ToolResult(tool_call_id="r1", tool_name="read", content=[TextContent(text="file body")])
         ),
@@ -8406,8 +8440,12 @@ async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) 
 
     page = await bridge.history(limit=50)
     body = json.dumps(page["entries"])
+    served = {entry["id"] for entry in page["entries"]}
 
     assert "armed 5m" not in body and '"patience"' not in body
+    assert wake_row.id not in served, "a hidden wake delivery reached the wire"
+    assert gate_row.id not in served, "a diverted ask's result reached the wire"
+    assert "gate: diverted" not in body
     assert "morning" in body, "the filter ate a visible row"
     assert "file body" in body, "the filter ate an ordinary tool row"
     assert page["cursor_missing"] is False
