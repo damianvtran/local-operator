@@ -2670,3 +2670,33 @@ async def test_a_name_miss_stays_a_local_question(
     )
     assert result.is_error
     assert result.text == "no session matches 'remote work' (searched live and stored sessions)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["info", "peek", "stop", "resume"])
+async def test_a_full_id_target_names_the_peer_on_every_addressed_op(
+    root: Path, monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    """ROUND-1 EXTEND: the `target=<full id>` spelling fires on all four ops
+    exactly as `session=` does — the same shared resolver, the same warm-cache
+    zero-read property (the read is poisoned)."""
+    from local_operator.paths import config_dir
+    from local_operator.session import peer_rows as peer_rows_mod
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _hint_peer_row())
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a warm cache hit paid a listing read")
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+
+    args: dict[str, Any] = {"op": op, "target": "ffff12345678"}
+    if op == "resume":
+        # A local resume requires a prompt by validation; the miss must still
+        # be resolved (and named) BEFORE anything would be launched.
+        args["prompt"] = "go"
+    result = await execute_sessions("t", args, None, None, _context(root))
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
