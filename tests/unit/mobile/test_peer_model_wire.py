@@ -432,10 +432,23 @@ def test_the_json_payload_is_one_field_wider() -> None:
     """Keeps the send schema's footprint claims honest.
 
     D4 added ``model``; the proactive class (design §8.2.5) adds ``patience``
-    as the second deliberate field. Both are pinned EXACTLY, so a third field
-    cannot arrive without this line moving and a reviewer seeing why.
+    as the second deliberate field, and PR-B (``sessions-remote-tools.md``
+    §3B) adds ``peer`` as the third — the mesh delivery path: a send to a
+    session on another device drives a turn there and returns the owner's
+    reply. All are pinned EXACTLY, so a further field cannot arrive without
+    this line moving and a reviewer seeing why.
     """
     from local_operator.tools.builtin import SendParams
 
     fields = set(SendParams.model_json_schema()["properties"])
-    assert fields == {"target", "pid", "session", "message", "model", "wake", "now", "patience"}
+    assert fields == {
+        "target",
+        "pid",
+        "session",
+        "message",
+        "model",
+        "wake",
+        "now",
+        "patience",
+        "peer",
+    }

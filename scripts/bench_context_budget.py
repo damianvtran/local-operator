@@ -1207,7 +1207,40 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: capability. The ceiling is the measured head + 55, the band this file
 #: keeps, so the base's 9 tokens of standing headroom are restored rather than
 #: loosened. The tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 36_552
+#:
+#: RAISED 36,552 -> 37,094 for the SESSIONS-REMOTE TOOL SURFACES
+#: (``feat/sessions-remote-tools-b``, design ``docs/design/sessions-remote-tools.md``
+#: §4): the ``network`` tool gains the pilot verbs (``send``/``steer``/``slash``
+#: + ``text``), the ``send`` tool gains ``peer``, and the ``sessions`` tool gains
+#: ``peer``/``scope`` with five ops now peer-capable — the mesh's three front
+#: doors in one change, measured with THIS script on both trees, same machine,
+#: one after the other, the CLEAN arm via ``env -i`` (the arm CI renders):
+#:
+#:   base (origin/main 4c492effd)   101,461 chars = ~36,497   (55 left)
+#:   head (this branch)             102,969 chars = ~37,039
+#:   delta                            1,508 chars =  ~542
+#:
+#: and it decomposes exactly into the three tools (name/description/schema, per
+#: ``tool_schema_chars``, descriptions and schemas counted separately):
+#:
+#:   + 370 chars  ``send``     — description +187 (the §3B ``peer`` field text
+#:                and the one description clause), schema +183 (the ``peer``
+#:                property with its description and JSON scaffold)
+#:   + 608 chars  ``network``  — description +36 (the sessions-action tail now
+#:                advertises the pilot verbs), schema +572 (the four new fields'
+#:                properties, their §4 descriptions and scaffold)
+#:   + 530 chars  ``sessions`` — description +164 (the mesh clause plus the
+#:                derived per-op summary across five ops), schema +366 (``peer``
+#:                and ``scope``, the §4 strings and scaffold)
+#:   = 1,508 chars = ~542 billed
+#:
+#: NO other block moves: instructions, tool_inventory, environment and knowledge
+#: are byte-identical across the two arms. The field descriptions are the design
+#: §4 strings (drafted lean there), and the guides are lazy — read on demand —
+#: so none of this rides the start context until a caller pulls it. The ceiling
+#: is the measured head + 55, the band this file keeps; the tighten band below
+#: (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 37_094
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

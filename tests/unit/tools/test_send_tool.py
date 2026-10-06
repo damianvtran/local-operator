@@ -953,3 +953,178 @@ async def test_the_role_guard_is_disabled_without_a_registry() -> None:
         assert call["text"] == "still works"
     finally:
         registrant.close()
+
+
+# ---------------------------------------------------------------------------
+# PR-B: `peer` — a session on ANOTHER device (design §3B, §5, §8.1)
+# ---------------------------------------------------------------------------
+
+PEER = "cloud-node-1"
+
+
+def _fake_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+    *,
+    rc: int = 0,
+    calls: list[tuple[list[str], float]] | None = None,
+) -> None:
+    """Replace the ONE process boundary the mesh path has: the child call.
+
+    The real delivery is `lop network sessions --peer P --send …`, so a double
+    at ``_mesh_cli_json`` exercises every line of the tool's own logic — argv
+    and bound included, because the fake receives what the tool spelled.
+    """
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        if calls is not None:
+            calls.append((argv, timeout))
+        return rc, payload, ""
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+
+
+@pytest.mark.asyncio
+async def test_peer_send_drives_a_turn_and_returns_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3B/§8.1: one call drives a turn on that device; the owner's reply is in
+    the result — the receipt-carried acceptance the manager locked."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s1",
+            "peer": PEER,
+            "verb": "send",
+            "ok": True,
+            "outcome": "finished",
+            "reply": "done over there",
+        },
+        calls=calls,
+    )
+    result = await execute_send(
+        "t1", {"peer": PEER, "target": "alpha", "message": "hello"}, None, None, _context()
+    )
+    assert not result.is_error, result.text
+    assert "the turn finished" in result.text and "done over there" in result.text
+    details = result.details or {}
+    assert details["mode"] == "mesh" and details["reply"] == "done over there"
+    assert details["outcome"] == "finished"
+    # §3A's spelling, at the boundary: --json BEFORE the act, text after `--`.
+    assert calls == [
+        (["network", "sessions", "--json", "--peer", PEER, "--send", "alpha", "--", "hello"], 600.0)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_peer_send_addresses_by_exact_session_id_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session` (an exact id there) is the same address `target` is, and reaches
+    the CLI in the same slot."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s9",
+            "peer": PEER,
+            "verb": "send",
+            "ok": True,
+            "outcome": "finished",
+            "reply": "ok",
+        },
+        calls=calls,
+    )
+    result = await execute_send(
+        "t2", {"peer": PEER, "session": "s9", "message": "hello"}, None, None, _context()
+    )
+    assert not result.is_error
+    assert calls[0][0] == [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        PEER,
+        "--send",
+        "s9",
+        "--",
+        "hello",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_peer_send_refuses_the_local_only_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3B: `wake`/`now`/`patience`/`model` act on THIS machine's loopback
+    substrate; beside `peer` they are refused — never dropped."""
+    for given in ({"wake": True}, {"now": True}, {"patience": "5m"}, {"model": "x/y"}):
+        _fake_mesh(monkeypatch, {})  # must never be reached
+        args: dict[str, Any] = {"peer": PEER, "target": "alpha", "message": "hi", **given}
+        result = await execute_send("t", args, None, None, _context())
+        assert result.is_error, given
+        assert "local-only" in result.text, given
+        assert "drop `wake`/`now`/`patience`/`model`" in result.text, given
+
+
+@pytest.mark.asyncio
+async def test_peer_send_refuses_a_pid_a_double_address_and_a_missing_one() -> None:
+    """A pid names a process HERE; two addresses name two sessions; none names
+    nothing — each refused in words that say what to pass instead."""
+    result = await execute_send(
+        "t", {"peer": PEER, "pid": 4, "message": "hi"}, None, None, _context()
+    )
+    assert result.is_error and "`pid` names a process on THIS machine" in result.text
+
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "a", "session": "b", "message": "hi"}, None, None, _context()
+    )
+    assert result.is_error and "exactly one" in result.text
+
+    result = await execute_send("t", {"peer": PEER, "message": "hi"}, None, None, _context())
+    assert result.is_error and "needs `target`" in result.text
+
+    result = await execute_send("t", {"peer": PEER, "target": "a"}, None, None, _context())
+    assert result.is_error and "needs `message`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_non_completing_peer_send_keeps_the_resume_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`running` is the owner's honest non-completion (the CLI exits 1 for it):
+    the result is an error AND carries the outcome plus the resume hint."""
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s1",
+            "peer": PEER,
+            "verb": "send",
+            "ok": False,
+            "outcome": "running",
+            "code": "turn_running",
+        },
+        rc=1,
+    )
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "alpha", "message": "go"}, None, None, _context()
+    )
+    assert result.is_error
+    assert "still running it" in result.text and "lop --resume s1" in result.text
+    assert (result.details or {})["outcome"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_family_refusal_comes_back_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal document (`{ok: false, code, message}`) is relayed as the
+    sentence the CLI composed — no paraphrase, no guessed outcome."""
+    message = (
+        "cloud-node-1 does not hold 'ghost': `lop network sessions --peer cloud-node-1` "
+        "lists what it does hold"
+    )
+    _fake_mesh(monkeypatch, {"ok": False, "code": "session_unknown", "message": message}, rc=1)
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "ghost", "message": "hi"}, None, None, _context()
+    )
+    assert result.is_error and result.text == message
