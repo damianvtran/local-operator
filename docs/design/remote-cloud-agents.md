@@ -61,8 +61,7 @@ never holds the epoch secret**.
    **Radient account**, which is already the billing identity. Their **mesh device
    identity** is bound to each request. The service turns a `PoolRequest` into one
    Fargate task, signs an attestation binding the pod's self-minted key to the user's
-   home device and relay route, enforces
-   TTL, idle and budget limits, records start and stop times from AWS, and charges
+   home device and relay route, enforces TTL, idle and budget limits, records start and stop times from AWS, and charges
    Radient credits. It also runs a **blind relay** so a NATed laptop and a private pod
    can link without either accepting inbound connections. The mesh still holds no capacity
    credential (`mesh-compute-pool.md` §7), and the control plane never holds a network's
@@ -645,7 +644,7 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 3. Slice 1 (direct path): the pod's relay with `network.listen_address = 0.0.0.0`
    behind a public IPv4. Does the duplicate-link dedupe (transport §6) behave when both
    sides dial? For the blind relay: what framing does the forwarder need so that the
-   existing hello/challenge/auth runs end-to-end unchanged?
+   handshake runs end-to-end through it without the relay reading it?
 4. Size of a typical session copy-set at drain, which sets the custodian upload time and
    `SYNC_DRAIN_DEADLINE_S`.
 5. Whether `lop exec`'s headless gate plus `--tools` covers the toolset agents actually
@@ -654,8 +653,7 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
    the attestation-then-row ordering ahead of `verify_auth` step 6, the signature-only auth
    frame, the listener-side signature (signed `welcome` or bidirectional `auth`) so both
    ends authenticate, pinning `home_pubkey` from the attestation, the rotation carve-out,
-   and the number-only epoch advance. This needs a design
-   note amending `mesh-transport-identity.md` §6/§12.4 and `mesh-compute-pool.md`
+   and the number-only epoch advance. This needs a design note amending `mesh-transport-identity.md` §6/§12.4 and `mesh-compute-pool.md`
    §3.1–3.2 before any P1 code. The verdict that it is implementable rests on the
    authorizer needing no secret: the pool capability set's `list` already admits
    `net_reconcile`, and the absence of `admin` already refuses `net_epoch`.
