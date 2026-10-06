@@ -195,7 +195,12 @@ class TuiSessionHandle(SessionHandle):
             effort=_current_effort(session),
             effort_ladder=_ladder(session),
         )
-        self._fold = ProjectionFold(self._projection)
+        # THE ASK GATE's mode (design docs/design/ask-gate.md §3 row 8): this
+        # handle owns the session, so the fold is told once — see
+        # ``harness.rows.queued_ask_engine_live``.
+        from local_operator.harness.rows import queued_ask_engine_live
+
+        self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
         self._on_projection: Callable[[], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
         # v4 raw-event relay subscription, separate from the projection fold:
@@ -308,7 +313,13 @@ class TuiSessionHandle(SessionHandle):
         self._projection.subagents.clear()
         self._projection.pending = None
         self._cancel_detail_tasks()
-        self._fold = ProjectionFold(self._projection)
+        # THE ASK GATE's mode follows the swap (design docs/design/ask-gate.md
+        # §3 row 8): the fold is rebuilt per session, so the new session's
+        # engine answers for it — a /new onto the blocking arm stops treating
+        # ask rows as settle-only, and vice versa.
+        from local_operator.harness.rows import queued_ask_engine_live
+
+        self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
         # A /new or /resume mid-ask abandons the old picker; drop its mapping
         # so a late phone answer for a question that no longer exists reports
         # "no longer waiting" instead of settling into the new conversation.

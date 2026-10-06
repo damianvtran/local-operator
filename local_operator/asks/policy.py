@@ -92,6 +92,47 @@ def enabled() -> bool:
     return NONBLOCKING_ASK
 
 
+#: THE ASK GATE'S KILL SWITCH (design docs/design/ask-gate.md §2.7). ``True`` =
+#: ``execute_ask`` runs one forked clearance check before the unchanged enqueue,
+#: so an ask whose recommended option is plainly best is diverted instead of
+#: queued. ``False`` = the gate is a zero-cost, zero-token path and an ask
+#: behaves exactly as today.
+#:
+#: Same direction and typo discipline as the queue switch above, deliberately:
+#: only ``0``/``false``/``no``/``off`` (case- and whitespace-insensitively) turn
+#: the gate off; an ABSENT variable or a typo leaves the shipped default — ON —
+#: because the fail-open direction for this feature is the check RUNNING (its
+#: every failure path enqueues unchanged), and a typo must not silently unbuild
+#: a safety property. Read from the environment ONCE, at import; a test that
+#: needs the other mode monkeypatches this attribute (or sets the env var before
+#: import), exactly like ``NONBLOCKING_ASK``.
+ASK_GATE: bool = os.environ.get("LOP_ASK_GATE", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def gate_enabled() -> bool:
+    """Whether the ask gate runs in this process (default: yes, §2.7).
+
+    The same function-not-attribute convention as :func:`enabled`, for the same
+    reason: monkeypatching ``policy.ASK_GATE`` must take effect on every path at
+    once (the callable's step 1 is the only reader).
+    """
+    return ASK_GATE
+
+
+#: The WHOLE-check bound (design §2.6): the fork is one short request reading
+#: the turn's warm prefix, and a fail-open budget's wrong side costs an extra
+#: ask or extra latency — never a missed decision. Initially uncalibrated and
+#: flagged as such in the design (§5): the later calibration reads the request
+#: ledger's ``purpose="clearance"`` latency distribution. Expiry raises
+#: ``TimeoutError`` → the callable returns ``None`` → the unchanged enqueue.
+GATE_TIMEOUT_S = 30.0
+
+
 #: The default window a queued ask stays open (design §3: "the spec's
 #: less-sensitive figure"). Because a late answer stays attributable (§2.2), a
 #: short default costs a TIMEOUT NOTICE, not a lost answer.

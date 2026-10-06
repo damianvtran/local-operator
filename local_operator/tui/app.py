@@ -4888,6 +4888,16 @@ class OperatorApp(App[None]):
         # no execution behind it yet, and treating the two as one dictionary let
         # an update for a running tool land on a row that had not started.
         self._composing_cards: dict[str, ToolCard] = {}
+        #: THE ASK GATE's settle-mount identity (design docs/design/ask-gate.md
+        #: §3): for an ask call the compose/start seams suppressed, the START
+        #: frame's args/intent/epoch, kept because the END frame does not
+        #: carry them and the settled receipt row ``on_tool_ended`` mounts for
+        #: a raise must be the same row a replay of the transcript paints
+        #: (whose summary comes from the call's arguments). Popped at settle,
+        #: cleared wherever the two card registries are reset.
+        self._ask_gate_settled_calls: dict[str, tuple[dict[str, Any], str | None, float | None]] = (
+            {}
+        )
         self._welcome: WelcomeView | None = None
         #: The empty state as it is CURRENTLY APPLIED to the screen, or `None`
         #: before the first resolution. Held so `_set_welcome_visible` can drop
@@ -14256,12 +14266,26 @@ class OperatorApp(App[None]):
         prepare-time callers paint a presentation that is not (yet) the
         visible one, so ``self`` is precisely the wrong answer there.
         """
+        from local_operator.harness.rows import (
+            is_settle_only_ask,
+            queued_ask_engine_live,
+        )
+
+        # THE ASK GATE (design docs/design/ask-gate.md §3): under the queued
+        # engine an ask call's rows are SETTLE-ONLY, so a replayed block for
+        # one is never repainted live — no `waiting`, no `running`; the
+        # settle-mount in `on_tool_ended` owns its one row. Read ONCE per
+        # pass, like the subtraction below; a session that cannot say is
+        # today's paint (the settle marker still drops).
+        gate_settle_only = queued_ask_engine_live(session)
         pending = getattr(session, "pending_display_tool_ids", None)
         call_ids: set[str] = set()
         if callable(pending):
             call_ids = cast(set[str], pending())
             for block in blocks:
                 if isinstance(block, ToolCard) and block.tool_call_id in call_ids:
+                    if is_settle_only_ask(block.tool_name, queued_engine=gate_settle_only):
+                        continue
                     block.mark_waiting()
         executing = getattr(session, "executing_display_tool_ids", None)
         if callable(executing):
@@ -14287,6 +14311,11 @@ class OperatorApp(App[None]):
             epochs = live_tool_start_epochs(session)
             for block in blocks:
                 if not isinstance(block, ToolCard) or block.tool_call_id not in live_ids:
+                    continue
+                # THE ASK GATE: the same settle-only skip as the pending arm
+                # above — a gated ask call is executing, but its rows are
+                # settle-only, so this scan must not mark it running.
+                if is_settle_only_ask(block.tool_name, queued_engine=gate_settle_only):
                     continue
                 has_start = epochs is None or block.tool_call_id in epochs
                 if not has_start:
@@ -14503,14 +14532,30 @@ class OperatorApp(App[None]):
         # ONCE per pass, mirroring the replay fold's narration read: a display
         # preference cannot change part-way through one repaint.
         hide_cross_session = cross_session_hidden()
-        from local_operator.harness.rows import is_hidden_tool_call
+        from local_operator.harness.rows import (
+            is_hidden_tool_call,
+            is_settle_only_ask,
+            queued_ask_engine_live,
+        )
 
+        # THE ASK GATE (design docs/design/ask-gate.md §3): the in-flight
+        # RESTORE is the second door a settle-only ask must not paint through
+        # — a mid-gate switch reaches this painter with the ask call in the
+        # skipped-live set (the fold drops in-flight calls), and mounting a
+        # row here would put the gated dictation back on screen for exactly
+        # the window the composing/start gates suppress. The settle-mount in
+        # `on_tool_ended` owns the one row a raise ever gets. Read once per
+        # pass; a session that cannot say is today's paint (the settle marker
+        # still drops).
+        gate_settle_only = queued_ask_engine_live(session)
         for call in calls:
             # HIDDEN tools never paint a row on any seam: this one restores the
             # row for a call already in flight, so skipping it here is what
             # keeps a resumed ``patience`` call from appearing where the live
             # path refuses to mount it (UX round 1, U2).
             if is_hidden_tool_call(call):
+                continue
+            if is_settle_only_ask(getattr(call, "name", ""), queued_engine=gate_settle_only):
                 continue
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
@@ -15361,6 +15406,76 @@ class OperatorApp(App[None]):
                 return block
         return None
 
+    def _queued_ask_engine_live(self) -> bool:
+        """Whether this app's session runs the queued-ask engine (the gate's mode).
+
+        The shared probe (``harness.rows.queued_ask_engine_live``), which is
+        also what the two static paint seams call with the session THEY are
+        painting — one decision for every seam, so an owner and a viewer
+        cannot answer differently about the same session. A session swap
+        re-reads the new session; nothing is cached here, because the fact can
+        only change WITH the session.
+        """
+        from local_operator.harness.rows import queued_ask_engine_live
+
+        return queued_ask_engine_live(self._session)
+
+    def _drop_tool_card(self, card: ToolCard) -> None:
+        """Remove a tool card's row from the transcript (the ask gate's drop).
+
+        The gate's ONE drop path (design docs/design/ask-gate.md §3): a
+        diverted ask's row must vanish wherever a surface had mounted one
+        before the mode could be read — the mixed-build fallback the design
+        records (today's mount, drop on the settle marker). Registries are
+        cleaned by IDENTITY first (the card may sit under a placeholder key),
+        then the view's ``remove_block`` takes the row off its retained list.
+        """
+        for registry in (self._tool_cards, self._composing_cards):
+            for key in [key for key, candidate in registry.items() if candidate is card]:
+                del registry[key]
+        self._ask_gate_settled_calls.pop(card.tool_call_id, None)
+        try:
+            # ``remove_block`` is the view's own take-it-off-the-list seam (the
+            # boot hint's lift, D9): it drops the block from ``blocks()``
+            # immediately, clears a pin naming it, and re-syncs the rows left
+            # behind. A bare ``card.remove()`` would leave the retained list —
+            # and every scan over it — still holding the row.
+            self._transcript_view().remove_block(card)
+        except Exception:  # pragma: no cover — teardown races only
+            logger.debug("ask gate: card was already gone", exc_info=True)
+
+    def _mount_settle_only_ask(self, event: Any) -> ToolCard | None:
+        """Mount the settle-only ask's one row, for a RAISE (design §3).
+
+        Called from ``on_tool_ended`` when no card exists and the call is a
+        settle-only ask: the compose/start seams suppressed its live row, so
+        the SETTLED receipt is born here, and the caller's settle derivation
+        below paints it — the same row a replay of the transcript paints.
+        Returns ``None`` for every call that is not a settle-only ask, which
+        keeps the caller's early return exactly today's.
+
+        The row's identity (args/intent/epoch) comes from the start frame's
+        stash; a surface that attached mid-gate without one mounts the row
+        without a summary rather than losing the receipt.
+        """
+        from local_operator.harness.rows import is_settle_only_ask
+
+        if not is_settle_only_ask(
+            getattr(event, "tool_name", None), queued_engine=self._queued_ask_engine_live()
+        ):
+            return None
+        stashed = self._ask_gate_settled_calls.pop(event.tool_call_id, None)
+        args, intent, started_at = stashed if stashed is not None else ({}, None, None)
+        card = ToolCard(
+            event.tool_call_id,
+            event.tool_name,
+            args,
+            intent,
+            started_at=START_UNKNOWN if started_at is None else started_at,
+        )
+        self._append_block(card)
+        return card
+
     def _settle_painted_tool_card(self, card: ToolCard, result: Any) -> None:
         """Settle a live-painted tool card with the result recovered from the gap.
 
@@ -15381,6 +15496,18 @@ class OperatorApp(App[None]):
         ``7.2s`` is the live/replay gap reopened one file over. Both paths read
         the same key off the same payload through the same parser.
         """
+        from local_operator.harness.rows import is_ask_gate_divert_message
+
+        if is_ask_gate_divert_message(result):
+            # THE DIVERT (design docs/design/ask-gate.md §3): a diverted ask's
+            # result settles NOTHING — handing it to the card would paint the
+            # decision note as if it were the ask's own receipt, the exact
+            # trace the hidden marker exists to prevent. A card can only be
+            # here if it was painted before the mode was knowable (the
+            # mixed-build fallback), so the settle-marker half of that
+            # contract is DROP.
+            self._drop_tool_card(card)
+            return
         result_text = getattr(result, "text", "") or ""
         payload = getattr(result, "provider_payload", None) or {}
         is_dict = isinstance(payload, dict)
@@ -28003,6 +28130,9 @@ class OperatorApp(App[None]):
         self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
+        # The ask gate's settle-mount stash is turn state like the registries
+        # beside it: the rows it described went with the transcript.
+        self._ask_gate_settled_calls = {}
         # The failure records' rows went with the transcript, and /clear is a
         # request to empty the SCREEN: resolve them here rather than project
         # them back onto a transcript the user just emptied (the design's
@@ -53000,6 +53130,7 @@ class OperatorApp(App[None]):
             self._resume_mounted_ids.clear()
             self._tool_cards = {}
             self._composing_cards = {}
+            self._ask_gate_settled_calls = {}
             self._streaming_block = None
             self._working_block = None
             # The reasoning block is cleared here for the reason
@@ -53067,9 +53198,32 @@ class OperatorApp(App[None]):
         # before the supersede/rekey bookkeeping — is what keeps the later
         # start/end frames from finding a registry to adopt. The rows stay in
         # the model's context; only the screen skips them.
-        from local_operator.harness.rows import is_hidden_tool_name
+        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
 
         if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
+        # THE ASK GATE (design docs/design/ask-gate.md §3): while the queued
+        # engine is live an `ask` call is SETTLE-ONLY — no row while it
+        # composes, queues or runs, because the forked clearance check may
+        # divert it and a row that flashed for the gate's whole duration on
+        # every surface is what the design rejects. The row is created at
+        # settle instead: the receipt for a raise, nothing for a divert (the
+        # marker is read there). Registering NOTHING and returning before the
+        # supersede/rekey bookkeeping is the source-suppression rule the
+        # patience arm above documents — the later frames find no registry to
+        # adopt.
+        #
+        # THE NEVER-RUN ENDING IS EXEMPT, and the exemption is a contract
+        # line from the design review: a compose frame carrying
+        # `not_run_reason` is a verdict row, not a dictation — no gate ran, a
+        # divert is impossible, and a turn that died before asking the user
+        # must stay visible, exactly as with the gate off and as for every
+        # other tool. Read `getattr`-style for the reason the not-run arm
+        # below documents: a bare relayed AgentEvent carries no field, and
+        # absence is the ordinary frame.
+        if is_settle_only_ask(
+            getattr(event, "tool_name", None), queued_engine=self._queued_ask_engine_live()
+        ) and not getattr(event, "not_run_reason", None):
             return
         # The call's real id has just arrived for a row this surface mounted
         # under an index-derived placeholder: REKEY the row rather than letting
@@ -53198,9 +53352,27 @@ class OperatorApp(App[None]):
         # a start frame from mounting a fresh card for a call with none — the
         # belt to that brace, because the two frames race and either can be a
         # viewer's first sight of the call.
-        from local_operator.harness.rows import is_hidden_tool_name
+        from local_operator.harness.rows import is_hidden_tool_name, is_settle_only_ask
 
         if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
+        # THE ASK GATE's belt (design docs/design/ask-gate.md §3): the same
+        # settle-only suppression the composing gate applies, because the two
+        # frames race and either can be a viewer's first sight of the call.
+        # The frame is not just suppressed — it is where the settled row's
+        # IDENTITY is captured: `on_tool_ended` (which mounts the raised
+        # receipt) sees an END frame, and that frame carries no args, while
+        # the receipt row must be the same row a replay paints from the call's
+        # arguments. A never-run call gets no start frame at all; its not-run
+        # ending paints through the composing arm above.
+        if is_settle_only_ask(
+            getattr(event, "tool_name", None), queued_engine=self._queued_ask_engine_live()
+        ):
+            self._ask_gate_settled_calls[event.tool_call_id] = (
+                dict(getattr(event, "args", None) or {}),
+                getattr(event, "intent", None),
+                getattr(event, "started_at_epoch", None),
+            )
             return
         # The call's own start instant, stamped by the producer and folded by
         # the session. Preferred over the map because it is the SAME value for
@@ -53302,6 +53474,8 @@ class OperatorApp(App[None]):
         card.set_live_advisory(_partial_advisory(message.event.partial_result))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
+        from local_operator.harness.rows import is_ask_gate_divert_details
+
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
         if card is None:
@@ -53317,6 +53491,22 @@ class OperatorApp(App[None]):
             card = self._composing_cards.pop(event.tool_call_id, None)
         if card is None:
             card = self._painted_tool_card(event.tool_call_id)
+        # THE DIVERT SETTLES NOTHING (design docs/design/ask-gate.md §3): a
+        # marker-carrying result means the ask never reached the queue — no
+        # question was put to the user. Under the queued engine no card exists
+        # for it (the compose/start gates refused to mount one) and this is a
+        # no-op; on a surface that could not read the owner's mode — the
+        # mixed-build fallback the design records as a brief flash residual —
+        # the row mounted at dictation is DROPPED here, the settle-marker half
+        # of that contract.
+        if is_ask_gate_divert_details(getattr(event.result, "details", None)):
+            # The settle-mount's stash goes with it: a diverted ask never
+            # reaches `_mount_settle_only_ask`, which is the other pop site.
+            self._ask_gate_settled_calls.pop(event.tool_call_id, None)
+            if card is not None:
+                self._drop_tool_card(card)
+            self._refresh_working_activity()
+            return
         # Before the early return below: a batch that just lost one of three
         # calls still has to drop its count, and a call that ended with no card
         # on screen still ended.
@@ -53328,7 +53518,16 @@ class OperatorApp(App[None]):
         if str(getattr(event, "tool_name", "") or "") == "todo":
             self._refresh_band()
         if card is None:
-            return
+            # SETTLE-ONLY ASK (design §3): the compose/start suppression above
+            # means a RAISE has no live row to adopt here, so its one settled
+            # receipt row is born at THIS seam — from the identity the start
+            # frame stashed, settled by the same derivation below that settles
+            # every card, so it is the row a replay of the transcript paints.
+            # A diverting verdict never reaches this line (the marker branch
+            # above drops it); any other tool keeps today's early return.
+            card = self._mount_settle_only_ask(event)
+            if card is None:
+                return
         # Hand the card the FULL result text and details, not just a summary
         # line: the text backs click-to-expand and the details carry the
         # write/edit +N/-N counters. Without this the card can only ever show

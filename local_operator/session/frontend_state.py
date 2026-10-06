@@ -2960,14 +2960,23 @@ class FrontendSessionState(BaseModel):
     #: queue of nothing but timed-out asks is in.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (design §4/N2, and the UI contract's own
-    #: rule): both fields are ABSENT, not empty, unless queued asks are live in
-    #: this process — so a client may take "``asks`` is on the frame" as "this
-    #: runtime has queued asks" and render the new surfaces. Emitting the field
-    #: while the server default is still blocking is exactly the false proxy the
-    #: rule exists to prevent, which is why the absence is enforced at the
-    #: SERIALIZER (`_serialize_frozen_jobs`) rather than by convention: a
-    #: declared field with a default would ride every frame whether or not the
-    #: feature is on.
+    #: rule, amended by the WIRE FIX): a client may take "``asks`` OR
+    #: ``asks_open`` is on the frame" as "this runtime runs the queued-ask
+    #: engine" and render the new surfaces. The two fields divide the work:
+    #: ``asks`` is the row LIST and is ABSENT whenever there is no list to carry
+    #: (nothing folded, or the wire bound dropped every row) — old clients read
+    #: only it and keep seeing today's view — while ``asks_open`` is the TALLY
+    #: and rides whenever the queue is LIVE, ``0`` included, so a live-but-empty
+    #: engine is distinguishable from a blocking one (a client deciding how to
+    #: paint an ask row needs exactly that bit). BOTH fields are absent only for
+    #: a runtime that cannot answer — flag off, no host, an unreadable queue —
+    #: and a frame that truly cannot afford its keys may still yield them (see
+    #: ``_yield_asks_when_the_frame_has_no_room``, the documented residual).
+    #: Emitting the fields while the server default is still blocking is exactly
+    #: the false proxy the rule exists to prevent, which is why the absence is
+    #: enforced at the SERIALIZER (`_serialize_frozen_jobs`) rather than by
+    #: convention: a declared field with a default would ride every frame
+    #: whether or not the feature is on.
     #:
     #: ``pending_gate``/``pending``/``pending_count`` keep meaning BLOCKING
     #: things. For one release a queued ask is ALSO mirrored onto
@@ -3019,6 +3028,10 @@ class FrontendSessionState(BaseModel):
         # delta, the sync payload, the durable checkpoint — serializes through
         # this one seam, and a rule that held on one of them would make the
         # capability proxy true for exactly the client that read the other.
+        # The two ask fields pop INDEPENDENTLY (the WIRE FIX): ``asks`` is
+        # absent whenever there is no row list to carry, while ``asks_open``
+        # rides whenever the queue is live — ``0`` included — so the pair's
+        # presence is the capability read a renderer keys its ask paint on.
         if mutable.asks is None:
             payload.pop("asks", None)
         if mutable.asks_open is None:
@@ -3553,13 +3566,17 @@ def _yield_asks_when_the_frame_has_no_room(
     everything available, and this is the last field to give way — the same
     ordering rule the goal record follows, one step further down.
 
-    Absence is the honest wire state for "this frame cannot carry the asks", and
-    it is the same state a client sees for a runtime with nothing queued (see
-    ``_bound_asks_in_place``). It is NOT a claim about the FEATURE: ``N2``'s gate
-    is the publisher's (the flag and a host that can show an ask), so a
-    dark runtime is distinguishable from a full frame by whether the flag was
-    ever on, and the cross-session aggregate route carries the view that a frame
-    this full cannot.
+    THE ONE PLACE THE TALLY YIELDS WITH THE ROWS (the WIRE FIX's documented
+    residual): every earlier bound keeps ``asks_open`` even when it drops every
+    row (``_bound_asks_in_place``), and this site is reserved for the frame that
+    cannot afford even the ~30 B tally — the all-maximum shape the line cap
+    refuses. A client losing the capability signal HERE loses it to a frame
+    that cannot carry anything (a re-sync restores it), which is why the yield
+    pops all three keys together: the frame must not claim a clip it cannot
+    describe (``asks_truncated`` goes with the rows), and it is NOT a claim
+    about the FEATURE: ``N2``'s gate is the publisher's (the flag and a host
+    that can show an ask), and the cross-session aggregate route carries the
+    view that a frame this full cannot.
     """
     if not snapshot.get("asks"):
         return
@@ -3852,9 +3869,14 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
 
     The rows themselves are bounded by :func:`bound_ask_rows`; this function is
     the wire boundary's policy: ship the prefix, and say so when rows were left
-    out. A list that will not fit at all ships ABSENCE rather than an empty array
-    (see the constants above for the measured reason), which is the same state a
-    runtime with nothing queued publishes.
+    out. A list that will not fit at all ships ABSENCE for the ROW KEY (see the
+    constants above for the measured reason) — but the TALLY STAYS, because it
+    is the capability signal now (the WIRE FIX): a frame that cannot afford
+    rows it did not have room for must still say the queued engine is live,
+    and the ~30 B tally is what says it. Only the last-resort yield
+    (``_yield_asks_when_the_frame_has_no_room``, which runs when the WHOLE
+    frame is at the line cap) may drop the tally too; that is the documented
+    bounded-frame residual.
     """
     rows = snapshot.get("asks")
     if not isinstance(rows, list):
@@ -3862,7 +3884,9 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
     kept, dropped = bound_ask_rows(rows)
     if not kept:
         snapshot.pop("asks", None)
-        snapshot.pop("asks_open", None)
+        # ``asks_open`` deliberately stays: the rows are absent, the
+        # capability signal rides. ``asks_truncated`` goes with the rows it
+        # describes (a frame with no list must not claim one was clipped).
         snapshot.pop("asks_truncated", None)
         return
     snapshot["asks"] = kept
@@ -6139,6 +6163,9 @@ class FrontendStateStore:
             # ``None`` rather than ``[]`` when nothing survives: absence is what a
             # frame that cannot carry the list says, and the client's model reads
             # both as "no ask list on this frame" (see ``FrontendSessionState.asks``).
+            # The TALLY is left alone by design (the WIRE FIX): when it rides in
+            # ``wire_changes`` it survives the rows' yield, because it is the
+            # live-engine signal — only the last-resort yield drops it.
             wire_changes["asks"] = kept or None
             wire_changes["asks_truncated"] = True if dropped else None
             # ``normalized`` keeps the VALIDATED candidate (the whole fold) and
@@ -7883,7 +7910,11 @@ def _json_value(value: Any) -> Any:
 
 
 def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
-    """The session's queued asks on the wire, or ``(None, None)`` while dark.
+    """The session's queued asks on the wire: ``(rows | None, tally | None)``.
+
+    A live-but-empty queue is ``(None, 0)`` — rows absent, tally present — and
+    a runtime that cannot answer at all is ``(None, None)``; the split is the
+    WIRE FIX's capability contract, spelled out below.
 
     The single derivation every publisher uses (``Session.publish_ask_state``,
     ``refresh_from_session``, the aggregate routes through the index), so the
@@ -7900,12 +7931,18 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     precisely because four surfaces read this rule; see that constant for why a
     second spelling is what produced the wrong count here.
 
-    Returns ABSENCE — ``None``, not ``[]`` — whenever the queue is not live in
-    this process, which is the capability proxy the whole A2 wire turns on (see
-    ``FrontendSessionState.asks``). ``ask_queue()`` is the one authority on that
-    question (the flag AND a host that can show the ask), and it is asked rather
-    than re-derived: a second spelling of the gate is how the wire would ship
-    the field while the enqueue path still blocked.
+    Returns ABSENCE — ``None`` — for the ROWS whenever they are not there, and
+    the TALLY is the capability signal: a live queue with nothing to fold returns
+    ``(None, 0)`` (rows absent, ``asks_open: 0`` present), while a runtime that
+    cannot answer at all returns ``(None, None)``. The capability proxy is the
+    presence of ``asks`` OR ``asks_open`` (the WIRE FIX, the cross-repo contract
+    with the desktop live-trace companion in ``local-operator-ui``): a client
+    deciding how to paint an ask row must be able to tell a live queued engine
+    from a blocking one EVEN WHEN the queue is empty, and a row list that is
+    absent whenever it is empty cannot say that. ``ask_queue()`` is the one
+    authority on the liveness question (the flag AND a host that can show the
+    ask), and it is asked rather than re-derived: a second spelling of the gate
+    is how the wire would ship the field while the enqueue path still blocked.
     """
     from local_operator.asks import policy, store
 
@@ -7945,13 +7982,17 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         logger.debug("ask: could not fold the queue for the wire", exc_info=True)
         return None, None
     if not rows:
-        # Same rule as the wire bound's tail (``_bound_asks_in_place``): an
-        # empty list is published as ABSENCE, because a field that says "nothing"
-        # while costing its keys ~290 B on a frame with ~100 B of slack is a
-        # field that can only ever make the frame worse. The N2 gate — the flag
-        # and a host that can show an ask — is what keeps a dark runtime from
-        # looking merely quiet; see ``FrontendSessionState.asks``.
-        return None, None
+        # THE TALLY RIDES EVEN WITH NOTHING TO FOLD (the WIRE FIX). A live queue
+        # whose log folds to zero rows publishes ``asks_open: 0`` and keeps
+        # ``asks`` absent: the rows stay ABSENT both because an empty list costs
+        # a key with no content to carry and because old clients read only
+        # ``asks`` and must keep seeing today's view — while the ~30 B tally is
+        # what a new client reads as "the queued engine is live here", the
+        # signal that decides its settle-only ask-row paint. Only a runtime
+        # that CANNOT answer (every branch above: flag off, no host, an
+        # unreadable queue) publishes neither field, which is the distinction
+        # this return keeps.
+        return None, 0
     outstanding = sum(1 for row in rows if store.is_outstanding(row.get("status")))
     return rows, outstanding
 

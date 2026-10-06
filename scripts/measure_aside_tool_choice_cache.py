@@ -48,7 +48,18 @@ Deliberately small: four calls of ~35k tokens each, ``max_tokens`` capped and
 the lowest reasoning effort, because the shared OAuth accounts run close to
 their five-hour caps. The request shapes are the real ones (``ChatRequest``
 through ``AnthropicClient``), not hand-built JSON, so what is measured is what
-``Session.complete_aside`` / ``Session.advise_compaction`` send.
+``Session.complete_aside`` / ``Session.advise_compaction`` send — and, from
+``--arms 5``, what ``Session.complete_clearance`` sends for the ask gate.
+
+Arm 5 (CLEARANCE / the fork, design docs/design/ask-gate.md §2.1): the ask
+gate's cost claim is that its forked check is the same prefix-cheap shape as
+the aside — same stream fn, same cache lineage key, no isolation, the
+clearance prompt as the appended turn — so one extra request per would-be ask
+costs the appended question's tokens rather than a cold prefix. The arm sends
+exactly that request (built through ``build_clearance_prompt``, the shipped
+builder) after a re-warm and prints the provider's counters; ``cache_read``
+near the full prefix is the claim holding. QA drives this against the real
+path; CI never runs it.
 
 Run (needs the configured Anthropic OAuth credential):
     .venv/bin/python scripts/measure_aside_tool_choice_cache.py
@@ -56,6 +67,7 @@ Run (needs the configured Anthropic OAuth credential):
 
 ``--arms 2`` stops after the pre-fix arm: two calls instead of four, for
 checking a second model against the same rule without spending the re-warm.
+``--arms 5`` adds the clearance arm (a fifth call, ~35k tokens).
 """
 
 from __future__ import annotations
@@ -72,6 +84,8 @@ sys.path.insert(0, str(REPO))
 from local_operator.compaction.advisor import ADVISOR_SYSTEM_PROMPT  # noqa: E402
 from local_operator.harness.types import (  # noqa: E402
     AgentTool,
+    AskOption,
+    AskQuestion,
     ChatRequest,
     Message,
     StreamUsageEvent,
@@ -83,6 +97,7 @@ from local_operator.harness.types import (  # noqa: E402
 from local_operator.model.configure import build_model_spec  # noqa: E402
 from local_operator.providers.auth_store import AuthStore, default_db_path  # noqa: E402
 from local_operator.providers.clients import AnthropicClient  # noqa: E402
+from local_operator.session.clearance import build_clearance_prompt  # noqa: E402
 
 #: Cheaper than the default TUI model and on the same cache rules; the effect
 #: is a property of the wire, not of the model.
@@ -307,10 +322,51 @@ async def main(model_id: str = MODEL_ID, arms: int = 4) -> None:
             f"fixed={new.cache_write_tokens}"
         )
 
+    if arms <= 4:
+        return
+    # ARM 5: the ask gate's fork. The SAME body as the aside (tools + the
+    # session's system blocks + ``tool_choice none``), with the clearance
+    # prompt's turn appended — the exact request ``complete_clearance`` sends,
+    # built through the shipped ``build_clearance_prompt`` so what is measured
+    # is what ships. The design's cost claim is that it rides the turn's cached
+    # prefix like the aside does: same stream fn, same lineage key, no
+    # isolation. A ``cache_read`` near the full prefix is that claim, measured.
+    clearance_question = build_clearance_prompt(
+        [
+            AskQuestion(
+                id="q0",
+                question="Which database should the migration target?",
+                options=[
+                    AskOption(label="staging", description="cheap, may drift"),
+                    AskOption(label="prod", description="the real rows"),
+                ],
+                recommended=0,
+            )
+        ]
+    )
+    clearance = ChatRequest(
+        model=spec,
+        purpose="clearance",
+        system_blocks=list(SYSTEM),
+        messages=[*convo, Message.user(clearance_question)],
+        tools=tools,
+        tool_choice="none",
+        max_tokens=MAX_TOKENS,
+        replayable=True,
+    )
+    await asyncio.sleep(SETTLE_SECONDS)
+    fork = await _run(fixed, oauth, clearance, "5 CLEARANCE (fork, tools, aside)")
+    if fork is not None:
+        print(
+            f"\nCLEARANCE ARM: cache_read={fork.cache_read_tokens} "
+            f"cache_write={fork.cache_write_tokens}; the claim holds when "
+            "cache_read is ~the whole prefix (compare arm 4)."
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--model", default=MODEL_ID)
-    parser.add_argument("--arms", type=int, default=4, choices=(2, 4))
+    parser.add_argument("--arms", type=int, default=4, choices=(2, 4, 5))
     args = parser.parse_args()
     asyncio.run(main(args.model, args.arms))

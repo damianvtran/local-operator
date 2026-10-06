@@ -27028,6 +27028,44 @@ async def execute_ask(
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
     if callable(enqueue):
+        # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
+        # the unchanged enqueue: one awaited clearance check, whose ONLY
+        # diverting outcome is a ``clear``/``resolve`` mapping. Everything
+        # else — flag off, secret, re-raise, timeout, provider error,
+        # unparseable text — comes back as ``None`` and falls through to the
+        # enqueue call below, byte-for-byte today's.
+        #
+        # The try/except is the LAST line of the design's double guard (the
+        # callable owns the policy; this guard means even a contract breach —
+        # a broken gate that raises — cannot cost the ask). ``except
+        # Exception`` and not ``BaseException``, deliberately:
+        # ``asyncio.CancelledError`` must keep propagating so an aborted turn
+        # aborts.
+        gate: Any = getattr(context, "gate_ask", None) if context is not None else None
+        if callable(gate):
+            try:
+                # ``cast`` for the same reason the enqueue call below carries it:
+                # ``callable()`` narrows an ``Any`` to ``(...) -> object``, and
+                # an un-cast ``await`` on that narrowing is a pyright error
+                # about a value whose real shape is an awaited mapping-or-None.
+                verdict: Any = await cast("Any", gate)(
+                    params.questions, params.timeout, tool_call_id=tool_call_id
+                )
+            except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
+                verdict = None
+            if isinstance(verdict, Mapping):
+                # THE DIVERSION: no enqueue, no queue entry, no events. The
+                # result carries the hidden marker (design §3) and the
+                # decision-point note, so the model learns what happened and
+                # every human surface filters the row pair (the marker is
+                # persisted with the result; predicates live in
+                # ``harness/rows.py``).
+                return _text(
+                    tool_call_id,
+                    "ask",
+                    str(verdict.get("text") or ""),
+                    details=dict(verdict.get("details") or {}),
+                )
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.

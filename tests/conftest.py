@@ -80,6 +80,16 @@ _AMBIENT_VARS = (
     # set it through ``monkeypatch`` explicitly, which is also where the reason
     # is written down.
     "LOP_ASK_NONBLOCKING",
+    # The ask GATE's kill switch (``asks/policy.ASK_GATE``, read from
+    # ``LOP_ASK_GATE``). The same ESCAPE-HATCH class as the queue switch
+    # beside it, and scrubbed for the same reason: the gate is the shipped
+    # default, and an inherited kill value would silently move every
+    # gate-driving cell (the e2e fork tapes included) onto the
+    # no-fork path — green cells asserting an arm nobody runs. The cells
+    # that DO mean gate-off set it through ``monkeypatch`` explicitly
+    # (``test_ask_queue_e2e.py``'s autouse pin, ``test_ask_gate_e2e.py``'s
+    # kill-switch cell), which is where that reason is written down.
+    "LOP_ASK_GATE",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off

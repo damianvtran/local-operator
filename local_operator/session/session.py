@@ -47,6 +47,7 @@ import string
 import tempfile
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -3803,6 +3804,16 @@ class Session:
         # is what this lock is for (review round 1, MAJOR 4).
         self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
+        #: THE ASK GATE'S HONOR RULE (design docs/design/ask-gate.md §2.5):
+        #: fingerprint -> epoch for asks this session has already DIVERTED
+        #: (verdict clear/resolve). A hit skips the second check and enqueues
+        #: unchanged — the model's second attempt is a decision the operator
+        #: can override. Bounded LRU: a hit or a record moves the entry to the
+        #: end, overflow drops the oldest (``GATE_FINGERPRINT_CAP``).
+        #: SESSION-lifetime, no TTL, and in-memory on purpose: the skip
+        #: direction is ENQUEUE (the safe one), so eviction costs one redundant
+        #: check and a restart costs one more — never a lost ask.
+        self._ask_gate_diverts: OrderedDict[str, float] = OrderedDict()
         #: The host's wire publisher for the ask fold (design §4, N2). A
         #: runtime/terminal host registers one so the queue's own change path
         #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
@@ -8794,13 +8805,16 @@ class Session:
         values into the periodic snapshot, so the two can never disagree about
         which asks are OUTSTANDING.
 
-        PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
-        not an empty list — whenever the queue is not there (the flag is off, or
-        this host has no ask surface). A client keys "this runtime has queued
-        asks" on the field's presence, which is the design's own rule for the
-        whole A2→F window: while the server default is still blocking, a field
-        that shipped anyway would take a new client down the queued path against
-        a blocking backend.
+        PRESENCE IS THE CAPABILITY PROXY, so a queue that is NOT there (the flag
+        is off, or this host has no ask surface) publishes ABSENCE in BOTH
+        fields — ``None``, not an empty list. A client keys "this runtime runs
+        the queued-ask engine" on the presence of ``asks`` OR ``asks_open``
+        (the WIRE FIX), which is the design's own rule for the whole A2→F
+        window: while the server default is still blocking, a field that shipped
+        anyway would take a new client down the queued path against a blocking
+        backend. A live queue with nothing folded is not that case: it publishes
+        ``asks_open: 0`` with the rows absent, so a client can still read the
+        engine as live — see ``frontend_state.ask_wire`` for the split.
         """
         from local_operator.session.frontend_state import ask_wire
 
@@ -8948,6 +8962,110 @@ class Session:
         if self.ask_queue() is None:
             return None
         return self.withdraw_ask
+
+    def _ask_gate_callable(self) -> Callable[..., Any] | None:
+        """The ask tool's gate door, or ``None`` wherever ``ask`` cannot queue (§2.2).
+
+        Bound per turn beside :meth:`_ask_enqueue_callable` and ``None`` under
+        exactly the same two conditions — the flag on AND a host that can show
+        an ask — because the gate exists only to decide the fate of an ask the
+        queued engine would otherwise take, and its presence IS that fact. The
+        kill switch (``LOP_ASK_GATE``) is deliberately NOT part of the binding:
+        it is read INSIDE :meth:`_gate_ask` as its step 1, the callable's own
+        policy, so gate-off is one flag check on a path the tool already walks.
+        """
+        if self.ask_queue() is None:
+            return None
+        return self._gate_ask
+
+    async def _gate_ask(
+        self,
+        questions: list[Any],
+        timeout_raw: Any = None,
+        *,
+        tool_call_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Run the gate's clearance check; divert or enqueue, never fail the ask.
+
+        THE TOTALITY TABLE (design docs/design/ask-gate.md §2.2), in order —
+        every non-divert path returns ``None``, which the tool maps to the
+        UNCHANGED enqueue:
+
+        1. ``LOP_ASK_GATE`` off → ``None`` (the fork is never called);
+        2. no queue (defense; unreachable through the tool) → ``None``;
+        3. any ``secret=True`` question → ``None`` — a credential is the user's
+           to hand over, so the fork is NEVER called for it;
+        4. fingerprint hit → ``None`` — the honor rule, no second check (§2.5);
+        5. timeout/provider/parse failure → ``None`` — fail-open; a CANCELLED
+           turn re-raises instead, because an abort must abort (§2.2);
+        6. no verdict / ``raise`` → ``None`` (nothing recorded on raise — the
+           queue's own caps own the re-ask path);
+        7. ``clear``/``resolve`` → the diversion mapping, fingerprint recorded.
+
+        ``timeout_raw`` and ``tool_call_id`` are accepted for call-shape parity
+        with :meth:`_enqueue_ask` (the tool passes the same two arguments to
+        both doors) and are deliberately unused: the gate's bound is
+        ``policy.GATE_TIMEOUT_S``, not the ask's own timeout — the deadline the
+        model set belongs to the QUEUED question, not to the check about it.
+        """
+        from local_operator.asks import policy
+        from local_operator.session import clearance
+
+        if not policy.gate_enabled():
+            return None
+        if self.ask_queue() is None:  # pragma: no cover — the tool only calls this when set
+            return None
+        if any(bool(getattr(question, "secret", False)) for question in questions):
+            # §2.2 step 3, and note the ORDER: this refusal runs before the
+            # fingerprint is even computed, so a secret ask is a zero-token,
+            # zero-check path by construction.
+            return None
+        digest = clearance.fingerprint(questions)
+        if digest in self._ask_gate_diverts:
+            # §2.5: recorded content queues with NO second check. A hit moves
+            # the entry to the LRU's end (recency), matching the record path.
+            self._ask_gate_diverts.move_to_end(digest)
+            return None
+        prompt = clearance.build_clearance_prompt(questions)
+        try:
+            async with asyncio.timeout(policy.GATE_TIMEOUT_S):
+                text = await self.complete_clearance([Message.user(prompt)])
+        except asyncio.CancelledError:
+            # Named explicitly rather than left to ``except Exception``: an
+            # aborted turn must keep aborting. (It would propagate anyway —
+            # CancelledError is a BaseException — but the intent is the
+            # contract here, not the class hierarchy.)
+            raise
+        except Exception:  # noqa: BLE001 — see the totality table; failure = enqueue
+            logger.debug("ask gate: clearance check failed; enqueueing", exc_info=True)
+            return None
+        verdict = clearance.parse_verdict(text)
+        if verdict is None or verdict == "raise":
+            # Unparseable is a provider quirk, ``raise`` is the user's — both
+            # mean the ask travels unchanged. Neither records a fingerprint.
+            return None
+        reason = clearance.parse_reason(text)
+        self._record_ask_gate_divert(digest)
+        return {
+            "verdict": verdict,
+            "text": clearance.clearance_note(verdict, reason),
+            "details": {"ask_gate": {"hidden": True, "verdict": verdict, "reason": reason}},
+        }
+
+    def _record_ask_gate_divert(self, digest: str) -> None:
+        """Record a diverted fingerprint in the bounded LRU (design §2.5).
+
+        A hit or a record moves the entry to the end; overflow drops the oldest
+        (``GATE_FINGERPRINT_CAP = 64``). The epoch value is diagnostic — the
+        window is session-lifetime and no reader ages entries out — so a clock
+        oddity cannot affect routing.
+        """
+        from local_operator.session.clearance import GATE_FINGERPRINT_CAP
+
+        self._ask_gate_diverts[digest] = time.time()
+        self._ask_gate_diverts.move_to_end(digest)
+        while len(self._ask_gate_diverts) > GATE_FINGERPRINT_CAP:
+            self._ask_gate_diverts.popitem(last=False)
 
     def _enqueue_ask(
         self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
@@ -13452,6 +13570,11 @@ class Session:
             # the queue is absent, which is what keeps ``ask_withdraw`` off the
             # blocking arm's tool surface.
             withdraw_ask=self._ask_withdraw_callable(),
+            # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
+            # same two conditions as the two doors above, so its presence IS
+            # "this ask would queue" — which is exactly the population the
+            # gate exists for. ``None`` means the tool never awaits a check.
+            gate_ask=self._ask_gate_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
@@ -17995,6 +18118,125 @@ class Session:
         # than at module scope for the reason the other ``session.errors``
         # imports in this file are lazy: the module is a leaf this file may not
         # import at the top without a cycle.
+        from local_operator.session.errors import AsideUnanswered
+
+        raise AsideUnanswered()
+
+    async def complete_clearance(self, turns: Sequence[AgentMessage]) -> str:
+        """One off-the-record request that reads the live conversation and writes nothing.
+
+        The ask gate's fork (design docs/design/ask-gate.md §2.1), a sibling of
+        :meth:`complete_aside`: it READS exactly what an aside reads — the live
+        system blocks (including the frozen-vs-desired epoch check and the
+        system-state delta message), the wire-legal snapshot of the live
+        history (:meth:`_wire_legal_snapshot` pairs pending ``tool_use``s with
+        placeholders, so the call is legal mid-batch), the caller's appended
+        gate message, and ``bound_replay_payloads`` over the result — and
+        WRITES nothing: no transcript entry, no ``_context.messages`` append,
+        no event fan-out. A gated ask must leave the conversation exactly as it
+        found it, on every path including failure.
+
+        The request shape is the aside's, with the deltas the design tables:
+
+        * ``purpose="clearance"`` — a new string, honest in the request ledger
+          and the counter the later "material reduction" measurement reads
+          (``purpose`` is open-valued; consumers compare ``"turn"``/
+          ``"compaction"`` only);
+        * ``tools=self._side_channel_tools()`` — the tools block is the FRONT of
+          the provider cache prefix, so ``[]`` would force a full re-process;
+        * ``tool_choice="none"`` — same value the aside sends; the wire mapping
+          (Anthropic sends the turn's own choice) is inherited unchanged, and
+          this method consumes text only, so a tool call in the answer is
+          inert;
+        * ``replayable=True`` — nothing is shown until the whole answer is
+          parsed, so a stalled read may be discarded and retried whole;
+        * ``isolated`` left absent (``False``) — LOAD-BEARING: ``isolated=True``
+          strips the session's cache key and puts the call on a cold namespace
+          (the advisor's docstring measures 92.9% cache-read against ~25.6%
+          cost when isolated). The gate must stay on the turn's warm prefix —
+          it rides the session's own ``_stream_fn``, which is what keeps the
+          cache lineage key.
+
+        Mechanics inherited from :meth:`complete_aside`, including the one
+        bounded retry when the answer is a bare tool call (the rejected call is
+        handed back, paired, with ``tools=[]`` for this request only). If the
+        retry still yields no text, this raises :class:`AsideUnanswered` — the
+        same class of failure — and ``Session._gate_ask`` maps that to
+        fail-open, so the gate never fails an ask.
+
+        Deliberately NO ``on_delta``/``on_usage`` in v1: no surface watches the
+        gate run, and cost accounting is the request ledger's, as for every
+        other request.
+        """
+        from local_operator.session import clearance
+
+        blocks, messages = await self._read_only_prompt(turns)
+        request = ChatRequest(
+            model=self._model,
+            purpose="clearance",
+            system_blocks=list(blocks),
+            messages=messages,
+            # Live tools (not []): the same cache-prefix rule the aside states
+            # at length — the tools block leads the prefix, so an empty array
+            # would change position 0 and force a full re-process.
+            tools=self._side_channel_tools(),
+            tool_choice="none",
+            # Same prefix as the turn, so the same TTL — the session stamps its
+            # own hint because the shared stream fn holds none.
+            context_tokens_hint=self._context_tokens_hint,
+            # Nothing here reaches a screen until the whole answer is parsed, so
+            # a stalled read may be discarded and retried whole (the advisor's
+            # argument, verbatim).
+            replayable=True,
+        )
+        parts: list[str] = []
+        called_tool = False
+        # Per-index accumulation of the call the wire carried, keyed by the
+        # delta's own ``index``: an answer that is nothing BUT a call is handed
+        # back to the model on the retry below.
+        calls: dict[int, dict[str, Any]] = {}
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+            elif isinstance(event, StreamToolCallDelta):
+                # Inert by design (see the docstring): recorded only so an
+                # answer that was NOTHING BUT a call can be corrected below.
+                called_tool = True
+                _collect_tool_call_delta(calls, event)
+        if parts or not called_tool:
+            return "".join(parts)
+        # Tool call and no text: the model tried to act instead of answering.
+        # Hand the rejected call back — the assistant turn verbatim, paired with
+        # one error result per call id — and retry once with no tools at all.
+        # The refusal sentence is the clearance-specific one (the gate's
+        # question, not a user question) while the PAIRING mechanics are the
+        # aside's, unchanged.
+        logger.debug("ask gate: clearance answered with a bare tool call; retrying without tools")
+        rejected = _assemble_aside_tool_calls(calls)
+        correction: list[AgentMessage] = [
+            Message(role="assistant", content=[], tool_calls=rejected)
+        ]
+        correction.extend(
+            Message(
+                role="tool",
+                content=[TextContent(text=clearance.CLEARANCE_TOOL_CALL_REFUSAL)],
+                tool_call_id=call.id,
+                tool_name=call.name,
+            )
+            for call in rejected
+        )
+        retry = request.model_copy(
+            update={"tools": [], "messages": [*request.messages, *correction]}
+        )
+        async for event in self._stream_fn(retry, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+        if parts:
+            return "".join(parts)
+        # A second bare call, or an empty answer AFTER being corrected: the
+        # model will not answer this in text. ``AsideUnanswered`` is the same
+        # class of failure the aside raises, and ``_gate_ask`` maps it to
+        # fail-open — the gate never fails an ask.
         from local_operator.session.errors import AsideUnanswered
 
         raise AsideUnanswered()
