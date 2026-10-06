@@ -33,8 +33,10 @@ opposite of the product's main promise ("close your laptop and it keeps working"
 (C1) is a contradiction between the docs and the as-built capability model that would
 stop a pool member from borrowing a model key. One (C4) assumes the control plane can
 read a local file. C7 is additive. The hardest of them is admission (C2): today an invite
-token carries the network's epoch secret and the joiner must dial the inviter, and both
-facts collide with a NATed laptop and a control plane that must not hold mesh secrets.
+token carries the network's epoch secret and the joiner must dial the inviter. Both
+facts collide with a NATed laptop, and the secret also lets its holder mint `admin`
+invites. So the proposal gives pool members their own handshake mode in which **the pod
+never holds the epoch secret**.
 
 **Recommendation.**
 
@@ -183,10 +185,10 @@ copy of results while home is offline, metering and billing.
                                            ◄──────── pod key + task metadata ────── report key to control plane
                                            sign attestation(pod key, account,
                                              network, grant, size, provider_ref,
-                                             expires_at)
+                                             relay_route, expires_at)
  home relay: verify attestation ◄── poll / push (home dials out, HTTPS) ──
  home relay ── dials ──────► blind relay (control plane) ◄── dials ── pod relay
-            ═══════════ pool-admission handshake, then mesh link (end-to-end) ═══════════►
+            ══════ `pool`-mode handshake (no epoch secret on the pod), end-to-end ══════►
                 (POC Slice 1 shortcut: pod public endpoint, home dials it directly)
  net_session_create(prompt, workspace spec) ══════════════════════════════════► clone@SHA / bundle; setup script
                                                                                     run session (owner = pod)
@@ -220,9 +222,13 @@ built facts constrain admission further:
   (`handshake.py` `build_hello`/`send_hello` attach `join` only when this side dials), and
   the joiner's dial targets come from the token (`invite.py` `host_candidates`).
 - **An invite token carries the network's current epoch secret.** `InviteEnvelope.material`
-  is "the transfer of the network secret" (`invite.py`), and the link keys derive from it
-  (`wire.py` `epoch_key`). Whoever carries the token to the pod therefore holds the secret
-  that admits members.
+  is "the transfer of the network secret" (`invite.py`). That one secret keys the
+  member-mode auth MAC (`wire.py` `epoch_key`, checked in `handshake.py` `verify_auth`)
+  and the invite key (`wire.py` `invite_key`); the link's encryption keys come from the
+  X25519 exchange plus the transcript (`wire.py` `link_keys`). Holding the secret is also
+  enough to **mint invites**, any role including `admin`: the relay's local invite op
+  calls `mint_invite(record, state.secret, role=…)` (`relay.py` `_ctl_invite`). Whoever
+  holds it can therefore admit devices.
 
 So the obvious shortcut, "the control plane hands the pod an invite token", makes the
 control plane a bearer of every user's network secret, able to admit itself. This doc
@@ -235,8 +241,12 @@ rejects that. Options for the link:
 | C. Expose home's peer port through the Radient tunnel | Named in transport §10.4; not built for raw TCP (tunnels serve HTTP/WS through `cloudflared`) | No: the tunnel path is HTTP-shaped and the peer protocol is raw TCP |
 
 Whichever path carries the bytes, **admission is a new pool-admission handshake (C2)**, not
-a join with a token: the pod proves possession of its attested key, and home, not the
-control plane, delivers the epoch key over the authenticated link.
+a join with a token. The pod proves possession of its attested key, and **the pod never
+receives the epoch secret**, not from the control plane and not from home. Handing it
+over after admission would be mechanically easy (the join's `pair_result` and a
+rotation's `epoch_frame` already carry the material), but it would let a
+prompt-injected pod mint an `admin` invite. That contradicts compute-pool §3.5's
+"blast radius is the sessions placed there" and this doc's §7.1.
 
 ### 3.3 One pod per task
 
@@ -329,7 +339,7 @@ transcripts outside our AWS account and region, which conflicts with data reside
 | # | Contract assumption | Why it fails for a hosted agent | Proposed change |
 |---|---|---|---|
 | **C1** | A pool member's capabilities "never" include `broker_credential` (compute-pool §3.5), yet it "borrows" credentials through the broker (credentials §6.2) | As built, `broker_credential` **is the borrower's capability**: `OP_CAPABILITY["net_broker"] = "broker_credential"`, described as "borrow this device's logins" (`network/types.py`; transport §7 table "ask this device's credential broker for a token"). A pool member built exactly to §3.5 cannot borrow anything, so it cannot call a model with a BYO key. Capabilities are flat names (`CAPABILITIES`, `ROLE_CAPABILITIES` = `read`/`drive`/`admin`; `drive` is exactly §3.5's pool set), so "broker_credential for these keys only" has nowhere to live in the capability itself | **Default: keep §3.5 as written** and use the hosted key (§6). **BYO opt-in:** add `broker_credential` to the pool row's *admit-time capability list* (the row stores resolved capabilities, so no new role is needed), and put the key restriction where restrictions already live: the owner's grant machinery (`holders` entries with `scope: "session"`, `GRANT_TTL_S`; credentials §6.2) plus an explicit key list on the pool grant. No scoped capability name is invented |
-| **C2** | Admission is a join: the joiner dials the inviter, proving possession of an invite token that **carries the epoch secret** (§3.2) | Home is usually NATed, and handing the pod a token through the control plane would make the control plane a bearer of the network secret | A **pool-admission handshake**, distinct from join. **Reused:** the hello/challenge/auth transcript order, the epoch, tombstone and trust checks, the capability chokepoint. **Added:** (1) the pod authenticates with its attested device key plus proof of possession over the transcript; no invite MAC and no epoch secret; (2) home, after verifying the attestation, writes the row with `kind="pool"` and compute-pool §3.3's seven keys (nothing writes `kind="pool"` today, §2), then delivers the current epoch key over the authenticated link, the same way a rotation reaches an existing member; (3) either side may dial, so it runs over the blind relay or a direct endpoint. **Not "same handshake":** this is new code in `handshake.py`/`relay.py` with its own tests |
+| **C2** | Admission is a join: the joiner dials the inviter, proving possession of an invite token that **carries the epoch secret** (§3.2). Every later link is member-mode, authenticated by a MAC under that secret | Home is usually NATed. Any path that puts the epoch secret on the pod, whether via the control plane or from home after admission, lets the pod mint invites (`_ctl_invite`), including `admin` | A **`pool` handshake mode**, used for admission *and* for every later link of a pool member. The pod **never holds the epoch secret**. **Reused:** the hello/challenge/auth transcript order; step 7's signature against the stored row key (`verify_auth`); the epoch-number, tombstone and trust checks; the capability chokepoint. **Replaced:** the epoch-key MAC (`verify_auth`'s member-mode step) becomes "signature by the attested key, plus the attestation's digest bound into the transcript" (otherwise one attestation could be replayed onto another link; `link_keys` binds only hello/challenge/auth today). **Added:** home writes the row with `kind="pool"` and compute-pool §3.3's seven keys from the signed attestation (nothing writes `kind="pool"` today, §2). A pool member links **only** to its home device (and through the blind relay), never to other members, so it needs no network secret. An epoch rotation reaches it as a re-check of its row, not as new material. Either side may dial. This is new code in `handshake.py`/`relay.py`, with tests that a pool link cannot run `_ctl_invite`/`net_epoch` and that an attestation does not verify on a second link |
 | **C3** | "`home_device` … is never the member itself — … a 'home' that can die is not a home" (§4). R22 flushes to home, and if the drain barrier times out after 900 s the result is `reason: "lost"` (§6.2) | The product promise is that the laptop can be closed. A pod finishing at 3 a.m. with home asleep would lose its tail | Add a **custodian sink**: on drain, the final flush also goes to a control-plane object store (per-account prefix, KMS, TTL), and home pulls it on the next connect. The custodian is storage, not a member, so it holds no session authority |
 | **C4** | The control plane reads `PoolRequest` from `<config>/network/pool-requests/` (§4.1) | The control plane is remote | The file stays as the client's record. Submission is an **HTTPS call from the CLI with the Radient login** (the `lop tunnel` precedent), never from the relay |
 | **C5** | Metering is pod-emitted and home-verified (§5.5); the drain barrier waits for every flush **and every `meter_push`** ack, up to `SYNC_DRAIN_DEADLINE_S` = 900 s (§6.2) | The control plane has AWS's own timestamps, and a barrier that waits on a sleeping laptop bills ~15 minutes per run for nothing | The billable record is AWS-observed `wall × size`. Pod events are the cross-check and the per-session attribution; `meter_dispute` stays. **Amend §6.2 together:** power off once the final flush is acked by home *or* the custodian (C3), plus a short fixed best-effort window for the last `meter_push` (seconds, not minutes) |
@@ -344,7 +354,7 @@ transcripts outside our AWS account and region, which conflicts with data reside
 |---|---|---|
 | Built today | Radient is a provider (`providers/registry.py` `radient`, `radient-key`) fronting OpenRouter (`providers/clients.py`). There is no per-task token mint | Broker built (`net_broker`); provider logins and API keys are offered to device members (`offers.py`) |
 | Home offline | Works | Stalls within ≤15 min (§3.4) |
-| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, held in memory and injected as an ECS task-level secret (not baked into the image or written to disk). A leaked token is worth at most the task's remaining budget | A bearer valid ≤900 s, in memory only (credentials §6.2) |
+| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, injected as an ECS task-level secret. ECS delivers that as a container environment variable, so it is **not on disk but is readable by the agent and anything it spawns**; v1 should have the lop entrypoint read it into the process and unset it before tools run. A leaked token is worth at most the task's remaining budget | A bearer valid ≤900 s, in memory only (credentials §6.2) |
 | Metering | Exact. The gateway already meters tokens in Radient credits | Tokens are billed to the user's own provider account. Radient meters compute only |
 | Data path | Model traffic goes Radient → OpenRouter → upstream provider. **Not Canada-resident** (§7.6) | User's chosen provider |
 | Work needed | Control-plane endpoint to mint and revoke task-scoped gateway tokens with a spend cap | C1, plus documenting the home-online requirement |
@@ -373,7 +383,7 @@ container.
 | Exfiltrate repo contents | Whatever egress allows | Egress allowlist (§7.2). Git push only to the task branch through the proxy (Claude pattern [A1]) |
 | Burn money | The task's remaining budget | Gateway cap + `expires_at` + control-plane budget stop |
 | Push malicious code | The task branch only; a human merges | Proxy enforces repo + branch. Branch protection on the default branch |
-| Pivot into the user's mesh | Sessions on this member only (compute-pool §3.5) | Pool capabilities: no `admin`, `trust`, `delete`, `move`. No visibility of other sessions. Epoch revoke is built |
+| Pivot into the user's mesh | Sessions on this member only (compute-pool §3.5) | Pool capabilities: no `admin`, `trust`, `delete`, `move`. No visibility of other sessions. **No epoch secret on the pod** (C2), so it cannot mint invites or open member-mode links to other devices. Row removal is built |
 | Pivot into AWS | None by design | Empty task role: the ECS container-credentials endpoint (169.254.170.2) does serve the task role's credentials, but that role has no policies. Fargate exposes no EC2 IMDS. Security group denies VPC-internal destinations |
 | Compromise of the control plane | **Highest-value target.** It can launch pods into any user's network as admitted pool members (it signs attestations) and can mint gateway tokens. It cannot read the mesh epoch secret, a device's private key, or a home device's own credentials | Attestation key in KMS (sign-only, no export), short attestation TTL bound to one `grant_id`, the human mints the grant on their own device (A8.1), per-user `pool_cap`, audit of every signature; a user can remove the control-plane key from their relay config to refuse all pool admission |
 | Persist | None | Ephemeral task, nothing written outside the task's storage, image pinned by digest |
@@ -407,8 +417,9 @@ Pod logs go to CloudWatch with 7–30 day retention.
 
 1. Session: `net_session_stop` (built).
 2. Task: control-plane `StopTask`.
-3. Member: `remove_member` → epoch rotation (built), plus broker grants die within
-   ≤900 s.
+3. Member: `remove_member` (built). For a pool member the row removal alone refuses its
+   next link, since it holds no epoch secret (C2); the built epoch rotation still runs.
+   Broker grants die within ≤900 s.
 4. User: revoke the gateway tokens and stop all of the user's tasks.
 5. Global: a feature flag in the control plane that refuses `RunTask`, plus an IAM
    deny on the controller role. The mesh's panic is not a remote kill
@@ -617,7 +628,7 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 | D6 | Surface naming | `lop exec --cloud`, `/new cloud`, "Cloud" in placement pickers | — |
 | D7 | IaC | Pulumi (the sandbox account's mandated tool) for the POC; the same for production unless Radient standardises elsewhere | The chosen account's own IaC rules |
 | D8 | Region and residency claim | `ca-central-1` for compute, storage and logs; state plainly that model inference may leave Canada | A customer requirement for Canadian inference |
-| D9 | Network path for v1 | A blind relay we host (§3.2 A), both ends dial out, pods stay in private subnets; a public pod endpoint only in POC Slice 1. Never hand the pod an invite token (it carries the epoch secret) | Unwillingness to run a relay service (then v1 is public pod endpoints, with the inbound exposure and egress caveats in §3.2 B) |
+| D9 | Network path for v1 | A blind relay we host (§3.2 A), both ends dial out, pods stay in private subnets; a public pod endpoint only in POC Slice 1. The pod never holds the network's epoch secret, by token or by delivery (C2) | Unwillingness to run a relay service (then v1 is public pod endpoints, with the inbound exposure and egress caveats in §3.2 B) |
 | D10 | Price | Compute at actual infrastructure cost plus the tunnel margin rule, per size class per second; model at gateway prices; required per-task budget | Product pricing strategy |
 | D11 | Default per-task limits | `--max-hours 2` hard stop; idle reap 15 min after the pod has **no turn in flight and no pending attention item** (independent of whether anyone is viewing, so a closed laptop does not cause a reap); budget required; `max_sessions: 1` | Measured usage in P2 |
 
@@ -636,9 +647,10 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
    `SYNC_DRAIN_DEADLINE_S`.
 5. Whether `lop exec`'s headless gate plus `--tools` covers the toolset agents actually
    need without `--yolo` (`docs/EXEC.md` "Approvals and lifetime").
-6. The pool-admission handshake (C2): exact transcript binding for the attested key, and
-   how the epoch key is delivered after admission. This needs a short design note in
-   `mesh-transport-identity.md` before P1 code.
+6. The `pool` handshake mode (C2): exact transcript binding for the attestation digest,
+   how a pool link is refused every peer-scope op that needs the network secret, and how a
+   pool row is re-checked on epoch rotation without receiving material. This needs a short
+   design note in `mesh-transport-identity.md` before P1 code.
 
 ## 13. Doc-hygiene findings (stale comments; out of scope here, noted for a follow-up)
 
