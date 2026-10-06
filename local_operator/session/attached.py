@@ -5170,8 +5170,11 @@ class AttachedSession:
             # replay below reads ``sessions/<id>/transcript.jsonl`` — a file that,
             # for a session on another device, is either absent or a DIFFERENT
             # conversation's history wearing the same id. Painting either one is
-            # the one local read that must not lie: "history comes from the wire,
-            # and only the wire". Refused with the remedy named rather than
+            # the one local read that must not lie: history comes from the OWNER,
+            # and only from the owner ("the wire, and only the wire" until the
+            # D5-core amendment in ``docs/design/mesh-session-mobility.md`` §3.4,
+            # which is about THIS file and not about the owner's relay-served
+            # journal). Refused with the remedy named rather than
             # degrading, because the honest alternative is a session the viewer
             # cannot open until the peer is updated.
             if not self._owner.placement.is_local:

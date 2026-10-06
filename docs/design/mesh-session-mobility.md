@@ -285,6 +285,7 @@ the phases of the two op names that document reserves (`net_session_move`,
 | `net_session_create` | `prompt` | create a session **on** the peer (R8): mint id, claim the directory, stamp `mesh.json`, engage, admit an optional first prompt | `{"op":"net_session_create","req":11,"cwd":"/home/ubuntu/work","model":{"provider":"anthropic","model_id":"claude-sonnet-4-5"},"name":"","prompt":"port the parser","images":[],"origin":"user","locality":"remote"}` → `{"op":"ack","req":11,"detail":{"session_id":"9f3ac1e0b7d2","admitted":true,"duplicate":false,"record":{…}}}` |
 | `net_session_engage` | `view` | make an owner exist on the peer (warm) so a cold session can be viewed or acted on; **carries no prompt** | `{"op":"net_session_engage","req":12,"session_id":"9f3ac1e0b7d2","cwd":"","warm":{"initial_model":null,"model_selection_override":false},"locality":"remote"}` → `{"op":"ack","req":12,"detail":{"engaged":true,"detail":"runtime joining"}}` |
 | `net_session_stop` | `stop` | run the **peer's own** kill-switch implementation (`lop stop <remote>`, `/stop <target>`) | `{"op":"net_session_stop","req":13,"session_id":"9f3ac1e0b7d2","mode":"graceful","locality":"remote"}` → `{"op":"ack","req":13,"detail":{"rung":"stop-op","outcome":"stopped","pid":91234,"detail":"…"}}` |
+| `net_session_history` *(added later — `docs/design/mesh-cold-read-stored-history.md`, slice D5-core)* | `view` | serve a **bounded page of the owner's stored journal** (`before_id`, `limit` 1..500) so a COLD read shows the conversation instead of an empty page; **starts nothing on the owner** | `{"op":"net_session_history","req":14,"session_id":"9f3ac1e0b7d2","before_id":null,"limit":100,"locality":"remote"}` → `{"op":"ack","req":14,"detail":{"entries":[{"id":"…","ts":1.7e9,"type":"message","payload":{…}}],"has_more":false,"cursor_missing":false}}` |
 | `net_session_move` phases *(name is the transport's)* | `move` | `phase: "status"｜"prepare"｜"ready"｜"commit"｜"done"｜"fork"｜"copy"`, `mode: "move"｜"copy"` (§6.3, §6.2) | see §6.3's literals |
 
 `net_session_lifecycle` (`delete`) carries `action: "archive"｜"restore"｜"delete"`
@@ -294,6 +295,19 @@ receipt, cleared on the OWNER's own attention store (`session/attention.py`) —
 the unread mark is written by the owner's runtime and lives nowhere else, so a
 front end's receipt for a peer's row routes there rather than replicating a
 write it could not make truthfully.
+
+**`net_session_history` is §3.4's amendment, and it is the one op here that
+neither starts nor stops anything.** A cold read used to answer an empty page —
+the same envelope a conversation with no rows produces — while the rows sat on
+the owner's disk and a session that was DELIBERATELY STOPPED could never show
+them at all (no engage may warm a stopped session, by design). The op serves the
+owner's own `sessions/<id>/transcript.jsonl` through the same reader the owner's
+local `/history` uses, under the same visibility filter, and it carries
+`session_id` on the frame so the §7.2 session-scope rule already refuses an id
+this device does not hold: "not mine" is a refusal, "mine, no rows yet" is an
+empty page, and the two are now distinguishable at the wire. The full decision,
+including the merge-safety argument and the attachment degradation, is
+`docs/design/mesh-cold-read-stored-history.md`.
 
 Two properties of that vocabulary this design depends on, both already stated there:
 
@@ -576,8 +590,8 @@ implementation must make explicit rather than inherit by luck:
   reads "connecting to <device>…" instead of "0 messages". A remote viewer's blank
   first frame is a *visible* defect, not a cosmetic one, because the sidebar paints
   before the bind.
-* **History comes from the wire, and only the wire.** The modern path already does
-  this: when the auth frame negotiated `display_window`
+* **History comes from the OWNER, and only from the owner.** The modern path already
+  does this: when the auth frame negotiated `display_window`
   (`attach_client.py:1002-1009`) and the owner advertises
   `display-history-window-v1`, `_load_frontend_history` (`attached.py:4168`) hydrates
   from the sync's window and pages older rows through `history_page`
@@ -588,6 +602,22 @@ implementation must make explicit rather than inherit by luck:
   if the owner cannot serve a window, answer `ConnectionError("this peer's runtime is
   too old to serve history over the mesh; update it")` rather than replaying a
   local transcript that is not the session.
+
+  **AMENDED (`docs/design/mesh-cold-read-stored-history.md`, slice D5-core).** The
+  rule above is written as "the wire, and only the wire", and the WIRE is what it
+  was always protecting against reading locally — not against reading the owner.
+  What it forbids is `load_transcript_page(<root>/sessions/<id>)` **on the viewing
+  device**, where that path is at best absent and at worst a different conversation
+  wearing the same id. It does not forbid the OWNER's stored journal, which is the
+  wire's own source: when no runtime is attached (a cold session, or one
+  deliberately stopped — which no engage may warm, so no amount of waiting helps),
+  a read now falls back to `net_session_history`, served by the owner's own relay
+  out of the owner's own store, `view`-gated, and refused for an id the owner does
+  not hold. Nothing is read off the viewer's disk, nothing is started on the owner,
+  and the renderer's entry shape and id space are unchanged — so the two sources
+  merge by `id` exactly as a warm window's own pages do. `has_more`,
+  `cursor_missing` and the visibility filter come from the owner's reader, which is
+  the one the local `/history` uses.
 
 **Finding the owner over the mesh is not a local scan.** `_bind_under_lock`
 (`attached.py:3266`) re-reads `find_runtime_record` on every attempt

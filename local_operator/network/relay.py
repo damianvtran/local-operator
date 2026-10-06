@@ -2933,6 +2933,63 @@ def stream_close_machine_cause(cause: str) -> str:
 #: and shorter than any front end's patience with a "starting" row.
 ENGAGE_DEADLINE_S = 60.0
 
+#: The page bounds ``net_session_history`` accepts, and they are the DESKTOP
+#: ROUTE'S OWN (``DESKTOP_API.md``: ``GET .../{id}/history`` takes ``limit``
+#: 1..500). Declared here rather than inherited from the route because this frame
+#: arrives from a granted member rather than from the route's FastAPI validator,
+#: and a second, larger bound on the peer path would be a way to ask one device
+#: for a page no surface on it could request. The reply travels as ONE link frame
+#: under ``dial.MAX_SESSION_FRAME_BYTES`` (8 MiB), the same envelope every other
+#: session-plane reply is framed in; a page that exceeds it is refused by the
+#: link rather than silently truncated, which is the honest failure.
+SESSION_HISTORY_MIN_LIMIT = 1
+SESSION_HISTORY_MAX_LIMIT = 500
+SESSION_HISTORY_DEFAULT_LIMIT = 100
+
+
+#: How long THIS relay waits for a peer to answer ``net_session_history``.
+#:
+#: READ-SIZED, not spawn-sized: the owner answers off its own disk (a page is
+#: ~1.7 ms on the operator's 261 MB journal), so the only long legs are the link
+#: itself and ``_ensure_link``'s dial — and an unanswerable hop is refused in
+#: milliseconds. It is deliberately NOT ``engage_hop_bound_s`` (60 s): that budget
+#: exists because a cold engage SPAWNS a runtime, which this op by design never
+#: does, and a viewer whose page read could block for a minute would turn the
+#: desktop's read envelope into a hung request. A hop this expires on is reported
+#: to the reader as an UNSERVABLE page (``cursor_missing``), never as "there are
+#: no rows", which is the failure state the design note picks.
+SESSION_HISTORY_HOP_S = 6.0
+
+#: What a caller of the stored-page read adds over the hop before its own deadline.
+#: Small because there is nothing on this side left to wait for: the answer's trip
+#: back over the control socket, and the client's own read of it. (The move route
+#: uses 10 s + 15 s for the same two legs, but those budget a handoff that can hold
+#: a session for minutes; a page read has no such tail.)
+SESSION_HISTORY_CLIENT_MARGIN_S = 2.0
+
+
+def session_history_hop_bound_s() -> float:
+    """How long THIS relay waits for a peer to answer a stored-page read.
+
+    A FUNCTION beside :func:`engage_hop_bound_s` for the same reason it exists: a
+    caller that has to OUTLAST this hop must derive it rather than guess it, and
+    the two drifting apart is how a client gives up first and reports "no relay
+    answered" about a relay that is still working.
+    """
+    return SESSION_HISTORY_HOP_S
+
+
+def session_history_client_bound_s() -> float:
+    """THE CLIENT BOUND FOR A STORED-PAGE READ, derived from the hop it crosses.
+
+    ``session_history_hop_bound_s()`` plus this side's own margin the whole way
+    down to the reader — the control socket's answer travelling back and the
+    client's read of it. A caller shorter than the hop it asked for does not
+    report a slow peer; it reports no answer, which the reader is required to
+    mark unservable rather than render as an empty conversation.
+    """
+    return session_history_hop_bound_s() + SESSION_HISTORY_CLIENT_MARGIN_S
+
 
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
     """How long THIS relay waits for a peer to answer an engage (``_local_peer_call``).
@@ -3860,6 +3917,10 @@ class RelayServer:
             "net_session_create": self._op_session_create,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
+            # The stored-journal read beside them: same session plane, same
+            # ownership rule, and the ONE op here that neither starts nor stops
+            # anything on this device (see the handler).
+            "net_session_history": self._op_session_history,
             "net_session_lifecycle": self._op_session_lifecycle,
             "net_pair_ready": self._op_pair_ready,
             "net_pair_abort": self._op_pair_abort,
@@ -6743,6 +6804,111 @@ class RelayServer:
             return {"engaged": False, "detail": error, "session_id": session_id}
         return {"engaged": True, "detail": "runtime joining", "session_id": session_id}
 
+    def _op_session_history(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """One bounded page of THIS device's stored journal for one of its sessions.
+
+        WHY THE OWNER SERVES ITS OWN DISK (design ``docs/design/mesh-cold-read-
+        stored-history.md``). A cold read of a peer's session used to answer an
+        EMPTY page, because the viewer's only source was the wire and a session
+        with no runtime has no wire window — while a session on the reader's own
+        disk answers from its journal. The rows were never missing; they were on
+        the owner's disk, unreachable. This op reaches them through the SAME
+        reader the owner's own ``/history`` uses (``load_transcript_page`` over
+        ``transcript.py``'s backward page reader), so the two answers are one
+        contract rather than two that can drift.
+
+        IT STARTS NOTHING AND TAKES NO LEASE. The directory check below is a
+        filesystem read, and ``asyncio.run`` exists only to drive the async page
+        façade (whose own ``to_thread`` keeps the parse off this thread — the same
+        ``asyncio.run`` shape ``_op_session_stop`` uses for its async act). A
+        viewer must be able to read a session that is DELIBERATELY STOPPED, which
+        no engage may warm by design, so a read that spawned anything on the peer
+        would fail exactly the sessions this exists for. The relay owns that loop
+        and this handler runs on its own thread, so the page façade's process-wide
+        cache is touched from ONE thread here (its module docstring's rule) — the
+        relay is its own process (``lop network serve``), never a thread beside a
+        desktop server that mutates the same cache.
+
+        OWNERSHIP IS THE CHOKEPOINT'S, not this handler's: the frame names a
+        ``session_id``, so ``Authorizer._session_scope`` has already refused one
+        this device does not hold before dispatch, and ``local_session_ids``
+        (``authorizer.NetworkState.local_session_ids``) is the one rule both ends
+        read. The directory check restates the same fact
+        where the ANSWER is composed (``_engage_locally`` makes the identical
+        check), so "does not hold it" is a refusal while "holds it, no rows yet"
+        is an empty page, even if the two ever disagree.
+
+        The entries are the journal's own serialized rows — ``id``/``ts``/
+        ``type``/``payload``, REAL timestamps — filtered by the same visibility
+        predicate the local ``/history`` applies. A row's attachments are NOT
+        inlined: they live in the owner's store and the page contract has no size
+        cap to hide one in, so the reader degrades to the existing missing-media
+        placeholder (design §"Attachments degrade").
+        """
+        session_id = str(frame.get("session_id") or "")
+        if not session_id:
+            raise MeshRefusal("protocol_error", "net_session_history must name a session_id")
+        directory = self.root / "sessions" / session_id
+        if not directory.is_dir():
+            raise MeshRefusal(
+                "unknown_session", f"{self._own_label()} does not hold a session {session_id}"
+            )
+        raw_before = frame.get("before_id")
+        before_id = str(raw_before) if raw_before else None
+        limit = self._history_limit(frame.get("limit"))
+
+        from local_operator.harness.rows import visible_transcript_rows
+        from local_operator.session.page_cache import load_transcript_page
+
+        try:
+            page = asyncio.run(
+                load_transcript_page(str(directory), before_id=before_id, limit=limit)
+            )
+        except FileNotFoundError:
+            # THE LOCAL ROUTE'S OWN ANSWER for a session whose journal has not been
+            # written yet: an empty page, and a cursor into it is a cursor that
+            # cannot be trusted (``desktop_sessions.history``'s reconcile branch).
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": bool(before_id),
+                "has_newer": None,
+            }
+        return {
+            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
+            "has_more": page.has_more,
+            # ``reconciled`` is the reader's word for "the cursor was not found, so
+            # this page is the tail rather than a continuation" — the same field
+            # the local envelope maps to ``cursor_missing``.
+            "cursor_missing": page.reconciled,
+            "has_newer": page.has_newer,
+        }
+
+    def _history_limit(self, raw: Any) -> int:
+        """Validate the page size a peer asked for, refusing rather than clamping.
+
+        A REFUSAL rather than a clamp, because a clamp answers a different question
+        than the one asked and the caller cannot tell: ``{before_id, limit}`` is a
+        POSITION, and silently serving 500 rows for a request of 5000 would let a
+        reader believe it had the whole tail. The bound is the desktop route's own
+        (see :data:`SESSION_HISTORY_MAX_LIMIT`).
+        """
+        if raw is None:
+            return SESSION_HISTORY_DEFAULT_LIMIT
+        try:
+            limit = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise MeshRefusal(
+                "protocol_error", f"limit must be a whole number, not {raw!r}"
+            ) from exc
+        if not SESSION_HISTORY_MIN_LIMIT <= limit <= SESSION_HISTORY_MAX_LIMIT:
+            raise MeshRefusal(
+                "protocol_error",
+                f"limit must be between {SESSION_HISTORY_MIN_LIMIT} and "
+                f"{SESSION_HISTORY_MAX_LIMIT}, not {limit}",
+            )
+        return limit
+
     def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).
 
@@ -8844,6 +9010,7 @@ class RelayServer:
             "peer_session_create": self._ctl_peer_create,
             "peer_session_engage": self._ctl_peer_engage,
             "peer_session_stop": self._ctl_peer_stop,
+            "peer_session_history": self._ctl_peer_history,
         }
 
     def _ctl_ls(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
@@ -9683,6 +9850,28 @@ class RelayServer:
             # working. Every other mode answers quickly (skip/refuse) and keeps the
             # default budget.
             timeout=forced_stop_deadline_s() if mode == "immediate" else None,
+        )
+
+    def _ctl_peer_history(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Fetch one page of a peer's STORED journal, for this device's own viewer.
+
+        A READ-SIZED HOP, not the engage/spawn budget ``_local_peer_call``
+        defaults to: the owner answers off its own disk, and a viewer that waited
+        60 s for a page it could have had in milliseconds would read as a hung
+        peer. The bound is :func:`session_history_hop_bound_s` — the same number
+        the client half derives its own deadline from
+        (``session_history_client_bound_s``), so the two cannot drift. A hop that
+        expires is reported to the reader as an UNSERVABLE page rather than as a
+        refusal (see ``DesktopSessionBridge._remote_history``).
+        """
+        limit = frame.get("limit")
+        return self._local_peer_call(
+            "net_session_history",
+            str(frame.get("peer") or ""),
+            timeout=session_history_hop_bound_s(),
+            session_id=str(frame.get("session_id") or ""),
+            before_id=(str(frame["before_id"]) if frame.get("before_id") else None),
+            limit=(int(limit) if isinstance(limit, int) else SESSION_HISTORY_DEFAULT_LIMIT),
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:

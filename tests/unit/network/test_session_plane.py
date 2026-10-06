@@ -204,6 +204,59 @@ def _seed(root: Path, session_id: str) -> None:
     (directory / "transcript.jsonl").write_text("", encoding="utf-8")
 
 
+def _seed_journal(root: Path, session_id: str, texts: list[str]) -> list[str]:
+    """Write a REAL journal on ``root`` and answer the entry ids it holds, in order.
+
+    Real ``TranscriptEntry`` rows through the product's own encoder, rather than
+    hand-written JSON, because the ids are the claim under test: the entry id IS
+    the message id (``transcript.encode_message_payload`` excludes ``id``), which
+    is what makes a stored page and a later wire window merge under one key. A
+    hand-built line would assert that claim about a shape nothing writes.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    ids: list[str] = []
+    for index, text in enumerate(texts):
+        message = Message.user(text)
+        # A DISTINCT, INCREASING ts per row: real timestamps are half of what this
+        # source adds over the wire (which can only date a page by its serve time),
+        # so a fixture that stamped them all alike would not pin the difference.
+        entry = TranscriptEntry(
+            message.id, 1_700_000_000.0 + index, ENTRY_MESSAGE, encode_message_payload(message)
+        )
+        lines.append(entry.to_json())
+        ids.append(message.id)
+    (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return ids
+
+
+def _append_hidden_row(root: Path, session_id: str) -> str:
+    """Append one row a human transcript must never serve, and answer its id.
+
+    A ``patience`` tool RESULT row: the ledger row UX round 1 (U2) found painting
+    a timer the user was promised they would never see. The owner's relay must drop
+    it exactly as the local ``/history`` does — that filter is the reason this
+    predicate moved into ``harness/rows.py`` rather than being copied.
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    directory = root / "sessions" / session_id
+    entry = TranscriptEntry(
+        "hidden000001", 1_700_000_500.0, ENTRY_MESSAGE, {"role": "tool", "tool_name": "patience"}
+    )
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(entry.to_json() + "\n")
+    return entry.id
+
+
 def _warm(root: Path, session_id: str) -> None:
     """Start the owning runtime for a seeded session, the relay's own way."""
     from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -1253,6 +1306,139 @@ def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
         _stop_all(served)
 
 
+def test_a_peer_reads_a_cold_sessions_stored_journal(peer_pair: Devices, monkeypatch) -> None:
+    """D5-core: a session no runtime holds is READ, not answered as empty.
+
+    The defect this pins (design ``docs/design/mesh-cold-read-stored-history.md``):
+    a cold read of a peer session served ``{entries: [], has_more: false}`` — the
+    same envelope a conversation with no rows produces — while the rows sat on the
+    owner's disk, on the very path the owner's own ``/history`` reads. Four facts,
+    each a requirement:
+
+    * the OWNER's journal is the source: the ids and timestamps are the entries'
+      own, not a page dated when it was served;
+    * NOTHING IS STARTED on the owner: the session is still ``stored`` afterwards,
+      which is the whole point for a deliberately stopped conversation that no
+      engage may warm;
+    * the SERVE-TIME ``ts`` compromise the wire path documents does not apply here;
+    * the page is the local page's contract (``has_more``/``cursor_missing``).
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["the first question", "the second"])
+    # A row a human surface must never serve rides the same journal: filtering is
+    # part of the contract, not a property of the transport.
+    hidden = _append_hidden_row(server_b.root, SESSION)
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        assert reply.get("op") == "ack", reply
+        page = reply["detail"]
+        assert [entry["id"] for entry in page["entries"]] == ids, page
+        assert [entry["ts"] for entry in page["entries"]] == [1_700_000_000.0, 1_700_000_001.0]
+        assert hidden not in json.dumps(page["entries"]), "a hidden tool row reached the wire"
+        assert all(entry["type"] == "message" for entry in page["entries"])
+        assert page["has_more"] is False
+        assert page["cursor_missing"] is False
+        # THE READ STARTED NOTHING: the owner still has no runtime for the id, so
+        # the row it lists is the stored one. A read that engaged would have flipped
+        # this to a live state -- and would be the exact failure this op exists to
+        # avoid for a session that was DELIBERATELY stopped.
+        states = [
+            row.get("state")
+            for row in server_b.local_session_rows()
+            if row.get("session_id") == SESSION
+        ]
+        assert states == ["stored"], f"a cold read left the owner at {states}"
+    finally:
+        link.close("test")
+
+
+def test_the_stored_page_paginates_and_refuses_what_it_cannot_serve(
+    peer_pair: Devices, monkeypatch
+) -> None:
+    """The page contract, the bound, and the refusal that must not read as empty.
+
+    Three answers the wire cannot give today, in one cell because they are one
+    contract: a bounded page with a working cursor, an OWNED session with no rows
+    (an empty page), and an id this device does not hold (a REFUSAL). The last two
+    are the distinction the design states as the point of the change — "empty"
+    now means the owner has no rows.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, [f"question {index}" for index in range(4)])
+    _seed(server_b.root, "aaaabbbb0001")
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        first = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=2,
+        )["detail"]
+        assert [entry["id"] for entry in first["entries"]] == ids[-2:], first
+        assert first["has_more"] is True, "a page with older rows behind it claimed the end"
+
+        # THE CURSOR IS THE OLDEST ROW SERVED, and the next page continues BELOW it.
+        older = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            before_id=ids[-2],
+            limit=2,
+        )["detail"]
+        assert [entry["id"] for entry in older["entries"]] == ids[:2], older
+        assert older["has_more"] is False
+
+        # OWNED, NO ROWS: an empty page that does NOT claim reconciliation.
+        empty = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id="aaaabbbb0001",
+        )["detail"]
+        assert empty["entries"] == [] and empty["cursor_missing"] is False, empty
+
+        # NOT OWNED: a refusal by name, never an empty page. The SENTENCE is what
+        # is asserted, not the code: an authoriser refusal crosses the wire codeless
+        # by design (``wire.refusal_frame`` — which guard fired is not something a
+        # remote peer is told), so the local control layer reports its own
+        # ``peer_refused`` and the peer's words are the whole answer.
+        unowned = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id="ffffffffffff",
+        )
+        assert unowned.get("op") == "error", unowned
+        assert "does not live on this device" in str(unowned.get("message")), unowned
+
+        # A BOUND THE ROUTE WOULD REFUSE IS REFUSED HERE TOO, rather than clamped:
+        # a clamped answer is a different page than the one asked for.
+        over = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=5000,
+        )
+        assert over.get("op") == "error", over
+        assert "between 1 and 500" in str(over.get("message")), over
+    finally:
+        link.close("test")
+
+
 def test_a_stored_session_refuses_a_peek_and_stays_cold(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1635,6 +1821,68 @@ def test_the_engage_hop_and_its_client_bound_cannot_drift() -> None:
     # client follows it rather than staying at the default's arithmetic.
     assert relay.engage_hop_bound_s(120.0) == 120.0
     assert relay.engage_client_bound_s(120.0) > 120.0
+
+
+def test_the_stored_page_hop_and_its_client_bound_cannot_drift() -> None:
+    """The same structural rule for the read-sized page bound.
+
+    A page read is not a spawn, so it must NOT inherit the engage hop's 60 s — and
+    the client that waits for it must outlast whatever hop is sent. Both halves
+    are derived from ``session_history_hop_bound_s()``, so an edit to either one
+    either moves both or fails here.
+    """
+    assert relay.session_history_hop_bound_s() == relay.SESSION_HISTORY_HOP_S
+    assert (
+        relay.session_history_hop_bound_s() < relay.engage_hop_bound_s()
+    ), "a stored page read must not wait out a runtime spawn's budget"
+    assert relay.session_history_client_bound_s() > relay.session_history_hop_bound_s()
+
+
+def test_the_stored_page_hop_is_sent_as_a_read_sized_budget(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the CLI-facing op actually issues: one short hop, and the peer named.
+
+    The LINK is the only thing stubbed (the ``_ctl_peer_stop`` precedent), so the
+    request asserted is the frame this code really sends — including the fact that
+    a page request carries NO default engage budget, which is the difference
+    between a reader that answers in milliseconds and one that can hold a desktop
+    read envelope open for a minute.
+    """
+    server_a, _server_b, _host, _port = peer_pair
+    seen: list[tuple[str, float | None, dict[str, Any]]] = []
+    detail = {"entries": [{"id": "e1"}], "has_more": False, "cursor_missing": False}
+
+    class _RecordingLink:
+        def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            seen.append((str(frame.get("op")), timeout, dict(frame)))
+            return {"op": "ack", "req": frame.get("req"), "detail": dict(detail)}
+
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: _RecordingLink())
+
+    reply = server_a.control_dispatch(
+        "peer_session_history",
+        {
+            "peer": "d_" + "c" * 32,
+            "session_id": SESSION,
+            "before_id": "e9",
+            "limit": 25,
+            "req": 1,
+        },
+    )
+    assert reply["op"] == "ack", reply
+    assert reply["detail"] == detail
+    op, timeout, frame = seen[0]
+    assert op == "net_session_history"
+    assert (
+        timeout == relay.session_history_hop_bound_s()
+    ), "the page hop inherited a budget built for a spawn"
+    assert frame["session_id"] == SESSION and frame["before_id"] == "e9"
+    assert frame["limit"] == 25
+    # ``locality: remote`` is declared by ``_local_peer_call``, never taken from the
+    # frame that arrived (the chokepoint refuses a claimed ``local``).
+    assert frame["locality"] == "remote"
 
 
 def test_a_remote_owner_refuses_closed_when_there_is_no_relay(tmp_path: Path) -> None:

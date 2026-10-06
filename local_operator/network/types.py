@@ -293,6 +293,17 @@ NET_OPS: tuple[str, ...] = (
     "net_session_create",
     "net_session_engage",
     "net_session_stop",
+    # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
+    # stored-history.md, slice D5-core). Its own name rather than a phase of
+    # ``net_session_engage`` because it starts NOTHING on the peer: it is the
+    # read a cold session's viewer used to answer as an empty page, served from
+    # the owner's own stored session journal under the same semantics the
+    # owner's own ``/history`` uses. Capability ``view``, the same row
+    # ``net_session_engage`` and ``net_sync`` carry — the act of opening a
+    # conversation is a read — and its frame names a ``session_id``, so the
+    # authoriser's session-scope rule decides ownership at the chokepoint: a
+    # session this device does not hold is a REFUSAL, never an empty page.
+    "net_session_history",
     # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
     # rather than part of a session op: a definition is install-wide
     # configuration with no owner device, and a create that named one had
@@ -367,6 +378,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # The client half of ``net_session_history`` (same boundary rule as the four
+    # above): a viewer asking ITS OWN relay to fetch a page of a peer's stored
+    # journal. A local name, so it may never appear in ``OP_CAPABILITY`` — the
+    # peer-scope half is the ``net_session_history`` row.
+    "peer_session_history",
     # The readiness report (readiness.py): a VIEWER asks its own relay whether
     # one peer (or every peer) can complete work offloaded to it — the link's
     # own reachability, then the peer's install facts. A local op by the
@@ -537,6 +553,13 @@ OP_CAPABILITY: dict[str, str | None] = {
     "net_session_create": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
+    # ``view``, and the conservative end of the choice for the same reason the
+    # three above it record theirs: a member that may WATCH a session here may
+    # read the bytes its runtime would have served anyway. It adds no new
+    # authority — the same rows already cross the wire whenever a runtime is warm
+    # — and it writes nothing on either device, so ``prompt`` (which would let a
+    # viewer start a turn) is broader than the act needs.
+    "net_session_history": "view",
     # ``admin``, and the conservative choice is deliberate. Installing a
     # definition writes DURABLE, install-wide state on the receiving device and
     # changes what every FUTURE session there resolves by name — which is
