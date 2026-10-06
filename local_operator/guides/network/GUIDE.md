@@ -287,6 +287,11 @@ written to the peer. It reads LIVE sessions only — a stored one REFUSES and
 names the warm-up (`--engage`) rather than starting a runtime on a device nobody
 is watching — and it takes no text.
 
+INSIDE A SESSION the same acts are one tool call: the `network` tool's `sessions`
+action carries `send`/`steer`/`slash` (a session id or name) with `text`, and
+returns the owner's receipt — for `--send`, the `reply` field is the owner's
+answer.
+
 THE DRIVING PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is
 the one that starts a new one, and `--peek` is the one that only reads). They open
 the same viewer the TUI's sidebar pick and `lop
@@ -299,6 +304,12 @@ inside a session. `--send` exits 0 only for a turn that REACHED its end; a turn 
 failed there, is still running, or was queued for a retiring runtime exits 1 with
 `outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
 delivery as a completion.
+
+THE INBOUND LEG IS PROMPT ADMISSION, NOT A SECOND WIRE OP: a send from another
+device is delivered through the owner's own prompt admission (the
+attached-viewer path, `viewer.prompt_and_wait`); the owner decides prompt vs
+steer exactly as it does for a local composer; there is no separate inbound
+wire op.
 
 THE TEXT IS WHAT FOLLOWS THE LAST FLAG THIS COMMAND READS, taken as-is to the end
 of the command line. A prompt that talks about flags is delivered whole —

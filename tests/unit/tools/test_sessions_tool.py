@@ -943,12 +943,12 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="stop", prompt="p"))
     assert refusal is not None
     assert refusal.startswith("`prompt` applies to spawn/resume only. ")
-    assert "`stop` takes: session|target|pid." in refusal
+    assert "`stop` takes: session|target|pid, peer." in refusal
     assert refusal.endswith("Call op='help' for the full per-op reference.")
     refusal = _sessions_validation_error(SessionsParams(op="list", session="a"))
     assert refusal is not None
     assert refusal.startswith("`session` does not apply to op='list' — it takes no address. ")
-    assert "`list` takes: include_stored, limit, query." in refusal
+    assert "`list` takes: peer, scope, include_stored, limit, query." in refusal
     refusal = _sessions_validation_error(SessionsParams(op="spawn", prompt="go", target="x"))
     assert refusal is not None and "creates a new session" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="info"))
@@ -997,13 +997,22 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     as before). The tool DESCRIPTION is unchanged (230), because the statement
     belongs on the field it governs, not in the per-op summary. The full
     vocabulary stays in ``op='help'``.
+
+    RAISED 1099 -> 1213 and 231 -> 273 for the mesh fields
+    (``feat/sessions-remote-tools-b``): ``peer`` and ``scope`` add two
+    properties to the schema (1,212 measured with this test's own ruler; their
+    descriptions are the design §4 strings verbatim, drafted lean there), and
+    the description gains §4's one mesh clause (272 measured — the derived
+    per-op summary grows across five ops and the clause itself is one
+    sentence). The ceilings are the measured figures + 1, the same knife-edge
+    headroom as every pin above.
     """
     from local_operator.compaction.tokens import count_text_tokens
     from local_operator.tools.builtin import _SESSIONS_TOOL_DESCRIPTION
 
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
-    assert count_text_tokens(params) <= 1099
-    assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 231
+    assert count_text_tokens(params) <= 1213
+    assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
 # --- peek (PR B): bounded transcript inspection ------------------------------
@@ -1541,7 +1550,7 @@ def test_peek_validation_refusals_are_legible() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="info", target="x", steps=4))
     assert refusal is not None
     assert refusal.startswith("`steps` applies to op='peek' only. ")
-    assert "`info` takes: session|target|pid." in refusal
+    assert "`info` takes: session|target|pid, peer." in refusal
 
 
 # ---------------------------------------------------------------------------
@@ -1642,7 +1651,7 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     assert result.is_error
     assert result.text == (
         "`timeout_ms` is not a sessions parameter. `resume` takes: "
-        "session|target|pid, prompt, background, paused, failed, all, dry_run, limit. "
+        "session|target|pid, peer, prompt, background, paused, failed, all, dry_run, limit. "
         "Call op='help' for the full per-op reference."
     )
     assert (result.details or {}).get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
@@ -2108,3 +2117,429 @@ async def test_a_role_word_address_is_refused_for_every_target_op(
         assert "no session matches" not in result.text
     finally:
         registry.unpublish(record.pid, root)
+
+
+# ---------------------------------------------------------------------------
+# PR-B: the mesh — another device's sessions (design §3C, §5, §9)
+# ---------------------------------------------------------------------------
+
+PEER = "cloud-node-1"
+
+
+def _fed_doc(**overrides: Any) -> dict[str, Any]:
+    """A family ``--json`` catalogue document, in the CLI's own shape.
+
+    The local-locality row is the half the tool MUST drop (it is this device's
+    own catalogue, already in hand); the remote rows carry the ``locality`` and
+    ``peer`` markers the federated listing pins.
+    """
+    block = {"device_id": "d_b", "name": PEER, "reachable": True, "reason": ""}
+    doc: dict[str, Any] = {
+        "ok": True,
+        "sessions": [
+            {
+                "session_id": "dddd77778888",
+                "conversation_name": "fed-local",
+                "state": "live",
+                "locality": "local",
+                "peer": None,
+            },
+            {
+                "session_id": "aaaa11112222",
+                "conversation_name": "shared-one",
+                "state": "live",
+                "started": 10.0,
+                "locality": "remote",
+                "peer": block,
+            },
+            {
+                "session_id": "bbbb33334444",
+                "conversation_name": "second",
+                "state": "stored",
+                "started": 5.0,
+                "locality": "remote",
+                "peer": block,
+            },
+        ],
+        "peers": {"d_b": block},
+        "device_name": "this-device",
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _fake_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+    *,
+    rc: int = 0,
+    calls: list[tuple[list[str], float]] | None = None,
+) -> None:
+    """Replace the ONE process boundary a mesh op has: the child call.
+
+    ``_mesh_cli_json`` is where the subprocess ends and the parsed document
+    begins, so a double here exercises every line of the tool's own logic —
+    argv construction included, since the fake receives what the tool spelled.
+    """
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        if calls is not None:
+            calls.append((argv, timeout))
+        return rc, payload, ""
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+
+
+@pytest.mark.asyncio
+async def test_list_is_a_union_of_local_and_remote_rows_with_the_device_on_each(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3C: `list` defaults to local+remote, drops the federated
+    document's own-locality rows, and marks every remote row with the device
+    that holds it."""
+    _session(root, "cccc55556666", "local-stored")
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _fed_doc(), calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "include_stored": True, "limit": 10}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "[stored] local-stored" in result.text
+    assert "[live] shared-one" in result.text and "on cloud-node-1" in result.text
+    # The document's own-locality row is this device's catalogue, already in
+    # hand — merging it would list local sessions twice.
+    assert "fed-local" not in result.text
+    details = result.details or {}
+    assert details["scope"] == "all"
+    assert [row["session_id"] for row in details["rows"]] == [
+        "cccc55556666",
+        "aaaa11112222",
+        "bbbb33334444",
+    ]
+    assert calls == [(["network", "sessions", "--json", "--all-peers"], 30.0)]
+
+
+@pytest.mark.asyncio
+async def test_list_scope_remote_and_peer_narrow_the_fetch(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _session(root, "cccc55556666", "local-stored")
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _fed_doc(), calls=calls)
+    result = await execute_sessions(
+        "t",
+        {"op": "list", "scope": "remote", "peer": PEER, "limit": 10},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert "local-stored" not in result.text
+    assert "shared-one" in result.text
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+
+
+@pytest.mark.asyncio
+async def test_list_with_no_mesh_degrades_to_local_rows_and_one_note(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3C: a relay that cannot be asked is ONE note on what WAS
+    readable, never an empty answer dressed as a complete one — and never an
+    error, because the local half is a real result."""
+    _session(root, "cccc55556666", "local-stored")
+    _fake_mesh(
+        monkeypatch,
+        {
+            "ok": False,
+            "code": "relay_unavailable",
+            "message": "the relay is not running; start it with `lop network start`",
+        },
+        rc=1,
+    )
+    result = await execute_sessions(
+        "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "local-stored" in result.text
+    assert result.text.count("no remote rows") == 1
+    assert "lop network start" in result.text
+    # scope='remote' has no local half, so the note IS the answer — still one.
+    result = await execute_sessions(
+        "t", {"op": "list", "scope": "remote"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "no remote rows" in result.text
+    assert "shared-one" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_list_names_unreachable_peers_and_caps_the_merged_union(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mesh half may not unbounded-grow the listing (the cap applies
+    POST-merge), and a device that did not answer is named rather than
+    silently dropped."""
+    doc = _fed_doc()
+    doc["peers"]["d_c"] = {
+        "device_id": "d_c",
+        "name": "old-box",
+        "reachable": False,
+        "reason": "connect_failed:ConnectionRefusedError",
+    }
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "list", "scope": "remote", "limit": 1}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "old-box: unreachable" in result.text
+    assert "2 rows available; 1 shown" in result.text
+    assert len((result.details or {})["rows"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_info_resolves_a_name_or_id_and_refuses_ambiguity(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3C: info selects via the shared resolver; an ambiguous name lists the
+    candidate rows rather than guessing, and a miss says what IS held."""
+    _fake_mesh(monkeypatch, _fed_doc())
+    result = await execute_sessions(
+        "t", {"op": "info", "peer": PEER, "target": "shared"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "shared-one" in result.text and "held by cloud-node-1" in result.text
+    assert (result.details or {})["session_id"] == "aaaa11112222"
+
+    result = await execute_sessions(
+        "t", {"op": "info", "peer": PEER, "session": "bbbb33334444"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "second" in result.text
+
+    doc = _fed_doc()
+    doc["sessions"].append(
+        {
+            "session_id": "eeee99990000",
+            "conversation_name": "shared-two",
+            "state": "live",
+            "started": 1.0,
+            "locality": "remote",
+            "peer": {"device_id": "d_b", "name": PEER, "reachable": True, "reason": ""},
+        }
+    )
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "info", "peer": PEER, "target": "shared"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "2 sessions matching" in result.text
+    assert "aaaa11112222" in result.text and "eeee99990000" in result.text
+
+    result = await execute_sessions(
+        "t", {"op": "info", "peer": PEER, "target": "nope"}, None, None, _context(root)
+    )
+    assert result.is_error and "does not hold" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_peek_reads_a_tail_and_relays_the_stored_gate(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3C with §8.3: the tail window where the session LIVES; a stored
+    session's refusal (raised by the CLI BEFORE any bind) arrives verbatim,
+    already naming the warm-up."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(
+        monkeypatch,
+        {
+            "ok": True,
+            "session_id": "aaaa11112222",
+            "peer": PEER,
+            "verb": "peek",
+            "steps": 2,
+            "rows": [
+                {"role": "user", "text": "hi"},
+                {"role": "assistant", "text": "there"},
+            ],
+            "has_older": True,
+        },
+        calls=calls,
+    )
+    result = await execute_sessions(
+        "t",
+        {"op": "peek", "peer": PEER, "session": "aaaa11112222", "steps": 2},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert "1. user: hi" in result.text and "2. assistant: there" in result.text
+    assert calls == [
+        (
+            [
+                "network",
+                "sessions",
+                "--json",
+                "--peer",
+                PEER,
+                "--peek",
+                "aaaa11112222",
+                "--steps",
+                "2",
+            ],
+            net_pilot_bound(),
+        )
+    ]
+
+    _fake_mesh(
+        monkeypatch,
+        {
+            "ok": False,
+            "code": "session_stored",
+            "message": (
+                "aaaa11112222 is stored on cloud-node-1, so there is nothing running "
+                "to read — a peek never starts a runtime there. Warm it first: `lop "
+                "network sessions --peer cloud-node-1 --engage aaaa11112222` (an "
+                "agent resumes with `sessions` op='resume'), then peek."
+            ),
+        },
+        rc=1,
+    )
+    result = await execute_sessions(
+        "t", {"op": "peek", "peer": PEER, "session": "aaaa11112222"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "--engage" in result.text and "op='resume'" in result.text
+
+
+def net_pilot_bound() -> float:
+    """The pilot act's bound, read from the surface under test (one home)."""
+    from local_operator.tools import builtin
+
+    return builtin._mesh_pilot_timeout_s()
+
+
+@pytest.mark.asyncio
+async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """send/engage/stop/create — each op's exact spelling and §3A bound,
+    captured at the process boundary the tool owns."""
+    calls: list[tuple[list[str], float]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        calls.append((argv, timeout))
+        if "--send" in argv:
+            return (
+                0,
+                {
+                    "session_id": "s1",
+                    "peer": PEER,
+                    "verb": "send",
+                    "ok": True,
+                    "outcome": "finished",
+                    "reply": "r",
+                },
+                "",
+            )
+        if "--engage" in argv:
+            return 0, {"ok": True, "engaged": True, "detail": "runtime joining"}, ""
+        if "--stop" in argv:
+            return 0, {"ok": True, "outcome": "stopped", "detail": "stopped (pid 4)"}, ""
+        return 0, {"ok": True, "session_id": "s_new", "admitted": True}, ""
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    await execute_sessions(
+        "t", {"op": "resume", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    await execute_sessions(
+        "t",
+        {"op": "spawn", "peer": PEER, "prompt": "go", "model": "anthropic/claude-sonnet-5-5"},
+        None,
+        None,
+        _context(root),
+    )
+    assert calls == [
+        (["network", "sessions", "--json", "--peer", PEER, "--send", "s1", "--", "go"], 600.0),
+        (["network", "sessions", "--json", "--peer", PEER, "--engage", "s1"], 180.0),
+        (["network", "sessions", "--json", "--peer", PEER, "--stop", "s1"], 300.0),
+        (
+            [
+                "network",
+                "sessions",
+                "--json",
+                "--peer",
+                PEER,
+                "--create",
+                "--prompt",
+                "go",
+                "--hosting",
+                "anthropic",
+                "--model",
+                "claude-sonnet-5-5",
+            ],
+            180.0,
+        ),
+    ]
+    # A bare model id cannot be split; refused BEFORE any child exists.
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "peer": PEER, "prompt": "go", "model": "bare"},
+        None,
+        None,
+        _context(root),
+    )
+    assert result.is_error and "<provider>/<model-id>" in result.text
+    assert len(calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_names_the_cli_force_escalation_on_skipped(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8.4: no force in the tool — the one outcome whose remedy is a flag
+    names the CLI escalation instead."""
+    _fake_mesh(
+        monkeypatch,
+        {"ok": False, "outcome": "skipped", "detail": "A turn is in flight there."},
+        rc=1,
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error  # the ladder did not end it
+    assert "lop network sessions --peer cloud-node-1 --stop s1 --force" in result.text
+
+
+def test_mesh_field_refusals_name_the_local_route() -> None:
+    """The remote/local composition refusals: each names the field that does
+    not apply and the route that does, rather than dropping it silently."""
+    refusal = _sessions_validation_error(
+        SessionsParams(op="peek", peer="p", session="s", query="q")
+    )
+    assert refusal is not None
+    assert (
+        "reads THIS device's transcript" in refusal and "drop `peer` for the local read" in refusal
+    )
+    refusal = _sessions_validation_error(SessionsParams(op="list", peer="p", scope="local"))
+    assert refusal is not None and "drop one" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="list", scope="remote", query="q"))
+    assert refusal is not None and "list with `scope='local'`" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="resume", peer="p", all=True))
+    assert refusal is not None and "set form" in refusal
+    refusal = _sessions_validation_error(
+        SessionsParams(op="spawn", peer="p", prompt="go", visibility="workstream")
+    )
+    assert refusal is not None and "minted on that device" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="info", peer="p", session="s", pid=3))
+    assert refusal is not None and "`pid` names a process on THIS machine" in refusal

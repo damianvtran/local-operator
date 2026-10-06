@@ -220,7 +220,7 @@ def test_the_sessions_action_is_tiered_by_what_it_does_not_by_its_name() -> None
     tier = tool.call_approval_tier
     assert tier({"action": "sessions", "peer": "device-b"}) == "read"
     assert tier({"action": "sessions", "all_peers": True}) == "read"
-    for verb in ("create", "engage", "stop", "delete"):
+    for verb in ("create", "engage", "stop", "delete", "send", "steer", "slash"):
         assert tier({"action": "sessions", "peer": "device-b", verb: "s1"}) == "write", verb
     # A model that sends the boolean as text is not a read either.
     assert tier({"action": "sessions", "peer": "device-b", "create": "true"}) == "write"
@@ -262,13 +262,24 @@ def test_the_argv_carries_no_confirmation_and_no_token_printing_flag() -> None:
         # escalates because ``--force`` is.
         NetworkParams(action="sessions", peer="device-b", delete="s1"),
         NetworkParams(action="sessions", peer="device-b", stop="s1"),
+        # The pilot acts could not spell one either: the text is DATA after
+        # ``--``, so even a payload that opens with a dash-shaped word is
+        # delivered to the peer rather than read as a flag.
+        NetworkParams(action="sessions", peer="device-b", send="s1", text="--force it"),
+        NetworkParams(action="sessions", peer="device-b", steer="s1", text="--yes"),
+        NetworkParams(action="sessions", peer="device-b", slash="s1", text="/rename x"),
         NetworkParams(action="sessions", peer="device-b", create=True, prompt="hi"),
         NetworkParams(action="trust", network="devmesh", trust_state="untrusted"),
     ]
     for params in samples:
         argv, problem = net_tool._argv_for(params)
         assert problem == ""
-        assert not (set(argv) & forbidden), argv
+        # Only the FLAG REGION is checked for the forbidden spellings: a pilot
+        # act's text rides after ``--``, where the CLI reads it as DATA — the
+        # sample above delivers a payload that literally spells ``--yes`` and
+        # still cannot act as one, which is the property this test pins.
+        flag_region = argv[: argv.index("--")] if "--" in argv else argv
+        assert not (set(flag_region) & forbidden), argv
 
 
 def test_the_tool_exposes_no_way_to_answer_a_park() -> None:
@@ -329,7 +340,7 @@ def test_the_tier_and_the_argv_read_the_same_verb_set() -> None:
     readers now share one predicate, and every falsy spelling is asserted on BOTH —
     tier and argv — so a divergence fails here rather than in the audit."""
     for value in ("0", "false", "no", "none", "null", "", "  "):
-        for verb in ("stop", "delete", "engage"):
+        for verb in ("stop", "delete", "engage", "send", "steer", "slash"):
             raw: dict[str, Any] = {"action": "sessions", "peer": "d1", verb: value}
             assert net_tool._approval_tier(raw) == "read", (verb, value)
             argv, problem = net_tool._argv_for(NetworkParams(**raw))
@@ -364,7 +375,10 @@ def test_the_description_teaches_the_two_phase_pair_and_drops_the_old_claim() ->
     assert tool is not None
     text = tool.description
     assert "Read and drive a lop mesh network from this device" in text
-    assert "creating a session on a peer" in text
+    # PR-B replaced the tail clause with the pilot family's advertisement (§4):
+    # the sessions action now carries send/steer/slash too, and a description
+    # that still said only "creating a session on a peer" would hide them.
+    assert "send/steer/slash a conversation" in text
     assert "not reachable" not in text
     assert "Pairing and incident controls need a human" in text
     # The two clauses that make the guarantee true as written: the tool parks and
@@ -1439,3 +1453,227 @@ def test_the_agent_digest_does_not_call_a_wedged_relay_not_running() -> None:
     stopped = dict(wedged, relay_running=False, relay_answering=False, relay_state="stopped")
     stopped_lines = net_tool._render("status", stopped)  # noqa: SLF001 — the renderer under test
     assert any(line == "relay:     not running" for line in stopped_lines), stopped_lines
+
+
+# ---------------------------------------------------------------------------
+# PR-B: the pilot acts (send/steer/slash) on a peer's session
+# ---------------------------------------------------------------------------
+
+
+def test_a_pilot_act_spells_json_before_the_act_and_text_after_the_separator() -> None:
+    """Design §3A, as a pin — the ordering IS the behaviour here.
+
+    ``--json`` must precede the act flag and the text must ALWAYS follow ``--``:
+    the CLI takes the payload as a REMAINDER from the first non-option token, so
+    a trailing ``--json`` would be delivered to the peer AS TEXT. The proof case
+    is a text that itself begins with ``--json`` — the shape that reads wrong if
+    either rule is dropped.
+    """
+    argv, problem = net_tool._argv_for(  # noqa: SLF001 — the builder under test
+        NetworkParams(action="sessions", peer="device-b", send="t1", text="--json is the field")
+    )
+    assert problem == ""
+    assert argv == [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        "device-b",
+        "--send",
+        "t1",
+        "--",
+        "--json is the field",
+    ]
+    assert argv.count("--json") == 1
+    assert argv.index("--json") < argv.index("--send")
+    for params, verb in (
+        (NetworkParams(action="sessions", peer="device-b", steer="t1", text="x"), "steer"),
+        (NetworkParams(action="sessions", peer="device-b", slash="t1", text="x"), "slash"),
+    ):
+        argv, problem = net_tool._argv_for(params)  # noqa: SLF001
+        assert problem == ""
+        assert argv.index("--json") < argv.index(f"--{verb}")
+        assert argv[-2] == "--" and argv[-1] == "x", argv
+
+
+def test_the_pilot_guards_are_the_clis_one_act_rule_in_the_tools_words() -> None:
+    """Exactly one act; an act beside create/engage/stop/delete is refused with
+    the CLI's own contrast; an empty text is refused BEFORE the child exists —
+    the CLI's stdin fallback is unreachable behind DEVNULL, so its own "needs
+    some text" sentence would name a route this tool does not have."""
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="d1", send="a", steer="b", text="x")
+    )
+    assert argv == [] and "one act at a time" in problem and "not a pipeline" in problem
+
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="d1", send="a", stop="b", text="x")
+    )
+    assert argv == []
+    assert "acts on the session you name" in problem and "would act on another" in problem
+
+    argv, problem = net_tool._argv_for(  # noqa: SLF001
+        NetworkParams(action="sessions", peer="d1", send="a", text="   ")
+    )
+    assert argv == []
+    assert problem == (
+        "action='sessions' with 'send' needs 'text': the words to deliver "
+        "(this tool cannot pipe a body in)."
+    )
+
+
+def test_this_front_end_never_reaps_a_child_the_cli_is_still_working_inside() -> None:
+    """The TUI's own derivation, mirrored for the tool (design §3A).
+
+    ``_PILOT_TIMEOUT_S`` must sit ABOVE the CLI's worst-case act — the number
+    the CLI reports its own expiry inside — or a tool call would kill a child
+    mid-act and report a timeout about a command that was still working. The
+    equality half pins the derivation, so a future edit to any of the CLI's
+    three budgets cannot leave a stale literal here.
+    """
+    assert net_tool._PILOT_TIMEOUT_S > net_cli.PILOT_ACT_TIMEOUT_S  # noqa: SLF001
+    assert net_tool._PILOT_TIMEOUT_S == net_cli.PILOT_ACT_TIMEOUT_S + 60.0  # noqa: SLF001
+    # The CLI relays stop over a 240 s budget and create/engage over 120 s.
+    assert net_tool._STOP_TIMEOUT_S > 240.0  # noqa: SLF001
+    assert net_tool._CREATE_ENGAGE_TIMEOUT_S > 120.0  # noqa: SLF001
+
+    def bound(**fields: Any) -> float:
+        return net_tool._timeout_for(NetworkParams(action="sessions", **fields))  # noqa: SLF001
+
+    assert bound(peer="d1", send="s", text="x") == net_tool._PILOT_TIMEOUT_S
+    assert bound(peer="d1", steer="s", text="x") == net_tool._PILOT_TIMEOUT_S
+    assert bound(peer="d1", slash="s", text="x") == net_tool._PILOT_TIMEOUT_S
+    assert bound(peer="d1", stop="s") == net_tool._STOP_TIMEOUT_S
+    assert bound(peer="d1", create=True, prompt="go") == net_tool._CREATE_ENGAGE_TIMEOUT_S
+    assert bound(peer="d1", engage="s") == net_tool._CREATE_ENGAGE_TIMEOUT_S
+    assert bound(peer="d1") == net_tool._DEFAULT_TIMEOUT_S
+
+
+def test_a_pilot_receipt_renders_the_owners_outcome_not_a_code_message() -> None:
+    """§3A's render branch: finished carries the reply; the non-completions say
+    which they are (running/queued/failed/lost); steer and slash render the
+    owner's own receipt; a wrong ``--peer`` rides ``peer_named``."""
+    finished = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "sessions",
+        {
+            "verb": "send",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "ok": True,
+            "outcome": "finished",
+            "reply": "all done",
+        },
+    )
+    assert finished == ["s_1 on mbp: the turn finished.", "all done"]
+
+    running = net_tool._render(  # noqa: SLF001
+        "sessions",
+        {
+            "verb": "send",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "ok": False,
+            "outcome": "running",
+            "code": "turn_running",
+        },
+    )
+    assert running[0] == "s_1 on mbp took the turn and is still running it."
+    assert "lop --resume s_1" in running[-1]
+
+    failed = net_tool._render(  # noqa: SLF001
+        "sessions",
+        {
+            "verb": "send",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "ok": False,
+            "outcome": "failed",
+            "code": "turn_failed",
+            "error": "boom",
+        },
+    )
+    assert failed[-1] == "boom"
+
+    steer = net_tool._render(  # noqa: SLF001
+        "sessions",
+        {
+            "verb": "steer",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "ok": True,
+            "outcome": "steered",
+            "receipt": "queued behind the current step",
+        },
+    )
+    assert steer[0] == "s_1 on mbp: queued behind the current step"
+
+    slash = net_tool._render(  # noqa: SLF001
+        "sessions",
+        {
+            "verb": "slash",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "command": "rename",
+            "ok": False,
+            "outcome": "refused",
+            "text": "no",
+            "style": "error",
+        },
+    )
+    assert slash == ["s_1 on mbp: /rename — no"]
+
+    named = net_tool._render(  # noqa: SLF001
+        "sessions",
+        {
+            "verb": "send",
+            "session_id": "s_1",
+            "peer": "mbp",
+            "ok": True,
+            "outcome": "finished",
+            "reply": "r",
+            "peer_named": "other-box",
+        },
+    )
+    assert named[-1] == "you named other-box; s_1 is held by mbp, which is where this ran"
+
+
+def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``running`` send is the owner's honest NON-completion: the CLI exits 1
+    for it, and the tool must render the receipt (outcome + resume hint) rather
+    than collapse it to ``code: message`` — while still reporting is_error, so a
+    delivery is never read as a completion. The finished arm is the contrast:
+    success, with the reply visible."""
+    receipt = {
+        "session_id": "s_1",
+        "peer": "cloud-node-1",
+        "verb": "send",
+        "ok": False,
+        "outcome": "running",
+        "code": "turn_running",
+    }
+
+    async def fake_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        assert argv[:3] == ["network", "sessions", "--json"]
+        assert argv[argv.index("--send") + 1] == "s_1"
+        assert timeout == net_tool._PILOT_TIMEOUT_S  # noqa: SLF001
+        return 1, json.dumps(receipt), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert result.is_error
+    text = _text(result)
+    assert "still running it" in text
+    assert "lop --resume s_1" in text
+    assert _payload(result)["outcome"] == "running"
+
+    done = dict(receipt, ok=True, outcome="finished", reply="on it")
+
+    async def fake_done(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        return 0, json.dumps(done), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_done)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert not result.is_error
+    assert _text(result).endswith("on it")

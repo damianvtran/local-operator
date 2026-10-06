@@ -32,6 +32,22 @@ Address a session with exactly one of `session` (exact id), `target`
 (name/cwd substring), or `pid` — the same resolver `send` uses, so an
 ambiguous target comes back with the candidate rows rather than a guess.
 
+## Remote sessions (mesh)
+
+`list` covers local AND remote rows by default — each remote row names the
+device that holds it — and `scope` (`all`/`local`/`remote`) or `peer` (one
+device) narrows the view. With no mesh, or a relay that is not answering,
+`list` shows the rows it could read plus ONE note saying why no remote rows
+could be; a peer that did not answer is named. `info`, `peek`, `spawn`,
+`resume` and `stop` take `peer` (a device name or id) and act ON that device's
+runtime: `spawn` mints the session there; `resume` warms it, or with `prompt`
+drives a turn there and returns the owner's reply; `stop` ends it where it
+lives — this tool sends no force (the CLI's `lop network sessions --stop <id>
+--force` is the escalation). `peek` reads only the newest `steps` rows where
+the session LIVES, live sessions only — a stored one refuses with the warm-up
+named — and `query`/`regex`/`digest` stay local. Message delivery to a session
+on another device is `send` with `peer`; `guide://peer-messaging` carries it.
+
 ## Visibility: `spawn` is listed by default
 
 `spawn` opens the run as a **workstream** by default: the operator's sidebar,
