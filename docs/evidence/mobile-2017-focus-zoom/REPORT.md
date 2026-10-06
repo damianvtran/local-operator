@@ -5,12 +5,20 @@ of headless Chrome with CDP device metrics, at 390x844 and 360x780, before and
 after the fix. Raw data: `before-focus-zoom-report.json`,
 `after-focus-zoom-report.json`, `*-focus-behavior-report.json`.
 
-Frame provenance (round-1 remediation): the `before-*` frames/reports are the
-pre-fix base build at `7d612a2db`; every `after-*` frame/report was captured on
-the round-1 remediation head `a0abf8a82` (the mechanism-sensitive frames must
-name the head they were taken on). Superseded: the first fix head's `after-*`
-set at `ae758cbe9` (its non-composer frames had been overwritten by the wide
-pass — the D3 finding — and were replaced by the phase-labelled set below).
+Provenance: every `before-*` artifact was captured on the pre-fix base build
+`7d612a2db` (served `index-D_Q6hwPa.css` / `index-BamXnLrM.js`) and every
+`after-*` artifact on the round-1 remediation head `a0abf8a82` (served
+`index-CHPDfYVB.css` / `index-CRwSKFzN.js`). Each report records the served
+asset hashes in its own `provenance` field, and each served-asset scan names
+them in its header, so the claim is checkable inside the artifact instead of
+resting on this sentence — the round-2 review found a scan captured on the
+earlier head `ae758cbe9` and presented as the reviewed head's; it and every other
+artifact were regenerated per side in single-build runs (see the README's
+"Round-2 correction"). Trigger for the whole set: the fit scale and every
+computed field font are what WebKit's rule consumes, and neither remediation
+commit moves them — the numbers below are therefore stable across both heads,
+which is exactly why the BUILD has to be provable from the file rather than
+inferred from the numbers.
 
 Frames are phase-labelled (`<vp>-<default|wide>-<surface>`) and the whole field
 set is now covered in BOTH modes at BOTH builds (round-1 design review D3),

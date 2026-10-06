@@ -1,4 +1,12 @@
 {
+  "provenance": {
+    "served_css": [
+      "index-D_Q6hwPa.css"
+    ],
+    "served_js": [
+      "index-BamXnLrM.js"
+    ]
+  },
   "390x844-wideoff-list": {
     "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
     "innerWidth": 390,

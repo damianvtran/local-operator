@@ -70,6 +70,25 @@ def focus_probe(page: Page, key: str, selector: str) -> dict:
     return after
 
 
+def served_assets(page: Page) -> dict:
+    """The build the fixture actually served — recorded IN the report.
+
+    WHY: a report that names its build only in the README cannot be checked
+    against the file itself, and a stale scan once passed as fresh (round-2
+    review). These filenames are content hashes, so recording them here makes
+    every report self-identifying.
+    """
+    refs = page.js(
+        "[...document.querySelectorAll('link[rel=stylesheet],script[src]')]"
+        ".map((e) => e.getAttribute('href') || e.getAttribute('src'))"
+    )
+    assets = [str(r).rsplit("/", 1)[-1] for r in (refs or [])]
+    return {
+        "served_css": sorted({a for a in assets if a.endswith(".css")}),
+        "served_js": sorted({a for a in assets if a.endswith(".js")}),
+    }
+
+
 def main() -> None:
     chrome = Chrome()
     try:
@@ -87,6 +106,8 @@ def main() -> None:
         # --- default mode: focus composer + pending secret input ---
         page.goto(f"{BASE}/#/s/ask-free")
         time.sleep(1.5)
+        report["provenance"] = served_assets(page)
+        log(f"[provenance] served: {json.dumps(report['provenance'])}")
         focus_probe(page, "wideoff-composer-16px", 'textarea')
         focus_probe(page, "wideoff-pending-secret-14px", '[data-testid="pending-card"] input')
 
