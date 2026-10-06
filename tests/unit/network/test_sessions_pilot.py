@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import io
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1108,6 +1109,58 @@ def test_a_name_on_another_device_is_not_this_peers(
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "session_unknown", payload
     assert "does not hold" in payload["message"], payload
+
+
+# ---------------------------------------------------------------------------
+# §9.2's regression cell: a created-on-peer id resolves IMMEDIATELY
+# ---------------------------------------------------------------------------
+
+
+def test_a_created_on_peer_id_resolves_immediately_through_this_verbs_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9.2, at the level the remote surfaces read rows (#2008's merged fix).
+
+    A conversation created on a peer must be resolvable by every local route the
+    moment the create answers: the create's arm seeds the row
+    (``peer_rows.seed_peer_row`` — cache-only, stamped already-stale so it
+    answers id resolution but never a listing read), and ``remote_row_for``'s
+    miss path pays the live read it documents. THE RESOLVER BELOW IS THE ONE THE
+    SURFACES RIDE: the pilot verbs run it at ``_resolve_act_target``, and the
+    sessions tool's remote resume/stop/peek shell into those verbs.
+
+    The cell asserts IMMEDIACY without encoding the window: the cache-first read
+    must answer from the seed with NO listing read at all — proved by poisoning
+    the read this route would otherwise pay.
+    """
+    from local_operator.session import peer_rows as peer_rows_mod
+    from local_operator.session.peer_rows import (
+        clear_cache,
+        peer_session_row,
+        seed_peer_row,
+    )
+    from local_operator.session.remote_open import remote_row_for
+
+    root = tmp_path / "store"
+    (root / "sessions").mkdir(parents=True)
+    clear_cache()
+    seed_peer_row(root, _remote_row(session_id="ffff12345678", name="fresh on the peer"))
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "resolution paid a listing read; the create's seed must answer immediately"
+        )
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+
+    resolved, candidates = net_cli._resolve_act_target("ffff12345678", PEER, root)
+    assert candidates == ()
+    assert resolved is not None and resolved.id == "ffff12345678"
+    # The cache-only guard every /resume-shaped route asks first agrees, so the
+    # next resolution is a hit rather than a second read.
+    assert peer_session_row("ffff12345678", root) is not None
+    # And the raw seam the other routes share answers the same way.
+    assert remote_row_for("ffff12345678", root) is not None
 
 
 def test_a_stop_target_may_be_the_conversations_name(

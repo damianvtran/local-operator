@@ -12842,6 +12842,13 @@ class SendParams(BaseModel):
             "note. Proactive-class senders only; invisible to the peer."
         ),
     )
+    peer: str = Field(
+        default="",
+        description=(
+            "Message a session on ANOTHER device over the mesh (a peer name or id); "
+            "drives a turn there and returns the owner's reply."
+        ),
+    )
 
 
 #: How a peer send is addressed and how it will land, as the two words both the
@@ -12894,6 +12901,15 @@ def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
     ASCII dots: a CJK body clipped by character count measured 138 cells against
     an intended 60 and wrapped the prompt onto a second line (design round 1, D4).
     """
+    peer = " ".join(str(args.get("peer") or "").split())
+    if peer:
+        # A MESH send: a different device, a different commitment (it drives a
+        # turn there and waits for the reply). The mode/wake vocabulary does not
+        # apply, so it is not printed — "peer <device> / …" instead.
+        who = peer_send_target_label(args)
+        body = _truncate_approval_body(" ".join(str(args.get("message") or "").split()))
+        head = f"peer {peer} / to {who}: drive a turn there and return the reply"
+        return f"{head} — {body}" if body else head
     who = peer_send_target_label(args)
     model = " ".join(str(args.get("model") or "").split())
     if model:
@@ -12932,7 +12948,10 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "
             "peer received it. A session with no message sent in it yet (a fresh "
-            "`/new`) is not a recipient: sends to it are refused."
+            "`/new`) is not a recipient: sends to it are refused. With `peer`, the "
+            "target addresses a session on that device (mesh): the send drives a turn "
+            "there and returns the owner's reply; `wake`/`now`/`patience`/`model` are "
+            "local-only and refused."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
@@ -13116,6 +13135,120 @@ def _role_words(context: "ToolContext | None") -> "dict[str, tuple[str, ...]]":
     return role_word_set(registry)
 
 
+#: The fields that mean one thing on THIS machine's loopback/registrant
+#: substrate and nothing on the mesh — refused, never dropped, beside `peer`
+#: (design §3B).
+_MESH_LOCAL_ONLY_MODES = ("wake", "now", "patience", "model")
+
+
+def _mesh_send_argv(peer: str, address: str, text: str) -> list[str]:
+    """The one spelling of a mesh send (design §3A): ``--json`` BEFORE the act —
+    a trailing one would be delivered to the peer as payload — and the text
+    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line."""
+    return ["network", "sessions", "--json", "--peer", peer, "--send", address, "--", text]
+
+
+async def _execute_send_peer(
+    tool_call_id: str, params: SendParams, context: ToolContext | None
+) -> ToolResult:
+    """``send(peer=…)``: drive a turn in a session on ANOTHER device.
+
+    NOT THE LOOPBACK MAILBOX (design §8.1/§8.2, locked): the local path spools to
+    a registrant on this machine; this one runs the SAME pilot act the CLI drives
+    (``lop network sessions --peer P --send <id-or-name> -- <text>``), where the
+    owner admits the turn through its own prompt admission
+    (``viewer.prompt_and_wait``) and answers with a receipt carrying its reply —
+    no new wire op, no second writer, and the CLI keeps every bound and refusal.
+    This function builds the argv, relays refusals, and renders the outcome.
+    """
+    peer = params.peer.strip()
+    given = params.model_fields_set
+    refused = [name for name in _MESH_LOCAL_ONLY_MODES if name in given]
+    if refused:
+        spelled = ", ".join(f"`{name}`" for name in refused)
+        return _error(
+            tool_call_id,
+            "send",
+            f"{spelled} {'is a local-only mode' if len(refused) == 1 else 'are local-only modes'}"
+            " — the loopback mailbox and the model switch act on THIS machine. With "
+            "`peer` the send drives a turn on that device and returns the owner's "
+            "reply: drop `wake`/`now`/`patience`/`model` for a peer send.",
+        )
+
+    if params.message is None or not params.message.strip():
+        return _error(
+            tool_call_id,
+            "send",
+            "a `peer` send needs `message`: the words to deliver to that session.",
+        )
+    if params.pid is not None:
+        return _error(
+            tool_call_id,
+            "send",
+            "`pid` names a process on THIS machine, so it cannot address a session on "
+            "`peer` — address it with `target` (an id or name on that device) or "
+            "`session` (an exact id there).",
+        )
+    address = str(params.target or "").strip()
+    session = str(params.session or "").strip()
+    if address and session:
+        return _error(
+            tool_call_id,
+            "send",
+            "`target` and `session` name two different addresses; pass exactly one — "
+            "they are alternatives, not companions.",
+        )
+    address = address or session
+    if not address:
+        return _error(
+            tool_call_id,
+            "send",
+            "a `peer` send needs `target` (an id or name on that device) or `session` "
+            "(an exact id there).",
+        )
+
+    timeout = _mesh_pilot_timeout_s()
+    argv = _mesh_send_argv(peer, address, params.message)
+    try:
+        code, payload, stderr = await _mesh_cli_json(argv, timeout, context)
+    except (asyncio.TimeoutError, TimeoutError):
+        return _error(
+            tool_call_id,
+            "send",
+            f"the mesh call did not finish within {int(timeout)}s and was killed; "
+            "nothing was changed here — check `lop network doctor` before retrying.",
+        )
+    if payload is None:
+        return _error(
+            tool_call_id, "send", stderr or f"`lop network` exited {code} without a readable answer"
+        )
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "send", refusal, details={"mesh": payload})
+    from local_operator.network.tool import _pilot_receipt_lines
+
+    text = "\n".join(_pilot_receipt_lines("send", payload))
+    details: dict[str, Any] = {
+        "peer": peer,
+        "mode": "mesh",
+        "session_id": payload.get("session_id"),
+        "outcome": payload.get("outcome"),
+        "mesh": payload,
+    }
+    reply = str(payload.get("reply") or "")
+    if reply:
+        details["reply"] = reply
+    for key in ("code", "error", "peer_named"):
+        if payload.get(key):
+            details[key] = payload[key]
+    if payload.get("ok") is False:
+        # ``running``/``queued``/``failed``/``lost`` are the owner's honest
+        # NON-completions — the same states the CLI exits non-zero for, so a
+        # delivery is never read as a completion.
+        return _error(tool_call_id, "send", text, details=details)
+    return _text(tool_call_id, "send", text, details=details)
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -13130,6 +13263,12 @@ async def execute_send(
         params = SendParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "send", exc)
+
+    if params.peer.strip():
+        # A MESH send rides the network CLI's pilot act, not the loopback
+        # substrate — a different trust boundary and a different receipt, so it
+        # is routed before every local-mode check below reads fields it ignores.
+        return await _execute_send_peer(tool_call_id, params, context)
 
     if params.model is not None:
         if params.message is not None:
@@ -13555,6 +13694,22 @@ class SessionsParams(BaseModel):
         ),
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
+    # --- mesh: another device's sessions (design §3C; PR B) ------------------
+    # `peer` is the device an address resolves ON for info/peek/spawn/resume/
+    # stop, and the remote half's narrowing key on `list`; `scope` is the same
+    # question for `list` alone (local rows beside remote ones, or either).
+    # Both sit with the ADDRESSES because they modify addressing, not content.
+    peer: str | None = Field(
+        default=None,
+        description=(
+            "Remote (mesh): the device holding the session — a name or id; on `list`, "
+            "narrows remote rows to it."
+        ),
+    )
+    scope: Literal["all", "local", "remote"] = Field(
+        default="all",
+        description="list: which homes to show — all (default), local, or remote.",
+    )
     prompt: str | None = Field(
         default=None,
         description="spawn/resume: message to run (required).",
@@ -13623,10 +13778,20 @@ _SESSIONS_PEEK_FIELDS = frozenset(_SESSIONS_PEEK_WINDOW_FIELDS) | frozenset({"re
 #: intent, and reporting success for a call the caller did not make is the one
 #: failure this table exists to prevent (design note §3.2).
 _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
-    "list": frozenset({"op", "include_stored", "limit", "query"}),
-    "info": frozenset({"op", "session", "target", "pid"}),
+    "list": frozenset({"op", "include_stored", "limit", "query", "peer", "scope"}),
+    "info": frozenset({"op", "session", "target", "pid", "peer"}),
     "spawn": frozenset(
-        {"op", "prompt", "name", "team", "profile", "model", "visibility", "background"}
+        {
+            "op",
+            "prompt",
+            "name",
+            "team",
+            "profile",
+            "model",
+            "visibility",
+            "background",
+            "peer",
+        }
     ),
     "resume": frozenset(
         {
@@ -13641,10 +13806,11 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
             "failed",
             "all",
             "dry_run",
+            "peer",
         }
     ),
-    "stop": frozenset({"op", "session", "target", "pid"}),
-    "peek": frozenset({"op", "session", "target", "pid", "query"}) | _SESSIONS_PEEK_FIELDS,
+    "stop": frozenset({"op", "session", "target", "pid", "peer"}),
+    "peek": frozenset({"op", "session", "target", "pid", "query", "peer"}) | _SESSIONS_PEEK_FIELDS,
     # ``help`` reads nothing: the reference is static, so an address or a
     # `prompt` beside it is a misspelled intent like any other stray field.
     "help": frozenset({"op"}),
@@ -13744,7 +13910,10 @@ def _sessions_tool_description() -> str:
         " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
         " stored/stopped session headlessly, or a SET (`paused`/`failed`/`all`)"
         " as a bounded batch; `stop` ends gracefully; `peek` reads a"
-        " transcript window. Address exactly one of `session` (id), `target`"
+        " transcript window"
+        "; `peer` acts on another device's session over the mesh (`list` shows those"
+        " rows beside local ones; `scope` filters them). Address exactly one of"
+        " `session` (id), `target`"
         " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
     )
 
@@ -13782,12 +13951,18 @@ class _SessionsOpDoc(NamedTuple):
 _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     "list": _SessionsOpDoc(
         summary="show what is running; `include_stored` widens the listing to"
-        " stored (not running) sessions and `query` searches them.",
+        " stored (not running) sessions and `query` searches them. `peer`/`scope`"
+        " read the mesh: remote rows beside local ones by default, or one home"
+        " alone.",
         example="sessions(op='list', include_stored=True)",
-        refusals=("takes no address and no `prompt`/`name`.",),
+        refusals=(
+            "takes no address and no `prompt`/`name`; `query`/`include_stored` are"
+            " THIS machine's store and are refused beside `peer`/`scope='remote'`.",
+        ),
     ),
     "info": _SessionsOpDoc(
-        summary="describe one session: state, directory, origin, sidebar visibility.",
+        summary="describe one session: state, directory, origin, sidebar visibility;"
+        " with `peer`, one ON that device instead (its state and holding device).",
         example="sessions(op='info', session='a1b2c3d4e5f6')",
         refusals=(
             "needs exactly one address; a miss reports that both the live and"
@@ -13796,11 +13971,13 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     ),
     "spawn": _SessionsOpDoc(
         summary="open a NEW parallel session for work the USER asked to run"
-        " separately; listed as a workstream by default.",
+        " separately; listed as a workstream by default. With `peer` it is minted ON"
+        " that device.",
         example="sessions(op='spawn', prompt='audit the release', name='release audit')",
         refusals=(
             "needs `prompt`; `background=false` is unsupported (v1 always detaches);"
-            " `visibility='ephemeral'` hides a throwaway run.",
+            " `visibility='ephemeral'` hides a throwaway run; `visibility`/`background`"
+            " are THIS machine's concepts and are refused with `peer`.",
         ),
     ),
     "resume": _SessionsOpDoc(
@@ -13809,19 +13986,22 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " reopen a SET — `paused` (interrupted/retired), `failed` (error), `all`"
         " (every stored, non-live session; capped by `limit`; the widest reading —"
         " given with the other two it wins) — as a bounded batch with a"
-        " per-session ok/fail outcome; `dry_run` previews the set.",
+        " per-session ok/fail outcome; `dry_run` previews the set. With `peer`:"
+        " `prompt` drives a turn there and returns the reply; without one it warms"
+        " the session (engage).",
         example="sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue')",
         refusals=(
-            "the single form needs an address and `prompt`; the set form takes no"
-            " address and defaults `prompt` to a continuation; a session already"
-            " open elsewhere is refused by its lease; the calling session cannot"
-            " resume itself; `visibility` is fixed at creation and cannot be"
-            " re-stamped.",
+            "the single form needs an address and `prompt` (with `peer`, `prompt` is"
+            " optional: omitting it warms); the set form takes no address and is"
+            " refused with `peer`; a session already open elsewhere is refused by its"
+            " lease; the calling session cannot resume itself; `visibility` is fixed"
+            " at creation and cannot be re-stamped.",
         ),
     ),
     "stop": _SessionsOpDoc(
         summary="end a running session gracefully (the graceful ladder only — this"
-        " tool never SIGKILLs).",
+        " tool never SIGKILLs). With `peer`, ends it where it lives; the force"
+        " escalation stays the CLI's (`lop network sessions --stop <id> --force`).",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
@@ -13829,12 +14009,15 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "peek": _SessionsOpDoc(
-        summary="read a bounded transcript window (tail/head/cursor/search) or a" " `digest` fold.",
+        summary="read a bounded transcript window (tail/head/cursor/search) or a"
+        " `digest` fold. With `peer`, a tail window (`steps`) read where the session"
+        " LIVES — live sessions only; `query`/`regex`/`digest` stay local.",
         example="sessions(op='peek', session='a1b2c3d4e5f6', steps=12)",
         refusals=(
             "one window at a time (`steps`/`head`/`before_id`/`around_id` are"
             " mutually exclusive); `digest` folds the newest rows alone; `regex`"
-            " needs `query`.",
+            " needs `query`; with `peer`, `head`/`before_id`/`around_id`/`query`/"
+            " `regex`/`digest` read THIS device's transcript and are refused.",
             # The step bound is DERIVED from ``comms.PEEK_MAX_STEPS`` by the
             # renderer (agent review round 1, M3) — a surface whose selling
             # point is "everything enumerable is generated" must not keep the
@@ -14025,6 +14208,7 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
     # set form, and letting it flip the rules would let `paused=False` smuggle
     # a second personality past every check.
     batch = op == "resume" and (params.paused or params.failed or params.all)
+    peer = str(params.peer or "").strip()
 
     if op in ("spawn", "resume"):
         if batch:
@@ -14033,7 +14217,10 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                     "`prompt` must be a non-empty message when given; omit it for the "
                     "default continuation ('Continue the task from where it left off.')."
                 )
-        elif params.prompt is None or not params.prompt.strip():
+        elif not (op == "resume" and peer) and (params.prompt is None or not params.prompt.strip()):
+            # A REMOTE resume is the exception that proves the rule: it warms
+            # with no prompt (engage) or drives a turn with one — a promptless
+            # spelling is a real op there, refused on every local form.
             return (
                 f"{op} needs `prompt`: the message the opened run executes. A headless "
                 "exec refuses a prompt-less run the same way."
@@ -14064,6 +14251,16 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 f"a set selection takes no `{addressed[0]}` — drop it, or drop "
                 "`paused`/`failed`/`all` and address ONE session.",
             )
+    if batch and peer:
+        # The set form selects over THIS machine's store; a device's rows are a
+        # different read with a different shape, so the composition is refused
+        # rather than silently narrowed to one half (design §3C, locked).
+        return _sessions_stray_field_refusal(
+            op,
+            "the set form selects over THIS machine's stored sessions; with "
+            "`peer`, address ONE session there — drop `peer`, or drop "
+            "`paused`/`failed`/`all`.",
+        )
 
     if op == "resume" and params.dry_run and not batch:
         return (
@@ -14083,6 +14280,20 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             "written once and immutable, so resume cannot change it — spawn a new "
             "workstream instead (that is the default).",
         )
+
+    if op == "spawn" and peer:
+        # `visibility` (a listing on this machine's sidebar) and `background` (a
+        # detached run here) are THIS machine's concepts; a `peer` spawn mints
+        # on that device's terms, so neither can act — refused, never dropped
+        # (design §3C).
+        local = sorted(name for name in ("visibility", "background") if name in given)
+        if local:
+            spelled = ", ".join(f"`{name}`" for name in local)
+            return _sessions_stray_field_refusal(
+                op,
+                f"{spelled} describes a run on THIS machine; a `peer` spawn is "
+                "minted on that device by its own rules — drop it.",
+            )
 
     allowed = _SESSIONS_OP_FIELDS[op]
     for field in sorted(given - allowed):
@@ -14104,24 +14315,99 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             return _sessions_stray_field_refusal(op, "`limit` applies to list/resume only.")
         if field in _SESSIONS_PEEK_FIELDS:
             return _sessions_stray_field_refusal(op, f"`{field}` applies to op='peek' only.")
+        if field == "peer":
+            return _sessions_stray_field_refusal(
+                op,
+                "`peer` applies to the mesh ops (list/info/spawn/resume/stop/peek) — "
+                f"not to op='{op}'.",
+            )
+        if field == "scope":
+            return _sessions_stray_field_refusal(op, "`scope` applies to op='list' only.")
         if op == "list":
             return _sessions_stray_field_refusal(
                 op, f"`{field}` applies to other ops; list takes no `{field}`."
             )
         return _sessions_stray_field_refusal(op, f"`{field}` applies to op='spawn' only.")
 
+    if "peer" in given and not peer:
+        return _sessions_stray_field_refusal(op, "`peer` needs the device's name or id.")
+
+    if op == "list":
+        if peer and params.scope == "local":
+            return _sessions_stray_field_refusal(
+                op,
+                "`peer` narrows the REMOTE rows and `scope='local'` shows none of "
+                "them — drop one.",
+            )
+        if "query" in given and (peer or params.scope == "remote"):
+            return _sessions_stray_field_refusal(
+                op,
+                "`query` searches THIS device's store, so it cannot ride a "
+                "`peer`/remote listing — drop `query`, or list with `scope='local'`.",
+            )
+        if "include_stored" in given and params.scope == "remote":
+            return _sessions_stray_field_refusal(
+                op,
+                "`scope='remote'` shows another device's rows, which come as that "
+                "device lists them; `include_stored` widens THIS device's listing — "
+                "drop it, or use `scope='all'`.",
+            )
+
+    if op == "peek" and peer:
+        # v1 remote peek is a TAIL WINDOW only (design §3C): the other reads walk
+        # THIS device's transcript, so they are refused with the local route named
+        # rather than silently searching the wrong store.
+        local_only = sorted(
+            name
+            for name in ("head", "before_id", "around_id", "query", "regex", "digest")
+            if name in given
+        )
+        if local_only:
+            spelled = ", ".join(f"`{name}`" for name in local_only)
+            return _sessions_stray_field_refusal(
+                op,
+                "with `peer`, peek reads the newest `steps` rows where the session "
+                f"LIVES; {spelled} {'reads' if len(local_only) == 1 else 'read'} THIS "
+                "device's transcript — drop it, or drop `peer` for the local read.",
+            )
+
     if op == "peek":
         refusal = _sessions_peek_validation_error(params, given)
         if refusal is not None:
             return refusal
 
+    if peer and params.pid is not None:
+        return _sessions_stray_field_refusal(
+            op,
+            "`pid` names a process on THIS machine, so it cannot address a session "
+            "on `peer` — use `session` (an exact id there) or `target`.",
+        )
+
     if op in _SESSIONS_TARGET_OPS and not batch:
+        if peer:
+            armed = sorted(
+                field
+                for field in ("session", "target")
+                if field in given and str(getattr(params, field) or "").strip()
+            )
+            if len(armed) > 1:
+                return _sessions_stray_field_refusal(
+                    op,
+                    "pass ONE address — `session` (an exact id there) or `target` "
+                    "(an id or name on that device), not both.",
+                )
         provided = [
             field
             for field in _SESSIONS_ADDRESS_FIELDS
             if (getattr(params, field) is not None and str(getattr(params, field)).strip())
         ]
         if not provided:
+            if peer:
+                return _sessions_stray_field_refusal(
+                    op,
+                    "address the session ON that device with `session` (an exact id) "
+                    "or `target` (an id or name there).",
+                )
             return (
                 "address the session with exactly one of `session` (exact id), "
                 "`target` (name/cwd substring) or `pid`."
@@ -14156,6 +14442,8 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
     yet and a resolved name here would be a promise the resolver may not keep.
     """
     op = str(args.get("op") or "")
+    peer = " ".join(str(args.get("peer") or "").split())
+    peer_on = f" on {peer}" if peer else ""
     if op == "spawn":
         name = " ".join(str(args.get("name") or "").split())
         prompt = _truncate_approval_body(" ".join(str(args.get("prompt") or "").split()))
@@ -14170,16 +14458,34 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             if str(args.get("visibility") or "workstream") == "ephemeral"
             else "a listed workstream"
         )
-        head = (
-            f'open "{name}" as {disposition}{qualifier}'
-            if name
-            else f"open as {disposition}{qualifier}"
-        )
+        if peer:
+            # A remote spawn mints ON that device; the local visibility words
+            # do not apply there (they are refused), so the prompt says the one
+            # fact that matters: which machine runs it.
+            head = (
+                f'open "{name}"{peer_on} as a session held there{qualifier}'
+                if name
+                else f"open{peer_on} a new session{qualifier}"
+            )
+        else:
+            head = (
+                f'open "{name}" as {disposition}{qualifier}'
+                if name
+                else f"open as {disposition}{qualifier}"
+            )
         return f"{head}: {prompt}" if prompt else head
     address = _sessions_address_label(args)
     if op == "stop":
+        if peer:
+            return f"stop {address} on {peer}: ends its run on that device"
         return f"stop {address}: ends its current run and releases the session lease"
     if op == "resume":
+        if peer:
+            # The remote form: engage (warm) or a driven turn whose reply comes
+            # back — never the local batch (refused beside `peer`).
+            if str(args.get("prompt") or "").strip():
+                return f"resume {address} on {peer}: drives a turn there and returns its reply"
+            return f"resume {address} on {peer}: warms the session there (no prompt runs no turn)"
         # All wins (review round 1, m3): `all` is the widest reading, so a
         # combination is described by the selection it actually performs.
         if args.get("all"):
@@ -14428,45 +14734,142 @@ def _session_row_brief(row: Mapping[str, Any]) -> str:
         bits.append(f"last active {format_duration(int(age * 1000))} ago")
     if row.get("cwd") and row.get("pid"):
         bits.append(str(row["cwd"]))
+    if str(row.get("locality") or "") == "remote":
+        # WHICH DEVICE HOLDS IT, said on the row itself (design §3C): the
+        # federated listing merges homes, and a row a caller cannot place is a
+        # row they cannot act on.
+        block = row.get("peer") or {}
+        holder = str(block.get("name") or block.get("device_id") or "") or "another device"
+        bits.append(f"on {holder}")
     return "- " + ", ".join(bits)
 
 
 async def _sessions_list(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
-    """``lop sessions``' rows, lean; ``details`` carries them whole."""
+    """``lop sessions``' rows, lean; ``details`` carries them whole.
+
+    THE MESH HALF (design §3C): with ``scope='all'`` (the default) the listing is
+    this device's rows (the local half, unchanged) beside every peer's, fetched
+    through the authenticated CLI child. The federated document's own
+    ``locality == 'local'`` rows are dropped (they are this device's catalogue,
+    already in hand), each remote row keeps its ``locality``/``peer`` markers,
+    and the merge is keyed by ``session_id`` with the LOCAL row winning — the
+    CLI's own rule ("a row this device holds is named as such"). ``scope``
+    narrows to one home; ``peer`` narrows the remote half to one device. A relay
+    that cannot be asked DEGRADES rather than refuses — the rows that were
+    readable plus ONE note saying why the rest were not — because an empty answer
+    from a listing must never read as "asked, and nothing is held". A peer that
+    did not answer is NAMED, whether or not it held rows.
+    """
     if params.query and params.query.strip():
+        # ``query`` is its own LOCAL mode (it searches this device's store) and
+        # the validator refuses it beside `peer`/`scope='remote'`; on `local`/
+        # `all` it keeps today's search semantics exactly.
         return await _sessions_list_query(tool_call_id, params, context)
 
     from local_operator.info.collect import session_rows
+    from local_operator.resume import peer_reason_words
 
-    stored_limit = params.limit if params.include_stored else None
-    # ``config_dir()`` EXPLICITLY, not ``None``: the stored half of the listing
-    # is skipped for a caller that passes no root (``collect_sessions``'s
-    # rule), so ``None`` here would silently answer include_stored=true with
-    # zero stored rows. Same root the CLI's own listing passes.
-    rows = await asyncio.to_thread(
-        session_rows, config_dir(), include_stored=params.include_stored, stored_limit=stored_limit
-    )
-    shown = rows[: params.limit]
+    scope = params.scope
+    peer = str(params.peer or "").strip()
+
+    local_rows: list[dict[str, Any]] = []
+    if scope in ("all", "local"):
+        stored_limit = params.limit if params.include_stored else None
+        # ``config_dir()`` EXPLICITLY, not ``None``: the stored half of the listing
+        # is skipped for a caller that passes no root (``collect_sessions``'s
+        # rule), so ``None`` here would silently answer include_stored=true with
+        # zero stored rows. Same root the CLI's own listing passes.
+        local_rows = await asyncio.to_thread(
+            session_rows,
+            config_dir(),
+            include_stored=params.include_stored,
+            stored_limit=stored_limit,
+        )
+
+    remote_rows: list[dict[str, Any]] = []
+    notes: list[str] = []
+    if scope in ("all", "remote"):
+        early, payload = await _mesh_op(
+            tool_call_id,
+            "sessions",
+            _mesh_doc_argv(peer),
+            _MESH_LIST_TIMEOUT_S,
+            context,
+        )
+        if early is not None:
+            return early
+        refusal = _mesh_refusal_sentence(payload)
+        if refusal and str(payload.get("code") or "") == "relay_unavailable":
+            # THE DEGRADE: a relay that cannot be asked is a NOTE on what was
+            # readable, never an empty remote half dressed as a result.
+            notes.append(f"no remote rows: {refusal}")
+        elif refusal:
+            return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+        else:
+            remote_rows = [
+                row
+                for row in payload.get("sessions") or []
+                if isinstance(row, dict) and row.get("locality") == "remote"
+            ]
+            for device_id, block in sorted((payload.get("peers") or {}).items()):
+                if isinstance(block, dict) and not block.get("reachable"):
+                    notes.append(
+                        f"{block.get('name') or device_id}: unreachable "
+                        f"({peer_reason_words(str(block.get('reason') or ''))})"
+                    )
+
+    merged: list[dict[str, Any]] = []
+    if scope in ("all", "local"):
+        merged.extend(local_rows)
+    if scope in ("all", "remote"):
+        merged.extend(remote_rows)
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in merged:
+        session_id = str(row.get("session_id") or "")
+        if session_id and session_id in seen:
+            # ONE SESSION, ONE ROW: local wins over remote, first-wins over the
+            # later duplicate (the merge mirrors the CLI's; the device is part of
+            # the mesh's own de-duplication key upstream, so a true cross-device
+            # id collision is still visible there rather than silently hidden).
+            continue
+        if session_id:
+            seen.add(session_id)
+        deduped.append(row)
+    shown = deduped[: params.limit]
     details: dict[str, Any] = {
         "op": "list",
         "count": len(shown),
-        "total": len(rows),
+        "total": len(deduped),
+        "scope": scope,
         "rows": shown,
     }
-    if not shown:
-        suffix = (
-            "" if params.include_stored else " (live only; pass include_stored=true for stored)"
-        )
-        text = f"no sessions to list{suffix}"
-    else:
-        text = "\n".join(_session_row_brief(row) for row in shown)
-        if len(rows) > len(shown):
-            text += (
-                f"\n({len(rows)} rows available; {len(shown)} shown — raise `limit` "
+    if notes:
+        details["notes"] = notes
+    lines: list[str] = [_session_row_brief(row) for row in shown]
+    if len(deduped) > len(shown):
+        if scope == "local":
+            lines.append(
+                f"({len(deduped)} rows available; {len(shown)} shown — raise `limit` "
                 "or narrow with `query`)"
             )
+        else:
+            lines.append(
+                f"({len(deduped)} rows available; {len(shown)} shown — raise `limit` "
+                "or narrow with `scope`/`peer`)"
+            )
+    lines.extend(notes)
+    if not lines:
+        if scope == "remote":
+            lines.append("no sessions are held by the devices that answered")
+        else:
+            suffix = (
+                "" if params.include_stored else " (live only; pass include_stored=true for stored)"
+            )
+            lines.append(f"no sessions to list{suffix}")
+    text = "\n".join(lines)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -14619,9 +15022,88 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
     return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
 
 
+async def _sessions_info_mesh(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``info`` on `peer`: the device's own catalogue row for one session.
+
+    The fetch is the SAME federated read ``list`` makes, and the pick is the SAME
+    shared resolver the pilot verbs use (``peer_rows.select_peer_session`` over
+    the fetched rows — id-or-name, an ambiguous name refused with its candidates).
+    What ``info`` adds over the listing row is the sentence: which device holds
+    it, and what that means for the verbs that can act on it — composed here
+    because no per-session wire op exists for a peer (the catalogue row already
+    carries the fields; design §3C: "info needs no new op").
+    """
+    peer = str(params.peer or "").strip()
+    needle = str(params.session or params.target or "").strip()
+    early, payload = await _mesh_op(
+        tool_call_id, "sessions", _mesh_doc_argv(peer), _MESH_LIST_TIMEOUT_S, context
+    )
+    if early is not None:
+        return early
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    rows = [
+        row
+        for row in payload.get("sessions") or []
+        if isinstance(row, dict) and row.get("locality") == "remote" and row.get("session_id")
+    ]
+    from local_operator.resume import SessionRow
+    from local_operator.session.peer_rows import select_peer_session
+
+    converted = [
+        SessionRow(
+            str(row.get("session_id") or ""),
+            float(row.get("started") or 0.0),
+            str(row.get("conversation_name") or ""),
+        )
+        for row in rows
+    ]
+    found, candidates = select_peer_session(needle, converted)
+    if candidates:
+        lines = [
+            f"{peer} holds {len(candidates)} sessions matching {needle!r} — name one by its id:"
+        ]
+        lines.extend(f"  {row.id}  {row.name}" for row in candidates)
+        return _error(tool_call_id, "sessions", "\n".join(lines))
+    if found is None:
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"{peer} does not hold a session matching {needle!r}: `lop network sessions "
+            f"--peer {peer}` lists what it does hold",
+        )
+    row = next(item for item in rows if str(item.get("session_id")) == found.id)
+    block = row.get("peer") or {}
+    device = str(block.get("name") or block.get("device_id") or peer)
+    state = str(row.get("state") or "?")
+    name = str(row.get("conversation_name") or "(unnamed)")
+    bits = [f"[{state}] {name}", f"session {found.id}"]
+    if row.get("pid"):
+        bits.append(f"pid {row['pid']}")
+    if row.get("model_label"):
+        bits.append(str(row["model_label"]))
+    if row.get("pending"):
+        bits.append(f"pending {row['pending']}")
+    text = (
+        ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
+        "transcript live on that device; peek reads its live tail there, resume warms "
+        "it, stop ends it"
+    )
+    details: dict[str, Any] = {"op": "info", "session_id": found.id, "device": device, **row}
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
 async def _sessions_info(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
+    if str(params.peer or "").strip():
+        return await _sessions_info_mesh(tool_call_id, params, context)
     target = await _sessions_target(params, context)
     if target.candidates:
         return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
@@ -14682,6 +15164,53 @@ async def _sessions_info(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
+async def _sessions_stop_mesh(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``stop`` on `peer`: the OWNER's own ladder, rendered verbatim.
+
+    This side carries the request; the peer runs its kill-switch ladder with its
+    own pid proofs and rungs, and its ``StopOutcome`` vocabulary comes back as
+    the receipt (design §3C — "a thin call"). NO FORCE is sent (design §8.4,
+    locked): the one outcome whose remedy is a flag — a ladder that declined to
+    signal a turn in flight — names the CLI escalation instead, because that
+    spelling is the human's route and this tool deliberately does not grow a
+    second one.
+    """
+    peer = str(params.peer or "").strip()
+    address = str(params.session or params.target or "").strip()
+    early, payload = await _mesh_op(
+        tool_call_id, "sessions", _mesh_stop_argv(peer, address), _MESH_STOP_TIMEOUT_S, context
+    )
+    if early is not None:
+        return early
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    outcome = str(payload.get("outcome") or "")
+    sentence = str(payload.get("detail") or "")
+    lines = [sentence or f"the stop of {address} on {peer} reported {outcome or 'no outcome'}"]
+    if outcome == "skipped":
+        # The ladder declined to signal a target whose turn is in flight — its
+        # own text says so; the remedy is the CLI's --force, named here because
+        # this tool deliberately does not spell one (design §8.4).
+        lines.append(
+            "this tool sends no --force: run `lop network sessions --peer "
+            f"{peer} --stop {address} --force` to push past the turn in flight"
+        )
+    details: dict[str, Any] = {
+        "op": "stop",
+        "session_id": str(payload.get("session_id") or address),
+        "peer": peer,
+        "outcome": outcome,
+        "mesh": payload,
+    }
+    text = "\n".join(lines)
+    if payload.get("ok") is False:
+        return _error(tool_call_id, "sessions", text, details=details)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
@@ -14692,6 +15221,8 @@ async def _sessions_stop(
     verbatim, because the TUI, the CLI and this tool must report the same
     event in the same words.
     """
+    if str(params.peer or "").strip():
+        return await _sessions_stop_mesh(tool_call_id, params, context)
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -15333,6 +15864,63 @@ def _peek_read(
     return _walk_steps(directory, cursor=None, need=need), "tail"
 
 
+async def _sessions_peek_mesh(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``peek`` on `peer`: the tail window, read where the session lives (v1).
+
+    One read flag on the pilot family serves this (design §3C): the newest
+    ``steps`` rows of the conversation's synced display window, each clipped, as
+    its owner holds them — the same rows an attached terminal paints. It is LIVE
+    sessions only: a stored one is REFUSED by the CLI BEFORE any bind (a read
+    must never start a runtime on a device nobody is watching), and that refusal
+    comes back verbatim, already naming the warm-up (`--engage`, or ``sessions``
+    op='resume'). ``head``/``before_id``/``around_id``/``query``/``regex``/
+    ``digest`` are THIS device's reads and are refused by validation, not here.
+    """
+    peer = str(params.peer or "").strip()
+    address = str(params.session or params.target or "").strip()
+    early, payload = await _mesh_op(
+        tool_call_id,
+        "sessions",
+        _mesh_peek_argv(peer, address, params.steps),
+        _mesh_pilot_timeout_s(),
+        context,
+    )
+    if early is not None:
+        return early
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    session_id = str(payload.get("session_id") or address)
+    rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
+    details: dict[str, Any] = {
+        "op": "peek",
+        "mode": "mesh-tail",
+        "session_id": session_id,
+        "peer": peer,
+        "steps_shown": len(rows),
+        "has_older": bool(payload.get("has_older")),
+        "mesh": payload,
+    }
+    if not rows:
+        text = (
+            f"{session_id} on {peer}: no steps with text are shown on that device's " "display yet"
+        )
+    else:
+        header = f"{session_id} on {peer} — the newest {len(rows)} step(s)"
+        if payload.get("has_older"):
+            header += " (older steps are loaded there too)"
+        lines = [header + ":"]
+        for index, row in enumerate(rows, start=1):
+            lines.append(f"{index}. {row.get('role') or '?'}: {row.get('text') or ''}")
+        text = "\n".join(lines)
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
 async def _sessions_peek(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
@@ -15345,6 +15933,8 @@ async def _sessions_peek(
     journal, and an honest miss instead of a silent slow scan. All reads run in
     a worker thread, like every other op's I/O in this tool.
     """
+    if str(params.peer or "").strip():
+        return await _sessions_peek_mesh(tool_call_id, params, context)
 
     target = await _sessions_target(params, context)
     if target.candidates:
@@ -15600,6 +16190,207 @@ def _sessions_kill_group(process: "asyncio.subprocess.Process") -> None:
             process.kill()
 
 
+# ---------------------------------------------------------------------------
+# The mesh child: one executor every remote op rides (design §3D)
+# ---------------------------------------------------------------------------
+
+#: A remote ``stop`` renders the owner's own ladder, whose SIGTERM rung waits
+#: out a drain (the CLI relays it with a 240 s budget) — a bound at the socket
+#: default would report "nothing happened" about a stop that was working.
+_MESH_STOP_TIMEOUT_S = 300.0
+
+#: ``--create``/``--engage``: a spawn plus that device's registry work, which
+#: the CLI relays with a 120 s budget of its own.
+_MESH_CREATE_ENGAGE_TIMEOUT_S = 180.0
+
+#: A listing (or the catalogue read ``info`` rides): the CLI's own client budget
+#: is ``relay.LISTING_CLIENT_TIMEOUT_S`` (20 s: probe 12 + slack 8) plus this
+#: child's interpreter start, so the bound sits above both.
+_MESH_LIST_TIMEOUT_S = 30.0
+
+
+def _mesh_pilot_timeout_s() -> float:
+    """The bound for a pilot act (``--peek``/``--send``): ``PILOT_ACT_TIMEOUT_S``
+    + 60, the TUI's own derivation.
+
+    DERIVED from the CLI's constant rather than restated — the TUI learned this
+    the hard way (a hand-written 480 against a 540 s act reaped a working child;
+    ``tui/network_cli.PILOT_CALL_TIMEOUT_S`` documents it) — and imported
+    function-locally because this module is on every process's boot path and the
+    CLI parser is not worth importing for sessions that never touch the mesh. A
+    test pins the derivation, so a stale literal cannot return.
+    """
+    from local_operator.network.cli import PILOT_ACT_TIMEOUT_S
+
+    return PILOT_ACT_TIMEOUT_S + 60.0
+
+
+def _mesh_doc_argv(peer: str) -> list[str]:
+    """The catalogue read: one device's rows (``--peer``) or every device's."""
+    return ["network", "sessions", "--json"] + (["--peer", peer] if peer else ["--all-peers"])
+
+
+def _mesh_engage_argv(peer: str, address: str) -> list[str]:
+    """``--engage``: warm a stored session so it can take a turn — resume's
+    promptless remote form."""
+    return ["network", "sessions", "--json", "--peer", peer, "--engage", address]
+
+
+def _mesh_stop_argv(peer: str, address: str) -> list[str]:
+    """``--stop``: the owner's own ladder, NO force — v1's rule (design §8.4)."""
+    return ["network", "sessions", "--json", "--peer", peer, "--stop", address]
+
+
+def _mesh_peek_argv(peer: str, address: str, steps: int | None) -> list[str]:
+    """``--peek [--steps N]``: the tail window, read where the session lives."""
+    argv = ["network", "sessions", "--json", "--peer", peer, "--peek", address]
+    if steps is not None:
+        argv += ["--steps", str(steps)]
+    return argv
+
+
+def _mesh_create_argv(peer: str, params: SessionsParams) -> tuple[list[str], str]:
+    """The ``--create`` spelling for a remote spawn; ``(argv, error)`` for the
+    ``model`` split — ``<provider>/<model-id>``, the grammar ``send`` documents —
+    because the CLI takes hosting and model as two flags."""
+    argv = ["network", "sessions", "--json", "--peer", peer, "--create"]
+    argv += ["--prompt", str(params.prompt or "")]
+    name = str(params.name or "").strip()
+    if name:
+        argv += ["--name", name]
+    team = str(params.team or "").strip()
+    if team:
+        argv += ["--team", team]
+    profile = str(params.profile or "").strip()
+    if profile:
+        argv += ["--profile", profile]
+    model = " ".join(str(params.model or "").split())
+    if model:
+        provider, sep, model_id = model.partition("/")
+        if not sep or not provider.strip() or not model_id.strip():
+            return [], (
+                "`model` needs `<provider>/<model-id>` (e.g. "
+                "`anthropic/claude-sonnet-5-5`): a bare id does not say who hosts it."
+            )
+        argv += ["--hosting", provider.strip(), "--model", model_id.strip()]
+    return argv, ""
+
+
+async def _mesh_cli_call(
+    argv: list[str], timeout: float, context: object | None = None
+) -> tuple[int, str, str]:
+    """Run THIS build's ``lop network …`` child; ``(rc, stdout, stderr)``.
+
+    ``python_argv(*_SESSIONS_CLI, …)`` — never ``shutil.which("lop")``: the
+    ``lop`` on PATH may be a different build (a global generation pointer, an
+    older install) than the session that spawned this call, and the mesh CLI's
+    protocol must match its peer's (the same rule ``_sessions_launch``
+    documents). The child gets its own process group so a fired bound reaps the
+    whole tree, ``stdin`` is /dev/null (every op here is non-interactive, and a
+    prompt nothing can answer must fail rather than hang), and the environment
+    is ``_sessions_open_env``'s CMUX_/LOP_ strip — an inherited ``LOP_*``
+    variable has steered a child before.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *python_argv(*_SESSIONS_CLI, *argv),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_sessions_open_env(context),
+        cwd=_sessions_child_cwd(context),
+        start_new_session=True,
+    )
+    try:
+        out, err = await asyncio.wait_for(process.communicate(), timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        _sessions_kill_group(process)
+        await process.wait()
+        raise
+    return (
+        int(process.returncode or 0),
+        out.decode("utf-8", "replace"),
+        err.decode("utf-8", "replace"),
+    )
+
+
+def _mesh_payload(stdout: str) -> dict[str, Any] | None:
+    """The child's ``--json`` document, or ``None`` when stdout is not one."""
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _mesh_cli_json(
+    argv: list[str], timeout: float, context: object | None = None
+) -> tuple[int, dict[str, Any] | None, str]:
+    """Run the mesh child and hand back a scrubbed, parsed document.
+
+    The scrub and the stderr cap are the network tool's OWN markers (lazily
+    imported so this module keeps using the single copy): a tool result is the
+    most-copied text in the system, and nothing this child says may bypass the
+    redaction the CLI surface already promises.
+    """
+    code, out, err = await _mesh_cli_call(argv, timeout, context)
+    from local_operator.network.tool import _clean, _scrub
+
+    payload = _mesh_payload(out)
+    if payload is not None:
+        payload = _scrub(payload)
+    return code, payload, _clean(err)
+
+
+def _mesh_refusal_sentence(payload: Mapping[str, Any]) -> str:
+    """The sentence a family REFUSAL carries, or ``""`` — where a receipt with
+    ``ok: false`` is a NON-completion the caller renders, not a refusal: the
+    refusal document is ``{ok: false, code, message}`` and its ``message`` is
+    the sentence, while a receipt never carries one."""
+    if payload.get("ok") is False and payload.get("message"):
+        return str(payload.get("message"))
+    return ""
+
+
+async def _mesh_op(
+    tool_call_id: str,
+    tool: str,
+    argv: list[str],
+    timeout: float,
+    context: object | None = None,
+) -> tuple[ToolResult | None, dict[str, Any]]:
+    """Run one mesh op; ``(early_error, payload)``.
+
+    The two failure shapes every remote op shares live here: a fired bound (the
+    sentence names the number, and the bound sits ABOVE every CLI budget, so a
+    timeout is this tool's rather than a pre-empted answer the CLI was still
+    making) and a child that printed no JSON document (its stderr, cleaned, is
+    the answer). Family REFUSALS ride back as payloads: ``list`` degrades on one
+    of their codes, so classification belongs to the caller that knows its op.
+    """
+    try:
+        code, payload, stderr = await _mesh_cli_json(argv, timeout, context)
+    except (asyncio.TimeoutError, TimeoutError):
+        return (
+            _error(
+                tool_call_id,
+                tool,
+                f"the mesh call did not finish within {int(timeout)}s and was killed; "
+                "nothing on this device was changed.",
+            ),
+            {},
+        )
+    if payload is None:
+        return (
+            _error(
+                tool_call_id,
+                tool,
+                stderr or f"`lop network` exited {code} without a readable answer",
+            ),
+            {},
+        )
+    return None, payload
+
+
 def _sessions_published_pid(state: Mapping[str, Any]) -> int | None:
     """The run's pid — reported only once its discovery record exists.
 
@@ -15810,6 +16601,126 @@ def _sessions_dead_job_error(
     )
 
 
+async def _sessions_spawn_mesh(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``spawn`` on `peer`: the peer mints the session (``net_session_create``).
+
+    The child CLI carries the request and the owner's refusal vocabulary comes
+    back verbatim; the fields map to the create flags one-for-one (design §3C),
+    with ``model`` split into ``--hosting``/``--model``. ``yolo`` is never
+    forwarded (no field exists) and the local concepts (`visibility`,
+    `background`) were refused by validation — so the create arrives on the
+    owner's own default, attended terms.
+    """
+    peer = str(params.peer or "").strip()
+    argv, problem = _mesh_create_argv(peer, params)
+    if problem:
+        return _error(tool_call_id, "sessions", problem)
+    early, payload = await _mesh_op(
+        tool_call_id, "sessions", argv, _MESH_CREATE_ENGAGE_TIMEOUT_S, context
+    )
+    if early is not None:
+        return early
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    minted = str(payload.get("session_id") or "")
+    name = str(params.name or "").strip()
+    head = f'created "{name}" on {peer}' if name else f"created on {peer}"
+    if minted:
+        head += f" (session {minted})"
+    lines = [head]
+    if str(params.prompt or ""):
+        admitted = bool(payload.get("admitted"))
+        lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
+    notice = str(payload.get("unattended_notice") or "")
+    if notice:
+        lines.append(notice)
+    details: dict[str, Any] = {
+        "op": "spawn",
+        "peer": peer,
+        "session_id": minted,
+        "mesh": payload,
+    }
+    text = "\n".join(lines)
+    if payload.get("ok") is False:
+        return _error(tool_call_id, "sessions", text, details=details)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
+async def _sessions_resume_mesh(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``resume`` on `peer`: drive a turn there (``prompt``) or warm it (engage).
+
+    Both spellings are the pilot family's act on that device (design §3C):
+    ``prompt`` sends the turn and the owner's reply rides the receipt; without
+    one the engage receipt warms the session so a later act finds a runtime.
+    Nothing is "reopened" HERE — the session and its transcript live on that
+    device and were never closed from this side; the set form is refused beside
+    `peer` by validation.
+    """
+    peer = str(params.peer or "").strip()
+    address = str(params.session or params.target or "").strip()
+    prompt = str(params.prompt or "")
+    if prompt.strip():
+        early, payload = await _mesh_op(
+            tool_call_id,
+            "sessions",
+            _mesh_send_argv(peer, address, prompt),
+            _mesh_pilot_timeout_s(),
+            context,
+        )
+        if early is not None:
+            return early
+        refusal = _mesh_refusal_sentence(payload)
+        if refusal:
+            return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+        from local_operator.network.tool import _pilot_receipt_lines
+
+        text = "\n".join(_pilot_receipt_lines("send", payload))
+        details: dict[str, Any] = {
+            "op": "resume",
+            "peer": peer,
+            "session_id": str(payload.get("session_id") or address),
+            "outcome": payload.get("outcome"),
+            "mesh": payload,
+        }
+        reply = str(payload.get("reply") or "")
+        if reply:
+            details["reply"] = reply
+        if payload.get("ok") is False:
+            return _error(tool_call_id, "sessions", text, details=details)
+        return _text(tool_call_id, "sessions", text, details=details)
+
+    early, payload = await _mesh_op(
+        tool_call_id,
+        "sessions",
+        _mesh_engage_argv(peer, address),
+        _MESH_CREATE_ENGAGE_TIMEOUT_S,
+        context,
+    )
+    if early is not None:
+        return early
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    engaged = bool(payload.get("engaged"))
+    sentence = str(payload.get("detail") or "") or ("engaged" if engaged else "not engaged")
+    details = {
+        "op": "resume",
+        "peer": peer,
+        "session_id": str(payload.get("session_id") or address),
+        "engaged": engaged,
+        "mesh": payload,
+    }
+    text = f"{address} on {peer}: {sentence}"
+    if payload.get("ok") is False:
+        return _error(tool_call_id, "sessions", text, details=details)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
 async def _sessions_open(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
@@ -15822,6 +16733,13 @@ async def _sessions_open(
     parse — and everything structured comes from the durable ledger the
     launcher wrote.
     """
+    if str(params.peer or "").strip():
+        # THE MESH PATH (design §3C): a remote spawn/resume is an act on the
+        # owner's device — the local `lop exec` launcher is not involved, and
+        # should not be: nothing is opened HERE.
+        if params.op == "spawn":
+            return await _sessions_spawn_mesh(tool_call_id, params, context)
+        return await _sessions_resume_mesh(tool_call_id, params, context)
     from local_operator.exec_mode import job_status
 
     resume_id = ""
