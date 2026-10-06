@@ -34,6 +34,7 @@ from local_operator.session.peer_rows import (
     peer_session_row,
     peer_session_rows,
     seed_peer_row,
+    select_peer_session,
 )
 
 
@@ -862,3 +863,118 @@ def test_a_seed_is_keyed_by_root_and_device(
         ("s_new", "d_aa"),
         ("s_new", "d_bb"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# The target selector: which session did "that name" mean.
+#
+# The pure half of the pilot family's id-or-name resolution
+# (``sessions-remote-tools.md`` §3B): no mesh, no I/O — the rows are fetched by
+# the caller and the decision is made here, so every tier is asserted against
+# constructed rows rather than against a relay that would have to exist first.
+
+
+def _selectable_row(
+    session_id: str,
+    *,
+    name: str = "Some conversation",
+    device_id: str = "d_aa",
+    device_name: str = "radiant-m4",
+) -> SessionRow:
+    """One row for the selector matrix: only its two address fields matter."""
+    return SessionRow(
+        id=session_id,
+        mtime=0.0,
+        name=name,
+        locality="remote",
+        owner_device=device_id,
+        owner_device_name=device_name,
+    )
+
+
+def test_the_selector_resolves_an_exact_name_or_id_in_either_case() -> None:
+    """An address the picker prints resolves silently — name first, then id.
+
+    The ordering of the tiers is what the callers' refusals are built on: an
+    exact value is evidence, so it never reaches the ambiguity list, and a
+    caller that typed 'PILOT' gets the same session as one that typed 'pilot'
+    (a conversation name is typed by a person, not by a machine).
+    """
+    by_name = _selectable_row("9e7d35e4e41f", name="pilot")
+    other = _selectable_row("aaaa11112222", name="unrelated")
+    assert select_peer_session("pilot", [by_name, other]) == (by_name, ())
+    assert select_peer_session("PILOT", [by_name, other]) == (by_name, ())
+    assert select_peer_session("9e7d35e4e41f", [by_name, other]) == (by_name, ())
+
+
+def test_an_exact_match_wins_over_a_substring_namesake() -> None:
+    """The wrong-recipient defect the exact tier exists for (§3B).
+
+    ``pilot`` also appears inside ``Pilot notes``, and the substring tier alone
+    would have refused the pair (or, when only the namesake contained it,
+    silently delivered to the wrong session). The whole-value match must
+    resolve to the row that IS ``pilot``.
+    """
+    exact = _selectable_row("9e7d35e4e41f", name="pilot")
+    namesake = _selectable_row("aaaa11112222", name="Pilot notes")
+    assert select_peer_session("pilot", [exact, namesake]) == (exact, ())
+
+
+def test_two_exact_matches_are_candidates_ordered_by_the_field_that_matched() -> None:
+    """Two whole-value matches is the one exact-tier state that refuses.
+
+    Picking either would be the silent wrong-recipient class; the candidates
+    are ordered name-match first, then id-match, and then by input order, so a
+    refusal listing them reads the same way twice.
+    """
+    by_name = _selectable_row("aaaa11112222", name="9e7d35e4e41f")
+    by_id = _selectable_row("9e7d35e4e41f", name="something else")
+    # ``9e7d35e4e41f`` is one row's NAME and another row's ID: two exact
+    # matches, and neither may be picked.
+    assert select_peer_session("9e7d35e4e41f", [by_id, by_name]) == (
+        None,
+        (by_name, by_id),
+    )
+
+
+def test_a_substring_resolves_alone_and_lists_every_candidate_when_not() -> None:
+    """One substring hit resolves; two are refused WITH both rows.
+
+    The candidate list is the refusal's payload — a person (or a script) picks
+    a new spelling from it rather than guessing at the tail of a name they
+    half-remember.
+    """
+    alpha = _selectable_row("aaaa11112222", name="release checklist")
+    beta = _selectable_row("bbbb33334444", name="checklist for the audit")
+    assert select_peer_session("release", [alpha, beta]) == (alpha, ())
+    assert select_peer_session("checklist", [alpha, beta]) == (None, (alpha, beta))
+
+
+def test_an_unknown_target_is_no_match_and_no_candidates() -> None:
+    """The third state the CLI needs apart: nothing matched AT ALL.
+
+    ``(None, ())`` is what the caller renders as the family's own
+    ``session_unknown`` (which distinguishes "the peer answered and holds no
+    such conversation" from "the peer did not answer") — so an empty target and
+    a miss must both land here without raising, and an empty candidate tuple is
+    the signal that nothing was refused because nothing was ambiguous.
+    """
+    row = _selectable_row("aaaa11112222", name="unrelated")
+    assert select_peer_session("nothing-like-it", [row]) == (None, ())
+    assert select_peer_session("", [row]) == (None, ())
+    assert select_peer_session("unrelated", []) == (None, ())
+
+
+def test_a_cwd_basename_is_not_an_address_because_a_peer_row_carries_no_cwd() -> None:
+    """The deliberate third-arm omission, pinned so a future wire change sees it.
+
+    The local resolver also matches a row's working-directory basename; the row
+    shape this selector reads (``SessionRow``) has no cwd field — the peer
+    projection drops it — so there is nothing to match a worktree token
+    against. If a cwd ever rides the row, this cell fails and the arm (plus its
+    sole-match rule, ``peer_send._EXACT_WEAK_RANK``) belongs beside it; until
+    then, a basename spelling simply is not an address.
+    """
+    assert "cwd" not in SessionRow._fields
+    row = _selectable_row("aaaa11112222", name="unrelated")
+    assert select_peer_session("sessions-remote-0b39", [row]) == (None, ())

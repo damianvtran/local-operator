@@ -491,6 +491,27 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         default="",
         help="run a slash command in that session on its device (e.g. '/rename new name')",
     )
+    # ``--peek`` IS THE FAMILY'S READ (design §3C): the same target addressing
+    # (an id or a name), no text, no write — the newest steps of the
+    # conversation's synced display window, served by the owner. It is a flag on
+    # this verb rather than a new subcommand because it takes the same
+    # ``--peer`` and answers the same "what does that conversation hold"
+    # question the table above asks. A STORED session is REFUSED rather than
+    # warmed (§8.3, locked): a read must never start a runtime on a device
+    # nobody is watching, and the refusal names the route that does warm it.
+    net_sessions.add_argument(
+        "--peek",
+        metavar="SESSION",
+        default="",
+        help="read the newest steps of that session's history, where it lives (live sessions)",
+    )
+    net_sessions.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"with --peek: how many of the newest steps to show (default {_PEEK_DEFAULT_STEPS})",
+    )
     # REMAINDER, so the payload is what the user typed rather than what the
     # parser makes of it: with ``nargs="*"`` every word matching a declared
     # option was consumed as that option, wherever it appeared — `check the
@@ -4535,6 +4556,18 @@ PILOT_REPLY_TIMEOUT_S = 60.0
 #: lookup, the teardown), which is why the rungs' sum is not by itself a bound.
 PILOT_ACT_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + max(PILOT_TURN_TIMEOUT_S, PILOT_REPLY_TIMEOUT_S)
 
+#: THE WORST CASE ONE ``--peek`` CAN OCCUPY, derived the same way the driving
+#: act's bound is (one bind budget for the OPEN, one for the BIND), with the
+#: READ rung in place of the turn — because a peek reaches neither a SPAWN nor a
+#: TURN: it gates stored sessions out BEFORE the viewer exists (design §8.3: a
+#: read never starts a runtime on a device nobody is watching), so the spawn
+#: half of the family's 540 s cannot happen, and it asks for no work, so the
+#: unbounded-turn rung cannot either. 2 x 120 + 60 = 300, and it must stay
+#: below the TUI's child budget (``tui/network_cli.PILOT_CALL_TIMEOUT_S``, 600)
+#: so a composer shows this verb's answer rather than a timeout about a call
+#: that was working.
+PILOT_PEEK_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + PILOT_REPLY_TIMEOUT_S
+
 #: The ``style`` values a ``SlashResult`` may carry (``session/frontend_state``:
 #: ``info``/``warning``/``error``, the three the owner's own renders use). A
 #: receipt outside this set is one this build cannot read an outcome from, which
@@ -4542,6 +4575,14 @@ PILOT_ACT_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + max(PILOT_TURN_TIMEOUT_S, PILOT
 #: NIT-6): the old test was ``style != "error"``, and a MISSING style is not
 #: ``error``, so an unreadable receipt read as success.
 _SLASH_STYLES = ("info", "warning", "error")
+
+#: Steps a ``--peek`` window shows when the caller names no count: the sessions
+#: tool's own default (``tools/builtin._PEEK_DEFAULT_STEPS``), so the CLI and
+#: the tool answer "how much is one peek" with one number. Its ceiling is NOT
+#: copied here — ``--steps`` is bounded against ``comms.PEEK_MAX_STEPS`` (50),
+#: the same constant ``hub``'s peek and the sessions tool refuse with, read at
+#: the one place the value is accepted.
+_PEEK_DEFAULT_STEPS = 12
 
 
 def _pilot_text(args: argparse.Namespace) -> str:
@@ -4676,6 +4717,99 @@ def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
     )
 
 
+def _pilot_ambiguous_sentence(peer: str, target: str, candidates: tuple[Any, ...]) -> str:
+    """The refusal an AMBIGUOUS target deserves: the rows to pick between, named.
+
+    A name that matches two conversations is not a target a verb may guess
+    between — the wrong-recipient hazard the local resolver's exact tier exists
+    for (``mobile/peer_send``) — so the refusal carries every candidate with the
+    id each one is RETYPEABLE as, in the shape the family's listings already
+    print. The candidate order is the selector's own (ordered by the field that
+    matched, then by the rows' order), so the same mesh state reads the same way
+    twice.
+    """
+    lines = [f"{peer} holds {len(candidates)} sessions matching {target!r} — name one by its id:"]
+    lines.extend(f"  {row.id}  {row.name}" for row in candidates)
+    return "\n".join(lines)
+
+
+def _stored_peek_sentence(session_id: str, peer: str) -> str:
+    """The one-line route out of a cold ``--peek`` (design §8.3, locked).
+
+    THE SENTENCE IS THE ROUTE: an agent (or a script) reading this refusal must
+    be able to make its NEXT call without a second question, so it names the
+    exact command that warms the session — and the agent-side spelling of the
+    same act — rather than saying "it is not running" and stopping.
+    """
+    return (
+        f"{session_id} is stored on {peer}, so there is nothing running to read — a peek "
+        f"never starts a runtime there. Warm it first: `lop network sessions --peer {peer} "
+        f"--engage {session_id}` (an agent resumes with `sessions` op='resume'), then peek."
+    )
+
+
+def _resolve_act_target(
+    target: str, peer: str, config_dir: Path
+) -> tuple[Any | None, tuple[Any, ...]]:
+    """The session plane's ONE id-or-name read, shared by every verb with a target.
+
+    TWO TIERS, in the order of the local resolver's own evidence:
+
+    * the exact ID first, through ``remote_row_for`` — cache-first, and ONE
+      catalogue read when the cache misses — so an id behaves exactly as it
+      always has: it resolves to the device that HOLDS it, and a ``--peer``
+      that disagrees is reported beside the real one rather than silently
+      obeyed (the Q1 correction);
+    * then, only when no id matched, the pure selector
+      (``peer_rows.select_peer_session``) over the rows THIS ``--peer``
+      reported — "reach the session called <name> on that device". A name is
+      answerable at all only because of this read: the peer's own ops take
+      session ids, and no wire op has ever taken a name.
+
+    Returns ``(row, ())`` resolved, ``(None, candidates)`` ambiguous, and
+    ``(None, ())`` for a miss — the third state the callers render through the
+    family's own unresolved taxonomy (``_pilot_unresolved``).
+    """
+    from local_operator.session.remote_open import remote_row_for
+
+    row = remote_row_for(target, config_dir)
+    if row is not None:
+        return row, ()
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    rows = [
+        candidate
+        for candidate in peer_rows_mod.peer_session_rows(config_dir)
+        if str(candidate.owner_device or "") == peer
+        or str(candidate.owner_device_name or "") == peer
+    ]
+    return peer_rows_mod.select_peer_session(target, rows)
+
+
+def _translate_act_target(target: str, peer: str) -> str:
+    """A ``--stop``/``--engage`` target: the id a name means, or the word itself.
+
+    THESE TWO VERBS ACT AT THE PEER, unlike the pilot acts: this side carries
+    the request and renders the owner's own ladder verbatim, so a target the
+    mesh cannot resolve PASSES THROUGH unchanged — an id can be missing from a
+    cache that is seconds old, and it is the peer that answers for what it
+    holds (§9.2: the fresh-created window is the mesh lane's to close, not this
+    side's to encode). The one state that must NOT pass through is an
+    AMBIGUOUS name, where the typed word means several sessions: acting on a
+    guess is the wrong-recipient class this family refuses, so it refuses in
+    the family's own vocabulary, listing the candidates.
+    """
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    row, candidates = _resolve_act_target(target, peer, Path(config_dir()))
+    if candidates:
+        raise MeshRefusal("session_ambiguous", _pilot_ambiguous_sentence(peer, target, candidates))
+    if row is not None:
+        return str(getattr(row, "id", "") or target)
+    return target
+
+
 def _pilot_dial_refusal(
     session_id: str, peer: str, message: str, config_dir: Path
 ) -> tuple[str, str]:
@@ -4712,7 +4846,7 @@ def _pilot_dial_refusal(
 
 
 def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
-    """``--send``/``--steer``/``--slash``: one act on a session that is not here.
+    """``--send``/``--steer``/``--slash``/``--peek``: one act on a session that is not here.
 
     WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
     is a request to THIS device's relay, and the session plane has a local op for
@@ -4741,8 +4875,11 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
             f"--{verb} needs --peer: a conversation lives on one device, and only that "
             "device's runtime can run a turn inside it",
         )
-    text = _pilot_text(args)
-    if not text:
+    # ``--peek`` DELIVERS NOTHING, so it reads stdin for nothing: skipping
+    # ``_pilot_text`` here is load-bearing, because that helper would otherwise
+    # BLOCK on a piped stdin for a payload this verb has no use for.
+    text = "" if verb == "peek" else _pilot_text(args)
+    if verb != "peek" and not text:
         print(
             f"--{verb} needs some text — pass it after the session id, or pipe it in",
             file=sys.stderr,
@@ -4754,9 +4891,19 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
             file=sys.stderr,
         )
         return 2
+    steps = getattr(args, "steps", None)
+    # The RANGE was validated where the flag was read (``_cmd_sessions``); this
+    # is only the default, for every verb — the driving acts merely ignore it.
+    steps = _PEEK_DEFAULT_STEPS if steps is None else int(steps)
 
     from local_operator.paths import config_dir
 
+    # ONE BOUND FOR THE WHOLE ACT, per verb: the driving acts pay for a spawn
+    # and an unbounded turn (``PILOT_ACT_TIMEOUT_S``), while ``--peek`` can
+    # reach neither — it never engages a stored session (§8.3) and asks for no
+    # work — so its bound is the same derivation with the REPLY rung in place
+    # of the turn (see ``PILOT_PEEK_TIMEOUT_S``).
+    bound = PILOT_PEEK_TIMEOUT_S if verb == "peek" else PILOT_ACT_TIMEOUT_S
     try:
         payload, lines = asyncio.run(
             asyncio.wait_for(
@@ -4766,19 +4913,20 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
                     peer=peer,
                     text=text,
                     config_dir=Path(config_dir()),
+                    steps=int(steps),
                 ),
                 # ONE bound around the whole act, at the number its parts add up
-                # to (``PILOT_ACT_TIMEOUT_S``) — the sum of the rungs alone is not
-                # a bound on the act, because the row lookup and the teardown have
-                # no rung of their own.
-                timeout=PILOT_ACT_TIMEOUT_S,
+                # to — the sum of the rungs alone is not a bound on the act,
+                # because the row lookup and the teardown have no rung of their
+                # own.
+                timeout=bound,
             )
         )
     except TimeoutError as exc:
         raise MeshRefusal(
             "session_unreachable",
             f"{peer} did not finish this act on {session_id} within "
-            f"{PILOT_ACT_TIMEOUT_S:.0f}s — the worst case this verb budgets for; "
+            f"{bound:.0f}s — the worst case this verb budgets for; "
             f"`lop network doctor --peer {peer}` diagnoses the link",
         ) from exc
     return _emit(args, payload, lines)
@@ -4791,29 +4939,50 @@ async def _pilot_act(
     peer: str,
     text: str,
     config_dir: Path,
+    steps: int = _PEEK_DEFAULT_STEPS,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Open ``session_id`` on the peer as its viewer, perform ONE act, report it."""
+    """Open the target on the peer as its viewer, perform ONE act, report it.
+
+    THE TARGET IS AN ID OR A NAME (``_resolve_act_target``): everything below
+    the resolution works on the RESOLVED id, so a name is one spelling of an
+    address rather than a second kind of session.
+    """
     from local_operator.network.types import MeshRefusal
     from local_operator.session.remote_open import (
         open_remote_viewer,
-        remote_row_for,
         unreachable_peer_sentence,
     )
 
-    # The reachability read is CACHE-FIRST and answers ``None`` with no dial when
-    # this device holds the id itself, so the local path pays nothing for it —
-    # the same property the TUI's guard and the shell's ``--resume`` rely on.
-    row = await asyncio.to_thread(remote_row_for, session_id, config_dir)
+    # WHO THE TARGET IS comes from ONE read with two tiers: the exact id
+    # (cache-first and dial-free for a local session, the property the TUI's
+    # guard and the shell's ``--resume`` rely on), then the id-or-name selector
+    # over this peer's rows.
+    row, candidates = await asyncio.to_thread(_resolve_act_target, session_id, peer, config_dir)
+    if candidates:
+        raise MeshRefusal(
+            "session_ambiguous", _pilot_ambiguous_sentence(peer, session_id, candidates)
+        )
     if row is None:
         # WHICH refusal this is depends on facts this side has not read yet, and
         # the three of them need three different next steps — see
         # ``_pilot_unresolved``. Read on the failure path only.
         code, sentence = await asyncio.to_thread(_pilot_unresolved, session_id, peer)
         raise MeshRefusal(code, sentence)
+    # FROM HERE THE RESOLVED ID IS THE ADDRESS: a name was one spelling of it,
+    # and every sentence and receipt below names the session's own id, so two
+    # callers who addressed one conversation two ways read back one answer.
+    session_id = str(getattr(row, "id", "") or session_id)
     if not row.reachable:
         # The peer's name, the reason in words and the diagnosing command, all
         # composed in the one place that owns "a peer row becomes a viewer".
         raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
+    if verb == "peek" and not str(getattr(row, "live_state", "") or ""):
+        # THE LIVE-ONLY GATE (design §8.3, locked 2026-10-06): the row state is
+        # read BEFORE the viewer exists, so a stored session refuses HERE —
+        # never opened, never bound, never warmed. A read must not start a
+        # runtime on a device nobody is watching, and the sentence names the
+        # exact call that does warm it (an agent's next action IS the resume).
+        raise MeshRefusal("session_stored", _stored_peek_sentence(session_id, peer))
 
     # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
     # ``--peer`` names where a conversation lives, but it is not what ROUTES this
@@ -4904,7 +5073,13 @@ async def _pilot_act(
                 _pilot_dial_refusal, session_id, peer, str(exc), config_dir
             )
             raise MeshRefusal(code, sentence) from exc
-        if verb == "send":
+        if verb == "peek":
+            # A READ, NOT AN ACT: no text, no write, and nothing is left behind
+            # on the peer. It rides the same bound viewer and bind as the
+            # driving acts, because the rows come from the same synced display
+            # window an attached terminal paints.
+            payload, lines = await _pilot_peek(viewer, session_id, device, steps)
+        elif verb == "send":
             payload, lines = await _pilot_send(viewer, session_id, device, text)
         elif verb == "steer":
             payload, lines = await _pilot_steer(viewer, session_id, device, text)
@@ -5121,6 +5296,85 @@ async def _pilot_slash(
     return payload, [f"{session_id} on {peer}: /{command} — {said or 'no receipt'}"]
 
 
+async def _pilot_peek(
+    viewer: Any,
+    session_id: str,
+    peer: str,
+    steps: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """``--peek``: the newest ``steps`` rows of the conversation's synced history.
+
+    A TAIL WINDOW, NOT A REPLAY. The rows come from the viewer's OWN synced
+    display history (``display_history_window``) — the same canonical window
+    ``_pilot_last_reply`` reads after a ``--send``, and the same rows an
+    attached terminal is painting — so this shows what that conversation
+    currently looks like from here, bounded to the window the owner already
+    served. Paging OLDER than that window (``history_page``'s signed cursors)
+    is not this verb's v1: a tail is what the acceptance asks for, and each
+    page is an owner round trip per step count.
+
+    WHY THE ROWS ARE FILTERED TO NON-EMPTY TEXT: the window carries the
+    bookkeeping rows the owner journals (checkpoints, todo snapshots) that
+    render as nothing, and a "last 12" that spent half its budget on blank
+    rows would be a window that lies about how much it shows. The filter is
+    the display-side sibling of the local peek's ``_peek_message_entries``
+    rule ("only rows that render become steps").
+
+    READ-ONLY: nothing is written to the peer, no text is delivered, and each
+    row's body is clipped (head AND tail, ``comms._clip``'s own budget) so
+    ``--steps 50`` of dense turns cannot push an unbounded payload into a
+    caller's context.
+    """
+    from local_operator.harness.comms import _clip
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        rows = list(viewer.display_history_window())
+    except Exception as exc:  # noqa: BLE001 — a read that fails is a refusal
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not serve {session_id}'s history ({exc}); nothing was changed "
+            "on that device",
+        ) from exc
+    readable = [row for row in rows if str(getattr(row, "text", "") or "").strip()]
+    shown = readable[-steps:]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "peek",
+        "steps": len(shown),
+        "rows": [
+            {
+                "role": str(getattr(row, "role", "") or ""),
+                "text": _clip(str(getattr(row, "text", "") or "")),
+            }
+            for row in shown
+        ],
+        # WHETHER THIS IS THE WHOLE CONVERSATION, SAID HONESTLY: true when the
+        # window holds more than the slice shows. It says nothing about rows
+        # older than the window itself — those were never loaded here, and a
+        # claim about them would be a claim this side cannot support.
+        "has_older": len(readable) > len(shown),
+    }
+    if not shown:
+        return payload, [
+            f"{session_id} on {peer}: the viewer holds no steps with text yet — "
+            "nothing has been shown on that device's display"
+        ]
+    lines = [
+        f"{session_id} on {peer} — the newest {len(shown)} step(s)"
+        + (" (older steps are loaded here too)" if payload["has_older"] else "")
+        + ":"
+    ]
+    for index, row in enumerate(shown, start=1):
+        lines.append(
+            f"{index}. {str(getattr(row, 'role', '') or '?')}: "
+            f"{_clip(str(getattr(row, 'text', '') or ''))}"
+        )
+    return payload, lines
+
+
 #: The dests of the flags that only describe a session being CREATED (each one's
 #: own help opens with "with --create:"). With a pilot act they can neither apply
 #: nor be ignored silently: they are ACCEPTED and then dropped, and the words a user
@@ -5189,20 +5443,39 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         print("--force applies to --stop only", file=sys.stderr)
         return 2
 
+    # ``--steps`` IS THE SAME CLASS as ``--force`` above: it means one thing —
+    # how much of a ``--peek`` window to show — so a caller who passes it beside
+    # anything else (or alone) has asked for a read this command is not
+    # performing. Its range is checked against ``comms.PEEK_MAX_STEPS`` — the
+    # SAME ceiling ``hub``'s peek and the sessions tool refuse with — read here
+    # rather than copied, so the surfaces cannot come to disagree about "too
+    # many".
+    peek = str(getattr(args, "peek", "") or "")
+    steps = getattr(args, "steps", None)
+    if steps is not None and not peek:
+        print("--steps applies to --peek only", file=sys.stderr)
+        return 2
+    if peek and steps is not None:
+        from local_operator.harness.comms import PEEK_MAX_STEPS
+
+        if not 1 <= steps <= PEEK_MAX_STEPS:
+            print(f"--steps takes 1..{PEEK_MAX_STEPS} (asked for {steps})", file=sys.stderr)
+            return 2
+
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
     # the only verbs here that open a VIEWER, and a command line that asked for
     # one of them AND an archive/stop would run one act while silently dropping
     # the other — the class of untruth ``--force`` above is refused for.
     pilot = [
         (name, str(getattr(args, name, "") or ""))
-        for name in ("send", "steer", "slash")
+        for name in ("send", "steer", "slash", "peek")
         if str(getattr(args, name, "") or "")
     ]
     if pilot:
         if len(pilot) > 1:
             print(
-                "name one of --send/--steer/--slash: each is one act on one session, and "
-                "they are not a pipeline",
+                "name one of --send/--steer/--slash/--peek: each is one act on one session, "
+                "and they are not a pipeline",
                 file=sys.stderr,
             )
             return 2
@@ -5235,6 +5508,15 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 f"--{verb} acts on one that already exists: it would be accepted and then "
                 "dropped. If you meant those words as text, separate the text with `--` "
                 f"(`--{verb} <session> -- <text>`)",
+                file=sys.stderr,
+            )
+            return 2
+        if verb == "peek" and _pilot_text_from_args(args):
+            # ``--peek`` READS; any positional would be accepted and dropped,
+            # which is the untruth this family refuses everywhere else.
+            print(
+                "--peek reads a conversation and takes no text: "
+                "`--peek <session> [--steps N]` is the whole form",
                 file=sys.stderr,
             )
             return 2
@@ -5277,6 +5559,15 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     if session_id:
         if not peer:
             raise MeshRefusal("peer_required", "--stop needs --peer: a session lives on one device")
+        # THE TARGET IS AN ID OR A NAME (design §3B). A name is translated
+        # through the same read the pilot acts use; a target the mesh cannot
+        # resolve PASSES THROUGH — the peer runs its own ladder and answers for
+        # what IT holds, and a cache seconds old must not become this side's
+        # verdict about a session it cannot see (§9.2). The one state that may
+        # NOT pass through is an AMBIGUOUS name: acting on a guess between two
+        # conversations is the wrong-recipient class this family refuses
+        # everywhere.
+        session_id = _translate_act_target(session_id, peer)
         # A LONG budget on purpose: the peer runs its OWN ladder, whose SIGTERM
         # rung waits out a drain only the owning machine can bound, and a CLI
         # that gave up at 5 s would report "nothing happened" about a stop that
@@ -5313,6 +5604,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--engage needs --peer: a session lives on one device"
             )
+        # The id-or-name translation, exactly as ``--stop`` above it (one
+        # spelling, one refusal for ambiguity, pass-through for a miss).
+        engage = _translate_act_target(engage, peer)
         detail = _relay_answer(
             "peer_session_engage",
             peer=peer,
