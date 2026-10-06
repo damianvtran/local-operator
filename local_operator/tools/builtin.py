@@ -14680,8 +14680,13 @@ def _peer_holder_sentence(session_id: str) -> str | None:
 
     Blocking (a cache read, and on a miss one bounded relay fan-out): call
     off the event loop — :func:`_peer_holder_hint` is the wrapper the tools
-    use, and it guarantees ``session_id`` is a full id whichever spelling
-    (``session=``/``target=``) named it.
+    use. What reaches ``session_id`` differs by spelling: a ``target=``
+    needle is gated to the minted full-id shape before the call
+    (``_FULL_ID_RE``), while a ``session=`` address arrives as typed — the
+    resolver's miss names any string that matched no record — and exact
+    equality below is its only gate, so a value that is not a row's id can
+    never match one (the worst case is the miss's bounded read spent for
+    nothing).
 
     THE LOOKUP, and every way it stays cheap:
 
@@ -14726,8 +14731,9 @@ async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | N
     TWO SPELLINGS of one exact id reach the hint, and both mean "this id,
     nowhere on this device":
 
-    * ``session=<id>`` — an id was named, and the refusal is the resolver's
-      own miss form;
+    * ``session=<id>`` — the refusal is the resolver's own miss form; the
+      address is used as an exact id and its shape is not re-gated here
+      (exact equality below can only match a row's id);
     * ``target=<id>`` — the needle must BE a full id (``_FULL_ID_RE``, on the
       stripped needle: the resolver strips a target the same way) and the
       refusal must be the rewritten target miss (``_TARGET_MISS_TAIL``). A
