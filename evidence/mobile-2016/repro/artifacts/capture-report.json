@@ -1,0 +1,41 @@
+{
+  "port": 4216,
+  "viewport": "390x844",
+  "steps": [
+    {
+      "step": "list-initial",
+      "title": "(11) local operator",
+      "control_count": 21,
+      "bulk_control_matches": [],
+      "bulk_text_matches": [],
+      "new_marks": [
+        {
+          "row": "Release notes draft | new",
+          "rect": {
+            "top": 608,
+            "bottom": 625,
+            "left": 355
+          },
+          "visible": true
+        },
+        {
+          "row": "Mobile parity audit | new",
+          "rect": {
+            "top": 659,
+            "bottom": 676,
+            "left": 355
+          },
+          "visible": true
+        }
+      ]
+    },
+    {
+      "step": "session-screen",
+      "title": "untitled \u2014 local operator",
+      "control_count": 8,
+      "bulk_control_matches": [],
+      "bulk_text_matches": []
+    }
+  ],
+  "first_unread_row": "Release notes draft | new"
+}

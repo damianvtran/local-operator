@@ -1,0 +1,68 @@
+local operator
+mark all as read
+
+touch and hold a row to pin it
+
+Active Sessions
+Queued asks
+2 asks
+ 
+working
+Asks behind a decision
+approval
+12 todo
+2 asks
+ 
+Stale tap
+question
+ 
+working
+Failing fan-out, decision waiting
+approval
+12 todo
+ 
+working
+Stacked panels
+approval
+12 todo
+ 
+working
+Stacked panels
+question
+12 todo
+ 
+Secret ask
+question
+ 
+Approval overflow
+approval
+ 
+Ask overflow
+question
+ 
+Release notes draft
+new
+/synthetic
+fixture
+Mobile parity audit
+new
+/synthetic
+fixture
+Asks elsewhere
+1 ask
+ 
+Asks settled
+ 
+Failing fan-out
+ 
+Roster overflow
+ 
+Previous Sessions
+Ask me the second one too.
+ended
+ 
+new session
+past
+projects
+◐
+wide

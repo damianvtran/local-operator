@@ -1,0 +1,162 @@
+# Raw HTTP transcript — issue #2016, post-fix (fixture daemon, isolated)
+
+=== [1] login ===
+> POST /login
+> (request body: password=<redacted>)
+< 303  content-type: 
+< set-cookie names: ['lop_mobile'] (value redacted)
+
+=== [2] badge BEFORE any mark ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":2,"revision":[2,0,0],"degraded":[],"conversations":[{"session_id":"c0ffee000017","completion_token":"7e347fdb-b124-49f0-8f67-903855752741","kind":"complete","revision":[2,0],"push_handle":"M4KFbGUBG4Sz0Zxib8s102"},{"session_id":"c0ffee000016","completion_token":"9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc","kind":"complete","revision":[1,0],"push_handle":"4B5Ga1sBP_bIhXcaqsE6ED"}]}
+
+=== [3] list frame BEFORE any mark ===
+> GET /api/sessions
+< 200  content-type: application/json
+< body: {"sessions":[{"session_id":"asks","section":"active","pinned":false,"conversation_name":"Queued asks","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0,"mtime":1791279204.415321,"created_at":1791279204.408576,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"asks-stacked","section":"active","pinned":false,"conversation_name":"Asks behind a decision","cwd":"","model_label":"","streaming":true,"leaving":"","updating":"","needs_attention":true,"pending_kind":"approval","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":12,"mtime":1791279204.400954,"created_at":1791279204.4030044,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"stale","section":"active","pinned":false,"conversation_name":"Stale tap","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0
+
+=== [4] bulk clear: one rendered receipt + one DEAD id (per-item verdicts) ===
+> POST /api/attention/seen
+> request body: {"items": [{"session_id": "c0ffee000016", "completion_token": "9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc"}, {"session_id": "deadbeef1234", "completion_token": "84a63d72-7d29-4ee0-bb68-7aae9bb9aecc"}]}
+< 200  content-type: application/json
+< body: {"ok":true,"read":[{"conversation_id":"session/c0ffee000016","completion_token":"9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc","anchor_id":"fixture-completion","kind":"complete","reason":"","cause":"","notify":true,"unseen":false,"revision":[1,1]}],"superseded":[],"unknown":["deadbeef1234"]}
+
+=== [5] badge AFTER the mixed batch ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":1,"revision":[2,1,0],"degraded":[],"conversations":[{"session_id":"c0ffee000017","completion_token":"7e347fdb-b124-49f0-8f67-903855752741","kind":"complete","revision":[2,0],"push_handle":"M4KFbGUBG4Sz0Zxib8s102"}]}
+
+=== [6] fixture publishes a NEWER completion for the stale target (lands after the render) ===
+> POST /fixture/publish
+> request body: {"session_id": "c0ffee000017"}
+< 200  content-type: application/json
+< body: {"session_id":"c0ffee000017","completion_token":"42cabeb9-c38c-44ca-9da3-0011bcc13eec"}
+
+=== [7] bulk clear with the STALE token (NOT A SWEEP: nothing may clear) ===
+> POST /api/attention/seen
+> request body: {"items": [{"session_id": "c0ffee000017", "completion_token": "7e347fdb-b124-49f0-8f67-903855752741"}]}
+< 200  content-type: application/json
+< body: {"ok":true,"read":[],"superseded":["c0ffee000017"],"unknown":[]}
+
+=== [8] badge AFTER the stale attempt (unchanged) ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":1,"revision":[3,1,0],"degraded":[],"conversations":[{"session_id":"c0ffee000017","completion_token":"42cabeb9-c38c-44ca-9da3-0011bcc13eec","kind":"complete","revision":[3,0],"push_handle":"M4KFbGUBG4Sz0Zxib8s102"}]}
+
+=== [9] fixture reads the SHARED STORE for the stale target ===
+> GET /fixture/state?session_id=c0ffee000017
+< 200  content-type: application/json
+< body: {"conversation_id":"session/c0ffee000017","completion_token":"42cabeb9-c38c-44ca-9da3-0011bcc13eec","anchor_id":"fixture-anchor","kind":"complete","reason":"","cause":"","notify":true,"unseen":true,"revision":[3,0]}
+
+=== [10] bulk clear with the CURRENT token (N -> 0) ===
+> POST /api/attention/seen
+> request body: {"items": [{"session_id": "c0ffee000017", "completion_token": "42cabeb9-c38c-44ca-9da3-0011bcc13eec"}]}
+< 200  content-type: application/json
+< body: {"ok":true,"read":[{"conversation_id":"session/c0ffee000017","completion_token":"42cabeb9-c38c-44ca-9da3-0011bcc13eec","anchor_id":"fixture-anchor","kind":"complete","reason":"","cause":"","notify":true,"unseen":false,"revision":[3,3]}],"superseded":[],"unknown":[]}
+
+=== [11] badge AFTER the finish ===
+> GET /api/attention/unread
+< 200  content-type: application/json
+< body: {"count":0,"revision":[3,4,0],"degraded":[],"conversations":[]}
+
+=== [12] list frame AFTER the finish ===
+> GET /api/sessions
+< 200  content-type: application/json
+< body: {"sessions":[{"session_id":"asks","section":"active","pinned":false,"conversation_name":"Queued asks","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0,"mtime":1791279204.415321,"created_at":1791279204.408576,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"asks-stacked","section":"active","pinned":false,"conversation_name":"Asks behind a decision","cwd":"","model_label":"","streaming":true,"leaving":"","updating":"","needs_attention":true,"pending_kind":"approval","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":12,"mtime":1791279204.400954,"created_at":1791279204.4030044,"completion_kind":"","unseen":false,"asks_open":2},{"session_id":"stale","section":"active","pinned":false,"conversation_name":"Stale tap","cwd":"","model_label":"","streaming":false,"leaving":"","updating":"","needs_attention":true,"pending_kind":"ask","subagents_running":null,"subagents_queued":null,"ended":false,"degraded":false,"opened_by":null,"todos_open":0
+
+=== [13] no-op batch: an all-unknown call is still 200 ===
+> POST /api/attention/seen
+> request body: {"items": [{"session_id": "deadbeef1234", "completion_token": "c1990d34-9458-4292-9a22-5e36ceaff7ed"}]}
+< 200  content-type: application/json
+< body: {"ok":true,"read":[],"superseded":[],"unknown":["deadbeef1234"]}
+
+=== [14] fixture reads the SHARED STORE for the cleared conversation ===
+> GET /fixture/state?session_id=c0ffee000016
+< 200  content-type: application/json
+< body: {"conversation_id":"session/c0ffee000016","completion_token":"9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc","anchor_id":"fixture-completion","kind":"complete","reason":"","cause":"","notify":true,"unseen":false,"revision":[1,1]}
+
+=== [15] fixture reads the SHARED STORE for the finished conversation ===
+> GET /fixture/state?session_id=c0ffee000017
+< 200  content-type: application/json
+< body: {"conversation_id":"session/c0ffee000017","completion_token":"42cabeb9-c38c-44ca-9da3-0011bcc13eec","anchor_id":"fixture-anchor","kind":"complete","reason":"","cause":"","notify":true,"unseen":false,"revision":[3,3]}
+
+=== READINGS ===
+{
+  "counts": {
+    "before": 2,
+    "after_mixed": 1,
+    "after_stale": 1,
+    "after_finish": 0
+  },
+  "mixed": {
+    "status": 200,
+    "body": "{\"ok\":true,\"read\":[{\"conversation_id\":\"session/c0ffee000016\",\"completion_token\":\"9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[1,1]}],\"superseded\":[],\"unknown\":[\"deadbeef1234\"]}"
+  },
+  "stale": {
+    "status": 200,
+    "body": "{\"ok\":true,\"read\":[],\"superseded\":[\"c0ffee000017\"],\"unknown\":[]}"
+  },
+  "finish": {
+    "status": 200,
+    "body": "{\"ok\":true,\"read\":[{\"conversation_id\":\"session/c0ffee000017\",\"completion_token\":\"42cabeb9-c38c-44ca-9da3-0011bcc13eec\",\"anchor_id\":\"fixture-anchor\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[3,3]}],\"superseded\":[],\"unknown\":[]}"
+  },
+  "noop": {
+    "status": 200,
+    "body": "{\"ok\":true,\"read\":[],\"superseded\":[],\"unknown\":[\"deadbeef1234\"]}"
+  },
+  "state_after_stale_attempt": {
+    "conversation_id": "session/c0ffee000017",
+    "completion_token": "42cabeb9-c38c-44ca-9da3-0011bcc13eec",
+    "anchor_id": "fixture-anchor",
+    "kind": "complete",
+    "reason": "",
+    "cause": "",
+    "notify": true,
+    "unseen": true,
+    "revision": [
+      3,
+      0
+    ]
+  },
+  "rows_before": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  },
+  "rows_after": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": false,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": false,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  }
+}

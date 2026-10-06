@@ -1,0 +1,44 @@
+{
+  "c0ffee000016": {
+    "conversation_id": "session/c0ffee000016",
+    "completion_token": "9e3c12dc-34bc-4f8e-8707-63f71d2cd2cc",
+    "anchor_id": "fixture-completion",
+    "kind": "complete",
+    "reason": "",
+    "cause": "",
+    "notify": true,
+    "unseen": false,
+    "revision": [
+      1,
+      1
+    ]
+  },
+  "c0ffee000017": {
+    "conversation_id": "session/c0ffee000017",
+    "completion_token": "42cabeb9-c38c-44ca-9da3-0011bcc13eec",
+    "anchor_id": "fixture-anchor",
+    "kind": "complete",
+    "reason": "",
+    "cause": "",
+    "notify": true,
+    "unseen": false,
+    "revision": [
+      3,
+      3
+    ]
+  },
+  "stale_attempt_read": {
+    "conversation_id": "session/c0ffee000017",
+    "completion_token": "42cabeb9-c38c-44ca-9da3-0011bcc13eec",
+    "anchor_id": "fixture-anchor",
+    "kind": "complete",
+    "reason": "",
+    "cause": "",
+    "notify": true,
+    "unseen": true,
+    "revision": [
+      3,
+      0
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "token_source": {
+    "c0ffee000016": "daemon SSE projection frame",
+    "c0ffee000017": "daemon SSE projection frame"
+  },
+  "unread_before": "{\"count\":2,\"revision\":[2,0,0],\"degraded\":[],\"conversations\":[{\"session_id\":\"c0ffee000017\",\"completion_token\":\"2d3a4e09-444d-4693-9d15-b800adb3d297\",\"kind\":\"complete\",\"revision\":[2,0],\"push_handle\":\"Q6FydQaoctXz6MFkc6lO33\"},{\"session_id\":\"c0ffee000016\",\"completion_token\":\"b7416a0b-e623-42e4-8958-778ded2bf9e1\",\"kind\":\"complete\",\"revision\":[1,0],\"push_handle\":\"bextDB5K7YdpCIBCXvpPfg\"}]}",
+  "unread_after": "{\"count\":1,\"revision\":[2,1,0],\"degraded\":[],\"conversations\":[{\"session_id\":\"c0ffee000017\",\"completion_token\":\"2d3a4e09-444d-4693-9d15-b800adb3d297\",\"kind\":\"complete\",\"revision\":[2,0],\"push_handle\":\"Q6FydQaoctXz6MFkc6lO33\"}]}",
+  "bulk_status": 404,
+  "bulk_body": "Not Found",
+  "single_status": 200,
+  "single_body": "{\"ok\":true,\"attention\":{\"conversation_id\":\"session/c0ffee000016\",\"completion_token\":\"b7416a0b-e623-42e4-8958-778ded2bf9e1\",\"anchor_id\":\"fixture-completion\",\"kind\":\"complete\",\"reason\":\"\",\"cause\":\"\",\"notify\":true,\"unseen\":false,\"revision\":[1,1]}}",
+  "rows_before": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  },
+  "rows_after": {
+    "c0ffee000017": {
+      "session_id": "c0ffee000017",
+      "conversation_name": "Release notes draft",
+      "section": "active",
+      "unseen": true,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    },
+    "c0ffee000016": {
+      "session_id": "c0ffee000016",
+      "conversation_name": "Mobile parity audit",
+      "section": "active",
+      "unseen": false,
+      "completion_kind": "complete",
+      "needs_attention": false,
+      "streaming": false
+    }
+  }
+}

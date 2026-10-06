@@ -1,0 +1,73 @@
+{
+  "port": 4216,
+  "viewport": "390x844",
+  "steps": [
+    {
+      "step": "list-unread-with-control",
+      "title": "(11) local operator",
+      "control_count": 22,
+      "bulk_control_matches": [
+        {
+          "tag": "button",
+          "text": "mark all as read",
+          "aria": null,
+          "title": null,
+          "testid": null,
+          "disabled": false
+        }
+      ],
+      "bulk_text_matches": [
+        "mark all as read"
+      ],
+      "new_marks": [
+        {
+          "row": "Release notes draft | new",
+          "rect": {
+            "top": 660,
+            "bottom": 677,
+            "left": 355
+          },
+          "visible": true
+        },
+        {
+          "row": "Mobile parity audit | new",
+          "rect": {
+            "top": 711,
+            "bottom": 728,
+            "left": 355
+          },
+          "visible": true
+        }
+      ],
+      "control_rect": {
+        "x": 62,
+        "y": 114,
+        "top": 92,
+        "left": 12,
+        "width": 100,
+        "height": 44
+      }
+    },
+    {
+      "step": "list-marked",
+      "marks_after_tap": 0,
+      "receipt_text": [
+        "Marked 2 read.",
+        "new session",
+        "past",
+        "projects",
+        "\u25d0",
+        "wide"
+      ],
+      "control_after_tap": false,
+      "bulk_control_matches": []
+    },
+    {
+      "step": "session-screen",
+      "title": "untitled \u2014 local operator",
+      "control_count": 8,
+      "bulk_control_matches": [],
+      "bulk_text_matches": []
+    }
+  ]
+}

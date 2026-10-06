@@ -1,0 +1,78 @@
+{
+  "url": "http://127.0.0.1:4216/#/s/c0ffee000016",
+  "title": "untitled \u2014 local operator",
+  "viewport": [
+    390,
+    844
+  ],
+  "controlCount": 8,
+  "controls": [
+    {
+      "tag": "button",
+      "text": "\u2039",
+      "aria": "back to sessions",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "\u2606",
+      "aria": "pin this session",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "wide",
+      "aria": "wide view",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "approvals",
+      "aria": "approvals in this session",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "\u2026",
+      "aria": "working directory: unknown",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "aria": "attach image",
+      "title": null,
+      "testid": null,
+      "disabled": false
+    },
+    {
+      "tag": "button",
+      "text": "\u2191",
+      "aria": "send",
+      "title": null,
+      "testid": null,
+      "disabled": true
+    },
+    {
+      "tag": "button",
+      "text": "model",
+      "aria": null,
+      "title": null,
+      "testid": null,
+      "disabled": false
+    }
+  ],
+  "bulkControlMatches": [],
+  "bulkTextMatches": [],
+  "newMarks": []
+}
