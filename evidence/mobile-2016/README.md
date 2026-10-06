@@ -1,7 +1,8 @@
 # Evidence — issue #2016: mobile one-gesture "mark all as read" (PR #2023)
 
 This branch carries the runnable evidence for PR #2023 (`feat/mobile-mark-all-read`;
-head `f46ee0cf8` for the original slice, `522fc80e6` for the round-1 remediation).
+head `f46ee0cf8` for the original slice, `522fc80e6` for the round-1 remediation,
+`842490005` for the round-2 remediation).
 It contains **no product code** and is never merged; the files
 exist so the PR thread can link frames and raw logs at a pinned commit, and so QA
 can re-execute the rigs.
@@ -70,9 +71,12 @@ Five states at 390x844, each a rendered frame plus the numbers behind it
   pill).
 - `artifacts/02-scrolled-sticky-390x844.png` — at the list's **own maximum scroll
   (`scrollTop` 271 of 1014)**, both unread marks are visible near the foot and the
-  control is still on screen at y=92 of the viewport: the band is sticky. Before
-  this round the control measured **y=-179** — entirely off-screen — in exactly
-  this state (design D5/UX U7).
+  control is still on screen: the band is sticky. **Its own measurement in
+  `capture-report.json` is `top: 40`** — the unscrolled state reads `top: 92`, and
+  the two were transposed in the round-1 prose (agent round 2, NIT-1); the band
+  rect is 40–92 because the search field above it has scrolled away. Before this
+  round the control measured **y=-179** — entirely off-screen — in exactly this
+  state (design D5/UX U7).
 - `artifacts/03-receipt-near-gesture-390x844.png` — after one real pointer tap:
   marks 0, and the receipt **"Marked 2 read."** renders **in the band at the top
   (y=92, with a Dismiss control)** instead of 646px away beside the footer
@@ -94,6 +98,39 @@ Five states at 390x844, each a rendered frame plus the numbers behind it
   each answer **422** with the same sentence (agent NIT-2 / QA Q2/Q3), while a
   well-formed but unknown id keeps the per-item **`unknown`** verdict at 200.
 - `logs/` — the two fixture generations' stdout (capture, then transcript).
+
+### `round2/` — round-2 remediation (head `842490005`)
+
+Four states at 390x844, each a rendered frame plus the numbers behind it
+(`artifacts/capture-report.json`). Same rig, same fixture wrapper as `round1/`
+(one fixture, two capture generations — the r2 script is the only new file):
+
+- `artifacts/01-band-separator-max-scroll-390x844.png` — the pinned band at the
+  list's own maximum scroll (`scrollTop` 272 of 1015), now carrying its own edge:
+  computed **`border-bottom-width: 1px`** (was `0px`, `box-shadow: none`), band
+  rect 40–92, with two unread marks still visible beneath it. **Design D6.**
+- `artifacts/02-focus-ring-390x844.png` — keyboard activation with a query that
+  registers no card: after a real `Tab` the focus is the control, and after a real
+  `Enter` the batch clears and the fallback lands on the band **with a visible
+  ring** — `document.activeElement` is the band `DIV`, computed **`outline-style:
+  solid`, `outline-width: 2px`, `outline-color: rgb(56, 201, 106)`** (the accent
+  ring). **Design D7 / QA Q-2 / agent NIT-3.**
+- `artifacts/03-degraded-no-count-390x844.png` — with the unread read failing for
+  real, the control now reads the plain **`mark all as read`** (the count it cannot
+  stand behind is gone) above the danger alert, both marks still painted, and the
+  step's **`/api/attention/seen` request count is 0** — read off the wire by a
+  page-side `fetch` counter installed for every document (agent NIT-2's artifact;
+  the same counter reads **1** on the steps that do post, so the zero is
+  discriminating rather than vacuous). **UX U11.**
+- `artifacts/04-receipt-window-after-absence-390x844.png` — a route away and back
+  with **`elapsedAwaySeconds: 15.8`** (longer than the 12s TTL): the receipt is
+  **still present on return** at (12, 92) 314x28, because the window is the
+  reader's own viewing time and the clock pauses while the screen is unmounted.
+  **UX U9.**
+
+`logs/capture.log` is the rig's stdout for this pass. The counter and key-event
+helpers live in `scripts/mobile_2016_capture_r2.py`; the fixture wrapper it runs
+is `round1/scripts/mobile_2016_fixture_r1.py` (unchanged).
 
 ## Re-running (QA)
 
@@ -121,6 +158,27 @@ PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/postfix/scripts
 
 The repro-phase scripts under `repro/scripts/` run the same way (their transcript
 asserts the pre-fix contract: the bulk route absent).
+
+The remediation generations run against the SAME fixture wrapper:
+
+```sh
+# round-1 rig (five states)
+PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/round1/scripts/mobile_2016_capture_r1.py 4216 "$SCRATCH/artifacts"
+
+# round-2 rig (four states; re-arms its own pile, so it can be re-run against a
+# store an earlier pass already cleared, and it counts /api/attention/seen
+# requests per step)
+PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/round2/scripts/mobile_2016_capture_r2.py 4216 "$SCRATCH/artifacts"
+
+# the wire transcript (shape layer + happy path)
+PYTHONPATH=. .venv/bin/python <this-branch>/evidence/mobile-2016/round1/scripts/mobile_2016_transcript_r1.py 4216 "$SCRATCH/artifacts"
+```
+
+All three expect the fixture started from
+`evidence/mobile-2016/round1/scripts/mobile_2016_fixture_r1.py` on the same port
+(it carries the `/fixture/publish`, `/fixture/state` and `/fixture/degrade`
+hooks); the degraded states need `/fixture/degrade?on=1` set more than 1 s after
+the last badge read, or the 1 s summaries cache answers before the seam.
 
 The round-1 rigs add one capability hook each and run identically:
 
