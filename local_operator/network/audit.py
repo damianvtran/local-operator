@@ -195,6 +195,13 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # revoke batch the owner's lender performed — the scheduled window-end DELETE,
         # the operator's immediate revoke, and the retry after a failed call.
         "credential.revoke",
+        # THE SYNC ENGINE (mesh-consent-provisioning.md §5): a copy served,
+        # refused or applied is the same delegation life the grant rows record,
+        # one lifecycle further on. `gen` names the per-key generation the row
+        # is about, so a reader can line a holder's ack up against a serve.
+        "credential.copy",
+        "credential.copy_refused",
+        "credential.copy_applied",
         # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). The lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or
@@ -400,6 +407,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.revoke": frozenset(
         {"credential_key", "act", "sub", "cause", "revoked", "deferred"}
     ),
+    # The copy path's rows (mesh-consent-provisioning.md §5): what the owner
+    # SERVED (`credential.copy`), why it refused to serve (`copy_refused`, with
+    # the machine reason — the digest pin's mismatch is the one that matters),
+    # and what a member APPLIED (`copy_applied`). Same act/sub delegation
+    # markers as `credential.grant`; `gen` is the generation transferred.
+    "credential.copy": frozenset({"credential_key", "act", "sub", "gen"}),
+    "credential.copy_refused": frozenset({"credential_key", "act", "sub", "reason"}),
+    "credential.copy_applied": frozenset({"credential_key", "act", "sub", "gen"}),
     # -- the remote onboarding approval -------------------------------------------
     #
     # `kind` is the record's own enum (device_onboard / local_authority);
