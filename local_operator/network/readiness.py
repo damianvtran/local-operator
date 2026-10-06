@@ -3068,7 +3068,12 @@ def equipment_note(checks: Iterable[Mapping[str, Any]]) -> str:
     """One line naming failed non-gating equipment, for the verify receipt.
 
     Shape (F8 ruling): ``mcp logins: slack — not required for onboarding``.
-    Empty when no non-gating row failed. The note names WHAT is not set up and
+    Empty when no named non-gating row failed. TOOLING joined the non-gating
+    set on 2026-10-06 and is deliberately NOT named here: this note exists for
+    the VERIFY receipt, an onboarding surface, while a tooling gap is a fit
+    question for a lane's work — it is reported on the ready rows and the
+    agent digest themselves, and it is repaired at its own point of use. The
+    note names WHAT is not set up and
     defers the state to the rows themselves (their details carry the branch —
     no login, not shared, an unreadable store), so it cannot misdescribe a
     branch it does not read — WHICH IS WHY THE SERVERS BRANCH READS THE CODE
