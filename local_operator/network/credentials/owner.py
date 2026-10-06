@@ -916,13 +916,31 @@ class MeshCredentialBroker:
         source = github_app.resolve_source(self.root)
         if source == github_app.SOURCE_APP:
             return await self._serve_github_app(key=key, provider=provider, by=by, common=common)
+        if source == github_app.SOURCE_UNREADABLE:
+            # THE LADDER STOPS HERE (M1): the store exists but cannot be read, so
+            # a narrower arm may be hiding in it — serving anything wider (the gh
+            # login) would be the silent downgrade this policy forbids.
+            return BrokerError(
+                code=github_app.CODE_STORE_UNREADABLE,
+                message=(
+                    "the secret store on this device exists but could not be read, so the "
+                    "GitHub source ladder cannot be resolved — nothing was lent, and no "
+                    "wider source is substituted while it is unreadable (repair or restore "
+                    "the store on this device; the network guide has the ladder)"
+                ),
+                **common,
+            )
         if source in (github_app.SOURCE_TOKEN, github_app.SOURCE_GH):
             try:
-                token = (
-                    github_app.read_token_secret(self.root)
-                    if source == github_app.SOURCE_TOKEN
-                    else github_app.read_gh_token()
-                )
+                if source == github_app.SOURCE_TOKEN:
+                    token = github_app.read_token_secret(self.root)
+                else:
+                    # OWNER-OFF-LOOP: asking gh may spawn gh, so it runs in the
+                    # broker's executor like the mint — a hung gh must not stall
+                    # the relay (and never runs on the borrower).
+                    token = await asyncio.get_running_loop().run_in_executor(
+                        None, github_app.read_gh_token
+                    )
             except (github_app.GithubTokenError, github_app.GithubGhError) as exc:
                 if exc.kind == "absent":
                     # A race with the presence probe (the secret or hosts file was

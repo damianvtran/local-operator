@@ -619,9 +619,10 @@ command, so a re-login or a token rotation needs no gesture on the node):
    scoped to the designated repositories with an expiry. It can be revoked at
    GitHub on its own, without touching anything else.
 3. **The owner's `gh` CLI login** — the zero-setup route: if that device is
-   already signed in with `gh`, there is nothing to configure. The broker reads
-   the login gh itself stores (the owner is the trusted side; the borrowing
-   device never reads it).
+   already signed in with `gh`, there is nothing to configure. The broker asks
+   `gh` itself for its token (the login lives in gh's config file or the OS
+   keychain — wherever that install keeps it); the owner is the trusted side,
+   and the borrowing device never reads it.
 
 **Designate the repositories first** — on **every node that borrows or serves**:
 `network.credentials.github.repositories` (search it in `/settings`),

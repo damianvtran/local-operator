@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from local_operator.network.credentials.github import GITHUB_KEY
+from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
 from local_operator.network.credentials.types import BrokerError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -103,14 +103,14 @@ def render_broker_error(
         # THE GITHUB ARMS COME FIRST, and each says only what is true for this
         # credential. It has no local-login remedy (there is no 'lop login github'
         # in this build), and after the source ladder (§3.2) its "the owner has
-        # nothing" state means NO arm is configured — gh CLI login, GITHUB_TOKEN
-        # secret, or App — so the fix sentence names all three in taught order.
+        # nothing" state means NO arm is configured — so the remedy sentence
+        # composes around ``no_source_arms()``, the ONE enumeration the device's
+        # own refusal also uses (review round 1, n1: the list cannot drift).
         if error.code == "no_local_credential":
             return (
-                f"{owner} holds no GitHub credential: push and PR-write through the "
-                "mesh are unavailable until one is configured there (a GITHUB_TOKEN-class "
-                "token, the gh CLI's own login, or the stronger GitHub App — the network "
-                "guide has the ladder). Public clones and non-GitHub work are unaffected."
+                f"{owner} holds no GitHub credential: push and PR-write through the mesh "
+                f"are unavailable until one is configured there ({no_source_arms()}). "
+                "Public clones and non-GitHub work are unaffected."
             )
         if error.code == "not_a_holder":
             return (
@@ -166,6 +166,13 @@ def render_broker_error(
             "the ladder). Push and PR-write through the mesh are unavailable until "
             "that source works or another one is configured; public clones and "
             "non-GitHub work are unaffected."
+        )
+    if error.code == "github_store_unreadable":
+        return (
+            f"{owner}'s encrypted secret store could not be read, so no GitHub "
+            "credential could be resolved there: nothing was lent, and no wider source "
+            f"is served while the store is unreadable (repair or restore it on {owner} "
+            "— the network guide has the ladder)."
         )
 
     if error.code == "owner_offline":

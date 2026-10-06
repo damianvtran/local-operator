@@ -285,6 +285,9 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     # change, so they cache long like the App's own codes.
     "github_token_unusable": 300_000,
     "github_gh_unusable": 300_000,
+    # The store itself could not be read, so no arm could be resolved — the
+    # ladder STOPS rather than serving a wider arm (review round 1, M1).
+    "github_store_unreadable": 300_000,
     # The frame named a sender other than the device the transport authenticated
     # (review round 1, F1). An honest client never produces it, so it is cached like
     # an authorisation refusal rather than retried.

@@ -284,11 +284,13 @@ def credential_here(key: str, config: Path) -> bool:
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
     if github_mod.is_github_key(key):
-        # "Does this device hold it" for github is whether ANY ladder arm
+        # "Does this device hold it" for github is whether any ladder arm
         # resolves (§3.2) — the App secret, a ``GITHUB_TOKEN``-class secret, or
-        # the gh CLI's stored login — read read-only, the same guard as every
-        # other candidate (never constructs a store, never creates one).
-        return bool(github_mod.resolve_source(config))
+        # the gh CLI's own login — read read-only, the same guard as every
+        # other candidate (never constructs a store, never creates one). An
+        # UNREADABLE store is not a promise: ``source_present`` folds it to no
+        # (M1 — a share must not claim what the serve path would refuse).
+        return github_mod.source_present(config)
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         store = open_store(config)
@@ -379,7 +381,7 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
 
     from local_operator.network.credentials import github as github_mod
 
-    if github_mod.resolve_source(config):
+    if github_mod.source_present(config):
         # A ladder arm resolves, so there is something to serve: the row has no
         # store row, so it is named here directly. The kind's default decides
         # its posture on the join list; this gate only says the row exists.

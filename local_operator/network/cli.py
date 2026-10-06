@@ -740,7 +740,7 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--scope",
         choices=("session", "device"),
         # NOT a static default: None is resolved PER KIND in the handler so the
-        # GitHub App credential — device-scoped by construction — defaults to
+        # github credential — device-scoped by construction — defaults to
         # 'device' (its only possible scope) while every provider keeps
         # 'session'. An explicitly typed value reaches the document's own refusal.
         default=None,
@@ -1690,11 +1690,12 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     from local_operator.network.credentials import github as github_mod
 
-    if github_mod.resolve_source(_config_dir()):
+    if github_mod.source_present(_config_dir()):
         # The github row's sources live OUTSIDE ``auth.db`` (the secret store and
-        # the gh CLI's own file), so it is the one row that can exist on a device
+        # gh's own login), so it is the one row that can exist on a device
         # with no credential store yet, and it is assembled BEFORE the store guard
-        # below can return early. Any ladder arm (§3.2) makes the row real.
+        # below can return early. Any ladder arm (§3.2) — and a resolvable one,
+        # never an unreadable store — makes the row real.
         rows.append(_github_shareable_row(self_device))
 
     store = offers.open_store(_config_dir())
@@ -1778,6 +1779,12 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
             "GitHub (Settings -> Applications) to end it; a grant already lent is "
             "dropped by the borrower at its window end"
         )
+    elif source == github_mod.SOURCE_UNREADABLE:
+        copied = (
+            "the secret store on this device could not be read, so the serving arm "
+            "could not be determined — any grant already lent is dropped by the borrower "
+            "at its window end; repair the store before the next revoke"
+        )
     else:
         copied = (
             "no GitHub source is configured on this device any more — nothing new can "
@@ -1846,6 +1853,17 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
             (
                 f"to end the token itself now, {end}; it keeps working at GitHub until "
                 "you do or it expires"
+            ),
+        ]
+    if source == github_mod.SOURCE_UNREADABLE:
+        return [
+            (
+                f"new borrows by {name}: refused now; this device's secret store could "
+                "not be read, so the serving arm could not be determined"
+            ),
+            (
+                f"a token already lent is dropped by {name} at its window end; repair "
+                "the store here and re-run the revoke for the per-arm receipt"
             ),
         ]
     return [
@@ -1970,7 +1988,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
 
     # THE SHARE SCOPE'S PER-KIND DEFAULT (github adapter, F3). An operator typing
     # the bare verb gets the scope the key can actually honour: 'session' where a
-    # session bound means something, 'device' for the GitHub App credential. The
+    # session bound means something, 'device' for the github credential. The
     # document refuses session scope for that key by NAME, so an explicitly
     # typed `--scope session` still reaches the refusal instead of being
     # silently overridden here.
@@ -2139,10 +2157,19 @@ def _require_local_credential(key: str, provider: str) -> None:
     if github_mod.is_github_key(key):
         # THE LADDER IS THE HOLD CHECK (§3.2): an App, a GITHUB_TOKEN-class
         # secret, or the gh CLI's own login — any arm is something to lend, and
-        # this is the SAME one order the lender serves with. The refusal is the
-        # one spelling (``github.no_source_message``) so the share verb and the
-        # borrower's rendered sentence cannot drift apart.
-        if github_mod.resolve_source(_config_dir()):
+        # this is the SAME one order the lender serves with. An UNREADABLE store
+        # refuses by name rather than reading as empty (M1): a share must not
+        # promise a device that cannot resolve its own ladder.
+        source = github_mod.resolve_source(_config_dir())
+        if source == github_mod.SOURCE_UNREADABLE:
+            raise MeshRefusal(
+                github_mod.CODE_STORE_UNREADABLE,
+                "this device's encrypted secret store could not be read, so the GitHub "
+                "source ladder cannot be resolved and nothing can be shared from here "
+                "until it is repaired — no wider source is substituted while it is "
+                "unreadable (the network guide has the ladder).",
+            )
+        if source:
             return
         raise MeshRefusal("no_local_credential", github_mod.no_source_message())
     if is_mcp_key(key):

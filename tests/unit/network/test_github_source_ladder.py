@@ -17,6 +17,8 @@ behaviour (its file owns that) and anything about copies/sync (S3/S4).
 from __future__ import annotations
 
 import contextlib
+import json
+import shlex
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -53,7 +55,9 @@ from tests.unit.network.test_credentials_github import (
 #: authenticates by EXACT value against the fake forge's liveness set, so a cell
 #: asserting "this token pushed" cannot drift onto a minted value.
 PAT = "github_pat_11TEST0000000000000000000000000000000000000000000"
+PAT2 = "github_pat_ROTATED_000000000000000000001"
 GHO = "gho_test_login_token_0000000000000000000001"
+GHO2 = "gho_rotated_login_token_0000000000000000001"
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +71,18 @@ def _no_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.secrets import client as secrets_client
 
     monkeypatch.setattr(secrets_client, "ensure_broker", lambda *a, **k: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No cell may discover or run the REAL gh (it can reach the operator's keychain).
+
+    Discovery is pinned to "not found" by default; cells that exercise the ask-gh
+    path install a stub and override ``_resolve_program`` explicitly. The real gh's
+    keychain lookup is user-global, so a stray discovery here would read the
+    operator's login into a test process — the pin is a guard, not a convenience.
+    """
+    monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
 
 
 @pytest.fixture()
@@ -131,11 +147,73 @@ def _seed_secret(root: Path, name: str, value: str) -> None:
 
 
 def _seed_gh_login(home: Path, token: str, *, host: str = "github.com") -> None:
+    """The FILE shape (``--insecure-storage`` installs): hosts.yml carries the token."""
     path = home / ".config" / "gh" / "hosts.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump({host: {"user": "operator", "oauth_token": token}}), encoding="utf-8"
     )
+
+
+def _install_stub_gh(
+    home: Path, token: str = GHO, *, exit_code: int = 0, log: Path | None = None
+) -> Path:
+    """A stand-in for the real gh, installed at ``~/.local/bin/gh``.
+
+    Written by the cells (never shipped): prints its token, optionally appends a
+    line per invocation, and can fail structurally (exit code + stderr noise that
+    the product must NOT reproduce).
+    """
+    path = home / ".local" / "bin" / "gh"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "#!/bin/sh\n"
+    if log is not None:
+        body += f"printf '%s\\n' fired >> {shlex.quote(str(log))}\n"
+    if exit_code:
+        body += "echo 'gh: not logged in to any hosts' >&2\n"
+        body += f"exit {exit_code}\n"
+    else:
+        body += f"printf '%s\\n' {shlex.quote(token)}\n"
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _pin_gh(monkeypatch: pytest.MonkeyPatch, stub: Path, *, on_path: bool = True) -> None:
+    """Pin ``find_gh``'s discovery: the stub (on PATH, or only via ``~/.local/bin``)."""
+    if on_path:
+        monkeypatch.setattr(
+            github_mod,
+            "_resolve_program",
+            lambda name, path=None: str(stub) if name == "gh" else None,
+        )
+    else:
+        monkeypatch.setattr(
+            github_mod,
+            "_resolve_program",
+            lambda name, path=None: (str(stub) if (name == "gh" and path is not None) else None),
+        )
+
+
+def _seed_gh_keyring(
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token: str = GHO,
+    log: Path | None = None,
+    exit_code: int = 0,
+    on_path: bool = True,
+) -> Path:
+    """The DEFAULT macOS shape: the login is in the OS keychain, hosts.yml tokenless."""
+    path = env.home / ".config" / "gh" / "hosts.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump({"github.com": {"user": "operator", "git_protocol": "https"}}),
+        encoding="utf-8",
+    )
+    stub = _install_stub_gh(env.home, token, exit_code=exit_code, log=log)
+    _pin_gh(monkeypatch, stub, on_path=on_path)
+    return stub
 
 
 class _Rig:
@@ -147,11 +225,23 @@ class _Rig:
 
 
 @contextlib.contextmanager
-def _owner_for(env: _Env, github_api: _FakeGithub, source: str, *, pem: str = "") -> Iterator[_Rig]:
+def _owner_for(
+    env: _Env,
+    github_api: _FakeGithub,
+    source: str,
+    *,
+    pem: str = "",
+    monkeypatch: pytest.MonkeyPatch | None = None,
+    gh_token: str = GHO,
+    gh_log: Path | None = None,
+) -> Iterator[_Rig]:
     """The broker rig for one ladder arm (mirrors the sibling's ``owner`` fixture).
 
     Same placement document, same share, same audit — only the ARM differs, so a
-    difference between cells is the ladder's, never the rig's.
+    difference between cells is the ladder's, never the rig's. For ``SOURCE_GH``
+    the default seed is the KEYRING shape (hosts.yml without a token + a pinned
+    stub gh), because that is a default macOS install; cells pass
+    ``monkeypatch=None`` to seed the file shape instead.
     """
     if source == github_mod.SOURCE_APP:
         _seed_app_key(env.root, pem)
@@ -159,8 +249,11 @@ def _owner_for(env: _Env, github_api: _FakeGithub, source: str, *, pem: str = ""
         _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, PAT)
         github_api.tokens.add(PAT)  # live at the fake forge, for the loopback cells
     elif source == github_mod.SOURCE_GH:
-        _seed_gh_login(env.home, GHO)
-        github_api.tokens.add(GHO)
+        if monkeypatch is not None:
+            _seed_gh_keyring(env, monkeypatch, token=gh_token, log=gh_log)
+        else:
+            _seed_gh_login(env.home, gh_token)
+        github_api.tokens.add(gh_token)
     _write_config(env.root, [SCRATCH])
     document = placement_mod.PlacementDocument("n_gh", root=env.root, written_by=OWNER_DEVICE)
     document.declare(
@@ -253,7 +346,8 @@ def test_read_token_secret_arms(env: _Env) -> None:
     assert github_mod.read_token_secret(env.root) == PAT
 
 
-def test_read_gh_token_arms(env: _Env) -> None:
+def test_read_gh_token_arms(env: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both shapes: gh itself for a keyring login (the DEFAULT), the file when it has one."""
     with pytest.raises(github_mod.GithubGhError) as absent:
         github_mod.read_gh_token(env.home)
     assert absent.value.kind == "absent"
@@ -261,17 +355,30 @@ def test_read_gh_token_arms(env: _Env) -> None:
     path = env.home / ".config" / "gh" / "hosts.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump({"github.com": {"user": "operator"}}), encoding="utf-8")
+    # The default macOS shape, with NO gh to ask: unusable, and the message says why.
     with pytest.raises(github_mod.GithubGhError) as tokenless:
         github_mod.read_gh_token(env.home)
     assert tokenless.value.kind == "unusable"
+    assert "was not found to ask" in str(tokenless.value)
+
+    # The default macOS shape WITH gh: asked directly, the answer is served.
+    log = env.home / "gh-invocations.log"
+    _seed_gh_keyring(env, monkeypatch, token=GHO, log=log)
+    assert github_mod.read_gh_token(env.home) == GHO
+    assert log.read_text(encoding="utf-8").splitlines() == ["fired"]
+
+    # The FILE shape wins without spawning gh when it holds a token.
+    _pin_gh(monkeypatch, _install_stub_gh(env.home, "stub-should-not-run", log=log))
+    _seed_gh_login(env.home, GHO)
+    assert github_mod.read_gh_token(env.home) == GHO
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "fired"
+    ], "a file-carried token must not spawn gh"
 
     path.write_text("not yaml: [", encoding="utf-8")
     with pytest.raises(github_mod.GithubGhError) as malformed:
         github_mod.read_gh_token(env.home)
     assert malformed.value.kind == "unusable"
-
-    _seed_gh_login(env.home, GHO)
-    assert github_mod.read_gh_token(env.home) == GHO
 
 
 def test_no_source_message_names_all_three_arms_and_the_guide() -> None:
@@ -312,22 +419,85 @@ def test_the_token_arm_serves_the_stored_token_without_minting(
         # No mint was attempted against the forge, and the lender tracks nothing.
         assert github_api.mint_requests == []
         assert rig.broker._lender().outstanding() == 0  # noqa: SLF001 — the registry's own count
-        # A second serve re-reads the source (§3.3's refresh path) and serves it again.
+        # A second serve re-reads the source (§3.3's refresh path). ROTATE the value
+        # in between, or a regression to caching would still pass this cell (n2).
+        _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, PAT2)
         again = _ask(rig)
-        assert again["access_token"] == PAT
+        assert again["access_token"] == PAT2
+        assert again["access_token"] != detail["access_token"]
         assert github_api.mint_requests == []
 
 
 def test_the_gh_arm_serves_the_login_the_cli_already_holds(
-    env: _Env, github_api: _FakeGithub
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with _owner_for(env, github_api, github_mod.SOURCE_GH) as rig:
+    """The DEFAULT macOS shape: hosts.yml has no token; the broker asks gh itself."""
+    log = env.home / "gh-invocations.log"
+    with _owner_for(
+        env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch, gh_log=log
+    ) as rig:
         detail = _ask(rig)
         assert detail["access_token"] == GHO
         assert detail["refreshed"] is False
         assert detail["token_expires_at_ms"] == 0
         assert github_api.mint_requests == []
         assert rig.broker._lender().outstanding() == 0  # noqa: SLF001
+    assert log.read_text(encoding="utf-8").splitlines() == ["fired"]
+
+
+def test_the_file_shape_still_serves_and_never_spawns_gh(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--insecure-storage`` installs keep working: the file token is used as-is."""
+    log = env.home / "gh-invocations.log"
+    _seed_gh_login(env.home, GHO)
+    _pin_gh(monkeypatch, _install_stub_gh(env.home, "stub-should-not-run", log=log))
+    with _owner_for(env, github_api, source="") as rig:
+        detail = _ask(rig)
+    assert detail["access_token"] == GHO
+    assert not log.exists(), "a file-carried token must not spawn gh"
+
+
+def test_gh_found_off_path_is_still_asked(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launchd lesson: gh not on PATH but in ``~/.local/bin`` is still found and asked."""
+    log = env.home / "gh-invocations.log"
+    _seed_gh_keyring(env, monkeypatch, token=GHO, log=log, on_path=False)
+    with _owner_for(env, github_api, source="") as rig:
+        detail = _ask(rig)
+    assert detail["access_token"] == GHO
+    assert log.read_text(encoding="utf-8").splitlines() == ["fired"]
+
+
+def test_gh_that_cannot_answer_refuses_with_a_structural_message(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing gh (logged out / broken) refuses by name; its stderr is never reproduced."""
+    _seed_gh_keyring(env, monkeypatch, token="", exit_code=7)
+    with _owner_for(env, github_api, source="") as rig:
+        detail = _ask(rig)
+    assert detail["code"] == github_mod.CODE_GH_UNUSABLE, detail
+    assert "exit 7" in detail["message"]
+    assert (
+        "not logged in to any hosts" not in detail["message"]
+    ), "gh's stderr is account material and must not travel"
+
+
+def test_a_gh_re_login_reaches_the_next_serve(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-serve, no cache (§3.3): a re-login changes what the NEXT serve carries."""
+    log = env.home / "gh-invocations.log"
+    with _owner_for(
+        env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch, gh_log=log
+    ) as rig:
+        first = _ask(rig)
+        assert first["access_token"] == GHO
+        _install_stub_gh(env.home, GHO2, log=log)  # the "re-login"
+        second = _ask(rig)
+        assert second["access_token"] == GHO2
+        assert log.read_text(encoding="utf-8").splitlines() == ["fired", "fired"]
 
 
 def test_a_configured_but_broken_app_refuses_and_never_downgrades(
@@ -358,6 +528,68 @@ def test_a_broken_token_secret_refuses_and_never_downgrades_to_gh(
         assert github_mod.TOKEN_SECRET_NAME in detail["message"]
 
 
+def test_a_corrupt_store_stops_the_ladder_and_never_serves_the_gh_login(
+    env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1 / QA-Q2, reproduced: a scoped arm that cannot be READ is never skipped.
+
+    The QA door's exact shape: a ``GITHUB_TOKEN`` in the store, a full gh login
+    present, the master key corrupted-but-present. Before the fix, resolution
+    fell through and the broker SERVED the gh login (a wider credential than the
+    one sitting unreadable on disk); now the ladder stops and refuses by name.
+    """
+    from local_operator.secrets.keys import store_path
+
+    log = env.home / "gh-invocations.log"
+    _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, PAT)
+    _seed_gh_keyring(env, monkeypatch, token=GHO, log=log)
+    assert github_mod.resolve_source(env.root) == github_mod.SOURCE_TOKEN  # control
+    original = store_path(env.root).read_bytes()
+    store_path(env.root).write_bytes(b"\x00" * 32)
+    try:
+        assert github_mod.resolve_source(env.root) == github_mod.SOURCE_UNREADABLE
+        assert github_mod.source_present(env.root) is False
+        # The closed bool view stays closed (a promise surface must not claim it).
+        assert github_mod.app_secret_present(env.root) is False
+        with _owner_for(env, github_api, source="") as rig:
+            detail = _ask(rig)
+        assert detail["code"] == github_mod.CODE_STORE_UNREADABLE, detail
+        assert GHO not in json.dumps(detail), "the gh login must never be served"
+        assert github_api.mint_requests == []
+        assert not log.exists(), "gh must not even be asked while the store is unreadable"
+        with pytest.raises(github_mod.GithubTokenError) as broken:
+            github_mod.read_token_secret(env.root)
+        assert broken.value.kind == "unusable", "present-but-unreadable is not 'absent'"
+    finally:
+        store_path(env.root).write_bytes(original)
+    assert github_mod.resolve_source(env.root) == github_mod.SOURCE_TOKEN  # restored
+
+
+def test_the_share_verb_refuses_by_name_on_a_corrupt_store(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The door's other half: a share must not promise a device that cannot resolve."""
+    from local_operator.network import cli as network_cli
+    from local_operator.network.credentials import offers
+    from local_operator.network.types import MeshRefusal
+    from local_operator.secrets.keys import store_path
+
+    _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, PAT)
+    _seed_gh_keyring(env, monkeypatch, token=GHO)
+    original = store_path(env.root).read_bytes()
+    store_path(env.root).write_bytes(b"\x00" * 32)
+    try:
+        monkeypatch.setattr(network_cli, "_config_dir", lambda: env.root)
+        with pytest.raises(MeshRefusal) as refusal:
+            network_cli._require_local_credential(
+                github_mod.GITHUB_KEY, github_mod.GITHUB_KEY
+            )  # noqa: SLF001
+        assert refusal.value.code == github_mod.CODE_STORE_UNREADABLE
+        assert offers.credential_here(github_mod.GITHUB_KEY, env.root) is False
+    finally:
+        store_path(env.root).write_bytes(original)
+
+
 def test_a_tokenless_gh_login_refuses_by_name(env: _Env, github_api: _FakeGithub) -> None:
     path = env.home / ".config" / "gh" / "hosts.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +597,7 @@ def test_a_tokenless_gh_login_refuses_by_name(env: _Env, github_api: _FakeGithub
     with _owner_for(env, github_api, source="") as rig:
         detail = _ask(rig)
         assert detail["code"] == github_mod.CODE_GH_UNUSABLE, detail
+        assert "was not found to ask" in detail["message"]
 
 
 def test_an_empty_ladder_refuses_with_the_one_ladder_sentence(
@@ -386,6 +619,7 @@ def test_the_new_refusal_codes_render_borrower_sentences(
     for code, needle in (
         (github_mod.CODE_TOKEN_UNUSABLE, "GITHUB_TOKEN"),
         (github_mod.CODE_GH_UNUSABLE, "gh CLI"),
+        (github_mod.CODE_STORE_UNREADABLE, "secret store"),
         ("no_local_credential", "the ladder"),
     ):
         sentence = render_broker_error(
@@ -557,20 +791,22 @@ def _push_through_the_ladder(
     assert not (env.home / ".git-credentials").exists()
     marker_text = marker_log.read_text(encoding="utf-8") if marker_log.exists() else ""
     assert "host=github.com" not in marker_text
-    # The gh arm's token legitimately LIVES in gh's own hosts file — it is the
-    # SOURCE, not a trace of delivery — so that one path is compared
-    # before/after instead: delivery must not write anything, anywhere.
-    hosts = env.home / ".config" / "gh" / "hosts.yml"
+    # The gh arm's token legitimately LIVES in its SOURCES — gh's hosts file in
+    # the file shape, the pinned stub script in the keyring shape — so those
+    # paths are compared before/after instead: delivery must not write anything,
+    # anywhere, and a stray write to a source is still a landing.
+    allowed = {env.home / ".config" / "gh" / "hosts.yml", env.home / ".local" / "bin" / "gh"}
     before_by_name = {name: content for name, content in before}
     for root in (env.home, env.root):
         for relative, content in _tree_bytes(root):
-            if Path(root) / relative == hosts:
+            if Path(root) / relative in allowed:
                 continue
             assert token.encode() not in content, f"the token reached {root}/{relative}"
-    if hosts.exists():
-        assert (
-            before_by_name.get(str(hosts.relative_to(env.home))) == hosts.read_bytes()
-        ), "delivery rewrote gh's own hosts file"
+    for path in sorted(allowed):
+        if path.exists():
+            assert (
+                before_by_name.get(str(path.relative_to(env.home))) == path.read_bytes()
+            ), f"delivery rewrote {path}"
 
 
 @pytest.mark.parametrize(
@@ -583,14 +819,17 @@ def test_a_push_through_each_token_source_succeeds_and_leaves_no_trace(
     tmp_path: Path,
     source: str,
     token: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The note's gate: the real-git loopback cell, extended per source.
 
     The grant comes off the wire exactly as a borrower gets it, and the push
     uses ONLY the delivered env — so "the token arms deliver like the App arm"
-    is proven by git succeeding, not by comparing field-by-field.
+    is proven by git succeeding, not by comparing field-by-field. The gh arm
+    runs the KEYRING shape (the default install): a tokenless hosts file plus
+    the pinned stub gh.
     """
-    with _owner_for(env, github_api, source) as rig:
+    with _owner_for(env, github_api, source, monkeypatch=monkeypatch) as rig:
         detail = _ask(rig)
         assert detail["access_token"] == token
         assert detail["refreshed"] is False
