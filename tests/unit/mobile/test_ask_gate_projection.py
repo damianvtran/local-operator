@@ -22,7 +22,11 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
-from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
+from local_operator.mobile.projection import (
+    ProjectionFold,
+    _summarize_args,
+    fold_messages_to_entries,
+)
 from local_operator.mobile.types import SessionProjection
 
 MARKER = {"ask_gate": {"hidden": True, "verdict": "clear", "reason": "plainly best"}}
@@ -83,6 +87,29 @@ def test_queued_engine_suppresses_live_rows_and_mounts_only_at_settle() -> None:
     # on the content, not the container).
     assert "Which database?" in str(rows[0].details["args"])
 
+    # THE SUMMARY IS ONE OF THOSE CARRIES (Q-5, round 2): the settle mint fills
+    # it from the stashed start args, so live gate-on agrees with the gate-off
+    # live start arm AND with what every replay paints from the call's
+    # arguments. Before the fill the mint row was blank (``summary == ""``)
+    # while both other paints showed the args summary — a reconnect visibly
+    # changed the row. The three-way equality is the contract; the blocking
+    # fold below is the live control and ``_history`` the replay one.
+    expected = _summarize_args("ask", ASK_ARGS)
+    assert rows[0].summary == expected, "the settle mint carries the args summary"
+
+    blocking = make_fold(queued=False)
+    blocking.fold_event(ToolCallComposeEvent(tool_call_id="call-ask", tool_name="ask"))
+    blocking.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call-ask", tool_name="ask", args=ASK_ARGS)
+    )
+    _end(blocking, marker=False)
+    assert _tool_rows(blocking)[0].summary == expected, "the gate-off live paint agrees"
+
+    replayed = [
+        entry for entry in fold_messages_to_entries(_history(marker=False)) if entry.kind == "tool"
+    ]
+    assert replayed and replayed[0].summary == expected, "the replay paint agrees"
+
 
 def test_queued_engine_drops_the_diverted_result() -> None:
     fold = make_fold(queued=True)
@@ -113,17 +140,21 @@ def test_the_blocking_arm_settles_a_normal_result_as_today() -> None:
     assert len(rows) == 1 and rows[0].tool_state == "done"
 
 
-#: The three fields the §4 byte-identity line's unit substitution excludes, each
+#: The two fields the §4 byte-identity line's unit substitution excludes, each
 #: for a MEASURED reason rather than convenience (the literal claim that the
 #: queued and blocking arms serialize identically is false on exactly these):
 #: ``version`` counts a row's fold updates and the settle-only arm legitimately
-#: makes fewer (its row is born at settle); ``intent``/``summary`` are the
-#: compose/start frames' live annotations, and the settle-only contract refuses
-#: to REGISTER at compose by design, while the END frame — the only one the
-#: queued arm folds into a row — carries neither. Everything else (ids, order,
-#: states, details, output, flags) must be byte-equal, which is what this pins;
-#: the wire-level ``LOP_ASK_GATE=0`` parity is QA's cell 2b.
-_PARITY_ASIDE_FIELDS = ("version", "intent", "summary")
+#: makes fewer (its row is born at settle); ``intent`` is the compose frame's
+#: live annotation, and the settle-only contract refuses to REGISTER at compose
+#: by design, while the END frame — the only one the queued arm folds into a
+#: row — carries none. ``summary`` WAS on this list through round 1 for that
+#: same END-frame reason; the Q-5 settle-mint fill now derives it from the
+#: stashed start args, measured equal to the blocking arm's start-derived and
+#: the replay's call-derived summary, so it is unmasked and pinned equal instead
+#: (see the three-way assert in the mint cell below). Everything else (ids,
+#: order, states, details, output, flags) must be byte-equal, which is what this
+#: pins; the wire-level ``LOP_ASK_GATE=0`` parity is QA's cell 2b.
+_PARITY_ASIDE_FIELDS = ("version", "intent")
 
 
 def _masked(rows: list[dict[str, Any]]) -> bytes:

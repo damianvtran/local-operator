@@ -258,13 +258,22 @@ async def test_ended_drops_on_the_divert_marker() -> None:
 async def test_a_diverted_ask_does_not_linger_in_the_working_line() -> None:
     """MINOR-1(c): the working line and every registry drop a diverted ask.
 
-    The marker branch re-derives the activity before returning, so a call the
-    gate hid must leave the working line naming no ask-shaped work — and the
-    START frame's stash (the one registry a settle-only ask ever touches) must
-    be empty afterwards. The mid-sequence assert proves the stash was really
-    populated, so the final emptiness is a DROP rather than a never-wrote; the
-    blocking-arm control in ``test_ended_on_the_blocking_arm_is_todays_settle``
-    is what keeps the suppressed shape from passing on an empty app.
+    TWO LEGS, because only the second can fail on the thing this cell exists
+    to pin (round-2 reviewer NIT: the first version passed with
+    ``_refresh_working_activity`` no-op'd, so it proved no refresh ran).
+
+    LEG 1 — the queued engine: compose and start are suppressed, so no card
+    ever exists to name the ask; the START frame's stash (the one registry a
+    settle-only ask ever touches) must be empty after the marker, and the
+    mid-sequence assert proves the stash was really populated, so the final
+    emptiness is a DROP rather than a never-wrote.
+
+    LEG 2 — the MIXED BUILD (no ``ask_queue``: a surface that cannot read the
+    owner's mode): compose and start MOUNT a card, so the working line
+    genuinely names the ask, and the marker branch's
+    ``_refresh_working_activity`` is the only thing that can take it back off.
+    With that call no-op'd ``working.activity`` keeps the flash and this leg
+    fails, which is the discrimination the first version lacked.
     """
     session = FakeSession()
     _queued(session)
@@ -310,6 +319,56 @@ async def test_a_diverted_ask_does_not_linger_in_the_working_line() -> None:
         working = app._working_block
         if working is not None:
             assert working.activity == label, "the refresh pushed the re-derived label"
+
+        # LEG 2 — the DISCRIMINATING half (round-2 reviewer NIT): the same
+        # divert on a surface that cannot read the owner's mode (no
+        # ``ask_queue``). Compose and start mount a card here, so the working
+        # line genuinely names the ask, and the marker branch's refresh is the
+        # only thing that can take it back off. Under a no-op'd
+        # ``_refresh_working_activity`` the working block keeps the flash and
+        # the asserts below fail; leg 1 alone could not notice.
+        mixed = FakeSession()
+        app2 = OperatorApp(lambda: _factory(mixed))
+        async with app2.run_test(size=(100, 30)) as pilot2:
+            await _boot(pilot2, app2)
+            app2._start_working_block()
+            app2.post_message(
+                ToolComposing(ToolCallComposeEvent(tool_call_id="call-ask", tool_name="ask"))
+            )
+            app2.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id="call-ask",
+                        tool_name="ask",
+                        args=ASK_ARGS,
+                        started_at_epoch=1_000.0,
+                    )
+                )
+            )
+            for _ in range(10):
+                await pilot2.pause()
+            before = app2._current_activity()[0]
+            assert "ask" in before.lower(), "the mixed-build flash names the ask"
+            working2 = app2._working_block
+            assert working2 is not None
+            assert working2.activity == before, "the mount's refresh pushed the flash"
+
+            app2.post_message(
+                ToolEnded(
+                    ToolExecutionEndEvent(
+                        tool_call_id="call-ask",
+                        tool_name="ask",
+                        result=_ask_result("[Ask clearance] x", marker=True),
+                    )
+                )
+            )
+            for _ in range(10):
+                await pilot2.pause()
+            after = app2._current_activity()[0]
+            assert "ask" not in after.lower(), "the marker branch re-derived the label"
+            assert working2.activity == after, (
+                "the marker refresh PUSHED the re-derived label; a no-op refresh keeps the" " flash"
+            )
 
 
 @pytest.mark.asyncio

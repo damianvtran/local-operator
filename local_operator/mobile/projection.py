@@ -2098,6 +2098,20 @@ class ProjectionFold:
                 # minted — there is nothing to settle, and nothing was ever
                 # tracked for it (see `_tool_row`).
                 return
+            # THE SUMMARY AT THE SETTLE MINT (Q-5, round 2): the start arm's
+            # suppression defers this row to THIS event, so it is born with no
+            # summary — while the gate-off live start arm above sets it from
+            # the same args and every replay paints it from the call's
+            # arguments (`fold_messages_to_entries`'s call-row creation). One
+            # call, three paints, one field: without this the phone's row
+            # visibly changed on reconnect and gate-on and gate-off renders
+            # differed on the summary cell. The stashed args ARE the start
+            # frame's args (the stash is written beside the suppression), so
+            # the three paints cannot drift; a fold that attached mid-call has
+            # no stash and keeps the documented no-summary residual.
+            stashed_args = self._tool_args.get(event.tool_call_id)
+            if stashed_args is not None:
+                row.summary = _summarize_args(event.tool_name, stashed_args)
             # An end is where a settle-only ask's ONE row is created: the
             # `settle=True` above admits the mint for a RAISE (a divert
             # returned before it), so the receipt row appears at settle on the
