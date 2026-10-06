@@ -31,6 +31,7 @@ its bound would only make that signal slower to read.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -55,18 +56,26 @@ BOUND_S = 90.0
 #: ``respond_ask`` / ``withdraw_ask`` / ``reconcile_asks``, delivered by a spawned
 #: turn (and, for the boot cells, by the boot reconcile).
 #:
-#: CALIBRATION, from CI junits as of 2026-10-06: three healthy samples of this file's
-#: waits read 0.100 s (macos-latest, run 37411607304), 0.107 s and 0.082 s
-#: (ubuntu-latest / macos-latest, run 37404837806), and the one known failure read
-#: >=30.421 s — i.e. it hit its own 30 s deadline — in run 37411607304
+#: CALIBRATION, from CI junits as of 2026-10-06: three healthy samples of this CELL —
+#: the testcase as a whole, of which a wait is a subset — read 0.100 s (macos-latest,
+#: run 37411607304), 0.107 s and 0.082 s (ubuntu-latest / macos-latest, run
+#: 37404837806), and the one known failure read >=30.421 s — i.e. it hit its own 30 s
+#: deadline — in run 37411607304
 #: (``test_an_answer_racing_a_withdrawal_wins_in_both_orders``, the Direction-2 wait).
 #: The job duration that run was normal (505 s against 512 s on the prior green run),
 #: so this is not a slow runner.
 #:
-#: 60 s is ~600x the healthy samples and 2x the observed floor of the stall, and it is
-#: deliberately BELOW the cell's stage bound (``BOUND_S``, 90 s): a wait that does time
-#: out must fail with THIS wait's state block rather than let the outer watchdog end
-#: the stage with a stack dump and no account of what the runtime owed.
+#: 60 s is ~600x the healthy cell samples and 2x the observed floor of the stall, and
+#: it is deliberately BELOW the cell's stage bound (``BOUND_S``, 90 s) so that the FIRST
+#: wait in a stage fails with its own state block rather than letting the outer watchdog
+#: end the stage with a stack dump and no account of what was owed. THE GUARANTEE IS
+#: PER-WAIT, NOT PER-BLOCK: two bounded blocks hold more than one wait
+#: (``test_an_answer_racing_a_withdrawal_wins_in_both_orders`` has two delivery waits —
+#: 120 s of backstop — and ``test_a_deadline_delivers_a_notice_into_the_model_context``
+#: two delivery waits plus a plain 30 s one, 150 s), so a SECOND stalled wait in the
+#: same block can be pre-empted by the 90 s stage bound, and the stage watchdog's dump
+#: is the instrument for that case. In practice each earlier wait costs ~0.1 s, so a
+#: single stall still reaches its own backstop and renders the block.
 #:
 #: WHAT THIS STOPS CATCHING: a stall between 31 s and 60 s now PASSES where it used to
 #: red. Accepted, because this wait is an EVENT BACKSTOP and not a timing assertion
@@ -145,22 +154,31 @@ async def _wait_for_delivery(session: Session, predicate, *, what: str) -> None:
         )
 
 
+#: Tokens a delivery-path task name is expected to carry, matched per SEGMENT of the
+#: name (split on non-alphanumerics) rather than as a bare substring: the substring
+#: form matched ``task-worker`` on the ``ask`` inside ``task`` (QA round 1, Q-1).
+#: Nothing on the delivery path is NAMED today — its tasks are anonymous
+#: ``create_task`` calls — so this is a heuristic for a future named task and for a
+#: rig's own probe; it is a prefix match on a segment so ``delivery-probe`` and
+#: ``ask-settle`` count while ``task-worker`` does not.
+_DELIVERY_TASK_TOKENS = ("deliver", "prompt", "ask")
+
+
 def _delivery_task_names(limit: int = 8) -> list[str]:
     """Names of pending tasks on the delivery paths, bounded.
 
-    ``ask`` is a substring of asyncio's own default task name (``Task-7``), so those
-    default names are dropped explicitly: a line listing every unnamed task would be
-    noise, and this line exists to show a DELIVERY task still pending — the stall
-    signature — or the absence of one.
+    asyncio names an unnamed task ``Task-<n>``, whose segments are ``task`` and the
+    number — neither matches a token, so the default names cannot flood this line,
+    and it shows a DELIVERY task still pending (the stall signature) or the absence
+    of one.
     """
     names: set[str] = set()
     for task in asyncio.all_tasks():
         if task is asyncio.current_task():
             continue
         name = task.get_name()
-        if name.startswith("Task-") and name[len("Task-") :].isdigit():
-            continue
-        if any(token in name for token in ("deliver", "prompt", "ask")):
+        segments = [part for part in re.split(r"[^a-z0-9]+", name.lower()) if part]
+        if any(segment.startswith(_DELIVERY_TASK_TOKENS) for segment in segments):
             names.add(name)
     return sorted(names)[:limit]
 
@@ -187,8 +205,10 @@ def _delivery_state(session: Session, predicate, *, elapsed: float) -> str:
 
     lines = ["--- delivery state at timeout ---"]
     lines.append(f"elapsed: {elapsed:.1f}s (backstop {DELIVERY_WAIT_S}s)")
-    # 1. The predicate, re-checked: the wait can give up between polls, and "it
-    #    arrived as we gave up" (a too-tight backstop) is not a stall.
+    # 1. The predicate, re-checked: `_poll_until` already re-checks once past its
+    #    deadline, and this is the SECOND read on the timeout path (these predicates
+    #    are pure reads). "It arrived as we gave up" is a too-tight backstop, not a
+    #    stall, and the later of the two readings is the one to trust.
     lines.append(f"predicate at re-check: {bool(_safe(predicate, False))}")
     # 2. The fold, for the ids this session's log holds (last 4, bounded).
     ids = _safe(lambda: _ask_ids(session.transcript.directory)[-4:], [])
