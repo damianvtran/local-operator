@@ -207,6 +207,28 @@ def test_the_stop_verb_accepts_the_force_the_ladder_names() -> None:
     assert _parser().parse_args(["network", "sessions", "--stop", "s"]).force is False
 
 
+def test_the_peek_verb_takes_a_session_and_a_steps_window() -> None:
+    """§3C: the READ parses as a flag on the family, with its window.
+
+    ``--steps`` DEFAULTS TO ``None`` on purpose: the default number (12) belongs
+    to the act, where it can be read back in one place, and a parser-level 12
+    would make "--steps absent" and "--steps 12" indistinguishable to any later
+    reader that wants to refuse the flag beside another verb. The RANGE is
+    enforced by the handler (``test_sessions_pilot`` pins the rc-2 forms), so
+    what is asserted here is only that the flag rides the family's own parser.
+    """
+    parsed = _parser().parse_args(["network", "sessions", "--peer", "b", "--peek", "s"])
+    assert parsed.peek == "s"
+    assert parsed.steps is None
+    parsed = _parser().parse_args(
+        ["network", "sessions", "--peer", "b", "--peek", "s", "--steps", "7"]
+    )
+    assert parsed.steps == 7
+    # AND IT DEFAULTS OFF like every other act on this verb: a bare listing
+    # carries no peek.
+    assert _parser().parse_args(["network", "sessions", "--peer", "b"]).peek == ""
+
+
 def test_every_leaf_action_accepts_json() -> None:
     """The agent path drives this CLI and parses it, so ``--json`` is a contract on
     every action that produces output."""

@@ -274,9 +274,22 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --send <session> <text>` | deliver a TURN to a conversation that is already there, and wait for its outcome |
 | `lop network sessions --peer <id> --steer <session> <text>` | inject into the turn that session is running there |
 | `lop network sessions --peer <id> --slash <session> /<command> [args]` | run a slash command in that session, ON its device |
+| `lop network sessions --peer <id> --peek <session> [--steps N]` | read the newest N steps of that conversation's history, as its own viewer holds them (default 12, max 50; live sessions only) |
 
-THE THREE PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is the
-one that starts a new one). They open the same viewer the TUI's sidebar pick and `lop
+A PILOT VERB TARGETS AN ID **OR A NAME** on that device: an exact id or
+conversation name wins, then a case-insensitive substring of the name or id; an
+ambiguous name is refused with the candidate rows rather than guessed. `--stop`
+and `--engage` accept the same spellings.
+
+`--peek` IS THE FAMILY'S READ, and it drives nothing: the newest `--steps` rows
+of the conversation's history where it lives, each clipped, and nothing is
+written to the peer. It reads LIVE sessions only — a stored one REFUSES and
+names the warm-up (`--engage`) rather than starting a runtime on a device nobody
+is watching — and it takes no text.
+
+THE DRIVING PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is
+the one that starts a new one, and `--peek` is the one that only reads). They open
+the same viewer the TUI's sidebar pick and `lop
 --resume <a peer's id>` open, so what they act on is the OWNER's runtime: a routed
 slash changes the peer's own record (a rename is visible in that device's listing),
 and `--send` waits for the owner's terminal turn outcome rather than returning on
@@ -348,6 +361,13 @@ acting on one (QA round 5, Q-R5-1):
   `relay_unavailable` with no local relay) even when the rung that noticed was the
   bind: the two codes answer "which side of the open died", not "which sentence did
   I get", because a stopped device and a stopped runtime look identical from here.
+- `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
+  the target matches (a conversation name is not unique by design): the sentence
+  lists the candidate rows with the id each is retypeable as, and NOTHING was sent.
+- `session_stored` — a `--peek` reached a conversation that is not running on its
+  device. A read never starts a runtime there: the sentence names the route that
+  warms it (`--engage`, or `sessions` op='resume' in a tool call), and nothing on
+  the peer was changed.
 
 `--all-peers` merges the rows it could read and NAMES the peers it could not
 (`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
@@ -387,6 +407,10 @@ WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer` a
 is a flag on `lop sessions` and on `lop network sessions`, never on `exec` or
 `send`. **`/new remote <peer> [prompt]` IS in this build** (see "Which device
 should run this session"): it creates, lists, warms and stops a session on a peer.
+**Id-or-name targets and `--peek` ARE in this build too** (see the session-plane
+table above): a pilot verb, `--stop` and `--engage` take an id or a name, and a
+peek reads a live conversation's newest steps where it lives — a stored session
+refuses and names the warm-up rather than starting a runtime.
 Credentials are brokered too (next section): `lop network credential share` lends
 a short-lived token from the device that owns the login, so a session on a peer no
 longer needs its own login for that provider — `kimi` is the one provider that can

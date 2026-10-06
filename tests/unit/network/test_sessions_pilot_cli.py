@@ -436,3 +436,97 @@ async def test_a_goal_slash_from_the_shell_runs_its_request_on_the_peer(
         assert await _journals(created, "wire the mesh end to end"), _user_texts(created)
     finally:
         await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_name_reaches_the_peer_over_a_real_pair(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§3B, over the wire: `--send <name>` resolves against the peer's OWN rows.
+
+    The id-or-name read is the part no fake can prove end to end — the rows come
+    from a real fan-out, and the name the selector matches is the one the OWNER
+    published for its session. What the receipt must carry is the resolved id,
+    and what the peer's journal must hold is the turn.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-by-name",
+        prompt="first turn",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--send",
+            "pilot-by-name",
+            "second turn by name",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["ok"] is True, payload
+        assert payload["outcome"] == "finished", payload
+        assert (
+            payload["session_id"] == created.session_id
+        ), "the receipt names the session the NAME resolved to"
+        assert await asyncio.to_thread(_said, created, "second turn by name"), _user_texts(created)
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_peek_reads_a_live_tail_over_a_real_pair(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§3C, over the wire: the tail window, resolved by name, served by the owner.
+
+    A read with no fake in the path: the viewer is the real one, the rows come
+    from the owner's synced display window over the real protocol, and the
+    conversation's own words are what prove the window is the CONVERSATION's
+    rather than an empty frame this side guessed at.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-peek",
+        prompt="first turn",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--peek",
+            "pilot-peek",
+            "--steps",
+            "5",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["ok"] is True and payload["verb"] == "peek", payload
+        assert payload["session_id"] == created.session_id, payload
+        assert payload["rows"], "the owner served no rows for a conversation with a turn"
+        said = "\n".join(row["text"] for row in payload["rows"])
+        assert "first turn" in said, payload
+    finally:
+        await asyncio.to_thread(created.stop)
