@@ -1376,3 +1376,29 @@ def test_a_revival_that_brought_nothing_up_is_not_announced(
     assert "did not report a new process within" in captured.err
     assert "`lop tunnel install`" in captured.err
     assert "STOPPED" not in captured.err, captured.err
+
+
+def test_the_relay_job_teaches_the_same_gh_directories_find_gh_probes() -> None:
+    """B2 (review round 2): the relay's job PATH leads with the probed gh dirs.
+
+    launchd hands a job PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured), so the
+    job itself must carry the directories the forge ladder probes for gh —
+    user-local bin first, then the two standard install prefixes — or the arm
+    cannot serve a Homebrew gh even though one is installed. ``_launchd_path``
+    hardcodes its list while the probe reads ``GH_FALLBACK_BIN_DIRS``; this cell
+    CROSS-PINS the two spellings (expected entries read from the constant,
+    compared against the rendered PATH), so a drift in either direction fails
+    here rather than at a relay that cannot find gh.
+    """
+    from local_operator.network import relay as relay_install
+    from local_operator.network.credentials import github as github_mod
+
+    plan = relay_install.render_plist()
+    env = plan["EnvironmentVariables"]
+    assert isinstance(env, dict)
+    entries = str(env["PATH"]).split(os.pathsep)
+    expected = [str(Path.home() / ".local" / "bin"), *github_mod.GH_FALLBACK_BIN_DIRS]
+    assert entries[: len(expected)] == expected, entries
+    # The system directories launchd would have provided follow, so the job's
+    # PATH is a superset of the default rather than a replacement for it.
+    assert "/usr/bin" in entries and "/bin" in entries

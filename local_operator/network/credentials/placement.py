@@ -471,7 +471,7 @@ class PlacementDocument:
         if github.is_github_key(key) and scope == "session":
             raise MeshRefusal(
                 github.CODE_DEVICE_SCOPE,
-                "a GitHub App credential is lent to the DEVICE, not to a session: the "
+                "a GitHub credential is lent to the DEVICE, not to a session: the "
                 "loan is authorised by the device (any process on the borrower may use "
                 "it while the share stands), and a session-scoped row would claim a "
                 "bound that does not exist. Share it again with --scope device.",

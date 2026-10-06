@@ -464,10 +464,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        1,
-        "``APP_SECRET_NAME``: the secret-store NAME the owner's GitHub App key lives "
-        "under — the identifier-not-a-path case this file's docstring names (the "
+        2,
+        "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
+        "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
+        "token) — the identifier-not-a-path case this file's docstring names (the "
         "reply-channel/action-tool precedent), never a file in a session directory",
+    ),
+    "local_operator/network/credentials/gitlab.py": (
+        1,
+        "``TOKEN_SECRET_NAME``: the secret-store NAME the GitLab adapter's token will "
+        "live under (the stub module pinning §3.6's decided names) — an identifier, "
+        "not a path, and never a file in a session directory",
     ),
     "local_operator/session/placement.py": (
         2,

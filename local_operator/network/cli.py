@@ -740,7 +740,7 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--scope",
         choices=("session", "device"),
         # NOT a static default: None is resolved PER KIND in the handler so the
-        # GitHub App credential — device-scoped by construction — defaults to
+        # github credential — device-scoped by construction — defaults to
         # 'device' (its only possible scope) while every provider keeps
         # 'session'. An explicitly typed value reaches the document's own refusal.
         default=None,
@@ -1690,10 +1690,12 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     from local_operator.network.credentials import github as github_mod
 
-    if github_mod.app_secret_present(_config_dir()):
-        # The App key lives in the SECRET store, not ``auth.db`` — so it is the one
-        # row that can exist on a device with no credential store yet, and it is
-        # assembled BEFORE the store guard below can return early.
+    if github_mod.source_present(_config_dir()):
+        # The github row's sources live OUTSIDE ``auth.db`` (the secret store and
+        # gh's own login), so it is the one row that can exist on a device
+        # with no credential store yet, and it is assembled BEFORE the store guard
+        # below can return early. Any ladder arm (§3.2) — and a resolvable one,
+        # never an unreadable store — makes the row real.
         rows.append(_github_shareable_row(self_device))
 
     store = offers.open_store(_config_dir())
@@ -1746,53 +1748,138 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _github_revocation_payload(revoked_now: int | None, ttl_s: int) -> dict[str, Any]:
-    """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``."""
-    return {
-        "new_grants": "refused now",
-        "lent_grant_max_s": ttl_s,
-        "minted_tokens_revoked": revoked_now,
-        "copied_bearer": (
+def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str) -> dict[str, Any]:
+    """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``.
+
+    Per-source (§3.3): only the App arm has a server-side revoke handle. A
+    token arm was not minted here, so no DELETE was run and the sentence names
+    the forge as the place the token actually ends — an incident reader must
+    not believe "revoked" means "dead" for a bearer lop never minted.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    if source == github_mod.SOURCE_APP:
+        copied = (
             "revoked at GitHub at the grant's window end — and immediately when "
             "this revoke ran — via DELETE /installation/token (204; idempotent); "
             "only if no revoke can be delivered does the token fall back to its "
             "own 60-minute ceiling"
-        ),
+        )
+    elif source == github_mod.SOURCE_TOKEN:
+        copied = (
+            "a GITHUB_TOKEN-class PAT is not minted by this device: there is no "
+            "server-side revoke here — it keeps working at GitHub until it expires "
+            "or is revoked there (Settings -> Developer settings -> Personal access "
+            "tokens); a grant already lent is dropped by the borrower at its window end"
+        )
+    elif source == github_mod.SOURCE_GH:
+        copied = (
+            "the gh CLI login is a user token this device did not mint: there is no "
+            "server-side revoke here — sign out of the gh CLI or revoke the token at "
+            "GitHub (Settings -> Applications) to end it; a grant already lent is "
+            "dropped by the borrower at its window end"
+        )
+    elif source == github_mod.SOURCE_UNREADABLE:
+        copied = (
+            "the secret store on this device could not be read, so the serving arm "
+            "could not be determined — any grant already lent is dropped by the borrower "
+            "at its window end; repair the store before the next revoke"
+        )
+    else:
+        copied = (
+            "no GitHub source is configured on this device any more — nothing new can "
+            "be served; a token copied out of the borrower lives at GitHub until it "
+            "expires or is revoked there"
+        )
+    return {
+        "new_grants": "refused now",
+        "lent_grant_max_s": ttl_s,
+        "minted_tokens_revoked": revoked_now,
+        "source": source,
+        "copied_bearer": copied,
     }
 
 
-def _github_revoke_lines(name: str, revoked_now: int | None) -> list[str]:
-    """The receipt's operator-visible lines, mint-revoke wording (M1, restated).
+def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> list[str]:
+    """The receipt's operator-visible lines, per serving arm (§3.3).
 
-    Line 1 holds the CONDITIONAL inside it — "and on this revoke's DELETE when it
-    can be delivered" — so it is true whether or not this relay could run the
-    call; line 2 says which branch actually happened. The ``--json`` payload
-    carries the same conditional in ``copied_bearer``.
+    App arm: the mint-revoke wording (M1, restated), unchanged — line 1 holds
+    the CONDITIONAL inside it, line 2 says which branch actually happened. The
+    token arms say the plainer truth: this device minted nothing, there is no
+    DELETE to run, and the end at the forge is where the operator goes. ``""``
+    (no source configured at revoke time) gets the neutral pair.
     """
-    if revoked_now is None:
-        delivered = (
-            "no immediate DELETE could be delivered (this device's relay is not "
-            "running): the token dies at GitHub at its own 60-minute ceiling unless "
-            "the borrowing device's window-end self-revoke lands first"
+    from local_operator.network.credentials import github as github_mod
+
+    if source == github_mod.SOURCE_APP:
+        if revoked_now is None:
+            delivered = (
+                "no immediate DELETE could be delivered (this device's relay is not "
+                "running): the token dies at GitHub at its own 60-minute ceiling unless "
+                "the borrowing device's window-end self-revoke lands first"
+            )
+        else:
+            delivered = (
+                f"the immediate DELETE ran: {revoked_now} outstanding token(s) revoked at "
+                "GitHub just now (a retry closes anything the call missed; the window-end "
+                "revoke still stands)"
+            )
+        return [
+            (
+                f"new borrows by {name}: refused now; the outstanding GitHub token is "
+                "revoked at GitHub at its window end, and on this revoke's DELETE when it "
+                "can be delivered — via `DELETE /installation/token` (204; idempotent)"
+            ),
+            delivered,
+        ]
+    if source in (github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        served = (
+            "the GITHUB_TOKEN-class PAT this device served"
+            if source == github_mod.SOURCE_TOKEN
+            else "the gh CLI login this device served"
         )
-    else:
-        delivered = (
-            f"the immediate DELETE ran: {revoked_now} outstanding token(s) revoked at "
-            "GitHub just now (a retry closes anything the call missed; the window-end "
-            "revoke still stands)"
+        end = (
+            "revoke the PAT at GitHub (Settings -> Developer settings -> Personal " "access tokens)"
+            if source == github_mod.SOURCE_TOKEN
+            else "sign out of the gh CLI on the owner, or revoke the token at GitHub "
+            "(Settings -> Applications)"
         )
+        return [
+            (
+                f"new borrows by {name}: refused now; {served} was not minted here, so "
+                "there is no window-end DELETE and nothing for this device to revoke — a "
+                f"grant already lent is dropped by {name} at its own window end"
+            ),
+            (
+                f"to end the token itself now, {end}; it keeps working at GitHub until "
+                "you do or it expires"
+            ),
+        ]
+    if source == github_mod.SOURCE_UNREADABLE:
+        return [
+            (
+                f"new borrows by {name}: refused now; this device's secret store could "
+                "not be read, so the serving arm could not be determined"
+            ),
+            (
+                f"a token already lent is dropped by {name} at its window end; repair "
+                "the store here and re-run the revoke for the per-arm receipt"
+            ),
+        ]
     return [
         (
-            f"new borrows by {name}: refused now; the outstanding GitHub token is "
-            "revoked at GitHub at its window end, and on this revoke's DELETE when it "
-            "can be delivered — via `DELETE /installation/token` (204; idempotent)"
+            f"new borrows by {name}: refused now; no GitHub source is configured on "
+            "this device any more, so nothing new can be served"
         ),
-        delivered,
+        (
+            "a token copied out of that device lives at GitHub until it expires or is "
+            "revoked there"
+        ),
     ]
 
 
-def _github_share_disclosure(name: str) -> str:
-    """T7(b), MANDATED: what device scoping MEANS, in one line on the receipt.
+def _github_share_disclosure(name: str, source: str) -> str:
+    """T7(b) + §3.4, MANDATED: what device scoping MEANS, in one line on the receipt.
 
     The share receipt carries this at share time (the network guide carries it
     once): while the share stands, any process or session on the borrowing
@@ -1800,15 +1887,29 @@ def _github_share_disclosure(name: str) -> str:
     trust unit on a node, not the session id. Nothing in this design claims
     intra-uid separation, and no surface may say the loan is bound to a
     session.
+
+    The token arms add §3.4's narrowing-honesty clause, because only the App is
+    narrowed server-side: the helper bounds lop's own paths to the designated
+    repositories, and the token itself is the owner's login beyond them.
     """
-    return (
+    device = (
         f"note: this loan is authorised by the DEVICE, not a session — while the "
         f"share stands, any process or session on {name} (same user) can use it"
     )
+    from local_operator.network.credentials import github as github_mod
+
+    if source in (github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        return (
+            device + ". GitHub note: the borrowing device can use this token against any "
+            "repository the git helper is configured to serve, and nothing else "
+            "through lop's own paths; the token itself is your full login, so treat "
+            "a share like a copy of your login"
+        )
+    return device
 
 
 def _github_shareable_row(self_device: str) -> dict[str, Any]:
-    """The GitHub App ledger row: shareable when the secret exists (§D4).
+    """The github ledger row: shareable when a ladder arm resolves (§3.2).
 
     Mirrors the provider rows' shape so ``readiness.shareable_lines`` renders it
     unchanged — holders nested, and the remedy spell the device scope the key
@@ -1887,7 +1988,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
 
     # THE SHARE SCOPE'S PER-KIND DEFAULT (github adapter, F3). An operator typing
     # the bare verb gets the scope the key can actually honour: 'session' where a
-    # session bound means something, 'device' for the GitHub App credential. The
+    # session bound means something, 'device' for the github credential. The
     # document refuses session scope for that key by NAME, so an explicitly
     # typed `--scope session` still reaches the refusal instead of being
     # silently overridden here.
@@ -1952,7 +2053,10 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
     if verb == "share" and github_mod.is_github_key(key):
-        lines.append(_github_share_disclosure(name))
+        # The disclosure names the ARM that will serve (§3.4): only the App is
+        # narrowed server-side, and the share receipt must not promise narrowing
+        # a token arm cannot deliver.
+        lines.append(_github_share_disclosure(name, github_mod.resolve_source(_config_dir())))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -1995,8 +2099,11 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # window end + on this revoke; the 60-minute figure is the fallback).
             # Both halves live in helpers so the copy has ONE home (the tests
             # assert against the same strings the receipt prints).
-            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s)
-            lines.extend(_github_revoke_lines(name, revoked_now))
+            # PER-SOURCE (§3.3): resolved at THIS moment — the receipt describes
+            # the arm that serves now, and says plainly when nothing does.
+            source = github_mod.resolve_source(_config_dir())
+            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s, source)
+            lines.extend(_github_revoke_lines(name, revoked_now, source))
             return _emit(args, payload, lines)
         copied = (
             "valid at the provider until the key is rotated there (a static key never expires)"
@@ -2048,20 +2155,23 @@ def _require_local_credential(key: str, provider: str) -> None:
     from local_operator.network.credentials import github as github_mod
 
     if github_mod.is_github_key(key):
-        # THE INTERIM STATE, IN THE READER'S TERMS (desk call, 2026-10-03): the
-        # GitHub adapter is present and its mint is real, but an App has not been
-        # created, so a share today has nothing to lend — and that is what this
-        # sentence says, followed by the one-time setup remedy. Not "implemented",
-        # not "blocked": push and PR-write through the mesh are unavailable until
-        # the App exists, everything else already works.
-        raise MeshRefusal(
-            "no_local_credential",
-            "this device has no GitHub App credential yet, so there is nothing to "
-            "share: push and PR-write through the mesh are unavailable until a "
-            "GitHub App is configured here (a short one-time setup — the network "
-            "guide has the checklist). Public clones and non-GitHub work are "
-            "unaffected.",
-        )
+        # THE LADDER IS THE HOLD CHECK (§3.2): an App, a GITHUB_TOKEN-class
+        # secret, or the gh CLI's own login — any arm is something to lend, and
+        # this is the SAME one order the lender serves with. An UNREADABLE store
+        # refuses by name rather than reading as empty (M1): a share must not
+        # promise a device that cannot resolve its own ladder.
+        source = github_mod.resolve_source(_config_dir())
+        if source == github_mod.SOURCE_UNREADABLE:
+            raise MeshRefusal(
+                github_mod.CODE_STORE_UNREADABLE,
+                "this device's encrypted secret store could not be read, so the GitHub "
+                "source ladder cannot be resolved and nothing can be shared from here "
+                "until it is repaired — no wider source is substituted while it is "
+                "unreadable (the network guide has the ladder).",
+            )
+        if source:
+            return
+        raise MeshRefusal("no_local_credential", github_mod.no_source_message())
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
         raise MeshRefusal(

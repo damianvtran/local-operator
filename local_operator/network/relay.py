@@ -10773,6 +10773,30 @@ def is_supported() -> bool:
     return supervisors.supervisor() in (supervisors.LAUNCHCTL, supervisors.SYSTEMCTL)
 
 
+def _launchd_path() -> str:
+    """The PATH the relay's job runs with: probed directories first, system after.
+
+    launchd hands a job PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured on the
+    operator's machine), so a gh installed at /opt/homebrew/bin is invisible to
+    the job — and gh is exactly what the forge ladder's third arm asks. The
+    order mirrors ``github.find_gh``'s discovery (user-local bin, then the two
+    standard install prefixes) so the job's environment and the code's own
+    fallback cannot disagree about which gh wins; the system directories follow
+    because launchd's default PATH would have provided them anyway.
+    """
+    return os.pathsep.join(
+        [
+            str(Path.home() / ".local" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+    )
+
+
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     """The supervised-unit plan, as one pure function every consumer reads."""
     from local_operator import procname
@@ -10793,6 +10817,12 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         "StandardErrorPath": str(log_path()),
         # A relay holds long-lived sockets and timers; App Nap would suspend them.
         "ProcessType": "Interactive",
+        # THE JOB'S OWN PATH (review round 2, B2): without it the job sees the
+        # launchd default only, and the gh arm cannot serve a Homebrew gh even
+        # though one is installed. ``refresh_plist_if_stale`` rewrites an
+        # installed job to this content, so existing installs pick the PATH up
+        # on the next run without a re-install.
+        "EnvironmentVariables": {"PATH": _launchd_path()},
     }
 
 

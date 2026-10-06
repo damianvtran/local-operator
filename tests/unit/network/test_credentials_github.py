@@ -812,8 +812,8 @@ def test_a_session_scoped_share_is_refused_by_name_in_the_document(owner: Any) -
     assert "nothing was lent" in detail["message"]
 
 
-def test_the_missing_app_is_the_named_interim_state(env: _Env) -> None:
-    """The state a user meets TODAY: no App → ``no_local_credential``, one-time setup."""
+def test_the_missing_source_is_the_named_ladder_state(env: _Env) -> None:
+    """No arm of the ladder configured → ``no_local_credential``, one ladder sentence."""
     from local_operator.network.credentials import messages
 
     root = env.root
@@ -847,8 +847,10 @@ def test_the_missing_app_is_the_named_interim_state(env: _Env) -> None:
         owner_name="owner-laptop",
     )
     assert "owner-laptop" in sentence
-    assert "unavailable until a GitHub App is configured" in sentence
-    assert "a short one-time setup" in sentence
+    assert "holds no GitHub credential" in sentence
+    assert "the gh CLI's own login" in sentence and "GITHUB_TOKEN-class" in sentence
+    assert "the stronger GitHub App" in sentence
+    assert "the network guide has the ladder" in sentence
     assert "Public clones" in sentence
     assert "lop login" not in sentence, "github has no local-login remedy to offer"
 
@@ -1528,11 +1530,18 @@ def test_the_t6_t7_acceptance_records_are_present_and_claim_no_coverage() -> Non
     from local_operator.network import cli as network_cli
 
     disclosure = network_cli._github_share_disclosure(
-        "peer-b"
+        "peer-b", github_mod.SOURCE_APP
     )  # noqa: SLF001 — the receipt's own copy
     assert "any process or session on peer-b" in disclosure
     assert "while the share stands" in disclosure
     assert "can use it" in disclosure, "D4: one verb for the same-uid exposure"
+    # §3.4's honesty clause rides the token arms: only the App is narrowed at
+    # GitHub, and the share receipt must say so instead of implying narrowing.
+    token_disclosure = network_cli._github_share_disclosure(
+        "peer-b", github_mod.SOURCE_TOKEN
+    )  # noqa: SLF001
+    assert "treat a share like a copy of your login" in token_disclosure
+    assert "treat a share like a copy of your login" not in disclosure
     guides = Path(__file__).resolve().parents[3] / "local_operator" / "guides" / "network"
     appendix = Path(__file__).resolve().parents[3] / "docs" / "design" / "mesh-credentials.md"
     guide = guides / "GUIDE.md"
@@ -1572,15 +1581,21 @@ def test_the_revoke_op_deletes_now_and_the_receipt_carries_the_mint_revoke_copy(
     monkeypatch.setattr(owner_mod, "broker_for_relay", lambda server: None)
     assert ops.revoke({"credential_key": "openai", "holder": BORROWER_DEVICE})["revoked"] == 0
 
-    # The receipt copy, from the helpers the receipt itself uses.
-    lines = network_cli._github_revoke_lines("peer-b", 1)  # noqa: SLF001 — the receipt's own copy
+    # The receipt copy, from the helpers the receipt itself uses (the App arm;
+    # the token arms' own copy is pinned in ``test_github_source_ladder``).
+    lines = network_cli._github_revoke_lines(
+        "peer-b", 1, github_mod.SOURCE_APP
+    )  # noqa: SLF001 — the receipt's own copy
     assert "refused now" in lines[0] and "DELETE /installation/token" in lines[0]
     assert "when it can be delivered" in lines[0], "D1: line 1 must hold the conditional"
     assert "1 outstanding token(s) revoked at GitHub just now" in lines[1]
-    payload = network_cli._github_revocation_payload(1, 900)  # noqa: SLF001
+    payload = network_cli._github_revocation_payload(1, 900, github_mod.SOURCE_APP)  # noqa: SLF001
     assert payload["minted_tokens_revoked"] == 1
+    assert payload["source"] == github_mod.SOURCE_APP
     assert "60-minute ceiling" in payload["copied_bearer"]
-    fallback = network_cli._github_revoke_lines("peer-b", None)  # noqa: SLF001
+    fallback = network_cli._github_revoke_lines(
+        "peer-b", None, github_mod.SOURCE_APP
+    )  # noqa: SLF001
     assert "relay is not running" in fallback[1]
     # The conditional lives in line 1, so the headline is IDENTICAL on both
     # branches — neither branch can promise a DELETE the other retracts.

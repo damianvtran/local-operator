@@ -1,21 +1,51 @@
-"""The ``github`` credential: a GitHub App installation token, minted by its owner.
+"""The ``github`` credential: a forge bearer from the owner's source ladder.
 
 WHAT THIS CREDENTIAL IS, AND WHY IT IS NOT A PROVIDER LOGIN. Every other key in
 ``placement`` names a login this device holds in its own ``auth.db`` and serves
-through ``AuthStore``. ``github`` has no row anywhere: the OWNER mints a
-short-lived GitHub **App installation token** on demand (GitHub caps these at
-one hour), hands it to a borrower over the existing broker wire, and the
-borrower uses it for ``git`` and ``gh`` — never for provider calls. So this
-module is the adapter the broker dispatches to, plus the borrower-side delivery
-(env construction, the git credential helper, and the self-revoke belt).
+through ``AuthStore``. ``github`` has no row anywhere: the OWNER serves a bearer
+resolved at serve time from the source ladder below, hands it to a borrower over
+the existing broker wire, and the borrower uses it for ``git`` and ``gh`` —
+never for provider calls. So this module is the adapter the broker dispatches
+to, plus the borrower-side delivery (env construction, the git credential
+helper, and the self-revoke belt).
 
-THE APP KEY LIVES IN THE OWNER'S ENCRYPTED SECRET STORE (``GITHUB_APP``), one
-JSON blob holding ``app_id``, ``installation_id`` and the PEM private key. The
-one-time setup checklist is in the network guide; until that secret exists the
-adapter refuses ``no_local_credential`` in the reader's own terms (push and
-PR-write are unavailable; public clones and non-GitHub work are unaffected).
-Nothing here fails closed on the missing secret in a way that touches any other
-credential class.
+THE SOURCE LADDER (``docs/design/mesh-consent-provisioning.md`` §3.2), strongest
+first, resolved by :func:`resolve_source` on the owner at EVERY serve:
+
+1. ``GITHUB_APP`` — one JSON blob (``app_id``, ``installation_id``, PEM private
+   key) in the owner's encrypted secret store; today's mint path runs unchanged.
+   The optional STRONGER arm: server-side narrowed at mint and revocable per
+   token (``DELETE /installation/token``). A configured-but-broken App REFUSES
+   rather than falling through — falling through would silently lend a wider
+   credential than the operator configured.
+2. ``GITHUB_TOKEN`` — a PAT-class secret in the same store: the durable,
+   revocable-at-the-forge arm the guide teaches (a fine-grained PAT scoped to
+   the designated repositories with an expiry). Not minted here, so there is no
+   server-side revoke handle and the revocation receipt says so (§3.3).
+3. The owner's own ``gh`` CLI login — the zero-setup route, resolved BY ASKING
+   ``gh`` ITSELF: ``gh auth token`` when the token lives in the OS keychain
+   (the default on macOS — ``hosts.yml`` then carries the login with no
+   ``oauth_token``), with gh's own hosts file read first when it holds one
+   (``--insecure-storage`` installs). The owner is the trusted side; the
+   borrower never reads it, and nothing new is stored — ``gh``'s tooling stays
+   the source of truth.
+
+Not-a-token material fails closed nowhere else: with no arm at all the adapter
+refuses ``no_local_credential`` in the reader's own terms (push and PR-write are
+unavailable until one of the three is configured; public clones and non-GitHub
+work are unaffected).
+
+DEVICE-SCOPED BY CONSTRUCTION (design F3). The borrower side has no
+rail-authenticated session identity — a same-uid process can claim any
+``for_session`` — so a session-scoped grant would enforce nothing. A session id
+therefore travels ONLY as attribution (audit rows, cache keying), and both
+directions refuse a session-scoped row by name: the share verb at the document
+(``placement.py``) and the owner at serve time (:meth:`MeshCredentialBroker`
+dispatch in ``owner.py``). The disclosure that follows — any process or session
+on the borrower node can borrow while the share stands — is stated on the share
+receipt and in the network guide (the mandated T7(b) copy), and §3.4's honesty
+clause rides it for the token arms: only the App is narrowed server-side, so
+the end the operator wants must be named for the arm that served.
 
 DEVICE-SCOPED BY CONSTRUCTION (design F3). The borrower side has no
 rail-authenticated session identity — a same-uid process can claim any
@@ -62,6 +92,7 @@ import datetime
 import json
 import os
 import shlex
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -76,8 +107,11 @@ from typing import Any, Callable, Iterable, Sequence
 #: is how a share and a borrow come to disagree about which key they mean).
 GITHUB_KEY = "github"
 
-#: The placement row's kind. ``CredentialRef.kind`` on the wire carries it too,
-#: and the revocation receipt branches on it for the github-app wording.
+#: The placement row's kind. ``CredentialRef.kind`` on the wire carries it too.
+#: The kind names the ROW (one github placement), not the arm that served this
+#: window: the ladder can change arm between windows (a gh login today, an App
+#: tomorrow) while the share stands. Per-source wording therefore branches on
+#: ``resolve_source``, never on this string.
 GITHUB_KIND = "github-app"
 
 #: The owner's secret-store entry. ONE JSON blob: ``app_id``, ``installation_id``,
@@ -107,6 +141,45 @@ GITHUB_API_VERSION = "2022-11-28"
 #: first ``git push``; a wider one would be a capability nobody asked for.
 GITHUB_PERMISSIONS: dict[str, str] = {"contents": "write", "pull_requests": "write"}
 
+#: The stored PAT-class secret (the ladder's second arm): ONE opaque short line,
+#: the token itself — a fine-grained PAT scoped to the designated repositories
+#: with an expiry is the shape the guide teaches. A ``GITHUB_TOKEN``-class NAME
+#: on purpose: it is the spelling a ``gh``/CI user already recognises.
+TOKEN_SECRET_NAME = "GITHUB_TOKEN"
+
+#: The ladder's arms, strongest first (§3.2). ``""`` — no arm — is
+#: ``no_local_credential`` at serve time. THE ONE ORDER: the lender resolves
+#: with :func:`resolve_source` and the receipts name the arm with it, so
+#: "which source serves" cannot drift between serving and the copy.
+SOURCE_APP = "app"
+SOURCE_TOKEN = "token"
+SOURCE_GH = "gh"
+
+#: The ladder's "we cannot tell" answer: the encrypted store EXISTS but cannot
+#: be read, so an arm may be present that must not be skipped (review round 1,
+#: M1). Deliberately distinct from ``""`` — an empty ladder falls through to
+#: ``no_local_credential``; an unreadable store REFUSES by name, because serving
+#: a wider arm than one that could not be read is exactly the silent downgrade
+#: the ladder forbids.
+SOURCE_UNREADABLE = "unreadable"
+
+#: How much of ``gh``'s hosts file one read may take. gh writes a few hundred
+#: bytes; the bound exists so a pathological file cannot make the lender read
+#: it wholesale — and an oversized file is refused BY NAME, never parsed
+#: partially (a half-read credential file must not serve half a token).
+_GH_HOSTS_READ_LIMIT = 64 * 1024
+
+#: The refusal codes the ladder's arms add to the broker's closed set
+#: (registered in ``types.BROKER_ERROR_TTL_MS``; borrower sentences in
+#: ``messages.py``). Both are OWNER-side states no retry from the borrower can
+#: change — the operator repairs the owner — so they cache long like the
+#: App's own codes.
+CODE_TOKEN_UNUSABLE = "github_token_unusable"
+CODE_GH_UNUSABLE = "github_gh_unusable"
+#: The store itself could not be read, so no arm could be resolved. Its own
+#: code rather than a token/App one: the refusal is about the door, not an arm.
+CODE_STORE_UNREADABLE = "github_store_unreadable"
+
 #: The refusal codes this adapter adds to the broker's closed set (registered in
 #: ``types.BROKER_ERROR_TTL_MS``; sentences in ``messages.py``).
 CODE_DEVICE_SCOPE = "device_scope_required"
@@ -121,6 +194,12 @@ HTTP_TIMEOUT_S = 10.0
 
 #: How often a failed revoke is retried while this process lives.
 REVOKE_RETRY_S = 60.0
+
+#: Bound for one ``gh auth token`` call: gh answers locally (keychain read or
+#: keyfile read), so this is generous for a healthy install and still bounded
+#: for a wedged one. The call runs in the broker's executor, never on the relay
+#: loop (a hung gh must not stall the relay — the mint's own rule).
+GH_CLI_TIMEOUT_S = 10.0
 
 #: The most tokens tracked per ``(key, holder)``. Each grant is one window
 #: (<= ``grant_ttl_s``), so 16 is far above any honest overlap; past it the
@@ -226,32 +305,74 @@ class GithubAppKeyError(Exception):
         self.kind = kind
 
 
-def app_secret_present(root: Path | None = None) -> bool:
-    """Whether a ``GITHUB_APP`` secret exists, WITHOUT reading its value.
+class GithubTokenError(Exception):
+    """The ``GITHUB_TOKEN`` secret is absent or unusable.
 
-    The metadata read (``describe``), not a retrieval: the ledger and the share
-    verb must answer "is a GitHub App configured here" without pulling key
-    material into a process that only needs to say yes or no. An unreadable
-    store answers ``False`` — the closed direction at a grant seam, the same
-    rule ``offers.credential_here`` states for provider rows.
+    Same two kinds as :class:`GithubAppKeyError` on purpose: the ladder treats
+    ``absent`` as "this arm is not configured" (fall through) and ``unusable``
+    as a NAMED refusal (present, broken — fall-through would lend a wider thing
+    than a configured arm the operator believes in).
+    """
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+class GithubGhError(Exception):
+    """The ``gh`` CLI login arm: absent (no stored login) or unusable (broken)."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def _secret_state(root: Path | None, name: str) -> bool | None:
+    """Whether ``name`` is configured: ``True`` / ``False`` / ``None`` = UNKNOWN.
+
+    The tri-state is what the LADDER needs and a single-arm probe did not:
+    ``False`` must mean "definitely not configured" so resolution may fall
+    through to the next arm, while an unreadable store is ``None`` — we cannot
+    know whether a NARROWER arm is hiding there, and continuing would serve a
+    wider credential than the one the operator may have set up (review round 1,
+    M1 / QA Q2: a corrupted ``master.key`` used to read as "absent" and the
+    ladder silently served the full ``gh`` login instead).
+
+    ``describe`` only — metadata, never value material. A store that was never
+    created is a definite ``False``: opening one with ``create=True`` would
+    make a read a writer.
     """
     try:
         from local_operator.secrets import access
-        from local_operator.secrets.errors import SecretStoreError
+        from local_operator.secrets.errors import SecretNotFound
         from local_operator.secrets.keys import store_path
 
         if not store_path(root).exists():
-            # A store that was never created is a definite "not there": opening
-            # one with ``create=True`` would make a read a writer.
             return False
-        store = access.open_store(root)
         try:
-            store.describe(APP_SECRET_NAME)
+            store = access.open_store(root)
+        except Exception:  # noqa: BLE001 — present but unopenable is UNKNOWN
+            return None
+        try:
+            store.describe(name)
             return True
-        except SecretStoreError:
+        except SecretNotFound:
             return False
-    except Exception:  # noqa: BLE001 — an unreadable store is "not known"
-        return False
+        except Exception:  # noqa: BLE001 — anything else is UNKNOWN, never False
+            return None
+    except Exception:  # noqa: BLE001 — even the store_path probe failing is UNKNOWN
+        return None
+
+
+def app_secret_present(root: Path | None = None) -> bool:
+    """Whether a ``GITHUB_APP`` secret exists, WITHOUT reading its value.
+
+    The closed-direction bool view of :func:`_secret_state` (``None`` folds to
+    ``False``): for callers that only need "is a source configured here for a
+    yes/no promise", an unknown store is not a promise. Callers that RESOLVE
+    the ladder must use :func:`resolve_source`, which distinguishes the two.
+    """
+    return _secret_state(root, APP_SECRET_NAME) is True
 
 
 def read_app_key(root: Path | None = None) -> GithubAppKey:
@@ -264,7 +385,7 @@ def read_app_key(root: Path | None = None) -> GithubAppKey:
     do (and those are exact-value registered on the borrower).
     """
     from local_operator.secrets import access
-    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.errors import SecretNotFound, SecretStoreError
     from local_operator.secrets.keys import store_path
 
     if not store_path(root).exists():
@@ -274,8 +395,14 @@ def read_app_key(root: Path | None = None) -> GithubAppKey:
         )
     try:
         raw = access.retrieve_secret(APP_SECRET_NAME, root)
-    except SecretStoreError as exc:
+    except SecretNotFound as exc:
         raise GithubAppKeyError("absent", str(exc)) from exc
+    except SecretStoreError as exc:
+        # Present but unreadable is NOT "absent": the ladder must refuse here
+        # rather than fall through to a wider arm (review round 1, M1).
+        raise GithubAppKeyError(
+            "unusable", f"{APP_SECRET_NAME} exists but could not be read ({exc.__class__.__name__})"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — a locked/hardened store is a store that cannot serve
         raise GithubAppKeyError(
             "unusable", f"{APP_SECRET_NAME} could not be read ({exc.__class__.__name__})"
@@ -301,6 +428,307 @@ def read_app_key(root: Path | None = None) -> GithubAppKey:
     if missing:
         raise GithubAppKeyError("unusable", f"{APP_SECRET_NAME} is missing {', '.join(missing)}")
     return GithubAppKey(app_id=app_id, installation_id=installation_id, private_key=private_key)
+
+
+# ---------------------------------------------------------------------------
+# The source ladder: which arm serves here (owner side)
+# ---------------------------------------------------------------------------
+
+
+def token_secret_present(root: Path | None = None) -> bool:
+    """Whether a ``GITHUB_TOKEN`` secret is configured, WITHOUT reading it.
+
+    The closed-direction bool view of :func:`_secret_state`, like
+    :func:`app_secret_present`; :func:`resolve_source` is the caller that must
+    distinguish "absent" from "unreadable".
+    """
+    return _secret_state(root, TOKEN_SECRET_NAME) is True
+
+
+def read_token_secret(root: Path | None = None) -> str:
+    """The ``GITHUB_TOKEN``-class secret's VALUE. Raises :class:`GithubTokenError`.
+
+    Read through ``access.retrieve_secret`` — the one announced path (design
+    §6) — exactly like the App key: the read is attributed like every other
+    value retrieval in this tree, and the value never reaches a model-visible
+    channel (it is exact-value registered on the borrower when served).
+    """
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+    from local_operator.secrets.keys import store_path
+
+    if not store_path(root).exists():
+        raise GithubTokenError(
+            "absent", f"no secret store exists here, so no {TOKEN_SECRET_NAME} is configured"
+        )
+    try:
+        raw = access.retrieve_secret(TOKEN_SECRET_NAME, root)
+    except SecretNotFound as exc:
+        raise GithubTokenError("absent", str(exc)) from exc
+    except SecretStoreError as exc:
+        # A store that exists but cannot produce the value is NOT "absent":
+        # aborting the ladder here is the whole point of the tri-state (M1).
+        raise GithubTokenError(
+            "unusable",
+            f"{TOKEN_SECRET_NAME} exists but could not be read ({exc.__class__.__name__})",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — a locked/hardened store cannot serve
+        raise GithubTokenError(
+            "unusable", f"{TOKEN_SECRET_NAME} could not be read ({exc.__class__.__name__})"
+        ) from exc
+    token = raw.decode("utf-8", "replace").strip()
+    # A token is ONE short opaque line. A value that is empty, multi-line, or
+    # absurdly long is not a token the forge will ever accept — refusing HERE,
+    # by name, beats surfacing the shape error as a 401 at the first push.
+    if not token or "\n" in token or len(token) > 512:
+        raise GithubTokenError(
+            "unusable",
+            f"{TOKEN_SECRET_NAME} does not look like a token (one short line expected)",
+        )
+    return token
+
+
+def gh_hosts_path(home: Path | None = None) -> Path:
+    """``~/.config/gh/hosts.yml`` — the DEFAULT path only, deliberately.
+
+    ``readiness._gh_auth_fact`` states the same position for its structural
+    scan: a ``GH_CONFIG_DIR``/``XDG_CONFIG_HOME`` relocation is not chased in
+    v1, so the report and the lender cannot come to different conclusions about
+    which login exists.
+    """
+    root = Path.home() if home is None else home
+    return root / ".config" / "gh" / "hosts.yml"
+
+
+def _read_gh_hosts(home: Path | None = None) -> dict[str, Any]:
+    """gh's hosts file parsed, or a :class:`GithubGhError` naming the state.
+
+    Bounded read (``_GH_HOSTS_READ_LIMIT``): an oversized file is refused, not
+    half-parsed. ``FileNotFoundError`` is ``absent``; every other failure is
+    ``unusable`` — never a guess, and never a partial answer.
+    """
+    path = gh_hosts_path(home)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise GithubGhError("absent", f"no gh CLI login is stored here ({path})") from exc
+    except OSError as exc:
+        raise GithubGhError(
+            "unusable", f"the gh CLI's hosts file could not be read ({exc.__class__.__name__})"
+        ) from exc
+    if len(raw) > _GH_HOSTS_READ_LIMIT:
+        raise GithubGhError("unusable", "the gh CLI's hosts file is unexpectedly large")
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(raw.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 — malformed is its own answer
+        raise GithubGhError(
+            "unusable", f"the gh CLI's hosts file is not valid YAML ({exc.__class__.__name__})"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise GithubGhError("unusable", "the gh CLI's hosts file is not a YAML mapping")
+    return parsed
+
+
+def gh_login_present(home: Path | None = None) -> bool:
+    """Whether gh stores a ``github.com`` login here, without reading the token.
+
+    An unreadable-but-present hosts file resolves to the arm (``True``) so the
+    serve-time refusal names it; only a definite absence — no file, or no
+    ``github.com`` entry — is ``False``. The direction matters: a file left
+    behind by ``gh auth logout`` (entry gone) must fall through to
+    ``no_local_credential``, not refuse as though a login existed. The parse
+    reads the file's mapping (the file IS gh's storage); the token string is
+    only extracted where a serve needs it, never here.
+    """
+    try:
+        hosts = _read_gh_hosts(home)
+    except GithubGhError as exc:
+        return exc.kind == "unusable"
+    return isinstance(hosts.get("github.com"), dict)
+
+
+#: Absolute fallback directories for gh discovery, after this process's PATH and
+#: the user-local bin: the two standard install prefixes (Homebrew on arm64 and
+#: on x86_64, plus locally-built installs). The relay's launchd job hands it
+#: PATH=/usr/bin:/bin:/usr/sbin:/sbin (measured on the operator's machine), where
+#: a Homebrew gh is invisible to a PATH probe — this fallback is what lets the
+#: arm serve there (review round 2, B2), and ``relay.render_plist`` teaches the
+#: job the same directories so the two cannot disagree.
+GH_FALLBACK_BIN_DIRS: tuple[str, ...] = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _resolve_program(name: str, *, path: str | None = None) -> str | None:
+    """``shutil.which`` behind ONE name, so the probe has one seam.
+
+    The same seam shape as ``readiness._resolve_program`` (that module's tooling
+    row): tests pin discovery without touching the process PATH, and production
+    keeps exactly one spelling of "where is gh".
+    """
+    import shutil
+
+    return shutil.which(name, path=path)
+
+
+def find_gh(home: Path | None = None) -> str | None:
+    """The gh executable as this device would run it — off-PATH included.
+
+    Probes, in order: this PROCESS's PATH; the user-local bin directory; then
+    the standard install prefixes (:data:`GH_FALLBACK_BIN_DIRS`). The order is
+    the one ``relay._launchd_path`` teaches the relay's own job, so the job's
+    environment and this fallback agree about which gh wins. The relay runs
+    under launchd with a minimal PATH on macOS and gh is commonly installed
+    where that PATH does not reach; the borrower never runs this (owner-side
+    only), so the probe answers for the same ambient user the broker serves as.
+    """
+    try:
+        found = _resolve_program("gh")
+    except Exception:  # noqa: BLE001 — a broken probe is "not found here"
+        found = None
+    if found:
+        return found
+    root = Path.home() if home is None else home
+    fallbacks = (root / ".local" / "bin", *(Path(entry) for entry in GH_FALLBACK_BIN_DIRS))
+    for directory in fallbacks:
+        try:
+            found = _resolve_program("gh", path=str(directory))
+        except Exception:  # noqa: BLE001 — see above
+            continue
+        if found:
+            return found
+    return None
+
+
+def read_gh_token(home: Path | None = None) -> str:
+    """The token the owner's own gh CLI holds for ``github.com`` (owner side).
+
+    ``by asking gh itself`` — the design's literal wording (§3.2), and what a
+    default macOS install needs: gh keeps the token in the OS keychain there,
+    and ``hosts.yml`` carries the login WITHOUT an ``oauth_token`` (verified
+    live: gh 2.100.0, ``gh auth status`` shows ``(keyring)``). So resolution is
+    two-step, cheapest first:
+
+    1. gh's own hosts file, when it holds a token (``--insecure-storage`` /
+       keyring-less installs) — a bounded local read, no process at all;
+    2. ``gh auth token --hostname github.com`` — gh's own resolution, the
+       default for keyring-stored logins. The binary is resolved off-PATH too
+       (:func:`find_gh`, the launchd lesson); stdout is captured and never
+       logged, and only a single-line answer is accepted.
+
+    Resolved fresh at EVERY serve — no cache, so a re-login or rotation
+    reaches the node's next command (§3.3). The value never reaches a
+    model-visible channel (exact-value registered when served).
+    """
+    hosts = _read_gh_hosts(home)
+    entry = hosts.get("github.com")
+    if isinstance(entry, dict):
+        token = str(entry.get("oauth_token") or "").strip()
+        if token:
+            return token
+    exe = find_gh(home)
+    if exe is None:
+        if isinstance(entry, dict):
+            raise GithubGhError(
+                "unusable",
+                "the gh CLI's github.com login stores no token in its file and no gh "
+                "executable was found to ask (probed PATH, ~/.local/bin, "
+                "/opt/homebrew/bin and /usr/local/bin): install gh if it is genuinely "
+                "absent, and check that directory list if it is not — nothing was lent "
+                "(the network guide has the ladder)",
+            )
+        raise GithubGhError("absent", "the gh CLI stores no github.com login here")
+    try:
+        proc = subprocess.run(
+            [exe, "auth", "token", "--hostname", "github.com"],
+            capture_output=True,
+            text=True,
+            timeout=GH_CLI_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — a timeout or spawn failure is the arm being unusable
+        raise GithubGhError(
+            "unusable", f"gh could not be asked for a token ({exc.__class__.__name__})"
+        ) from exc
+    token = proc.stdout.strip()
+    if proc.returncode != 0 or not token or "\n" in token:
+        # STRUCTURAL only: gh's stderr can carry account and host detail and is
+        # never reproduced (the readiness probe's names-only discipline).
+        raise GithubGhError(
+            "unusable",
+            f"gh could not produce a github.com token (exit {proc.returncode}): sign in "
+            "again with the gh CLI on this device (the network guide has the ladder)",
+        )
+    return token
+
+
+def no_source_arms() -> str:
+    """The one enumeration of the ladder's arms, shared by every refusal voice.
+
+    Kept CLAUSE-level so the device-side refusal (:func:`no_source_message`),
+    the share verb's refusal and the borrower's rendered sentence
+    (``messages.py``) cannot drift in WHICH arms they teach — the fact a person
+    acts on. Order is remedy-first (cheapest to set up first); the network
+    guide's ladder lists the same three strongest-first, and this clause points
+    there.
+    """
+    return (
+        "the gh CLI's own login, a GITHUB_TOKEN-class token, or the stronger "
+        "GitHub App — the network guide has the ladder"
+    )
+
+
+def no_source_message() -> str:
+    """The device-side sentence for "no arm of the ladder is configured here".
+
+    This sentence (not a second literal) is what the broker refusal and the
+    share verb emit; its arms clause is :func:`no_source_arms`, shared with the
+    borrower's sentence in ``messages.py`` so the enumeration cannot drift.
+    """
+    return (
+        f"no GitHub credential is configured here yet: {no_source_arms()}. Push and "
+        "PR-write stay unavailable until one of them exists; public clones and "
+        "non-GitHub work are unaffected"
+    )
+
+
+def resolve_source(root: Path | None = None, *, home: Path | None = None) -> str:
+    """Which ladder arm serves github on this device right now.
+
+    Answers ``SOURCE_APP`` / ``SOURCE_TOKEN`` / ``SOURCE_GH`` / ``""`` (no arm),
+    or ``SOURCE_UNREADABLE`` when the encrypted store EXISTS but cannot be read:
+    the ladder STOPS there rather than guessing, because an unreadable store
+    may hold a narrower arm (App or token) and continuing would serve a wider
+    credential than the one the operator set up (review round 1, M1 / QA Q2).
+    Callers that only need "may this device serve at all" use
+    :func:`source_present`, which folds the unknown to not-a-promise.
+
+    PRESENCE, not usability, for each arm it does resolve: a configured but
+    broken arm RESOLVES so the serve-time refusal can name it. THE ONE ORDER:
+    the lender serves with this, and the receipts name the arm with it.
+    """
+    app_state = _secret_state(root, APP_SECRET_NAME)
+    if app_state is None:
+        return SOURCE_UNREADABLE
+    if app_state:
+        return SOURCE_APP
+    token_state = _secret_state(root, TOKEN_SECRET_NAME)
+    if token_state is None:
+        return SOURCE_UNREADABLE
+    if token_state:
+        return SOURCE_TOKEN
+    if gh_login_present(home):
+        return SOURCE_GH
+    return ""
+
+
+def source_present(root: Path | None = None, *, home: Path | None = None) -> bool:
+    """Whether any arm resolves to something servable (``""``/unknown are not).
+
+    The closed direction for yes/no surfaces (the offer candidate gate, the
+    ledger row): an unreadable store is not a promise, and neither is an empty
+    ladder.
+    """
+    return resolve_source(root, home=home) in (SOURCE_APP, SOURCE_TOKEN, SOURCE_GH)
 
 
 # ---------------------------------------------------------------------------
