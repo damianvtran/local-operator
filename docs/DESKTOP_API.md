@@ -561,7 +561,7 @@ readings.
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below (**read envelope**) |
-| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` (**read envelope**) |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner") |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing |
@@ -1191,6 +1191,38 @@ loop is free, while the durable answer — the same transcript `/history` reads 
 is available the whole time: with a silent-but-alive owner the read used to be
 refused after ~15 s, while the identical rows came back in 0.02 s with no owner
 at all.
+
+The same rule holds for a conversation ANOTHER device owns, and there the
+"durable answer" has a different source. A peer's runtime is the only thing that
+can serve its display window, so a cold one — idle-exited, or deliberately
+**stopped**, which no engage may warm — used to answer `/history` with
+`{entries: [], has_more: false, cursor_missing: false}`: byte-identical to a
+conversation with no rows, which is the defect
+`docs/design/mesh-cold-read-stored-history.md` fixes. The page now comes from the
+OWNER's stored journal, served by the OWNER's own relay over the mesh (the op
+`net_session_history`, capability `view`), through the same reader and the same
+visibility filter the owner's own `/history` uses — never from this device's
+`<root>/sessions/<id>`, which for a peer's id is absent or a different
+conversation wearing the same id (`mesh-session-mobility.md` §3.4). Three
+consequences a client can rely on:
+
+* **an empty page on a peer means the OWNER HAS NO ROWS**, because an answer that
+  could not be produced is not published as one (below);
+* **entries carry their own `ts`**, unlike the wire path's serve-time stamp — the
+  source is journal rows, not messages, so the ordering and the timestamps are
+  the owner's own (`id`/`ts`/`type`/`payload`, the shape a local page has);
+* **a read starts nothing on the peer**: no runtime is spawned and no lease is
+taken, which is what makes a stopped session readable at all and keeps the GET
+side-effect free across the mesh too.
+
+When the stored page cannot be SERVED — this device has no relay, the peer
+refuses, or the hop expires — the answer is an empty page marked
+`cursor_missing: true`. That is the contract's existing word for "this page cannot
+be trusted as complete", and it is deliberately not the open path's refusal
+(`409 session_is_remote`): the session exists and the row resolved, so the reader
+is missing a TRANSCRIPT, not a SESSION. A renderer must therefore never claim
+exhaustion over a peer page whose `cursor_missing` is true — the same rule it
+already applies to a local page it could not anchor.
 
 The snapshot frame reports WHY it is cold, in a TOKEN rather than a sentence
 (the copy belongs to the app, the same discipline `code` follows in the error
