@@ -2067,10 +2067,12 @@ def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
     THE MOBILE SITE READS ``build_app``, and that is the AST's honest answer
     rather than a route name: every mobile handler is a nested def inside the
     app factory, so the outermost enclosing def for a call made there is the
-    factory itself. Naming it here is the point of the guard -- a new caller in
-    a poll or a blur handler inside that factory would still have to be added
-    deliberately (and would then have to be renamed to fit), which is the review
-    moment this test exists to force.
+    factory itself. That name says less than the other two, and the guard still
+    bites there: the map's VALUES are lists, so a second caller inside the
+    factory lands as ``["build_app", "build_app"]`` and reddens the equality
+    below -- measured by injecting a nested poll that reaches the batch write.
+    The entry must therefore be added deliberately; nothing renames it into
+    place.
 
     Driven off the syntax tree, so a call added from `_poll_completion_attention`
     or from a window-blur handler fails here BY NAME, rather than passing because

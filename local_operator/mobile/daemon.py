@@ -34,6 +34,7 @@ import gzip
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -151,6 +152,15 @@ SUMMARIES_CACHE_TTL_S = 1.0
 #: it rendered in one call and never has to chunk a single user gesture. The
 #: worst-case body is ~30 KB against the 900 KB control-frame limit.
 SEEN_MANY_MAX_ITEMS = 500
+
+#: The completion-token shape a bulk item may name, spelled once here: the
+#: desktop route's own ``RequestID`` pattern (``server/routes/desktop_sessions.py``),
+#: which is the canonical UUID the runtime mints (``str(uuid.uuid4())``; the
+#: durable writer derives a uuid5). Refusing a malformed token at the SHAPE
+#: layer (422) is what keeps this route's status semantics identical to
+#: ``SeenItem``'s, instead of letting the store answer ``unknown`` for a string
+#: that was never a token.
+_COMPLETION_TOKEN_RE = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
 
 #: The wire name for "the durable half of this listing could not be re-read".
 #:
@@ -4551,10 +4561,27 @@ def build_app(daemon: MobileDaemon):
         real-but-replaced token answers ``superseded`` for that item; it never
         moves a watermark no surface can see.
 
-        PER-ITEM, never per-call: a dead or foreign session id -- not a live
-        generation and not a durable user conversation, the same pair of checks
-        the single route 404s on -- answers ``unknown`` FOR THAT ITEM so one
-        stale row cannot cost the others their receipt.
+        PER-ITEM, never per-call: an item for a conversation this machine cannot
+        acknowledge answers ``unknown`` FOR THAT ITEM, so one stale row cannot
+        cost the others their receipt. "Known" here is the MOBILE listing's own
+        predicate rather than the desktop facade's, deliberately: a conversation
+        is known iff it is among the rows ``daemon.table.entries`` serves (the
+        list's population, ``ended`` included -- an ended conversation can still
+        be listed while its receipt is unread) or
+        :func:`_durable_user_session_dir` resolves it (the marker predicate the
+        badge aggregate itself uses, plus a transcript). The desktop route
+        reaches the same store through
+        :meth:`DesktopSessions.acknowledge_attention_many`, whose check is
+        ``is_dir()`` + ``is_user_session``; the two agree on every conversation
+        either surface can render, and a receipt naming a row this daemon cannot
+        see is the one thing both must refuse.
+
+        SHAPE BEFORE BEHAVIOUR: an item's ``session_id`` (12 lowercase hex) and
+        ``completion_token`` (the completion's UUID) are validated here, exactly
+        as the desktop ``SeenItem`` validates them, so a malformed pair is a 422
+        rather than a 200 whose bucket happens to say ``unknown`` -- the two
+        surfaces answer the same shape the same way. The id pattern is the one
+        the store's own receipt path uses, imported so a copy cannot drift.
 
         Body fields are additive forever: ``device_id`` (optional, advisory
         exactly as on the single route) decides only who is SKIPPED by the
@@ -4578,6 +4605,10 @@ def build_app(daemon: MobileDaemon):
                 {"error": f"items is limited to {SEEN_MANY_MAX_ITEMS} receipts per call"},
                 status_code=422,
             )
+        # The shared id shape, imported from the store's own receipt path so a
+        # copy cannot drift (``local_operator.session.attention``'s own note).
+        from local_operator.session.attention import _SESSION_ID_RE
+
         receipts: list[tuple[str, str]] = []
         for item in items:
             session_id = item.get("session_id") if isinstance(item, dict) else None
@@ -4585,6 +4616,18 @@ def build_app(daemon: MobileDaemon):
             if not isinstance(session_id, str) or not isinstance(token, str):
                 return JSONResponse(
                     {"error": "each item needs a session_id and a completion_token"},
+                    status_code=422,
+                )
+            if not _SESSION_ID_RE.fullmatch(session_id) or not _COMPLETION_TOKEN_RE.fullmatch(
+                token
+            ):
+                return JSONResponse(
+                    {
+                        "error": (
+                            "session_id must be 12 lowercase hex characters and "
+                            "completion_token must be the completion's UUID"
+                        )
+                    },
                     status_code=422,
                 )
             receipts.append((session_id, token))
