@@ -3379,9 +3379,12 @@ class DesktopSessionBridge:
         on the owner's disk and nothing on the wire. Serving those is what makes a
         cold peer read mean something: an empty page then means the OWNER HAS NO
         ROWS, and a page that could not be served says so instead of pretending to
-        be empty (:meth:`_peer_stored_history`). The fallback is taken only on a
-        COLD facade's empty read, never on a warm one's: a warm runtime answering
-        with no rows is a real answer about a conversation that has none.
+        be empty (:meth:`_peer_stored_history`). The fallback is taken on an
+        UNREADABLE read -- ``rows is None``, i.e. this facade is not hydrated, which
+        is a different predicate from ``is_cold`` and so also fires on a
+        warm-but-unhydrated facade -- or on a COLD facade's empty read. A WARM
+        runtime answering with no rows keeps the wire: that is a real answer about a
+        conversation that has none.
 
         ``ts`` IS THE SERVE TIME FOR WIRE ROWS, AND THAT IS A STATED LIMIT RATHER
         THAN A CLAIM. The wire carries MESSAGES, not journal rows, and a message
@@ -3413,15 +3416,20 @@ class DesktopSessionBridge:
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
-        # THE WIRE ANSWERS ONLY WHEN A RUNTIME IS ACTUALLY ATTACHED TO THIS VIEWER.
-        # ``is_cold`` is the facade's own word for "no fully synchronized runtime is
-        # attached", and it is the predicate here rather than a bare "the rows came
-        # back empty": a COLD facade's empty window is not an answer about the
+        # THE WIRE ANSWERS ONLY WHEN IT CAN ANSWER AT ALL, and there are TWO ways it
+        # cannot (agent review round 1, R1-3 — the predicate this comment used to
+        # describe was ``is_cold`` alone, which is not the predicate the code runs).
+        # ``rows is None`` means the read itself was unreadable: the facade is NOT
+        # HYDRATED, which is a different predicate from ``is_cold`` (``_client is
+        # None or not connected or not _ready_for_events``) and therefore also fires
+        # on a WARM facade whose window has not landed yet. ``cold and not rows`` is
+        # the other: a COLD facade's EMPTY window is not an answer about the
         # conversation -- it never received one, and its local replay is refused for
         # a remote placement (the empty rows at §3.4's refusal) -- while a WARM one's
-        # empty window is exactly the answer "the owner has no rows". Reading it
-        # after the bounded attach above is what keeps a live-but-unattached owner,
-        # the case the attach can still rescue, on the wire.
+        # empty window IS the answer "the owner has no rows", and stays on the wire.
+        # ``cold`` is read AFTER the bounded attach above, which is what keeps a
+        # live-but-unattached owner -- the case the attach can still rescue -- on the
+        # wire.
         cold = remote.is_cold
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
         if rows is None or (cold and not rows):
@@ -3453,16 +3461,23 @@ class DesktopSessionBridge:
                     page, has_more = _remote_page(older, limit=limit)
                     has_more = has_more or remote.history_before_token is not None
         stamp = time.time()
+        entries = [
+            {
+                "id": str(getattr(row, "id", "") or ""),
+                "ts": stamp,
+                "type": "message",
+                "payload": _wire_row_payload(row),
+            }
+            for row in page
+        ]
         return {
-            "entries": [
-                {
-                    "id": str(getattr(row, "id", "") or ""),
-                    "ts": stamp,
-                    "type": "message",
-                    "payload": _wire_row_payload(row),
-                }
-                for row in page
-            ],
+            # THE SAME FILTER AS THE STORED SOURCE (agent review round 1, R1-4). A
+            # hidden wake delivery, a patience ledger row and a diverted ask's result
+            # are in the journal and therefore in the owner's own display window --
+            # and the client reducer has no filter of its own, so an older build
+            # paints exactly what the current one hides. One method answering from
+            # two sources is only "one contract" if both drop the same rows.
+            "entries": visible_transcript_rows(entries),
             "has_more": has_more,
             "cursor_missing": False,
             "has_newer": None,

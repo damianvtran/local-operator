@@ -1213,7 +1213,14 @@ consequences a client can rely on:
   the owner's own (`id`/`ts`/`type`/`payload`, the shape a local page has);
 * **a read starts nothing on the peer**: no runtime is spawned and no lease is
 taken, which is what makes a stopped session readable at all and keeps the GET
-side-effect free across the mesh too.
+side-effect free across the mesh too;
+* **a page can come back SHORTER than `limit`**, and then it says so: the reply
+travels as ONE mesh record (8 MiB), so the owner serves as many of the requested
+rows as fit — newest first, `has_more: true` for the older ones it left behind,
+which the same `before_id` cursor then pages back — rather than letting the frame
+oversize and take the whole peer link down with it. A single entry too large to
+fit that record is refused by name (`page_too_large`), which a reader sees as the
+unservable page above.
 
 When the stored page cannot be SERVED — this device has no relay, the peer
 refuses, or the hop expires — the answer is an empty page marked

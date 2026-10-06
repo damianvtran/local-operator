@@ -2938,13 +2938,35 @@ ENGAGE_DEADLINE_S = 60.0
 #: 1..500). Declared here rather than inherited from the route because this frame
 #: arrives from a granted member rather than from the route's FastAPI validator,
 #: and a second, larger bound on the peer path would be a way to ask one device
-#: for a page no surface on it could request. The reply travels as ONE link frame
-#: under ``dial.MAX_SESSION_FRAME_BYTES`` (8 MiB), the same envelope every other
-#: session-plane reply is framed in; a page that exceeds it is refused by the
-#: link rather than silently truncated, which is the honest failure.
+#: for a page no surface on it could request.
 SESSION_HISTORY_MIN_LIMIT = 1
 SESSION_HISTORY_MAX_LIMIT = 500
 SESSION_HISTORY_DEFAULT_LIMIT = 100
+
+#: The ENCODED ceiling for ONE ``net_session_history`` reply, and the reason this
+#: op bounds its own by SIZE instead of trusting the link to (agent review round 1,
+#: R1-1). The reply travels as one link record, whose plaintext ceiling is
+#: ``wire.MAX_RECORD_BYTES`` — and ``LinkCodec.seal`` refuses a larger record by
+#: RAISING, which ``PeerLink._write_loop`` answers by closing the WHOLE link. So an
+#: oversized page was not "refused by the link": it killed the mesh to that peer
+#: (every other op, stream and session on the link with it) and told the reader
+#: nothing, because the hop then expired byte-identically to an unreachable relay.
+#: The handler instead measures the frame it is about to return and serves as many
+#: of the requested rows as fit — ``fit_session_history_reply`` below.
+#:
+#: MEASURED WITH THE ENCODER THAT APPLIES THE BOUND (``session_history_reply_bytes``
+#: uses the same compact JSON, UTF-8), so this is the number ``seal`` checks rather
+#: than an estimate of it; the margin covers the ack frame around ``detail`` and any
+#: future key added to it, and is deliberately far larger than those cost today.
+SESSION_HISTORY_REPLY_MARGIN_BYTES = 64 * 1024
+SESSION_HISTORY_REPLY_BUDGET_BYTES = wire.MAX_RECORD_BYTES - SESSION_HISTORY_REPLY_MARGIN_BYTES
+
+#: The longest a relay's reader thread waits for its OWN page loop. Deliberately
+#: not a service-level bound — a page read is milliseconds, and the VIEWER's own
+#: hop (``session_history_hop_bound_s``) is what bounds a legitimate wait — but a
+#: wait with no bound at all is a reader thread that can never be reclaimed if the
+#: loop is stopped under it, and a parked reader is a link that never closes.
+SESSION_HISTORY_PAGE_READ_BOUND_S = 60.0
 
 
 #: How long THIS relay waits for a peer to answer ``net_session_history``.
@@ -2989,6 +3011,96 @@ def session_history_client_bound_s() -> float:
     mark unservable rather than render as an empty conversation.
     """
     return session_history_hop_bound_s() + SESSION_HISTORY_CLIENT_MARGIN_S
+
+
+def validate_history_limit(raw: Any) -> int:
+    """THE page-size decision, shared by BOTH halves of a stored-page read.
+
+    ``net_session_history`` validates what a granted PEER put on the frame
+    (``RelayServer._op_session_history``), and ``peer_session_history`` validates
+    what a caller put on the LOCAL control frame (``RelayServer._ctl_peer_history``)
+    — one function so the two cannot answer "what is a bad limit?" differently
+    (agent review round 1, R1-5 / QA round 1, Q2).
+
+    A REFUSAL, never a substitution or a clamp: ``{before_id, limit}`` is a
+    POSITION, and a page served at a limit other than the one asked for reads as
+    complete when it is not. ``None`` is the ONE value that takes the default —
+    "I did not ask" is a request, unlike "I asked for 'abc'". ``bool`` is refused
+    BY NAME ahead of the integer test because ``isinstance(True, int)`` is true in
+    Python, so a JSON ``true`` would otherwise silently become a one-row page.
+    """
+    if raw is None:
+        return SESSION_HISTORY_DEFAULT_LIMIT
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise MeshRefusal("protocol_error", f"limit must be a whole number, not {raw!r}")
+    if not SESSION_HISTORY_MIN_LIMIT <= raw <= SESSION_HISTORY_MAX_LIMIT:
+        raise MeshRefusal(
+            "protocol_error",
+            f"limit must be between {SESSION_HISTORY_MIN_LIMIT} and "
+            f"{SESSION_HISTORY_MAX_LIMIT}, not {raw}",
+        )
+    return raw
+
+
+def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
+    """The byte length of the reply frame ``wire.LinkCodec.seal`` will serialize.
+
+    ``_run_handler`` wraps every handler's answer as
+    ``{"op": "ack", "req": …, "detail": …}`` and the writer seals exactly that,
+    with compact JSON that keeps non-ASCII unescaped — so this measures the same
+    bytes the record bound is applied to rather than an estimate of them.
+    """
+    frame = {"op": "ack", "req": req, "detail": detail}
+    return len(
+        json.dumps(frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    )
+
+
+def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
+    """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
+
+    Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
+    rows dropped are its oldest and the reader reaches them with the same
+    ``before_id`` cursor it pages with — a partial page with ``has_more: True``
+    and no gap. If not even the newest single row fits, this raises a NAMED
+    per-op refusal (``page_too_large``): the reader cannot be served rows this
+    frame physically cannot carry, and the one answer that must never come back
+    is a torn-down link.
+
+    A page that already fits — every ordinary page — is returned untouched.
+    """
+    if session_history_reply_bytes(req, detail) <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        return detail
+    entries = list(detail.get("entries") or [])
+    if not entries:
+        return detail
+    # Trimming means older rows are being left behind, and ``has_more`` must say
+    # so rather than let the reader believe it reached the end of the window.
+    bounded = {**detail, "has_more": True}
+    if (
+        session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
+        > SESSION_HISTORY_REPLY_BUDGET_BYTES
+    ):
+        raise MeshRefusal(
+            "page_too_large",
+            "this conversation has a single entry too large to serve over the mesh; "
+            "open it on the device that holds it",
+        )
+    # MONOTONE in the rows kept, so the largest fitting suffix is found in
+    # O(log limit) serializations rather than one per row.
+    low, high = 1, len(entries)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if (
+            session_history_reply_bytes(req, {**bounded, "entries": entries[-mid:]})
+            <= SESSION_HISTORY_REPLY_BUDGET_BYTES
+        ):
+            low = mid
+        else:
+            high = mid - 1
+    return {**bounded, "entries": entries[-low:]}
 
 
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
@@ -3940,6 +4052,15 @@ class RelayServer:
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: The ONE event loop every stored-page read runs on, and the lock that
+        #: builds it once (see ``_page_read_loop``). Lazy for the same reason the
+        #: slow pool is: most relays never serve ``net_session_history``.
+        self._page_loop: asyncio.AbstractEventLoop | None = None
+        self._page_loop_thread: threading.Thread | None = None
+        self._page_loop_lock = threading.Lock()
+        #: Set by ``stop``: the next read builds a fresh loop rather than queueing
+        #: work onto one whose thread has finished (see ``_page_read_loop``).
+        self._page_loop_shelved = False
         self._install_slices()
         self.started_at = time.time()
         #: Computed ONCE: the build stamp is decoration, and asking packaging
@@ -4103,6 +4224,15 @@ class RelayServer:
         with self._slow_lock:
             if self._slow_pool is not None:
                 self._slow_pool.shutdown(wait=False, cancel_futures=True)
+        # THE PAGE LOOP STOPS WITH THE RELAY. A read already submitted on it runs
+        # first (the stop callback is queued behind it); a read that arrives later
+        # builds a fresh loop rather than hand one to a thread that has finished.
+        with self._page_loop_lock:
+            if self._page_loop is not None:
+                self._page_loop.call_soon_threadsafe(self._page_loop.stop)
+                self._page_loop = None
+                self._page_loop_thread = None
+                self._page_loop_shelved = True
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
@@ -6818,16 +6948,27 @@ class RelayServer:
         contract rather than two that can drift.
 
         IT STARTS NOTHING AND TAKES NO LEASE. The directory check below is a
-        filesystem read, and ``asyncio.run`` exists only to drive the async page
-        façade (whose own ``to_thread`` keeps the parse off this thread — the same
-        ``asyncio.run`` shape ``_op_session_stop`` uses for its async act). A
-        viewer must be able to read a session that is DELIBERATELY STOPPED, which
-        no engage may warm by design, so a read that spawned anything on the peer
-        would fail exactly the sessions this exists for. The relay owns that loop
-        and this handler runs on its own thread, so the page façade's process-wide
-        cache is touched from ONE thread here (its module docstring's rule) — the
-        relay is its own process (``lop network serve``), never a thread beside a
-        desktop server that mutates the same cache.
+        filesystem read, and the page façade is driven on ONE relay-owned loop
+        (:meth:`_stored_page_read`) purely to reach the reader's async entry point
+        (whose own ``to_thread`` keeps the parse off that loop). A viewer must be
+        able to read a session that is DELIBERATELY STOPPED, which no engage may
+        warm by design, so a read that spawned anything on the peer would fail
+        exactly the sessions this exists for.
+
+        ONE LOOP, NOT ONE ``asyncio.run`` PER CALL (agent review round 1, R1-2).
+        ``page_cache``'s cross-thread rule is about THREADS, and its single-flight
+        is keyed by the loop that started the read: this handler runs on the LINK'S
+        reader thread (one per link), so an ``asyncio.run`` per call gave a relay
+        with two viewer links two loops against the SAME module-level cache —
+        single-flight silently lost, and ``get``/``put`` mutated from two threads,
+        which the module names as the shape of the freeze #401 was. Every
+        stored-page read therefore runs on the one loop ``_stored_page_read``
+        owns, so however many viewers ask at once, the façade is touched from one
+        thread.
+
+        THE REPLY IS BOUNDED BY ENCODED SIZE, not by row count (agent review
+        round 1, R1-1). See :func:`fit_session_history_reply`: the frame travels as
+        ONE link record, and exceeding it used to close the whole link.
 
         OWNERSHIP IS THE CHOKEPOINT'S, not this handler's: the frame names a
         ``session_id``, so ``Authorizer._session_scope`` has already refused one
@@ -6855,15 +6996,12 @@ class RelayServer:
             )
         raw_before = frame.get("before_id")
         before_id = str(raw_before) if raw_before else None
-        limit = self._history_limit(frame.get("limit"))
+        limit = validate_history_limit(frame.get("limit"))
 
         from local_operator.harness.rows import visible_transcript_rows
-        from local_operator.session.page_cache import load_transcript_page
 
         try:
-            page = asyncio.run(
-                load_transcript_page(str(directory), before_id=before_id, limit=limit)
-            )
+            page = self._stored_page_read(directory, before_id=before_id, limit=limit)
         except FileNotFoundError:
             # THE LOCAL ROUTE'S OWN ANSWER for a session whose journal has not been
             # written yet: an empty page, and a cursor into it is a cursor that
@@ -6874,40 +7012,62 @@ class RelayServer:
                 "cursor_missing": bool(before_id),
                 "has_newer": None,
             }
-        return {
-            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
-            "has_more": page.has_more,
-            # ``reconciled`` is the reader's word for "the cursor was not found, so
-            # this page is the tail rather than a continuation" — the same field
-            # the local envelope maps to ``cursor_missing``.
-            "cursor_missing": page.reconciled,
-            "has_newer": page.has_newer,
-        }
+        return fit_session_history_reply(
+            frame.get("req"),
+            {
+                "entries": visible_transcript_rows(
+                    [json.loads(row.to_json()) for row in page.entries]
+                ),
+                "has_more": page.has_more,
+                # ``reconciled`` is the reader's word for "the cursor was not found,
+                # so this page is the tail rather than a continuation" — the same
+                # field the local envelope maps to ``cursor_missing``.
+                "cursor_missing": page.reconciled,
+                "has_newer": page.has_newer,
+            },
+        )
 
-    def _history_limit(self, raw: Any) -> int:
-        """Validate the page size a peer asked for, refusing rather than clamping.
+    def _stored_page_read(self, directory: Path, *, before_id: str | None, limit: int) -> Any:
+        """Drive ``load_transcript_page`` on THIS relay's ONE page loop (R1-2).
 
-        A REFUSAL rather than a clamp, because a clamp answers a different question
-        than the one asked and the caller cannot tell: ``{before_id, limit}`` is a
-        POSITION, and silently serving 500 rows for a request of 5000 would let a
-        reader believe it had the whole tail. The bound is the desktop route's own
-        (see :data:`SESSION_HISTORY_MAX_LIMIT`).
+        WHY A SHARED LOOP AND NOT ``asyncio.run``. The page façade serializes its
+        work per LOOP: its single-flight map is keyed by ``(loop, task)``, so two
+        loops against the same key both become leaders and decode the page twice,
+        and the two also mutate the module-level cache from two threads. One loop
+        for every stored-page read in this process is what keeps the façade on one
+        thread however many viewer links ask at once.
         """
-        if raw is None:
-            return SESSION_HISTORY_DEFAULT_LIMIT
-        try:
-            limit = int(raw)
-        except (TypeError, ValueError) as exc:
-            raise MeshRefusal(
-                "protocol_error", f"limit must be a whole number, not {raw!r}"
-            ) from exc
-        if not SESSION_HISTORY_MIN_LIMIT <= limit <= SESSION_HISTORY_MAX_LIMIT:
-            raise MeshRefusal(
-                "protocol_error",
-                f"limit must be between {SESSION_HISTORY_MIN_LIMIT} and "
-                f"{SESSION_HISTORY_MAX_LIMIT}, not {limit}",
-            )
-        return limit
+        from local_operator.session.page_cache import load_transcript_page
+
+        loop = self._page_read_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            load_transcript_page(str(directory), before_id=before_id, limit=limit), loop
+        )
+        return future.result(timeout=SESSION_HISTORY_PAGE_READ_BOUND_S)
+
+    def _page_read_loop(self) -> asyncio.AbstractEventLoop:
+        """The relay's single page loop, started on first use and kept for its life.
+
+        LAZY, like the slow-op pool: most relays never serve this op, and a thread
+        per relay that never reads a page would be paid for nothing. A DAEMON
+        thread, so a relay that is never stopped cannot hold the process open.
+
+        A STOPPED RELAY BUILDS A FRESH LOOP rather than queueing work onto one
+        whose thread has finished — ``stop`` shelves it — and the flag, not
+        ``is_running``, is what distinguishes the two: ``is_running`` is false for
+        a loop whose thread has not reached ``run_forever`` yet, so reading it here
+        would race the first caller into building a second loop.
+        """
+        with self._page_loop_lock:
+            if self._page_loop is None or self._page_loop_shelved:
+                loop = asyncio.new_event_loop()
+                self._page_loop_thread = threading.Thread(
+                    target=loop.run_forever, name="mesh-page-loop", daemon=True
+                )
+                self._page_loop_thread.start()
+                self._page_loop = loop
+                self._page_loop_shelved = False
+            return self._page_loop
 
     def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).
@@ -9863,15 +10023,22 @@ class RelayServer:
         (``session_history_client_bound_s``), so the two cannot drift. A hop that
         expires is reported to the reader as an UNSERVABLE page rather than as a
         refusal (see ``DesktopSessionBridge._remote_history``).
+
+        ``limit`` IS VALIDATED HERE TOO, by the SAME function the owner-side op
+        uses (:func:`validate_history_limit`, agent review round 1 R1-5 / QA round
+        1 Q2): this used to substitute the default for anything that was not an
+        ``int`` — silently answering a different page than the one asked for, and
+        turning a JSON ``true`` into a one-row page — while the owner refused a
+        bad limit outright. One decision, one spelling, on both halves of the read.
         """
-        limit = frame.get("limit")
+        limit = validate_history_limit(frame.get("limit"))
         return self._local_peer_call(
             "net_session_history",
             str(frame.get("peer") or ""),
             timeout=session_history_hop_bound_s(),
             session_id=str(frame.get("session_id") or ""),
             before_id=(str(frame["before_id"]) if frame.get("before_id") else None),
-            limit=(int(limit) if isinstance(limit, int) else SESSION_HISTORY_DEFAULT_LIMIT),
+            limit=limit,
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:
