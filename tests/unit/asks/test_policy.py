@@ -113,3 +113,43 @@ def test_the_late_window_is_seven_days():
 
 def test_the_open_cap_is_eight():
     assert policy.OPEN_ASK_CAP == 8
+
+
+def test_the_gate_defaults_on_and_the_env_var_is_a_kill_switch(monkeypatch):
+    """``LOP_ASK_GATE=0`` is the gate's own escape hatch (design §2.7).
+
+    Same DIRECTION and typo discipline as ``LOP_ASK_NONBLOCKING`` above:
+    absence, empty, or a typo leaves the shipped default ON, because a kill
+    switch a typo could arm fails in the one direction that hurts an operator
+    debugging the gate off. Read at import like the queue flag; tests
+    monkeypatch the attribute.
+    """
+    import importlib
+
+    for value in ("0", "false", "no", "off", "OFF", " false "):
+        monkeypatch.setenv("LOP_ASK_GATE", value)
+        module = importlib.reload(policy)
+        assert module.ASK_GATE is False, value
+        assert module.gate_enabled() is False
+    for value in ("", "1", "true", "YES", "on", "maybe"):
+        monkeypatch.setenv("LOP_ASK_GATE", value)
+        module = importlib.reload(policy)
+        assert module.ASK_GATE is True, value
+    monkeypatch.delenv("LOP_ASK_GATE", raising=False)
+    module = importlib.reload(policy)
+    assert module.ASK_GATE is True
+    # Leave the module on the shipped default (see the queue flag's test).
+    assert module.gate_enabled() is True
+
+
+def test_gate_enabled_follows_the_module_attribute(monkeypatch):
+    monkeypatch.setattr(policy, "ASK_GATE", False)
+    assert policy.gate_enabled() is False
+    monkeypatch.setattr(policy, "ASK_GATE", True)
+    assert policy.gate_enabled() is True
+
+
+def test_the_gate_timeout_is_thirty_seconds(monkeypatch):
+    """The wait a diverted path may add, bounded; the callable also honours it
+    through ``asyncio.timeout`` — this only pins the constant one place."""
+    assert policy.GATE_TIMEOUT_S == 30

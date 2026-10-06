@@ -8561,3 +8561,44 @@ async def test_the_gate_body_still_needs_its_epoch(answers_api) -> None:
     )
     assert result.status_code == 409
     assert "earlier session owner" in result.json()["detail"]
+
+
+def test_visible_transcript_rows_drops_an_ask_gate_divert_row() -> None:
+    """The ask gate's marker row is subtracted server-side (design §3 row 5).
+
+    A diverted ask's result carries ``payload.provider_payload.details``; the
+    OLDER desktop builds this seam exists for cannot read the marker, so the
+    drop must happen here. The patience row stays dropped exactly as before,
+    and an ordinary ask receipt row survives — so an over-broad filter fails
+    this test too.
+    """
+    from local_operator.server.utils.desktop_sessions import visible_transcript_rows
+
+    marker_row = {
+        "type": "message",
+        "payload": {
+            "role": "tool",
+            "tool_name": "ask",
+            "content": [
+                {"type": "text", "text": "[Ask clearance] No question was put to the user."}
+            ],
+            "provider_payload": {
+                "details": {"ask_gate": {"hidden": True, "verdict": "clear", "reason": "r"}}
+            },
+        },
+    }
+    patience_row = {
+        "type": "message",
+        "payload": {"role": "tool", "tool_name": "patience", "content": []},
+    }
+    ordinary_ask_row = {
+        "type": "message",
+        "payload": {
+            "role": "tool",
+            "tool_name": "ask",
+            "content": [{"type": "text", "text": "Ask a-1 queued."}],
+        },
+    }
+
+    kept = visible_transcript_rows([marker_row, patience_row, ordinary_ask_row])
+    assert kept == [ordinary_ask_row]
