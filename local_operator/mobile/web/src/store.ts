@@ -156,33 +156,36 @@ export interface MarkNotice {
 }
 
 let markNotice: MarkNotice | null = null;
-let markNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** How long a receipt survives without the reader dismissing it -- long enough
-    to read after a glance away, short enough that it does not outlive the
-    gesture it describes (UX round 1, U8). */
+/** How long a receipt survives once it is ON SCREEN, without the reader
+    dismissing it -- long enough to read after a glance away, short enough that
+    it does not outlive the gesture it describes (UX round 1, U8). */
 export const MARK_NOTICE_TTL_MS = 12000;
 
 export function useMarkNotice(): MarkNotice | null {
-	return useSyncExternalStore(subscribe, () => markNotice);
+	const notice = useSyncExternalStore(subscribe, () => markNotice);
+	/* THE CLOCK RUNS ONLY WHILE THE RECEIPT IS BEING LOOKED AT (UX round 2, U9).
+	   A store-owned timer armed at publish kept ticking through a route change,
+	   so a glance into a conversation longer than the TTL still erased the
+	   receipt on return -- and the receipt is the only explanation of a partial
+	   or failed clear (the same U2 reason it outlives the route change at all).
+	   Owning the timer HERE, and clearing it on unmount, ties the window to the
+	   reader's own viewing time: leaving the screen pauses the clock, coming
+	   back restarts it, and a fresh receipt gets its own full window. */
+	useEffect(() => {
+		if (notice === null) return;
+		const timer = setTimeout(() => publishMarkNotice(null), MARK_NOTICE_TTL_MS);
+		return () => clearTimeout(timer);
+	}, [notice]);
+	return notice;
 }
 
-/** Publish (``notice``) or clear (``null``) the receipt. Every publish re-arms
-    the TTL, so a second gesture's receipt gets its own full window; the timer
-    is cleared first so a superseded receipt can never expire its successor. */
+/** Publish (``notice``) or clear (``null``) the receipt. No timer lives here:
+    the consuming hook owns the countdown, so an unmounted screen cannot expire
+    a receipt nobody is looking at (U9), and ``null`` is also how the dismiss
+    control and every new press clear the line. */
 export function publishMarkNotice(notice: MarkNotice | null): void {
-	if (markNoticeTimer !== null) {
-		clearTimeout(markNoticeTimer);
-		markNoticeTimer = null;
-	}
 	markNotice = notice;
-	if (notice !== null) {
-		markNoticeTimer = setTimeout(() => {
-			markNotice = null;
-			markNoticeTimer = null;
-			emit();
-		}, MARK_NOTICE_TTL_MS);
-	}
 	emit();
 }
 

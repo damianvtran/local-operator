@@ -973,14 +973,24 @@ export function SessionListScreen() {
 	   rows in the same snapshot, tests/unit/mobile/test_attention_unread.py), so
 	   the row set IS the badge. The TOKENS such a gesture must name are the one
 	   thing a summary does not carry: they live on the unread read, taken at the
-	   moment of the press — and then INTERSECTED with the pile this screen is
-	   painting, so the batch is the rows the reader rendered (the desktop route's
-	   own rule) rather than everything the read happened to enumerate. The store
-	   still compares every pair against the conversation's CURRENT completion
-	   inside one write, so a result that landed after the read answers superseded
-	   and stays unread. */
+	   moment of the press, and are then INTERSECTED with the live `sessions`
+	   store list — which drops a badge row for a conversation this screen does
+	   not list at all. That is ALL the intersection narrows; it does NOT close
+	   the paint->press race (review round 2, MINOR-1, correcting an earlier
+	   claim): a newer completion on a LISTED conversation lands after the last
+	   paint and before the press and IS posted and cleared here, where the
+	   desktop's per-row token would answer `superseded`. The bound that stays is
+	   the STORE's: every pair is compared against the conversation's CURRENT
+	   completion inside one write, so a result that landed after the READ answers
+	   superseded and stays unread. */
 	const unreadCount = sessions.filter((session) => session.unseen).length;
 	const [markingAll, setMarkingAll] = useState(false);
+	/* U11 (UX round 2): the count is derived from the painted pile, so in the one
+	   state where this screen has just said it could NOT read unread state, the
+	   control must stop asserting a number as fact. Set when the read comes back
+	   degraded, cleared as soon as a read answers for real — the number is
+	   verified again, not merely restored. */
+	const [countUnverified, setCountUnverified] = useState(false);
 	/* The receipt is STORE state, not component state: this screen unmounts on the
 	   way into a conversation and back, and the receipt is the only explanation
 	   of a partial or failed clear, so it must outlive the route change (UX U2);
@@ -1013,7 +1023,13 @@ export function SessionListScreen() {
 	   document. When that happens — and only when the focus we lost was ours —
 	   move it to the first card, whose DOM position continues the tab walk into
 	   the list. A pile cleared somewhere else must NOT steal the reader's focus,
-	   hence the guard on what was focused. */
+	   hence the guard on what was focused.
+
+	   BOTH targets must SHOW the focus (design round 2, D7 / QA Q-2): the first
+	   card is a real button, and the band — the fallback taken when a query
+	   registers no card — carries `tabIndex={-1}` plus an explicit
+	   `focus:outline-*` ring on its own element, so neither path can land the
+	   keyboard on an invisible position (WCAG 2.4.7). */
 	const showMarkAllRef = useRef(false);
 	useEffect(() => {
 		if (showMarkAll) {
@@ -1042,23 +1058,32 @@ export function SessionListScreen() {
 			   unread". Read the failure BEFORE the empty-set branch, so the reader is
 			   told the truth and nothing is posted. */
 			if (badge.degraded?.length) {
+				/* The count on the control is now an assertion this screen cannot
+				   stand behind (U11): drop it to the plain label until a read
+				   answers for real. */
+				setCountUnverified(true);
 				publishMarkNotice({
 					text: "Could not read what is unread — nothing was cleared. Try again.",
 					danger: true,
 				});
 				return;
 			}
-			/* ONLY THE ROWS THE READER RENDERED (agent MINOR-2). The badge is read at
-			   the press for the TOKENS, but it is intersected with the pile this screen
-			   paints: a completion that landed between the last list frame and the
-			   press is not in the batch, which is the desktop route's own "only what
-			   the caller rendered" rule. The store's current-token compare still stops
-			   anything newer than the READ from clearing. */
-			const painted = new Set(
+			/* The read answered for real, so the number is verified again (U11) and
+			   the control may state it. */
+			setCountUnverified(false);
+			/* A DIFFERENT PROPERTY THAN "ONLY WHAT WAS RENDERED" (review round 2,
+			   MINOR-1). The badge is read at the press for the TOKENS, then
+			   intersected with the live `sessions` store list: a badge row for a
+			   conversation this screen does not list is dropped from the batch. It
+			   does NOT bound the batch to what was painted — the summary carries no
+			   token, so the phone has nothing to intersect on that would exclude a
+			   newer completion on a listed row. The store's write is the rail: a
+			   token newer than the READ answers superseded and stays unread. */
+			const listed = new Set(
 				sessions.filter((session) => session.unseen).map((session) => session.session_id),
 			);
 			const items = (badge.conversations ?? []).flatMap((conversation) =>
-				conversation.completion_token && painted.has(conversation.session_id)
+				conversation.completion_token && listed.has(conversation.session_id)
 					? [
 							{
 								session_id: conversation.session_id,
@@ -1379,10 +1404,30 @@ export function SessionListScreen() {
 					    (`showMarkAll` above) — only the exit animation needs it alive, and
 					    `inert` covers that window so a vanishing control cannot be tapped or
 					    tabbed. */}
+					{/* The band floats OVER scrolling rows, so it has to read as a
+					    layer rather than a clipping bug: with no edge on an opaque
+					    `bg-canvas`, a row slides under it and its text is cut
+					    mid-glyph against a flat fill (design round 2, D6) —
+					    `border-hairline` is the same token the footer uses for the
+					    same job. Drawn only while the band actually holds
+					    something, so an empty band leaves no stray line.
+
+					    `outline-none` is deliberately absent here (design round 2,
+					    D7 / QA Q-2): the band is the focus fallback when no session
+					    card is registered, and Tailwind's `outline-none` sets
+					    `--tw-outline-style: none`, which neutralises the app's own
+					    `html :focus-visible` ring — leaving a keyboard user's focus
+					    position invisible (WCAG 2.4.7). The base ring is the
+					    visible indicator this path needs, and `focus:` makes it
+					    deterministic rather than heuristic, since the band is only
+					    ever focused programmatically. */}
 					<div
 						ref={bandRef}
 						tabIndex={-1}
-						className="sticky top-0 z-10 bg-canvas outline-none"
+						className={cn(
+							"sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent",
+							(showMarkAll || markNotice !== null) && "border-b border-hairline",
+						)}
 					>
 						<div
 							className={cn(
@@ -1414,7 +1459,11 @@ export function SessionListScreen() {
 												markingAll ? "text-ink-dim" : "text-ink",
 											)}
 										>
-											{markingAll ? "marking…" : `mark all ${unreadCount} read`}
+											{markingAll
+												? "marking…"
+												: countUnverified
+													? "mark all as read"
+													: `mark all ${unreadCount} read`}
 										</button>
 									</div>
 								) : null}
