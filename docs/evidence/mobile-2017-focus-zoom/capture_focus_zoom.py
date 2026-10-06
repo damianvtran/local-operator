@@ -190,12 +190,21 @@ def open_model_sheet(page: Page, key: str) -> None:
 
 
 def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> None:
-    """Walk every field surface; keys prefixed with `<vp>-<phase>-`."""
+    """Walk every field surface; keys prefixed with `<vp>-<phase>-`.
+
+    Frames are named `<vp>-<label>-<surface>`, where `label` is `default` or
+    `wide`: both passes walk the same surfaces, and a name without the label
+    made the wide pass overwrite the default pass's frames — which is how the
+    round-1 design review found the default-mode field set missing (D3).
+    """
+    label = "default" if phase == "wideoff" else "wide"
     # ---- list ----
     page.goto(f"{BASE}/#/")
     time.sleep(1.2)
     snap(page, f"{vp}-{phase}-list")
     fields(page, f"{vp}-{phase}-list-fields")
+    if with_frames:
+        frame(page, f"{vp}-{label}-list")
 
     # ---- projects sheet (create form = FIELD_CLASS inputs) ----
     js_click(page, """
@@ -216,7 +225,7 @@ def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> No
 """, "projects-create")
     fields(page, f"{vp}-{phase}-projects-create-fields")
     if with_frames:
-        frame(page, f"{vp}-projects-create")
+        frame(page, f"{vp}-{label}-projects-create")
     close_sheet(page)
 
     # ---- past sessions ----
@@ -224,14 +233,14 @@ def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> No
     time.sleep(1.0)
     fields(page, f"{vp}-{phase}-past-fields")
     if with_frames:
-        frame(page, f"{vp}-past")
+        frame(page, f"{vp}-{label}-past")
 
     # ---- pair ----
     page.goto(f"{BASE}/#/pair")
     time.sleep(1.0)
     fields(page, f"{vp}-{phase}-pair-fields")
     if with_frames:
-        frame(page, f"{vp}-pair")
+        frame(page, f"{vp}-{label}-pair")
 
     # ---- session: ask-free (composer + pending secret input) ----
     page.goto(f"{BASE}/#/s/ask-free")
@@ -244,7 +253,7 @@ def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> No
     open_model_sheet(page, "open-model-sheet")
     fields(page, f"{vp}-{phase}-model-sheet-fields")
     if with_frames:
-        frame(page, f"{vp}-model-sheet")
+        frame(page, f"{vp}-{label}-model-sheet")
     close_sheet(page)
 
     # ---- directory sheet (working-directory chip) ----
@@ -257,7 +266,24 @@ def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> No
 """, "open-directory-sheet")
     fields(page, f"{vp}-{phase}-directory-sheet-fields")
     if with_frames:
-        frame(page, f"{vp}-directory-sheet")
+        frame(page, f"{vp}-{label}-directory-sheet")
+        # The POPULATED case the empty-with-placeholder frame cannot show: type a
+        # long technical path so the design round can judge character room
+        # against a real value (round-1 design review D3). Native setter + an
+        # input event, because a bare `.value` write does not reach React.
+        js_click(page, """
+(() => {
+  const el = document.querySelector('input[placeholder="or type another path…"]');
+  if (!el) return "missing";
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  setter.call(el, '/Users/damian/workspace/repos/local-operator/local_operator/mobile/web/src');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.focus();
+  return "typed";
+})()
+""", "type-long-path")
+        time.sleep(0.4)
+        frame(page, f"{vp}-{label}-directory-longvalue")
     close_sheet(page)
 
     # ---- asks sheet on asks-stacked (ask-card inputs) ----
@@ -274,7 +300,7 @@ def walk_fields(page: Page, phase: str, vp: str, with_frames: bool = True) -> No
     cards(page, f"{vp}-{phase}-asks-sheet-cards")
     fields(page, f"{vp}-{phase}-asks-sheet-fields")
     if with_frames:
-        frame(page, f"{vp}-asks-sheet")
+        frame(page, f"{vp}-{label}-asks-sheet")
     close_sheet(page)
 
 
