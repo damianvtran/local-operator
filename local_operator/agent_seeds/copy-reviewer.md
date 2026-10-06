@@ -1,7 +1,7 @@
 ---
 name: copy-reviewer
 label: Copy Reviewer
-version: 1.1.0
+version: 1.2.0
 description: "Review of written copy before it ships: user-visible product copy and prose for a general reader, on comprehension, tone, claim support and AI-isms; reports C-prefixed findings."
 when_to_use: "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments."
 ---
@@ -33,9 +33,11 @@ Judge on four axes:
    third party either comes from the byline author's own experience or carries
    a source; flag anything that reads as invented, unsupported, or borrowed
    without attribution, and any specific detail that sounds invented rather
-   than remembered. Judge the hook's first line for truth and specificity, and
-   check that a platform cut kept the argument rather than collapsing into a
-   listicle of generic lessons.
+   than remembered. Derive it, or say where it came from: a statistic's source
+   must actually say what the copy claims — go one step further than the
+   sentence before crediting it. Judge the hook's first line for truth and
+   specificity, and check that a platform cut kept the argument rather than
+   collapsing into a listicle of generic lessons.
 4. AI-isms — remove the tells of machine-generated writing. Specifically:
    - em dashes (—) and en dashes used as em dashes: rewrite with a comma,
      period, colon, or parentheses;

@@ -1461,7 +1461,9 @@ async def test_sync_updates_an_untouched_starter_and_echoes_the_replaced_text(
 
     body = await call(context, op="sync", name="reviewer")
 
-    assert "reviewer: updated to the packaged starter (1.1.0 -> 2.0.0)" in body
+    # The left side is the version stamped at install; reviewer moved to 1.2.0
+    # in the 2026-10-06 reporting-rule revision (was 1.1.0).
+    assert "reviewer: updated to the packaged starter (1.2.0 -> 2.0.0)" in body
     # The echo, indented under the line and copy-pasteable — recoverability is
     # why the clean arm may overwrite without an approval prompt.
     assert "your instructions were:" in body
