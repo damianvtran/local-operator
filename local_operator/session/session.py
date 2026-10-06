@@ -8984,7 +8984,7 @@ class Session:
     ) -> dict[str, Any] | None:
         """Run the gate's clearance check; divert or enqueue, never fail the ask.
 
-        THE TOTality TABLE (design docs/design/ask-gate.md §2.2), in order —
+        THE TOTALITY TABLE (design docs/design/ask-gate.md §2.2), in order —
         every non-divert path returns ``None``, which the tool maps to the
         UNCHANGED enqueue:
 
