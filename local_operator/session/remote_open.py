@@ -56,14 +56,29 @@ def remote_row_for(session_id: str, root: Path) -> "SessionRow | None":
 
     Cache first (the producer the sidebar's poll fills), and ONE read only when
     this device holds no directory for the id — the same policy the TUI's guard
-    used, so a local resume never waits on a peer. Blocking: call off the loop.
+    used, so a local resume never waits on a peer.
+
+    THAT ONE READ IS A GENUINE READ (``ttl_s=0``). A miss means the cached
+    listing was read BEFORE this id could be in it — the created-on-a-peer race
+    the operator hit live: the create answered with the peer's minted id, and
+    every route resolving it inside the listing's TTL was answered from a
+    listing the id could not be in yet, each one refusing "This conversation no
+    longer exists, so your message wasn't sent" about a conversation that had
+    just been created. The TTL exists to keep the sidebar's two-second poll off
+    the wire; this seam is the one caller whose cached answer is guaranteed
+    stale by construction, so it pays the read it always documented (the TUI's
+    own post-create open already pays the same forced read — ``app.py``,
+    "ONE FORCED CATALOGUE READ"). The local-directory guard above keeps that
+    cost off every id this device holds.
+
+    Blocking: call off the loop.
     """
     from local_operator.session.peer_rows import peer_session_row, peer_session_rows
 
     root = Path(root)
     row = peer_session_row(session_id, root)
     if row is None and not (root / "sessions" / session_id).is_dir():
-        peer_session_rows(root)
+        peer_session_rows(root, ttl_s=0)
         row = peer_session_row(session_id, root)
     if row is None or not row.is_remote or not row.owner_device:
         return None
