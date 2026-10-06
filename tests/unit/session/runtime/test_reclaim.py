@@ -954,13 +954,35 @@ def test_the_summary_reports_the_window_the_pass_used(tmp_path: Path) -> None:
     assert "7s confirm window" in report.summary()
 
 
-def test_the_batch_env_reader_is_one_fork_and_keys_by_pid() -> None:
+def test_the_batch_env_reader_is_one_fork_and_keys_by_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The fleet path: ONE ``ps`` over the process table instead of a fork per runtime
     # (``-Eww -eo pid=,command=`` where the environment comes in that fork, ``-ww``
     # where it does not — see :func:`pid_environment`, and the spelling cells at the
     # end of this file). On Linux the environment per row is a ``/proc`` read, which
     # is a file read and not a fork, so ``len(calls) == 1`` holds on both platforms.
+    #
+    # THE /proc SEAM IS PINNED, and the row is why. The pids below are FABRICATED —
+    # no process 4242 or 4243 is this test's — but on Linux ``process_envs`` appends a
+    # LIVE ``/proc/<pid>/environ`` read to every row, and a busy CI runner can hold an
+    # unrelated process at exactly that pid. Measured: run 37247490071 (test (3.12, 2),
+    # Oct 5) and run 37404837806 (test (3.13, 2), Oct 6) both failed here with
+    # ``assert '/home/runner/.local-operator' == ''`` — the runner's own pid 4243 (a
+    # ``/bin/zsh``) held ``HOME=/home/runner``, so the live read supplied a config root
+    # the fabricated row never named. The reader was correct; the cell was not
+    # hermetic, and it failed only when the load happened to put a live process on
+    # that pid. Pinning the seam (rather than hunting for "rarer" pids) makes the read
+    # deterministic on both platforms and keeps every assertion below unchanged: the
+    # stub answers ``""``, exactly what a quiet host's ``/proc`` read answers.
     calls: list[list[str]] = []
+    seen: list[int] = []
+
+    def fake_proc_environ_text(pid: int) -> str:
+        seen.append(pid)
+        return ""
+
+    monkeypatch.setattr(reclaim, "proc_environ_text", fake_proc_environ_text)
 
     def run(command, timeout_s):
         calls.append(list(command))
@@ -976,6 +998,10 @@ def test_the_batch_env_reader_is_one_fork_and_keys_by_pid() -> None:
     assert set(envs) == {4242, 4243}
     assert config_root_of(envs[4242]) == "/tmp/one"
     assert config_root_of(envs[4243]) == ""
+    # The per-row append itself is pinned: on Linux one ``/proc`` read per parsed row,
+    # in the order ``ps`` printed them; on macOS the environment rides the ``ps`` fork
+    # and the seam is never touched.
+    assert seen == ([4242, 4243] if reclaim._IS_LINUX else [])
 
 
 # ---------------------------------------------------------------------------
