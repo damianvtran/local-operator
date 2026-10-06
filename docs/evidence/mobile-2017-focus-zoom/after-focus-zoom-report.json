@@ -1,0 +1,2310 @@
+{
+  "390x844-wideoff-list": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "innerHeightVV": 844,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 390,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "390x844-wideoff-list-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        40,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-projects-create-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        40,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-name",
+      "placeholder": "e.g. payments-migration",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        317,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": "create-description",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        418,
+        366,
+        92
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "select",
+      "type": null,
+      "id": "create-status",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "normal",
+      "rect": [
+        12,
+        546,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-tags",
+      "placeholder": "payments, q4",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        625,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-past-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "search names and conversations\u2026",
+      "className": "min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:t",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        8,
+        64,
+        374,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-pair-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "paste the code",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-body text-ink outline-none placeholde",
+      "label": "pairing code",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        158,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none",
+      "label": "what to call this device",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        238,
+        366,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-session-askfree": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "innerHeightVV": 844,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 390,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "390x844-wideoff-session-askfree-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        631,
+        276,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        753,
+        236,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-session-askfree-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "password",
+          "placeholder": "paste secret",
+          "fontSize": "16px",
+          "rect": [
+            19,
+            631,
+            276,
+            44
+          ],
+          "inFold": true
+        }
+      ]
+    }
+  ],
+  "390x844-wideoff-model-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        631,
+        276,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        753,
+        236,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "filter models",
+      "className": "mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:tex",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        8,
+        729,
+        374,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-directory-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        631,
+        276,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "or type another path\u2026",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink o",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "23.2px",
+      "rect": [
+        4,
+        792,
+        303,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        753,
+        236,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideoff-asks-sheet-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "checkbox",
+          "placeholder": null,
+          "fontSize": "16px",
+          "rect": [
+            19,
+            545,
+            16,
+            16
+          ],
+          "inFold": true
+        }
+      ]
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-head",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "fa-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "en-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-first",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-deadline",
+      "status": "timed_out",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-settled",
+      "status": "answered",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-declined",
+      "status": "declined",
+      "fields": []
+    }
+  ],
+  "390x844-wideoff-asks-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "checkbox",
+      "id": null,
+      "placeholder": null,
+      "className": "size-4 accent-accent",
+      "label": "remember this choice",
+      "fontSize": "16px",
+      "lineHeight": "24px",
+      "rect": [
+        19,
+        545,
+        16,
+        16
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        753,
+        184,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-after-toggle": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1109,
+    "innerHeightVV": 1108,
+    "scale": 0.7617,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.761",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "390x844-wideon-session-askfree-at-load": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1109,
+    "innerHeightVV": 1108,
+    "scale": 0.7617,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.761",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "390x844-wideon-list": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1109,
+    "innerHeightVV": 1108,
+    "scale": 0.7617,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.761",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "390x844-wideon-list-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        40,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-projects-create-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        40,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-name",
+      "placeholder": "e.g. payments-migration",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        592,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": "create-description",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        693,
+        488,
+        116
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "select",
+      "type": null,
+      "id": "create-status",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "normal",
+      "rect": [
+        12,
+        844,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-tags",
+      "placeholder": "payments, q4",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        924,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-past-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "search names and conversations\u2026",
+      "className": "min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:t",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        8,
+        64,
+        496,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-pair-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "paste the code",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-body text-ink outline-none placeholde",
+      "label": "pairing code",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        139,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none",
+      "label": "what to call this device",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        12,
+        218,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-session-askfree": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1109,
+    "innerHeightVV": 1108,
+    "scale": 0.7617,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.761",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "390x844-wideon-session-askfree-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        19,
+        892,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "29.435px",
+      "rect": [
+        77,
+        1012,
+        358,
+        29
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-session-askfree-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "password",
+          "placeholder": "paste secret",
+          "fontSize": "21.025px",
+          "rect": [
+            19,
+            892,
+            398,
+            44
+          ],
+          "inFold": true
+        }
+      ]
+    }
+  ],
+  "390x844-wideon-model-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        19,
+        892,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "29.435px",
+      "rect": [
+        77,
+        1012,
+        358,
+        29
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "filter models",
+      "className": "mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:tex",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        8,
+        1013,
+        496,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-directory-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        19,
+        892,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "or type another path\u2026",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink o",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "30.4862px",
+      "rect": [
+        4,
+        1056,
+        425,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "29.435px",
+      "rect": [
+        77,
+        1012,
+        358,
+        29
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-asks-sheet-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "checkbox",
+          "placeholder": null,
+          "fontSize": "21.025px",
+          "rect": [
+            19,
+            806,
+            16,
+            16
+          ],
+          "inFold": true
+        }
+      ]
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-head",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "fa-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "en-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-first",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-deadline",
+      "status": "timed_out",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-settled",
+      "status": "answered",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-declined",
+      "status": "declined",
+      "fields": []
+    }
+  ],
+  "390x844-wideon-asks-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "checkbox",
+      "id": null,
+      "placeholder": null,
+      "className": "size-4 accent-accent",
+      "label": "remember this choice",
+      "fontSize": "21.025px",
+      "lineHeight": "31.5375px",
+      "rect": [
+        19,
+        806,
+        16,
+        16
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "32.5887px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "21.025px",
+      "lineHeight": "29.435px",
+      "rect": [
+        77,
+        1012,
+        306,
+        29
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "390x844-wideon-toggle-off": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "innerHeightVV": 844,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 390,
+    "layoutClientWidth": 390,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "360x780-wideoff-list": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 360,
+    "innerHeight": 780,
+    "innerHeightVV": 780,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 360,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "360x780-wideoff-list-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        40,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-projects-create-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        40,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-name",
+      "placeholder": "e.g. payments-migration",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        254,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": "create-description",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        354,
+        336,
+        92
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "select",
+      "type": null,
+      "id": "create-status",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "normal",
+      "rect": [
+        12,
+        482,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-tags",
+      "placeholder": "payments, q4",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        562,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-past-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "search names and conversations\u2026",
+      "className": "min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:t",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        8,
+        64,
+        344,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-pair-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "paste the code",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-body text-ink outline-none placeholde",
+      "label": "pairing code",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        158,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none",
+      "label": "what to call this device",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        12,
+        238,
+        336,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-session-askfree": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 360,
+    "innerHeight": 780,
+    "innerHeightVV": 780,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 360,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "360x780-wideoff-session-askfree-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        567,
+        246,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        689,
+        206,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-session-askfree-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "password",
+          "placeholder": "paste secret",
+          "fontSize": "16px",
+          "rect": [
+            19,
+            567,
+            246,
+            44
+          ],
+          "inFold": true
+        }
+      ]
+    }
+  ],
+  "360x780-wideoff-model-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        567,
+        246,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        689,
+        206,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "filter models",
+      "className": "mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:tex",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        8,
+        665,
+        344,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-directory-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        19,
+        567,
+        246,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "or type another path\u2026",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink o",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "23.2px",
+      "rect": [
+        4,
+        728,
+        273,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        689,
+        206,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideoff-asks-sheet-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "checkbox",
+          "placeholder": null,
+          "fontSize": "16px",
+          "rect": [
+            19,
+            481,
+            16,
+            16
+          ],
+          "inFold": true
+        }
+      ]
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-head",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "fa-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "en-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-first",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-deadline",
+      "status": "timed_out",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-settled",
+      "status": "answered",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-declined",
+      "status": "declined",
+      "fields": []
+    }
+  ],
+  "360x780-wideoff-asks-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "checkbox",
+      "id": null,
+      "placeholder": null,
+      "className": "size-4 accent-accent",
+      "label": "remember this choice",
+      "fontSize": "16px",
+      "lineHeight": "24px",
+      "rect": [
+        19,
+        481,
+        16,
+        16
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "24.8px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "16px",
+      "lineHeight": "22.4px",
+      "rect": [
+        77,
+        689,
+        154,
+        24
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-after-toggle": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1110,
+    "innerHeightVV": 1109,
+    "scale": 0.7031,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.703",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "360x780-wideon-session-askfree-at-load": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1110,
+    "innerHeightVV": 1109,
+    "scale": 0.7031,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.703",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "360x780-wideon-list": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1110,
+    "innerHeightVV": 1109,
+    "scale": 0.7031,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.703",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/"
+  },
+  "360x780-wideon-list-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        40,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-projects-create-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "Search conversations\u2026",
+      "className": "mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholde",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        40,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-name",
+      "placeholder": "e.g. payments-migration",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        585,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": "create-description",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        686,
+        488,
+        124
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "select",
+      "type": null,
+      "id": "create-status",
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "normal",
+      "rect": [
+        12,
+        845,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": "create-tags",
+      "placeholder": "payments, q4",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        925,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-past-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "search names and conversations\u2026",
+      "className": "min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:t",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        8,
+        64,
+        496,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-pair-fields": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "paste the code",
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 font-mono text-body text-ink outline-none placeholde",
+      "label": "pairing code",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        139,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": null,
+      "className": "min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none",
+      "label": "what to call this device",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        12,
+        218,
+        488,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-session-askfree": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "innerHeight": 1110,
+    "innerHeightVV": 1109,
+    "scale": 0.7031,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 512,
+    "dataView": "wide",
+    "fitScale": "0.703",
+    "wideStored": "1",
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  },
+  "360x780-wideon-session-askfree-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        19,
+        890,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "31.8634px",
+      "rect": [
+        77,
+        1010,
+        358,
+        32
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-session-askfree-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "password",
+          "placeholder": "paste secret",
+          "fontSize": "22.7596px",
+          "rect": [
+            19,
+            890,
+            398,
+            44
+          ],
+          "inFold": true
+        }
+      ]
+    }
+  ],
+  "360x780-wideon-model-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        19,
+        890,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "31.8634px",
+      "rect": [
+        77,
+        1010,
+        358,
+        32
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "filter models",
+      "className": "mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:tex",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        8,
+        1014,
+        496,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-directory-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "password",
+      "id": null,
+      "placeholder": "paste secret",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none place",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        19,
+        890,
+        398,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": null,
+      "id": null,
+      "placeholder": "or type another path\u2026",
+      "className": "min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink o",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "33.0014px",
+      "rect": [
+        4,
+        1057,
+        425,
+        44
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "31.8634px",
+      "rect": [
+        77,
+        1010,
+        358,
+        32
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-asks-sheet-cards": [
+    {
+      "testid": "pending-card",
+      "askId": null,
+      "status": null,
+      "fields": [
+        {
+          "tag": "input",
+          "type": "checkbox",
+          "placeholder": null,
+          "fontSize": "22.7596px",
+          "rect": [
+            19,
+            804,
+            16,
+            16
+          ],
+          "inFold": true
+        }
+      ]
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-head",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "fa-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "en-mine",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-second",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "st-first",
+      "status": "open",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-deadline",
+      "status": "timed_out",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-settled",
+      "status": "answered",
+      "fields": []
+    },
+    {
+      "testid": "ask-card",
+      "askId": "qa-declined",
+      "status": "declined",
+      "fields": []
+    }
+  ],
+  "360x780-wideon-asks-sheet-fields": [
+    {
+      "tag": "input",
+      "type": "checkbox",
+      "id": null,
+      "placeholder": null,
+      "className": "size-4 accent-accent",
+      "label": "remember this choice",
+      "fontSize": "22.7596px",
+      "lineHeight": "34.1394px",
+      "rect": [
+        19,
+        804,
+        16,
+        16
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": null,
+      "placeholder": null,
+      "className": "hidden",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "35.2774px",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "inFold": true,
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": null,
+      "id": null,
+      "placeholder": "Message\u2026",
+      "className": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none p",
+      "label": "",
+      "fontSize": "22.7596px",
+      "lineHeight": "31.8634px",
+      "rect": [
+        77,
+        1010,
+        306,
+        32
+      ],
+      "inFold": true,
+      "disabled": false
+    }
+  ],
+  "360x780-wideon-toggle-off": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 360,
+    "innerHeight": 780,
+    "innerHeightVV": 780,
+    "scale": 1,
+    "dpr": 2,
+    "screenW": 360,
+    "layoutClientWidth": 360,
+    "dataView": null,
+    "fitScale": "",
+    "wideStored": null,
+    "url": "http://127.0.0.1:4317/#/s/ask-free"
+  }
+}

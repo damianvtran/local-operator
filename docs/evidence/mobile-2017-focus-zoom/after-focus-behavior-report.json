@@ -1,0 +1,110 @@
+{
+  "wideoff-composer-16px": {
+    "selector": "textarea",
+    "focus": "focused",
+    "before": {
+      "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+      "fitScale": "",
+      "scale": 1,
+      "vvTop": 0,
+      "focused": "BODY[]"
+    },
+    "after": {
+      "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+      "fitScale": "",
+      "scale": 1,
+      "vvTop": 0,
+      "focused": "TEXTAREA[Message\u2026]"
+    }
+  },
+  "wideoff-pending-secret-14px": {
+    "selector": "[data-testid=\"pending-card\"] input",
+    "focus": "focused",
+    "before": {
+      "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+      "fitScale": "",
+      "scale": 1,
+      "vvTop": 0,
+      "focused": "TEXTAREA[Message\u2026]"
+    },
+    "after": {
+      "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+      "fitScale": "",
+      "scale": 1,
+      "vvTop": 0,
+      "focused": "INPUT[paste secret]"
+    }
+  },
+  "wideon-composer-16px": {
+    "selector": "textarea",
+    "focus": "focused",
+    "before": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "BODY[]"
+    },
+    "after": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "TEXTAREA[Message\u2026]"
+    }
+  },
+  "wideon-pending-secret-14px": {
+    "selector": "[data-testid=\"pending-card\"] input",
+    "focus": "focused",
+    "before": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "TEXTAREA[Message\u2026]"
+    },
+    "after": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "INPUT[paste secret]"
+    }
+  },
+  "wideon-model-search-14px": {
+    "selector": "input[placeholder=\"filter models\"]",
+    "focus": "focused",
+    "before": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "BUTTON[]"
+    },
+    "after": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "INPUT[filter models]"
+    }
+  },
+  "wideon-directory-path-12px": {
+    "selector": "input[placeholder=\"or type another path\u2026\"]",
+    "focus": "focused",
+    "before": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "BUTTON[]"
+    },
+    "after": {
+      "meta": "width=512, viewport-fit=cover",
+      "fitScale": "0.761",
+      "scale": 0.7617,
+      "vvTop": 0,
+      "focused": "INPUT[or type another path\u2026]"
+    }
+  }
+}

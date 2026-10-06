@@ -1,0 +1,26 @@
+# Served-asset checks for #2017 (fix build, 2026-10-06T09:14Z, worktree mobile-2017-focus-zoom)
+
+## SPA meta (dist/index.html, served at /)
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<!-- The brand's island ground; the address bar matches the canvas. -->
+
+## Tokens in served HTML (login page + authed SPA)
+login page:
+(empty = none)
+authed SPA /:
+(empty = none)
+
+## Tokens in served CSS (local_operator/mobile/web/dist/assets/index-CUqFJHkk.css)
+   1 -webkit-text-size-adjust:100%
+
+## New focus-zoom rules present in served CSS
+   1 font-size:calc(16px / var(--lo-fit-scale))
+   1 font-size:max(16px,1em)
+
+## Tokens in served JS bundle
+(empty = none)
+
+## App source tokens
+(empty = none)
