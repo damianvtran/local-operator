@@ -420,6 +420,14 @@ class Team(BaseModel):
             "a short human-readable `title` and a markdown `description`, and keep "
             "its progress current; keep the todo list updated the same way."
         )
+        # Operator's reporting + heavy-run rule (2026-10-06): stated here because
+        # a custom manager role never reads ``agent_seeds/manager.md``.
+        parts.append(
+            "Derive it, or say where it came from: every number and status you "
+            "report is one you derived here or one whose source you name. Iterate "
+            "on targeted tests and lints — the full suite belongs to the terminal "
+            "pass or CI, and only a terminal step waits on CI."
+        )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "
             "Each member already carries this team's collaboration and project "
@@ -454,6 +462,11 @@ class Team(BaseModel):
             # (`task(agent='<role>')`). This mirrors :func:`escalation_preamble`'s
             # own "report to {reports_to}, through hub".
             f"You are {role} on this team. You report to {self.manager}, through hub.",
+            # Same rule for members, who report into the manager; carried here
+            # for custom roles that have no seed.
+            "Derive it, or say where it came from: a result you report is one you "
+            "derived here or one whose source you name — when a first read looks "
+            "surprising, go one step further before reporting it.",
             "Teammates:\n" + "\n".join(self.roster_lines()),
         ]
         collab = self.instructions.strip()

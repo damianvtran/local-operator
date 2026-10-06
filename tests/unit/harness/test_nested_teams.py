@@ -54,8 +54,15 @@ MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 #: reading a roster did exactly that, typing ``target="manager"`` into a
 #: resolver whose substring tier then landed on any session whose title
 #: contained the word. Update deliberately, never to admit a cosmetic edit.
+#:
+#: RE-BASELINED again for the 2026-10-06 reporting-rule addition: the member
+#: preamble now carries "Derive it, or say where it came from." for custom
+#: roles that have no seed.
 FROZEN_ORG_TASK_BYTES = (
     "[team: org]\n\nYou are task on this team. You report to manager, through hub.\n\n"
+    "Derive it, or say where it came from: a result you report is one you "
+    "derived here or one whose source you name — when a first read looks "
+    "surprising, go one step further before reporting it.\n\n"
     "Teammates:\n- manager: manager (you, when this team is invoked)\n- coder\n"
     "- pod (team)\n\nCollaboration:\nReview before merge.\n\nProject:\nwidgets\n\n"
     "implement the button"
