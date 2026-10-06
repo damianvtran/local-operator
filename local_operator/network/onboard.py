@@ -27,6 +27,7 @@ THE STEPS (named receipts, §3.3 steps 3-10; steps 1-2 are the request path):
     anchor    ``lop operator anchor export`` → node → ``install --from`` (F4b)
     relay     install/start the relay service; linger check (OQ11)
     grants    ``lop network member grant <net> <mac> approve unattended``
+    provision the provisioning transaction (mesh-consent-provisioning.md §1, S1)
     verify    ``doctor``/``ready``/``peers`` → the record folds to ``connected``
 
 CREDENTIAL HANDLING (§3.2). The record stores a REFERENCE, never material. The
@@ -82,6 +83,12 @@ from local_operator.network.types import MeshRefusal
 #: pre-run process: the write settled as ``applied:false, reason:not_admin``
 #: and nothing re-attempted it after the relay moved. Pinned by
 #: ``test_the_relay_step_runs_before_the_grants_step``.
+#:
+#: ``provision`` follows both for the same F7b reason (mesh-consent-provisioning
+#: §1.1): the trust decisions exist by the time it runs, and the one write it
+#: makes THROUGH the node's relay — the node's in-run placement pull — meets the
+#: run's relay rather than a pre-run one. It sits before ``verify`` so the
+#: acceptance read sees the provisioned state.
 STEP_NAMES: tuple[str, ...] = (
     "invite",
     "pre_read",
@@ -90,6 +97,7 @@ STEP_NAMES: tuple[str, ...] = (
     "anchor",
     "relay",
     "grants",
+    "provision",
     "verify",
 )
 
@@ -104,6 +112,11 @@ STEP_TIMEOUTS: dict[str, float] = {
     "anchor": 180.0,
     "grants": 60.0,
     "relay": 180.0,
+    # One provision run makes up to three mesh round trips (two pushes the CLI
+    # itself bounds at 90 s each, and the node's placement pull) over a link the
+    # run has just restarted; the bound is generous so a slow-but-working node
+    # is not failed by it.
+    "provision": 300.0,
     "verify": 180.0,
 }
 
@@ -2065,6 +2078,386 @@ class OnboardRun:
             },
         )
 
+    def step_provision(self) -> _StepOutcome:
+        """The provisioning transaction (``mesh-consent-provisioning.md`` §1, S1).
+
+        ONE approval, one reconcile. Binds to the same gesture as the steps around
+        it — the operator's signed decision IS the authorisation (§1.1) — and runs
+        after ``grants`` and ``relay`` for the F7b reason stated at the module
+        head: the trust decisions exist by now, and the one write this step makes
+        THROUGH the node's relay (the node pulls its placement in-run) meets the
+        run's relay rather than a pre-run one.
+
+        What it does, in §1.2's order — the pushes first, then credential
+        provisioning, then the verification read:
+
+        * one forced push of this device's definitions and MCP server rows
+          (create-path semantics: the node is usable the moment onboarding
+          returns; the cadence keeps it current afterwards). Both are recorded,
+          never fatal — an unreachable node is named in the receipt and the sync
+          catches up;
+        * the per-class default credential HELD rows on THIS device's placement
+          document — the set is the offer's own projection (§1.4's defaults), so
+          the join screen the node saw and this write cannot disagree. Role
+          ``read`` and pool members get no credential rows (§1.3): the necessary
+          data is bounded by the member's role;
+        * the ``broker_credential`` capability on the node's member row — the
+          other half of the pair ``credential share`` writes, and without it the
+          node cannot dial the broker at all;
+        * the placement document delivered ONTO the node within the run: the node
+          pulls once now (a node that owns no keys answers a raw push frame with
+          ``not_implemented`` — its broker is only built when it has something to
+          lend — so in-run delivery is the node's own pull, driven now instead of
+          waiting for its next one), and its own listing is read back as the
+          confirmation;
+        * the node's global git identity, seeded from this device's where the node
+          has none (readiness.py's intended pairing; a node that already commits
+          under its own identity is left alone);
+        * one report read of the node's MCP servers, recording "the keys to set"
+          — the needs list the copy-set decision reads.
+
+        PER-KEY AND PER-ACTION FAILURES DO NOT FAIL THE STEP — they are recorded
+        (the admission precedent: admit-then-grant, never a rollback). The step
+        refuses only when the promised state cannot be approached at all: no
+        device, no network record, no active member row, a placement write that
+        refuses, or no identity to write with. Resumable like every other step:
+        ``mark_failed`` + retry reruns it, and every write here is idempotent.
+        """
+        from local_operator.network import identity as identity_mod
+        from local_operator.network import readiness as readiness_mod
+        from local_operator.network import store as network_store
+        from local_operator.network.credentials import offers as offers_mod
+        from local_operator.network.credentials import placement as placement_mod
+        from local_operator.network.credentials.types import BROKER_CAPABILITY
+        from local_operator.network.relay import set_member_capabilities
+        from local_operator.paths import config_dir
+
+        where = str(self.view.device.get("name") or "").strip() or "that machine"
+        device_id = str(self.view.device.get("device_id") or "")
+        if not device_id:
+            # THE NODE IS THE AUTHORITY ON ITS OWN ID: the card's copy is what a
+            # requester declared (often empty — the id does not exist yet when the
+            # card is filed), and the join receipt's ``data`` does not survive the
+            # store's six-field receipt fold. One bounded read, the same call the
+            # join step itself verified against.
+            shown = self._node_json("lop network identity show", timeout=60.0)
+            device_id = str((shown or {}).get("device_id") or "")
+        if not device_id:
+            return _StepOutcome(
+                False,
+                "neither the request nor the machine named a device to provision; "
+                "nothing was written",
+            )
+
+        network_id = str(self.view.what.get("network_id") or "")
+        network_name = ""
+        record: Any = None
+        for candidate in network_store.list_networks():
+            if candidate.network_id == network_id:
+                record = candidate
+                network_name = candidate.name
+                break
+        if record is None or not network_name:
+            return _StepOutcome(
+                False,
+                "this machine does not know the network this request names, so nothing "
+                "was provisioned",
+            )
+        member = record.member(device_id)
+        if member is None or not member.active:
+            return _StepOutcome(
+                False,
+                f"this machine's copy of {network_name} does not hold {where} as an "
+                "active member yet, so nothing was provisioned for it",
+            )
+        identity = identity_mod.load()
+        if identity is None:
+            return _StepOutcome(
+                False, "this machine has no mesh identity to write the sharing list with"
+            )
+
+        data: dict[str, Any] = {
+            "device_id": device_id,
+            "device_name": str(member.name or ""),
+            "network": network_name,
+        }
+
+        # -- one forced push each: definitions, then MCP server rows -----------
+        def _push(*tail: str) -> dict[str, Any]:
+            """One push through this device's own CLI; recorded, never fatal."""
+            result = self.run_local(
+                [*self.local_cli, "network", *tail, "--peer", device_id, "--json"],
+                timeout=self._step_timeout("provision"),
+            )
+            payload = _json_from(result.stdout or "")
+            if isinstance(payload, dict) and payload.get("ok"):
+                return {"ok": True}
+            code = str((payload or {}).get("code") or "")
+            message = str((payload or {}).get("message") or "")
+            if not code and not message:
+                tail_lines = (result.stderr or "").strip().splitlines()
+                message = tail_lines[-1][:200] if tail_lines else "no output"
+            return {"ok": False, "code": code, "message": message}
+
+        definitions = _push("definitions", "push")
+        mcp = _push("mcp", "push")
+        data["definitions"] = definitions
+        data["mcp"] = mcp
+
+        # -- credential provisioning: the holder rows + the capability --------
+        granted: list[str] = []
+        skipped: list[dict[str, str]] = []
+        store_unreadable = ""
+        role = str(member.role or "")
+        grants_credentials = str(getattr(member, "kind", "device")) != "pool" and role in (
+            "drive",
+            "admin",
+        )
+        if grants_credentials:
+            try:
+                default_keys = offers_mod.served_keys(offers_mod.build_items(config_dir()))
+            except offers_mod.OfferEnumerationError:
+                # An unreadable store is not "nothing to share": it is a fact the
+                # receipt must carry, and the shares can be retried (the step is
+                # resumable). Everything else in the transaction still runs.
+                default_keys = []
+                store_unreadable = (
+                    "this machine's login store could not be read, so no logins were " "shared"
+                )
+            try:
+                with placement_mod.mutate(
+                    record.network_id, self_device=identity.device_id
+                ) as document:
+                    granted, skipped = placement_mod.grant_key_set(
+                        document,
+                        device=device_id,
+                        keys=default_keys,
+                        config=config_dir(),
+                        self_device=identity.device_id,
+                        owner_name=identity.name,
+                    )
+            except MeshRefusal as refusal:
+                return _StepOutcome(
+                    False,
+                    "the sharing list on this machine refused the write"
+                    + (f": {refusal.sentence}" if refusal.sentence else "")
+                    + "; nothing was provisioned",
+                )
+            except OSError as exc:
+                return _StepOutcome(
+                    False,
+                    "the sharing list on this machine could not be written: " + str(exc),
+                )
+            data["grants_note"] = ""
+        elif str(getattr(member, "kind", "device")) == "pool":
+            data["grants_note"] = (
+                "no credential rows were written: this member is a pool member (§1.3)"
+            )
+        else:
+            data["grants_note"] = (
+                f"no credential rows were written: {where} holds the read role, which "
+                "carries no borrow path (§1.3)"
+            )
+        data["grants"] = {"granted": granted, "skipped": skipped}
+
+        # -- the capability: the node must be able to DIAL the broker at all ---
+        capability: dict[str, Any] = {"set": False, "changed": False}
+        if grants_credentials:
+            try:
+                with network_store.mutate(record.network_id) as fresh:
+                    change = set_member_capabilities(
+                        fresh, device_id=device_id, grant=[BROKER_CAPABILITY]
+                    )
+                    if change.changed:
+                        network_store.save(fresh)
+                capability = {
+                    "set": BROKER_CAPABILITY in tuple(change.capabilities or ()),
+                    "changed": bool(change.changed),
+                }
+            except (MeshRefusal, OSError) as refusal:
+                # Defensive only (the share verb's shape): a refusal here leaves
+                # the placement rows standing and drops only the node's ability to
+                # DIAL — named, never silent. ``OSError`` covers the record having
+                # gone missing between the list and the mutate (the store's
+                # ``load`` raises ``FileNotFoundError``, which is not a refusal).
+                capability = {
+                    "set": False,
+                    "changed": False,
+                    "reason": str(getattr(refusal, "code", "") or "write_failed"),
+                }
+        data["capability"] = capability
+
+        # -- deliver the document: the node pulls once, IN-RUN ------------------
+        placement: dict[str, Any] = {"refreshed": False, "missing": [], "note": ""}
+        if grants_credentials and granted:
+            listing = self._node_json(
+                "lop network credentials", timeout=self._step_timeout("provision")
+            )
+            if listing is None:
+                placement["note"] = (
+                    "the sharing list could not be read back from that machine this "
+                    "run; the new shares arrive on its next refresh"
+                )
+            else:
+                placement["refreshed"] = bool(listing.get("refreshed"))
+                held: set[str] = set()
+                for network in listing.get("networks") or []:
+                    if not isinstance(network, dict):
+                        continue
+                    for row in network.get("credentials") or []:
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("owner_device") or "") == str(identity.device_id):
+                            held.add(str(row.get("credential_name") or ""))
+                placement["missing"] = [key for key in granted if key not in held]
+                if not placement["refreshed"]:
+                    placement["note"] = (
+                        "that machine's relay did not answer the refresh, so the "
+                        "shares arrive on its next one"
+                    )
+                elif placement["missing"]:
+                    placement["note"] = (
+                        "these shares are not in that machine's list yet: "
+                        + ", ".join(placement["missing"])
+                        + " — they arrive on its next refresh"
+                    )
+        data["placement"] = placement
+
+        # -- git identity: seed what the node lacks, never overwrite ------------
+        git: dict[str, Any] = {"seeded": [], "already_set": [], "note": ""}
+        owner_git = readiness_mod.git_identity_fact()
+        owner_name = str(owner_git.get("user_name") or "").strip()
+        owner_email = str(owner_git.get("user_email") or "").strip()
+        if not owner_name and not owner_email:
+            git["note"] = "this device has no global git identity to seed"
+        else:
+            probe = self._remote_lop(
+                "printf 'git=%s\\n' \"$(command -v git >/dev/null 2>&1 && echo yes || "
+                "echo no)\"; printf 'name=%s\\n' \"$(git config --global --get "
+                "user.name 2>/dev/null)\"; printf 'email=%s\\n' \"$(git config --global "
+                '--get user.email 2>/dev/null)"',
+                timeout=60.0,
+            )
+            node_git: dict[str, str] = {}
+            for line in (probe.stdout or "").splitlines():
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    node_git[key.strip()] = value.strip()
+            # THREE states, never two (agent review round 1, F1): ``no`` is the
+            # printf's own word — printed only by a machine that ANSWERED and has
+            # no git on PATH. Empty output is a probe that never ran (an
+            # unreachable node, or the ssh timeout above), and reading it as "git
+            # is not installed there" asserts a fact never observed — misdirecting
+            # a reader exactly where a link problem is being diagnosed.
+            state = node_git.get("git", "")
+            if state == "no":
+                git["note"] = "git is not installed there; nothing was seeded"
+            elif state != "yes":
+                git["note"] = "the git probe did not answer on that machine; nothing was seeded"
+            else:
+                failures: list[str] = []
+                for option, value, slot in (
+                    ("user.name", owner_name, "name"),
+                    ("user.email", owner_email, "email"),
+                ):
+                    if not value:
+                        continue
+                    if node_git.get(slot):
+                        # AN IDENTITY SET ON THE NODE IS NOT A GAP TO FILL: the
+                        # dead-end this seed fixes is the EMPTY case, and
+                        # overwriting a deliberate identity is not the job.
+                        git["already_set"].append(option)
+                        continue
+                    written = self._remote_lop(
+                        f"git config --global {option} {shlex.quote(value)}", timeout=60.0
+                    )
+                    if written.rc == 0:
+                        git["seeded"].append(option)
+                    else:
+                        tail = (written.stderr or "").strip().splitlines()
+                        failures.append(tail[-1][:200] if tail else option)
+                if git["seeded"]:
+                    git["identity"] = {"user_name": owner_name, "user_email": owner_email}
+                if failures:
+                    git["note"] = "the git identity could not be written: " + "; ".join(failures)
+        data["git"] = git
+
+        # -- the report read: the node's MCP servers, and "the keys to set" ----
+        mcp_state: dict[str, Any] = {"keys_needed": [], "note": ""}
+        report = self._node_json("lop network mcp state", timeout=60.0)
+        if report is None:
+            mcp_state["note"] = "the MCP server report could not be read from that machine"
+        else:
+            needs: list[str] = []
+            for row in report.get("servers") or []:
+                if not isinstance(row, dict):
+                    continue
+                for ref in row.get("refs") or []:
+                    if isinstance(ref, dict) and ref.get("set") is False:
+                        ref_id = str(ref.get("id") or "")
+                        if ref_id and ref_id not in needs:
+                            needs.append(ref_id)
+            mcp_state["keys_needed"] = needs
+            if needs:
+                mcp_state["note"] = "keys the node's MCP servers still need: " + ", ".join(needs)
+        data["mcp_state"] = mcp_state
+
+        # The sentence leads with the settled facts a reader acts on, sub-outcome
+        # by sub-outcome (D7's rule from step_grants); anomalies ride after it as
+        # caveats, never hidden.
+        clauses: list[str] = []
+        if not grants_credentials:
+            clauses.append("no logins were shared")
+        elif granted:
+            clauses.append("shared " + ", ".join(granted) + f" with {where}")
+        elif skipped:
+            clauses.append(f"no login could be shared with {where}")
+        else:
+            clauses.append("no logins to share here")
+        pushed = [
+            name
+            for name, result in (("definitions", definitions), ("MCP server rows", mcp))
+            if result.get("ok")
+        ]
+        clauses.append(("pushed " + " and ".join(pushed)) if pushed else "nothing was pushed")
+        if git.get("seeded"):
+            clauses.append("seeded its git identity")
+        elif git.get("already_set"):
+            clauses.append("its git identity was already set")
+        detail = f"provisioned {where}: " + "; ".join(clauses)
+        caveats = [
+            context
+            for context in (
+                store_unreadable,
+                (
+                    ""
+                    if definitions.get("ok")
+                    else "definitions not pushed ("
+                    + str(definitions.get("message") or definitions.get("code") or "no answer")
+                    + ")"
+                ),
+                (
+                    ""
+                    if mcp.get("ok")
+                    else "MCP server rows not pushed ("
+                    + str(mcp.get("message") or mcp.get("code") or "no answer")
+                    + ")"
+                ),
+                (
+                    "borrow capability not applied (" + str(capability["reason"]) + ")"
+                    if capability.get("reason")
+                    else ""
+                ),
+                str(placement.get("note") or ""),
+                str(git.get("note") or ""),
+                str(mcp_state.get("note") or ""),
+            )
+            if context
+        ]
+        if caveats:
+            detail += "; caveat: " + "; ".join(caveats)
+        return _StepOutcome(True, detail, data)
+
     def step_relay(self) -> _StepOutcome:
         """§3.3 step 8 (+ OQ11): supervision via the service arm; linger caveat.
 
@@ -2239,6 +2632,7 @@ class OnboardRun:
             "anchor": self.step_anchor,
             "grants": self.step_grants,
             "relay": self.step_relay,
+            "provision": self.step_provision,
             "verify": self.step_verify,
         }[step]()
 

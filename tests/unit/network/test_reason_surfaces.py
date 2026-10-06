@@ -106,6 +106,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the runner's own receipt field, copied into the store row — not a wire read",
     ),
+    # The provisioning transaction's capability half (S1): the borrow capability's
+    # pair write is refused by THIS device's own store — ``set_member_capabilities``'s
+    # literals (``not_admin``, ``unknown_member``, ``self_capabilities``,
+    # ``unknown_capability``, ``not_grantable``, ``conflicting_change``), plus this
+    # arm's own ``write_failed`` for the ``OSError`` half. THIS device's own
+    # vocabulary (the shared glosses read the wire's), so the code is shown, as the
+    # caveat's parenthetical (``borrow capability not applied (<code>)``): the receipt
+    # records why the capability half did not land, and the same code rides
+    # ``data["capability"]["reason"]`` for machines.
+    ("local_operator/network/onboard.py", "OnboardRun.step_provision", "reason"): (
+        1,
+        "this device's own store-write refusal code, shown as the caveat's parenthetical",
+    ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.

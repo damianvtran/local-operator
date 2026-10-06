@@ -727,7 +727,14 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     credential = actions.add_parser("credential", help="Share or revoke one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
     cred_share = credential_actions.add_parser(
-        "share", help="Let another device borrow a credential this one holds"
+        "share",
+        # §9.2 of the provisioning design: share is an ADJUSTMENT surface now —
+        # approving a device already provisioned it, so the help says the verb is
+        # not a prerequisite of onboarding (it was the taught first step before).
+        help=(
+            "Let another device borrow a credential this one holds — not needed for "
+            "onboarding anymore: approving a device already shares this device's logins"
+        ),
     )
     cred_share.add_argument("key", help="A provider name, or mcp:<server-url>")
     cred_share.add_argument(
@@ -7534,6 +7541,16 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     ]
     if scopes:
         lines.append(f"  {'what':<{_CARD_LABEL_WIDTH}}: " + ", ".join(scopes))
+    if record.get("kind") == "device_onboard":
+        # WHAT APPROVAL DOES, named where the decision is taken (§1.4/§9.2's
+        # copy half): the approve gesture IS the provisioning transaction's
+        # authorisation now, and the operator reads that here rather than
+        # meeting it first in the run's receipts. One line, no counts — the
+        # per-key list lives on `network credentials` and in the run itself.
+        lines.append(
+            f"  {'provision':<{_CARD_LABEL_WIDTH}}: definitions, MCP servers, "
+            "git identity, and this device's logins"
+        )
     expires = record.get("expires_at")
     decided = record.get("decided_at")
     if state == "withdrawn" and isinstance(decided, (int, float)) and decided:
