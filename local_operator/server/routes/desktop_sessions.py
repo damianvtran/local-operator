@@ -9,7 +9,7 @@ import logging
 import pathlib
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
@@ -2397,6 +2397,59 @@ def _config_run_directory(pool: Any) -> str:
     return str(pool.root)
 
 
+def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, Any]) -> None:
+    """Make a just-created peer session resolvable locally, before any read.
+
+    THE CREATE'S OWN ANSWER IS AUTHORITATIVE HERE. The id in ``reply`` names a
+    conversation the peer just minted, but every other route resolves peer ids
+    through ``session/peer_rows``' cached listing — refreshed on the sidebar's
+    cadence — which cannot contain an id minted a moment ago. Left unseeded, the
+    message the user sends to the just-created conversation is refused with
+    "This conversation no longer exists, so your message wasn't sent" (the
+    operator's live defect: create at 02:25:52, every resolution 404ing at
+    .631-.640, resolved only by the 02:26:39 federated read). ``seed_peer_row``
+    merges this row into that cache, so the very next resolution finds it with
+    no wire cost.
+
+    THIS NEVER DIALS, and that is the point rather than a detail: the row is the
+    peer's own reply (its id, and its ``record`` when the reply carries one) plus
+    facts read from THIS device's membership records — which is also where the
+    display name comes from, through the same local resolver ``/new remote``'s
+    autofill reads. A name this device cannot resolve is left empty (the
+    ordinary unnamed-device fallback), and a reply that names no session id
+    seeds nothing. Everything here is local disk reads; callers run on a request
+    thread.
+    """
+    from local_operator.network.peers import resolve_peer
+    from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
+    from local_operator.session.peer_rows import seed_peer_row
+
+    session_id = str(reply.get("session_id") or "")
+    if not session_id:
+        return
+    record = reply.get("record")
+    record = record if isinstance(record, Mapping) else {}
+    started_raw = record.get("started")
+    started = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    name_raw = record.get("conversation_name")
+    name = name_raw if isinstance(name_raw, str) and name_raw else UNTITLED_CONVERSATION
+    matches = resolve_peer(peer, root)
+    seed_peer_row(
+        root,
+        SessionRow(
+            session_id,
+            started,
+            name,
+            locality="remote",
+            owner_device=peer,
+            owner_device_name=(matches[0].name if matches else ""),
+            # The peer's ``started`` claim is the row's ordering birth, exactly as
+            # the federated read stamps ``created_at`` from the same claim.
+            created_at=started,
+        ),
+    )
+
+
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
     """Create a new conversation, optionally born on a chosen model and effort.
@@ -2536,6 +2589,15 @@ async def create_session(body: CreateSession, request: Request):
             # class the block above documents. Absent reads as "", which is every
             # create that did not need one, local or remote.
             created["unattended_notice"] = str(peer_reply.get("unattended_notice") or "")
+            # THE CREATE'S OWN ANSWER IS AUTHORITATIVE LOCALLY, and the operator's
+            # defect is why: the id minted here resolved to nothing on every other
+            # route until the next federated sidebar read, so the message sent to
+            # the just-created conversation was refused with "This conversation no
+            # longer exists". Every route resolves peer ids through
+            # ``session/peer_rows``' cached listing, and a listing read before
+            # this create cannot contain its id — so this route, which HOLDS the
+            # peer's reply, seeds the row it names (``_seed_created_peer_row``).
+            _seed_created_peer_row(host(request).root, body.peer, peer_reply)
             return created
         pool = host(request)
         target = body.target.model_dump() if body.target else None

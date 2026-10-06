@@ -1107,6 +1107,72 @@ async def test_create_on_a_peer_that_stopped_answering_is_unconfirmed_not_retrie
     assert second.status_code == 503, second.text
 
 
+@pytest.mark.asyncio
+async def test_a_create_on_a_peer_seeds_the_id_every_route_resolves(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE OPERATOR'S DEFECT, at the route: the id resolves the moment it answers.
+
+    The create mints the conversation ON the peer and answers with the id; every
+    other route (events, command entities, send) resolves a peer id through
+    ``session/peer_rows``' cached listing, refreshed on the sidebar's cadence.
+    Unseeded, the id resolved nowhere until the next federated read — the live
+    trace: create 02:25:52, every resolution 404ing at .631-.640, resolved only
+    by the 02:26:39 federated read, with the send refused "This conversation no
+    longer exists, so your message wasn't sent". This cell drives the REAL route
+    and then the CACHE-ONLY lookup every resolver pays: the row must be there,
+    must carry the destination and the name this device's own records know, and
+    must cost no wire op beyond the create itself.
+    """
+    client, root = mesh_api
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=MINE, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(device_id=PEER, name="build-box", role="drive")
+    )
+    network_store.save(record, root)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": OTHER,
+                "admitted": False,
+                "record": {"started": 1789400999.0, "conversation_name": ""},
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    # The sidebar's federated read a moment before the create: the listing the
+    # new id cannot be in yet — the catalogue seam, exactly as the producer's
+    # own tests inject it.
+    from local_operator.session.peer_rows import (
+        clear_cache,
+        peer_session_row,
+        peer_session_rows,
+    )
+    from tests.unit.session.test_peer_rows import _Catalog, _Facts
+
+    clear_cache()
+    peer_session_rows(root, catalog=_Catalog([_Facts(PEER, "build-box", reachable=True)], []))
+
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["session_id"] == OTHER
+
+    row = peer_session_row(OTHER, root)
+    assert row is not None, "the id the create answered with resolves nowhere locally"
+    assert row.locality == "remote" and row.owner_device == PEER
+    assert row.owner_device_name == "build-box", "the name comes from this device's records"
+    assert row.name == "Untitled conversation" and row.created_at == 1789400999.0
+    # The sidebar's next poll already carries it, off the same one cache entry...
+    assert [item.id for item in peer_session_rows(root)] == [OTHER]
+    # ...and the ONLY wire op this whole cell made was the create itself.
+    assert relay.ops() == ["peer_session_create"], relay.ops()
+
+
 # ---------------------------------------------------------------------------
 # Transfer: one answer, request_id accepted, unconfirmed is not "nothing changed"
 # ---------------------------------------------------------------------------

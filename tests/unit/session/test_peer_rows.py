@@ -33,6 +33,7 @@ from local_operator.session.peer_rows import (
     park_edges,
     peer_session_row,
     peer_session_rows,
+    seed_peer_row,
 )
 
 
@@ -746,4 +747,118 @@ def test_a_live_parked_row_is_a_park_through_the_producer() -> None:
     edges, _ = park_edges({}, [row])
     assert [(edge.session_id, edge.kind, edge.device_name) for edge in edges] == [
         ("s_live", "approval", "radiant-m4")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The create-on-peer seed: an id that was just minted resolves NOW
+# ---------------------------------------------------------------------------
+
+
+def _seeded_row(
+    session_id: str, device_id: str = "d_aa", *, name: str = "Untitled conversation"
+) -> SessionRow:
+    """The row the create route builds from a peer's create reply."""
+    return SessionRow(
+        session_id,
+        1234.0,
+        name,
+        locality="remote",
+        owner_device=device_id,
+        owner_device_name="radiant-m4",
+        created_at=1234.0,
+    )
+
+
+def test_a_seed_merges_into_the_listing_that_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next resolution finds the created id with no read — the defect's fix.
+
+    The operator's timeline: the sidebar's federated read filled the cache, the
+    create minted ``s_new`` on the peer, and nothing seeded it, so every
+    resolution inside the TTL missed. The seed is what the create route does
+    now, and the cache-only lookup — the one every route resolves through —
+    must find it immediately; the sidebar's own listing carries it too.
+    """
+    _with_relay(monkeypatch)
+    catalog = _Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [_Row("s_old", "d_aa")])
+    peer_session_rows(catalog=catalog, now=0.0)
+    seed_peer_row(None, _seeded_row("s_new"))
+    assert catalog.calls == 1, "a seed is knowledge, not a read: it never dials"
+    found = peer_session_row("s_new")
+    assert found is not None and found.owner_device == "d_aa"
+    # ...and the same one answer the sidebar paints: merged, not a second listing.
+    assert [row.id for row in peer_session_rows(catalog=catalog, now=1.0)] == ["s_old", "s_new"]
+
+
+def test_a_seed_with_no_listing_yet_never_becomes_a_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-row entry must not paint "nothing else exists" for a TTL.
+
+    With no listing cached, the seed's entry is stamped ALREADY-STALE: the
+    cache-only lookup answers from it, and the first LISTING read still pays its
+    read in full — the mesh's answer is the mesh's, never a seed's.
+    """
+    _with_relay(monkeypatch)
+    seed_peer_row(None, _seeded_row("s_new"))
+    assert peer_session_row("s_new") is not None, "the resolution the seed exists for"
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_old", "d_aa"), _Row("s_new", "d_aa")],
+    )
+    assert [row.id for row in peer_session_rows(catalog=catalog)] == ["s_old", "s_new"]
+    assert catalog.calls == 1, "a TTL-respecting read must still read"
+
+
+def test_a_seed_keeps_the_entrys_age_and_refresh_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merging a row is not a reason to extend every other row's staleness."""
+    _with_relay(monkeypatch)
+    catalog = _Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [_Row("s_old", "d_aa")])
+    peer_session_rows(catalog=catalog, now=0.0)
+    seed_peer_row(None, _seeded_row("s_new"))
+    # Inside the TTL the seeded row rides the existing entry...
+    rows = peer_session_rows(catalog=catalog, now=peer_rows_mod._TTL_S / 2)
+    assert [row.id for row in rows] == ["s_old", "s_new"]
+    assert catalog.calls == 1, "the seed must not have reset the entry's clock"
+    # ...and past it the schedule is exactly what it was: one full read.
+    peer_session_rows(catalog=catalog, now=peer_rows_mod._TTL_S * 2)
+    assert catalog.calls == 2
+
+
+def test_a_reseed_replaces_one_row_and_never_duplicates_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same device, same id is one conversation — ``_read``'s key, on the write side."""
+    _with_relay(monkeypatch)
+    catalog = _Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [_Row("s_1", "d_aa")])
+    peer_session_rows(catalog=catalog, now=0.0)
+    seed_peer_row(None, _seeded_row("s_new", name="first"))
+    seed_peer_row(None, _seeded_row("s_new", name="second"))
+    rows = peer_session_rows(catalog=catalog, now=1.0)
+    assert [(row.id, row.name) for row in rows] == [
+        ("s_1", "Some conversation"),
+        ("s_new", "second"),
+    ]
+
+
+def test_a_seed_is_keyed_by_root_and_device(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cache's two keys hold: the config root, and (device, id) within it."""
+    _with_relay(monkeypatch)
+    one, two = tmp_path / "one", tmp_path / "two"
+    catalog = _Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [_Row("s_1", "d_aa")])
+    peer_session_rows(one, catalog=catalog, now=0.0)
+    seed_peer_row(one, _seeded_row("s_new"))
+    assert peer_session_row("s_new", one) is not None
+    assert peer_session_row("s_new", two) is None, "another root must not read this seed"
+    # A same-id row from ANOTHER device is a different conversation, kept separate.
+    seed_peer_row(one, _seeded_row("s_new", "d_bb"))
+    rows = peer_session_rows(one, catalog=catalog, now=1.0)
+    assert [(row.id, row.owner_device) for row in rows] == [
+        ("s_1", "d_aa"),
+        ("s_new", "d_aa"),
+        ("s_new", "d_bb"),
     ]

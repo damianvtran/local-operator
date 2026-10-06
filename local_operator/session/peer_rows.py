@@ -182,6 +182,61 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
     return None
 
 
+def seed_peer_row(root: Path | None, row: SessionRow) -> None:
+    """Merge a KNOWINGLY-LIVE peer row into the cache, for resolutions to find.
+
+    WHY THIS EXISTS (the operator-blocking defect, 2026-10-06). ``/new remote
+    <peer>`` is answered by the peer's mint: the id in that reply names a
+    conversation that exists. But every other local route resolves ids through
+    the cached listing (``peer_session_row`` above), and a listing read a moment
+    before the create cannot contain the id — so the message sent to the
+    just-created conversation was refused with "This conversation no longer
+    exists, so your message wasn't sent", and the id resolved only when the
+    next federated sidebar read landed. The create's own reply is authoritative
+    local knowledge, so the route that holds it merges the row in here: the very
+    next resolution finds it with zero wire cost (the miss path's live read —
+    ``remote_open.remote_row_for``'s ``ttl_s=0`` — remains the fallback for
+    every id no reply announced).
+
+    MERGE; A ONE-ROW ENTRY NEVER ANSWERS A LISTING. A cache entry is this
+    module's ONE answer about the whole mesh, so it is only ever built from a
+    read — except here, where a row is KNOWN rather than read. With a listing
+    already cached, the row merges into it, keeping its age (``moment``) and its
+    unanswered peers: the row is visible on the next poll, and the poll's own
+    refresh schedule is untouched. With NO listing yet, the entry is stamped
+    ALREADY-STALE (``-inf``): the cache-only lookup answers from it, and every
+    TTL-respecting read — the sidebar's poll, the silent-peer read — sees it
+    expire immediately and pays its read in full, exactly as it would on a cold
+    cache. That is the property a one-row entry must never be able to break:
+    "device D holds this row" is what the create proved; "and nothing else" it
+    did not.
+
+    SAME DEVICE, SAME ID REPLACES — one conversation, one row, the same
+    (device, id) key ``_read`` de-duplicates by — while a same-id row for
+    ANOTHER device is the different conversation ``_read`` keeps separate.
+    ``unanswered`` rides as-is when merging: it is a fact about the last LISTING
+    read, and a create is not one.
+    """
+    key = "" if root is None else str(root)
+    device = str(row.owner_device or "")
+    cached = _CACHE.get(key)
+    if cached is None:
+        _CACHE[key] = (float("-inf"), (row,), ())
+        return
+    moment, rows, unanswered = cached
+    merged: list[SessionRow] = []
+    replaced = False
+    for existing in rows:
+        if existing.id == row.id and str(existing.owner_device or "") == device:
+            merged.append(row)
+            replaced = True
+        else:
+            merged.append(existing)
+    if not replaced:
+        merged.append(row)
+    _CACHE[key] = (moment, tuple(merged), unanswered)
+
+
 class RemotePark(NamedTuple):
     """One LIVE parked request on a peer device, as the origin sees it.
 
