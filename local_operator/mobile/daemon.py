@@ -144,6 +144,14 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 #: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
 SUMMARIES_CACHE_TTL_S = 1.0
 
+#: The bound on ONE bulk receipt call (``POST /api/attention/seen``).
+#:
+#: 1..500, the desktop contract's own bound (``SeenMany``'s ``max_length``):
+#: the catalogue's maximum page, so a client can always send every unread row
+#: it rendered in one call and never has to chunk a single user gesture. The
+#: worst-case body is ~30 KB against the 900 KB control-frame limit.
+SEEN_MANY_MAX_ITEMS = 500
+
 #: The wire name for "the durable half of this listing could not be re-read".
 #:
 #: The phone's conversation list is MEMBERSHIP: the client replaces everything
@@ -4524,6 +4532,116 @@ def build_app(daemon: MobileDaemon):
                 )
         return JSONResponse({"ok": True, "attention": state})
 
+    async def api_attention_seen_many(request: Request) -> Response:
+        """The bulk sibling of ``/api/sessions/{id}/seen``: clear the pile, one write.
+
+        The phone's list can enumerate every conversation ``GET /api/attention/unread``
+        names, and issue #2016 is that clearing the pile was one-at-a-time. This
+        route mirrors the desktop plane's ``POST /v1/desktop/attention/seen``
+        contract: the body carries the completions the caller actually RENDERED
+        (``{"items": [{"session_id", "completion_token"}, ...]}``, 1..500),
+        the answer is the three per-item verdict buckets, and a batch that
+        clears nothing is still 2xx -- the buckets ARE the answer.
+
+        NOT A SWEEP, and the distinction is the whole safety story (shared with
+        the desktop route's own wording): the receipt is compared against each
+        conversation's CURRENT completion inside one write transaction
+        (:meth:`AttentionStore.acknowledge_many`), so a completion published
+        after the caller's render is not in the batch and stays unread. A
+        real-but-replaced token answers ``superseded`` for that item; it never
+        moves a watermark no surface can see.
+
+        PER-ITEM, never per-call: a dead or foreign session id -- not a live
+        generation and not a durable user conversation, the same pair of checks
+        the single route 404s on -- answers ``unknown`` FOR THAT ITEM so one
+        stale row cannot cost the others their receipt.
+
+        Body fields are additive forever: ``device_id`` (optional, advisory
+        exactly as on the single route) decides only who is SKIPPED by the
+        badge correction the push worker emits for a cleared conversation.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "items is required; update the client"}, status_code=422)
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list) or not items:
+            return JSONResponse(
+                {"error": "items (a non-empty list of receipts) is required; update the client"},
+                status_code=422,
+            )
+        if len(items) > SEEN_MANY_MAX_ITEMS:
+            return JSONResponse(
+                {"error": f"items is limited to {SEEN_MANY_MAX_ITEMS} receipts per call"},
+                status_code=422,
+            )
+        receipts: list[tuple[str, str]] = []
+        for item in items:
+            session_id = item.get("session_id") if isinstance(item, dict) else None
+            token = item.get("completion_token") if isinstance(item, dict) else None
+            if not isinstance(session_id, str) or not isinstance(token, str):
+                return JSONResponse(
+                    {"error": "each item needs a session_id and a completion_token"},
+                    status_code=422,
+                )
+            receipts.append((session_id, token))
+        # The known-session check runs in the worker with the write: it stats
+        # the durable directory, and the single route's own contract is the bar
+        # (a live generation OR a durable user conversation; everything else is
+        # `unknown` for its item rather than a refusal for the call).
+        entry_ids = {entry.record.session_id for entry in daemon.table.entries.values()}
+
+        def acknowledge() -> dict[str, Any]:
+            from local_operator.session.attention import AttentionStore
+
+            store = AttentionStore()
+            outcomes: list[tuple[str, dict[str, Any] | None]] = [
+                ("unknown", None) for _ in receipts
+            ]
+            batched: list[int] = []
+            for index, (session_id, _token) in enumerate(receipts):
+                if session_id not in entry_ids and _durable_user_session_dir(session_id) is None:
+                    continue
+                batched.append(index)
+            verdicts = store.acknowledge_many(
+                [(f"session/{receipts[index][0]}", receipts[index][1]) for index in batched]
+            )
+            for index, verdict in zip(batched, verdicts):
+                outcomes[index] = (verdict["status"], verdict["state"])
+            result: dict[str, Any] = {"read": [], "superseded": [], "unknown": []}
+            for (session_id, _token), (status, state) in zip(receipts, outcomes):
+                if status == "read":
+                    result["read"].append(state)
+                else:
+                    result[status].append(session_id)
+            return result
+
+        result = await asyncio.to_thread(acknowledge)
+        # The next list paint must already show the authoritative verdicts.
+        daemon.table.invalidate_summaries_cache()
+        daemon.table.notify_list_changed()
+        # S6's nudge, once per conversation the batch actually cleared -- the
+        # same advisory half the single route carries, with the same guards
+        # (``None`` on an unarmed daemon is not a failure, and the guard keeps
+        # an unarmed daemon from paying the registry read).
+        worker = daemon.push_worker
+        device_id = body.get("device_id") if isinstance(body, dict) else None
+        if worker is not None and device_id is not None:
+            known = await asyncio.to_thread(known_device_id, device_id)
+            if known is not None:
+                for cleared in result["read"]:
+                    revision = cleared.get("revision") if isinstance(cleared, dict) else None
+                    if isinstance(revision, list) and len(revision) == 2:
+                        worker.note_ack(
+                            device_id=known,
+                            conversation=str(cleared.get("conversation_id") or ""),
+                            acknowledged=revision[1],
+                        )
+        return JSONResponse({"ok": True, **result})
+
     async def api_session_pin(request: Request) -> Response:
         """Set a conversation's durable pin to the state the caller asked for.
 
@@ -6118,6 +6236,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
         Route("/api/sessions/{session_id:str}/seen", api_session_seen, methods=["POST"]),
+        # THE BULK SIBLING (issue #2016): one gesture clears the pile the
+        # unread badge enumerates. Mirrors the desktop plane's
+        # ``POST /v1/desktop/attention/seen`` -- rendered receipts in, per-item
+        # verdict buckets out, a no-op batch still 2xx.
+        Route("/api/attention/seen", api_attention_seen_many, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(

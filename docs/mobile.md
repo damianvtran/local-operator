@@ -160,7 +160,10 @@ Screens, following branding.md §7's agent-output hierarchy:
 - **Login** — minimal, brand mark, password field, 16 px inputs.
 - **Session list** — one card per session: name, cwd, model label, streaming
   shimmer, needs-attention badge (approval/ask pending), running-subagent
-  chip. New-session button with a cwd picker (home + recents).
+  chip. New-session button with a cwd picker (home + recents). While any
+  conversation is unread, a **mark all as read** control rides above the
+  sections and clears the pile in one write (`POST /api/attention/seen`),
+  answering the store's per-item verdicts.
 
   Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
   the daemon sorts every row on the shared catalogue key
