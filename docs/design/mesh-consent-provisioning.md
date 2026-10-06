@@ -100,20 +100,23 @@ Two surfaces already implement "a device is approved":
   (`local_operator/network/approvals.py`; schema `mesh-remote-onboarding.md` §2.2) is
   answered with the operator gesture (`approve`, `approvals.py:1123`), and executed by
   the runner (`local_operator/network/onboard.py`, `execute_approval:2282`) as the step
-  sequence `invite → pre_read → install → join → anchor → grants → relay → verify`
+  sequence `invite → pre_read → install → join → anchor → relay → grants → verify`
   (`step_invite:1092` … `step_verify:2143`), gated before **every** credentialed step by
   state + expiry + signature (`_gate:1065`, `approvals.verify_for_run:1593`).
 
 The transaction binds to **both**, because both are the operator's approval of the same
 thing — a device — and the directive does not distinguish them. Concretely:
 
-- **Onboarding path (primary):** a new runner step, `step_provision`, runs after the
-  node's relay is up and before `verify` — after `step_grants` (`onboard.py:1965`) so
-  the node-side trust decisions exist, after `step_relay` (`:2068`) for the same F7b
-  reason the grants step runs late (a relay answering on the node executes its own
-  writes from the loaded build). Receipts append per action (`approvals.append_receipt`,
-  `approvals.py:1467`); the step is resumable like every other (`mark_failed` →
-  `begin_run` retry, `approvals.py:1509`, `:1369`).
+- **Onboarding path (primary):** a new runner step, `step_provision`, runs after
+  `step_relay` (`:2068`) and `step_grants` (`:1965`), before `verify`. The order is
+  load-bearing: `relay` precedes `grants` ON PURPOSE (F7b, `onboard.py:75` — a relay
+  answering on the node executes the grant write from its own loaded build, and a
+  pre-run relay's refusal does not fall back; pinned by
+  `test_the_relay_step_runs_before_the_grants_step`), and the transaction sits after
+  both so the trust decisions exist and any write it makes through the node's relay
+  meets the run's relay rather than a pre-run one. Receipts append per action
+  (`approvals.append_receipt`, `approvals.py:1467`); the step is resumable like every
+  other (`mark_failed` → `begin_run` retry, `approvals.py:1509`, `:1369`).
 - **Pairing path:** the offer's per-kind defaults are the one thing that changes (§1.4);
   the admission grant code path stays as built.
 
@@ -128,10 +131,10 @@ stops requiring that the operator type a per-credential command first.
 |---|---|---|---|
 | 1 | **Placement grants** (owner's document: who may borrow what) | **Exists.** `PlacementDocument.grant` (`credentials/placement.py:438`), owner-only write rule (`:438-498`), merge/persist (`:532`, `:596`); owner serves it on `net_broker` `kind: placement` (`credentials/owner.py:1177`); borrower pulls (`credentials/client.py:758`). | Write the per-class default holder rows for the approved device at approval time (instead of the operator running `credential share` per key), then push the document to the node within the run (a push, not a wait for the next pull) so the node's first `lop network credentials` is already true. |
 | 2 | **Capability enablement** (`broker_credential` on the member row) | **Exists.** Grantable vocabulary `GRANTABLE_CAPABILITIES` (`network/types.py:444-458`), `member grant` CLI, and the admission grant already writes "placement + `broker_credential`" as one pair. | Include the pair write in the transaction (owner-side), so a run-only approval reaches the same state a pairing admission reaches. |
-| 3 | **Definitions push** (agents, teams) | **Exists and continuous.** `definitions.push_to_peer` (`definitions.py:1423`), `DefinitionsSyncer` thread (`:2019`), `net_definitions` handler (`:1870`), create-path reconciliation (`desktop_mesh.create_on_peer:520` forwards a target "because the relay reconciles the definition on the way"). Payloads are versioned and **non-credential** ("one versioned, non-credential payload", `definitions.local_bundle:708`; credential-shaped rows are withheld, `_withheld:571`). | Reuse as-is. The transaction forces one push for the approved node (create-path semantics) so the node is usable the moment onboarding returns; the tick keeps it current afterwards. **Keep the non-credential invariant** — values never ride the definitions bundle. |
+| 3 | **Definitions push** (agents, teams) | **Exists and continuous.** `definitions.push_to_peer` (`definitions.py:1423`), `DefinitionsSyncer` thread (`:2019`), `net_definitions` handler (`:1870`), create-path reconciliation (`local_operator/server/utils/desktop_mesh.py:520`, `create_on_peer`, forwards a target "because the relay reconciles the definition on the way"). Payloads are versioned and **non-credential** ("one versioned, non-credential payload", `definitions.local_bundle:708`; credential-shaped rows are withheld, `_withheld:571`). | Reuse as-is. The transaction forces one push for the approved node (create-path semantics) so the node is usable the moment onboarding returns; the tick keeps it current afterwards. **Keep the non-credential invariant** — values never ride the definitions bundle. |
 | 4 | **MCP server definitions push** | **Exists and continuous.** `mcpdefs.push_to_peer` (`mcpdefs.py:1104`), tick step `mesh_tick_step:1350` riding the definitions thread, state with per-ref resolution ("the keys to set", `state_rows:782`; `_reference_present:844`). | Reuse as-is; then **use its refs as the transaction's needs-list**: the refs the bundles declare (`ref:<NAME>` states) are exactly the secret names the node will need, and §4 makes them the default copy set. Order: definitions + MCP defs push first, then credential provisioning, then one verification read (`network mcp state`) whose "keys still needed" must be empty for the covered set. |
 | 5 | **Git identity** | **Check exists, seed is new (small).** `readiness.git_identity_fact` (`readiness.py:256`) reads `user.name`/`user.email`; the readiness row and its remedy (`:1100-1140`) currently only *suggest* fixing the node. | Seed the node's global git identity from the owner's (`readiness.py:1125` shows the intended pairing) via the transport's `run` — small, visible on the card, and it makes the first commit from the node carry the operator's identity instead of dead-ending at the next `ready`. |
-| 6 | **Credential material (copies)** | **New.** The broker never writes material to a borrower (`mesh-credentials.md` §10: nothing in the implemented list writes `secrets/`, `auth.db` or the keychain), and the design-text `replicate` field of `placement.json` (`mesh-credentials.md` §2.2) was never built. | §4 and §5 define it: per-class copy decision, generation counters, node-side encrypted storage, wipe/revoke. |
+| 6 | **Credential material (copies)** | **New.** The broker never writes material to a borrower (`mesh-credentials.md` §10: nothing in the implemented list writes `secrets/`, `auth.db` or the keychain), and the design-text `replicate` field of `placement.json` (`mesh-credentials.md` §2.1, `:231`) was never built. | §4 and §5 define it: per-class copy decision, generation counters, node-side encrypted storage, wipe/revoke. |
 | 7 | **Repo / workspace seeding** | **Not needed for the default path — say so rather than build it.** Forge work needs no local clone to push (remote URLs; the helper serves `https://github.com` for the allow-listed repos, `github.py:922`); session state carry-over for moves already exists as the sync copy set (`sync.py:13-22`, "the copy set is the spec of what a session directory may hold"). | Nothing. If a future workstream wants offline repo priming, it is a separate slice with its own bounding; the transaction does not clone repositories. |
 | 8 | **Invite / join / anchor / relay** | **Exists** (`onboard.py` steps above). | Untouched; the transaction slots after them. |
 
@@ -165,7 +168,7 @@ Today's join-time defaults are a closed table (`credentials/offers.py:83-92`):
 | kind | today | under the directive |
 |---|---|---|
 | `oauth-rotating` | `True` | `True` (unchanged) |
-| `api-key-static` | `False` | **`True`** — a static key is the class that *works* from a second device; the reason it was off ("a permanent capability increase", `offers.py:85-91`) is answered by the approval gate + wipe/rotate, not by making the operator type `share` per key. |
+| `api-key-static` | `False` | **`True`** — a static key is the class that *works* from a second device; the reason it was off ("a permanent capability increase", `offers.py:24-26`; `mesh-credentials.md:328`) is answered by the approval gate + wipe/rotate, not by making the operator type `share` per key. |
 | `mcp-rotating` | `False` (v1 scope-surface caution, `mesh-credentials.md` §2.3 as-built bullet 2) | **`True`** — the access token is already brokerable (`owner._resolve_mcp:652`), the grant never moves (`_oauth_refresh_lock`, `mcp/auth.py:3716`, stays host-local), and the MCP defs push already reports the server set the node will run. |
 | `github-app` | `False` ("closed hardest", `offers.py:87-91`) | **`True`** when the adapter resolves *any* source (§3); the "one App covers every designated repository for every command" concern is bounded by the repository allow-list (`network.credentials.github.repositories`, `github.py:92`) and by the helper's path check (`github.py:906`). |
 | `radient` | never auto-offered (`NEVER_AUTO_OFFERED_PROVIDERS:98`) | **Offered by default, reduce-only, for `device` members of the operator's own networks; pool exclusion unchanged.** This is the one default I flag for review (§10 Q4): the bearer carries organization-write authority (`mesh-credentials.md` §1.1), but the operator's directive covers exactly this kind of login, and a node that cannot publish an agent cannot do the work it was onboarded for. |
@@ -199,7 +202,7 @@ Two exclusions do not move, because they are facts rather than postures:
 | 2 | Encrypted secrets (`~/.local-operator/secrets/`: SQLite AES-GCM + `master.key`, broker daemon over `broker.sock`) | `secrets/store.py:445+`; per-record `updated_at`/fingerprint (`SecretRecord:206-223`, `describe_identity:887`) | No | **Copy, selected (§4).** | The value must exist on the consuming host for `bash` to use it (`mesh-credentials.md` §4.8's own argument); consent-as-authorisation removes the last real blocker and bounds the rest. |
 | 3 | Provider OAuth grants (rotating) | `auth.db` → `auth_credentials`, `credential_type='oauth'`; refresh under a local lease (`auth_store.py`, PR-24 history) | **Yes** | **Broker only, unchanged mechanics — new default: the holder grant lands at approval.** | Two hosts racing one rotating refresh token is the measured PR-24 failure; the lease is a local row and cannot span hosts (`mesh-credentials.md` §0, §4 `auth_store.py:147`, `:1777`). |
 | 3b | Radient org login (a class-3 login with org-write authority) | As class 3 | Yes | **Broker; default-flipped per §1.4 with the review flag (Q4).** | Person-scoped org bearer; least authority was `scope: session`, kept. |
-| 4 | Provider API-key logins | `auth.db`, `credential_type='api_key'`, `source="login"` | No | **Copy by default (same policy machine as class 2).** | Static keys work from anywhere; copying them is what makes remote work survive the owner going offline. Broker remains available per key for operators who prefer TTL-bounded lending. |
+| 4 | Provider API-key logins | `auth.db`, `credential_type='api_key'`, `source="login"` | No | **Copy, selected — the same policy machine as class 2 (§4.2: needs-list ∪ `sync` marks).** | Static keys work from anywhere; copying them is what makes remote work survive the owner going offline. Broker remains available per key for operators who prefer TTL-bounded lending. |
 | 5 | MCP OAuth grants (rotating) | `auth.db`, `provider='mcp-oauth'`; refresh lock beside `auth.db` (`mcp/auth.py`) | **Yes** | **Broker the access token; the grant never moves and never copies.** | The grant's refresh lock is host-local and a new grant needs a loopback callback (`DEFAULT_CALLBACK_PORT = 33441`, `local_operator/mcp/auth.py:111`); the access token is already served by `owner._resolve_mcp:652`. |
 | 6 | Mobile portal password | macOS Keychain, service `lop-mobile` — the repository's only keychain use | No | **Refuse.** | Host-scoped by construction; a peer has nothing to do with it. |
 | 6b | Kimi device-bound grant | Class-3 rows plus `<config>/kimi/device-id` | Yes | **Broker the access token; never the device id, never a copy.** | A borrower replaying the owner's device fingerprint is presenting an id the provider did not issue it (`mesh-credentials.md` §1 row 6b). |
@@ -214,8 +217,9 @@ A borrowing device **cannot bound a secret to one process or one session**. Ther
 per-session secret far side: the guide already accepts it — "the DEVICE is the trust
 unit … any process or session on the borrowing device (same user) can use it, because
 there is no per-session secret on a node for the design to bound"
-(`local_operator/guides/network/GUIDE.md:606-610`), and `github.py`'s T7 disclosure says
-the same for the App (`:1350-1356`). Everything below inherits that: a copy is readable
+(`local_operator/guides/network/GUIDE.md:606-610`), and the T7 disclosure ships the same acceptance for the
+App (`mesh-credentials.md` §14, `:1350-1356`; `github.py:28` points at the receipt/
+guide copies). Everything below inherits that: a copy is readable
 by whatever the node's own consent machinery admits, and the *node's* honest limits are
 the copy's limits.
 
@@ -384,16 +388,27 @@ with the work. This is what the bounding story must answer, and §4.2 does.
 
 ### 4.2 What becomes copyable, and the bound
 
-**Decision: the store becomes copyable, selected per key.** A per-key policy, held with
-the secret's metadata on the owner:
+**Decision: the store becomes copyable, selected per key, and the default copy-set is
+the node's declared need.** Stated once here — §5, S4 and the C5 brief all read their
+defaults off this paragraph:
 
-- `sync` — provision at approval and keep fresh (§5). **The default**, per the
-  directive: "all the necessary data … cloned". The wide end of the model's consent,
-  chosen deliberately; the opt-outs below are one command each.
+- **The default is the needs-list:** the union of (i) the `ref:<NAME>` refs the node's
+  pushed bundles declare — "the keys to set" is already computed
+  (`mcpdefs.state_rows:782-825`) — and (ii) keys the operator has marked `sync`. A node
+  whose work needs three secrets gets three, not the store. This is the working reading
+  of the directive's "necessary": minimisation where the work itself has not named a
+  need.
+- `sync` — the operator's standing "send this to approved nodes" mark. A key so marked
+  joins every approved device's copy-set by default, for keys the operator knows a node
+  will need before the node's bundles can say so.
 - `local-only` — never crosses. The operator's per-key kill switch (and the class rule
   for anything device-bound).
 - `refuse`-by-class — the structural exclusions of §1.4 apply; nothing here can widen
   them.
+
+Everything outside the default set is *offered* — visible on the approval card, one
+step to add — and not copied unless selected. One keystroke up per key when wanted, not
+an opt-out per key to keep it out.
 
 The **bounding story**, stated as five concrete bounds:
 
@@ -441,10 +456,11 @@ member records every `network.sync.tick_s` (**15 s shipped**), with a **60 s** f
 between pushes to one reachable member (`STATE_MIN_INTERVAL_S:2199`), a separate refusal
 floor (`REFUSED_MIN_INTERVAL_S:2210`), and a failure retried on the next tick — and it
 publishes exactly one extension seam for sibling cadences:
-**`definitions.add_tick_step` (`:1999`)**, whose own docstring argues against a second
-cadence over the same members ("a second thread, a second set of floors and a second
-retry policy for one shared question"), with `mcpdefs.mesh_tick_step` as the first
-tenant (`mcpdefs.py:1350`).
+**`definitions.add_tick_step` (`:1999`)**, whose own seam comment argues against a
+second cadence over the same members (the `#:` comment above `_TICK_STEPS`,
+`definitions.py:1982-1987`: "a second thread, a second set of floors and a second retry
+policy for one shared question"), with `mcpdefs.mesh_tick_step` as the first tenant
+(`mcpdefs.py:1350`).
 
 **Decision: credential sync rides that seam.** A new tick step (working name
 `credentials_sync`) runs after each member's definitions push and does one bounded unit
@@ -516,6 +532,23 @@ payload path byte-identical in shape to an existing borrow reply.
   The p95 figure is a design budget to be *measured* on the two-device rig (§11, Q3 of
   `mesh-credentials.md`'s evidence set); if measurement disagrees, the budget changes,
   not the mechanism.
+- **The budget's other half — the in-flight question, in the operator's words: *how
+  long can a running job on the node keep going once the owner rotates a credential?*
+  Per mechanism, and the mesh never cuts the job (property 1 of §5.4):**
+  - a **borrowed** bearer keeps working until its own provider-side expiry or the
+    borrower's next re-ask — the three statements of `mesh-credentials.md` §3.7 ("new
+    grants stop now; a lent grant stops within `grant_ttl_s`; a copied bearer stops
+    only when the token expires or is revoked at the provider");
+  - a **held copy** outlives the owner entirely and ends only at (i) a wipe, or
+    (ii) provider-side rotation killing the old value — in which case the job's next
+    *use* of that value fails into the §6 repair path while the job itself keeps
+    running;
+  - the **replacement** reaches the node inside the same ≈75 s budget above, so the
+    work-interruption window for a rotate-at-source is "until the next use after the
+    old value dies", bounded by that number.
+  So the budget answers both halves: ≤75 s to the replacement, and *no job is cut by
+  the sync — only a credential step fails*. That last sentence is what S5's drill must
+  prove (Q7).
 - **Interactive freshness beats cadence:** a member that has been told a newer gen
   exists never waits for the next tick to use it — it pulls on the spot. The cadence is
   the floor for idle members, not the ceiling for busy ones.
@@ -631,7 +664,8 @@ Answer, precisely:
 2. **Its transport deliberately carries no payload.** `net_update` is apply-or-answer
    for a *build target* the member installs from its own channel — "The peer never
    delivers code, never names a ref, never runs a command"
-   (`mesh-rolling-updates.md` §2). Credential sync is the opposite direction: the owner
+   (`mesh-rolling-updates.md` §0, `:50-51`; §2 adds the fuller bound, "a nudge to
+   fetch and install, not a delivery", `:258-262`). Credential sync is the opposite direction: the owner
    delivers the value. Reusing the op would mean turning a no-payload transport into a
    secret-delivery one — the exact re-plumbing this design avoids by riding
    `net_broker`, whose payload path already exists and is already redaction-audited.
@@ -737,14 +771,16 @@ explicit switch, that is a one-line default change at the transaction (Q5).
 | S1 | **Approval → provisioning transaction (owner side)** | `onboard.py` `step_provision`; placement writes + push; capability enablement; git-identity seed; card/receipt copy; `offers.py` defaults flip (§1.4) — excluding `radient` if Q4 decides to hold it. | M | unit (transaction receipts, idempotent re-run, refusal paths), two-config-roots e2e; reviewer + QA. No secret material moves. |
 | S2 | **Forge without an App** | `GITHUB_APP` → ladder in `owner._resolve_github`; PAT-class secret name; `gh`-CLI arm; per-source revoke receipts; guide rewrite (taught route = ladder; App = stronger option). GitLab: position doc + adapter slice stub (or the adapter itself if capacity allows). | M | unit (source ladder, refusal arms, helper unchanged), real-git loopback cell extended per source; reviewer + QA; guide copy round. |
 | S3 | **Sync engine** | Generations + ack ledger; `announce`/`copy` kinds; `credentials_sync` tick step; member-side apply + ack; staleness surface (`credentials`/`doctor` segment). | L | unit (monotonicity, non-block, floors), two-device e2e (change → usable within budget); **C5 review before merge — see below.** |
-| S4 | **Class-2 copies** | Policy flag (`sync`/`local-only`); card selection + needs-list union; node-side re-seal + provenance; wipe/revoke; `copy_stale` repair code. | L | unit (encryption-at-rest, provenance, wipe ack/queue), e2e (copy → use → revoke → wipe); **C5 review before merge.** |
-| S5 | **Repair + visibility polish + drill** | Repair codes/sentences end-to-end; freshness check at use; the two-device drill runbook + evidence; sibling-doc reconciliation (`mesh-credentials.md`'s stale `replicate` text — its §2.2 field was never built and this design supersedes it; the §14 App section gains the "optional stronger" label). | M | drill evidence on the real topology (Mac + one cloud node), frames for the surfaces touched; reviewer + QA. |
+| S4 | **Class-2 copies** | Policy marks (`sync` / `local-only`) with the **needs-list default** (§4.2); card selection; node-side re-seal + provenance; wipe/revoke; `copy_stale` repair code. | L | unit (encryption-at-rest, provenance, wipe ack/queue, default-set intersection), e2e (copy → use → revoke → wipe); **C5 review before merge.** |
+| S5 | **Repair + visibility polish + drill** | Repair codes/sentences end-to-end; freshness check at use; the two-device drill runbook + evidence; sibling-doc reconciliation (`mesh-credentials.md`'s stale `replicate` text — its §2.1 field was never built and this design supersedes it; the §14 App section gains the "optional stronger" label). | M | drill evidence on the real topology (Mac + one cloud node), frames for the surfaces touched; reviewer + QA. |
 
 **The C5 class, named:** under the operator's merge disposition, a foundational
 security/data change is C5 — it holds for human approval before merge. S3 and S4 are
 exactly that class (the first secret-copying code), and they additionally carry the
-standing agent-review + QA rounds. S1/S2 are ordinary code changes (no new material
-crossing), gated as usual.
+standing agent-review + QA rounds. The one default the C5 reviewer should read first is
+§4.2's: **the copy-set defaults to the node's declared need (needs-list ∪ `sync`
+marks), not the store.** S1/S2 are ordinary code changes (no new material crossing),
+gated as usual.
 
 **Doc reconciliation is part of the work, not an afterthought:** `mesh-credentials.md`
 §2's join-default table and §14's App narrative need the two-line pointers to this
@@ -756,11 +792,13 @@ in S1.
 
 ## 10. Open questions, each with my recommendation
 
-**Q1 — Class-2 default: `sync` (copy) or `ask` (per-approval checklist off)?**
-*Recommend `sync`* — the directive says clone the necessary data, and the iCloud-Keychain
-precedent (a device you approve gets your items) is the model the operator described.
-The bounds are §4.2's. The flip is one constant if the C5 review judges the wide default
-wrong; flagging it because it is the biggest exposure change in the document.
+**Q1 — Class-2 default: the needs-list, or every key?** *Decided: the needs-list*
+(§4.2 — declared refs ∪ `sync` marks; everything else offered, not copied). "Necessary"
+is the directive's word, and minimisation is its reading where the work has not named a
+need; the copy-everything reading was rejected as unbounded blast radius (the §4.1(c)
+concern), and it is one constant away if the C5 review ever judges otherwise. This is
+the biggest exposure decision in the document, so it is recorded as a decision, not
+left to the implementer.
 
 **Q2 — Do copies carry a TTL?** *Recommend no.* The point of a copy is to outlive the
 owner's reachability; a TTL would reintroduce the dependence the copy removes. The
@@ -789,10 +827,18 @@ detection now; move the generation bump into `secrets/brokerd.py` (the store's o
 writer) when measured to matter.* Evidence: store-write→announce latency on the drill;
 if the diff tick is late by more than one tick, the hook moves.
 
-**Q7 — Latency budget verification.** *Recommend the drill pins the number:* change a
-value on the Mac, run a command on the node, assert usable within the §5.3 budget with
-the on-demand path disabled (pure cadence), then with it enabled (first-use pull).
-The number in §5.3 is a budget, and budgets get measured.
+**Q7 — Latency budget verification — two cells, both in the drill.** *Recommend the
+drill pins both numbers:*
+1. **The delivery cell:** change a value on the Mac, run a command on the node, assert
+   usable within the §5.3 budget with the on-demand path disabled (pure cadence), then
+   with it enabled (first-use pull).
+2. **The in-flight cell** (§5.3's other half): start a long-running job on the node (a
+   bounded sleep-and-report prompt), rotate/deliver a value mid-job, and record per
+   class what the running job saw (continues on the old value / fails at the next use),
+   when the replacement became usable, and that new work resumed. This is the evidence
+   S5 cites to the C5 review for "work continues uninterrupted".
+
+The numbers in §5.3 are budgets, and budgets get measured.
 
 ---
 
