@@ -5,6 +5,19 @@ of headless Chrome with CDP device metrics, at 390x844 and 360x780, before and
 after the fix. Raw data: `before-focus-zoom-report.json`,
 `after-focus-zoom-report.json`, `*-focus-behavior-report.json`.
 
+Frame provenance (round-1 remediation): the `before-*` frames/reports are the
+pre-fix base build at `7d612a2db`; every `after-*` frame/report was captured on
+the round-1 remediation head `a0abf8a82` (the mechanism-sensitive frames must
+name the head they were taken on). Superseded: the first fix head's `after-*`
+set at `ae758cbe9` (its non-composer frames had been overwritten by the wide
+pass — the D3 finding — and were replaced by the phase-labelled set below).
+
+Frames are phase-labelled (`<vp>-<default|wide>-<surface>`) and the whole field
+set is now covered in BOTH modes at BOTH builds (round-1 design review D3),
+plus `directory-longvalue`, which carries a real long path typed into the field
+— the populated case a placeholder cannot show (measured default-mode character
+room for that field is in the review's D1 note).
+
 ## Wide-view preconditions (both runs)
 
 | reading | before | after |
@@ -31,8 +44,8 @@ after the fix. Raw data: `before-focus-zoom-report.json`,
 
 - Zoom factors per the issue's WebKit rule: `target = clamp(16 / fontSize)`,
   zoom = target / current (current = 1 default; 0.7617 / 0.7031 wide).
-  After: every field's target ≤ current (`16/21.025 = 0.76103 ≤ 0.7617`;
-  `16/22.7596 = 0.70301 ≤ 0.703125`) — no zoom, with the three-decimal floor's
+  After: every field's target ≤ current (`16/21.025 = 0.760999 ≤ 0.7617`;
+  `16/22.7596 = 0.703000 ≤ 0.703125`) — no zoom, with the three-decimal floor's
   margin.
 - Physical size check: 21.025 x 0.76171875 = 16.01px; 22.7596 x 0.703125 =
   16.00px (≥ 16 physical px).
