@@ -292,6 +292,26 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     # (review round 1, F1). An honest client never produces it, so it is cached like
     # an authorisation refusal rather than retried.
     "identity_mismatch": 60_000,
+    # The copy path's codes (mesh-consent-provisioning §5; review round 1, R2 —
+    # every code the copy path emits joins this table, so the next consumer does
+    # not meet an unregistered name and silently fall to the default TTL and
+    # sentence. ``malformed_*``/``unknown_key`` are build-bug-or-forgery states,
+    # cached like an authorisation refusal; ``not_copyable`` and
+    # ``member_not_active`` are policy answers no retry can change (`member_not_active`
+    # rather than the transport's ``not_a_member``: the transport's code refuses a
+    # frame at the door for someone not in the network, this one withholds a copy
+    # from a member whose row is no longer active — distinct layers, distinct names);
+    # ``no_value`` is the owner's current supply, which a login can change at any
+    # moment, so it honours the wire's own retry hint (0); ``unavailable`` means
+    # the far side cannot service sync at all (no identity/placement yet).
+    "malformed_frame": 60_000,
+    "malformed_announce": 60_000,
+    "unknown_key": 60_000,
+    "not_copyable": 300_000,
+    "no_value": 0,
+    "member_not_active": 300_000,
+    "generation_out_of_range": 60_000,
+    "unavailable": 60_000,
     "not_implemented": NO_RETRY,
     "internal": 60_000,
 }

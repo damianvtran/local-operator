@@ -538,7 +538,7 @@ def test_the_copy_is_withheld_from_a_removed_member(root: Path) -> None:
     link = SimpleNamespace(device_id=MEMBER)
     frame = {"kind": "copy", "key": KEY, "gen": 1, "held": 0, "from_device": MEMBER}
     detail = sync.owner_copy(broker, link, frame)
-    assert detail.get("kind") == "error" and detail.get("code") == "not_a_member", detail
+    assert detail.get("kind") == "error" and detail.get("code") == "member_not_active", detail
     store_handle.close()
 
 
@@ -821,7 +821,7 @@ def test_a_removed_member_is_not_announced_to_and_is_refused(sync_mesh: Any) -> 
         "from_device": mesh.member,
     }
     detail = sync.owner_copy(broker, link, frame)
-    assert detail.get("code") == "not_a_member", detail
+    assert detail.get("code") == "member_not_active", detail
 
 
 def test_the_sync_step_rides_the_definitions_seam(
@@ -838,3 +838,209 @@ def test_the_sync_step_rides_the_definitions_seam(
     assert (
         sync.credentials_sync_step in definitions._tick_steps()
     ), "credentials.install must register the step on the definitions syncer"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1's remediation (R1's ceiling, Q-2's ledger, N2's rows)
+# ---------------------------------------------------------------------------
+
+
+def test_a_ceiling_held_is_refused_and_never_adopted(root: Path) -> None:
+    """R1 (review round 1): a forged ``held`` at the ceiling is refused by name.
+
+    Reproduced on the pre-fix head: one ``copy`` frame with ``held: 2**53``
+    recorded the owner's generation AT the ceiling; every later bump clamped
+    there and every reply was dropped by a member at the ceiling — a permanent
+    liveness break for one key from one frame. The fix refuses (and records
+    nothing), so the key keeps bumping; the corrupt-state half is the load cell
+    below.
+    """
+    from local_operator.network.credentials.owner import MeshCredentialBroker
+
+    owner_root = root / "owner"
+    owner_root.mkdir()
+    _declare_owner(owner_root)
+    _seed_network(owner_root)
+    store_handle = _open_member_store(owner_root)
+    store_handle.upsert_credential(KEY, _payload(VALUE_1))
+    broker = MeshCredentialBroker(
+        root=owner_root,
+        self_device=OWNER,
+        self_device_name="owner",
+        network_id=NETWORK,
+        audit=None,
+        auth_store=store_handle,
+    )
+    link = SimpleNamespace(device_id=MEMBER)
+    for forged in (2**53, sync.GEN_SAFE_MAX):
+        detail = sync.owner_copy(
+            broker,
+            link,
+            {"kind": "copy", "key": KEY, "gen": 1, "held": forged, "from_device": MEMBER},
+        )
+        assert detail.get("code") == "generation_out_of_range", detail
+    assert (
+        SyncState.load(NETWORK, owner_root).generation(KEY) is None
+    ), "a refused held must record nothing"
+    # The key is NOT frozen: a normal request serves gen 1, and a later change bumps.
+    detail = sync.owner_copy(
+        broker, link, {"kind": "copy", "key": KEY, "gen": 0, "held": 0, "from_device": MEMBER}
+    )
+    assert detail.get("kind") == "copy" and detail.get("gen") == 1, detail
+    store_handle.upsert_credential(KEY, _payload(VALUE_2))
+    detail = sync.owner_copy(
+        broker, link, {"kind": "copy", "key": KEY, "gen": 1, "held": 1, "from_device": MEMBER}
+    )
+    assert detail.get("kind") == "copy" and detail.get("gen") == 2, detail
+    store_handle.close()
+
+
+def test_a_corrupt_generation_row_is_dropped_not_obeyed(root: Path) -> None:
+    """R1's corrupt-state path: rows at/above the bound load as ABSENT.
+
+    ``peer_int`` clamps an inflated value to ``2**53`` rather than rejecting
+    it, so a corrupt ``applied`` row made the member drop every reply, and a
+    corrupt generation row froze the owner. The load now drops such rows (the
+    load docstring's "unreadable falls back to a fresh one"), and the member
+    heals by RE-PULLING from zero — both halves asserted here.
+    """
+    owner_root = root / "owner"
+    owner_root.mkdir()
+    with sync.mutate(NETWORK, owner_root) as state:
+        state.record_generation(KEY, sync.GEN_SAFE_MAX, "sha256:" + "a" * 64, 1)
+    assert SyncState.load(NETWORK, owner_root).generation(KEY) is None
+
+    member_root = root / "member"
+    member_root.mkdir()
+    _declare_owner(member_root)
+    with sync.mutate(NETWORK, member_root) as state:
+        state.record_applied(
+            KEY,
+            gen=sync.GEN_CEILING,
+            digest="sha256:" + "b" * 64,
+            owner_device=OWNER,
+            row_id=7,
+            at=1.0,
+        )
+        state.record_ack(MEMBER, KEY, gen=2**53, digest="sha256:" + "c" * 64, at=1.0)
+    corrupt = SyncState.load(NETWORK, member_root)
+    assert corrupt.applied_for(KEY) is None
+    assert corrupt.ack_for(MEMBER, KEY) is None
+
+    # The member heals by re-pulling from zero (the dropped row reads as held 0).
+    server = _FakeServer(member_root, MEMBER, "member")
+    engine = _engine(member_root, server, member_root=member_root)
+    payload = _payload(VALUE_1)
+    digest = sync.fingerprint(payload)
+    server.reply = {
+        "op": "ack",
+        "detail": {
+            "kind": "copy",
+            "key": KEY,
+            "gen": 1,
+            "digest": digest,
+            "value_state": "present",
+            "value": payload,
+            "provenance": {"owner_device": OWNER, "owner_device_name": "owner"},
+        },
+    }
+    engine._pull_blocking(OWNER, KEY, 1, digest)
+    applied = SyncState.load(NETWORK, member_root).applied_for(KEY)
+    assert applied is not None and applied.get("gen") == 1, applied
+    store = _open_member_store(member_root)
+    try:
+        assert store.list_credentials(KEY)[0].data.get("key") == VALUE_1
+    finally:
+        store.close()
+
+
+def test_an_equal_digest_ack_follows_the_reset_counter_down(root: Path) -> None:
+    """Q-2 (review round 1): the ledger follows the member DOWN on a reset.
+
+    After the owner's generation row is lost while acks survive, the member
+    adopts the fresh counter down and acks it. Refusing that ack (the old
+    monotonic rule) left ``stale (gen 4 of 1)`` and a doctor FAIL forever, and
+    re-announced every cycle; an equal digest is proof no value moved, so the
+    ledger follows — and a lower gen with a DIFFERENT digest still cannot
+    regress it.
+    """
+    digest = "sha256:" + "d" * 64
+    with sync.mutate(NETWORK, root) as state:
+        state.record_generation(KEY, 1, digest, 5)
+        state.record_ack(MEMBER, KEY, gen=4, digest=digest, at=100.0)
+        state.record_ack(MEMBER, KEY, gen=1, digest=digest, at=200.0)
+        acked = state.ack_for(MEMBER, KEY)
+        assert acked is not None and acked.get("gen") == 1, acked
+        assert sync._ack_matches(
+            acked, 1, digest
+        ), "the announce gate must read the reset as synced"
+        state.record_ack(MEMBER, KEY, gen=0, digest="sha256:" + "e" * 64, at=300.0)
+        kept = state.ack_for(MEMBER, KEY)
+        assert kept is not None and kept.get("gen") == 1, "a different digest must not regress"
+
+
+def test_member_audit_rows_land_with_actor_and_network(root: Path) -> None:
+    """N2 (review round 1): the member's rows carry actor/network ON DISK.
+
+    ``_audit_row`` used to leave ``actor`` at the dataclass default ("self")
+    and pass no network id, where the owner's ``credential.copy`` row carries
+    both. Read from the real ``audit.jsonl`` rather than a fake recorder: the
+    writer's per-event whitelist drops a field it does not know, so a recorder
+    would agree with a row that never landed.
+    """
+    from local_operator.network.audit import AuditLog
+
+    member_root = root / "member"
+    member_root.mkdir()
+    _declare_owner(member_root)
+    server = _FakeServer(member_root, MEMBER, "member")
+    server.audit = AuditLog(root=member_root)
+    engine = _engine(member_root, server, member_root=member_root)
+    payload = _payload(VALUE_1)
+    digest = sync.fingerprint(payload)
+    server.reply = {
+        "op": "ack",
+        "detail": {
+            "kind": "copy",
+            "key": KEY,
+            "gen": 2,
+            "digest": "sha256:" + "0" * 64,
+            "value_state": "present",
+            "value": payload,
+            "provenance": {"owner_device": OWNER, "owner_device_name": "owner"},
+        },
+    }
+    engine._pull_blocking(OWNER, KEY, 2, "sha256:" + "0" * 64)
+    server.reply = {
+        "op": "ack",
+        "detail": {
+            "kind": "copy",
+            "key": KEY,
+            "gen": 2,
+            "digest": digest,
+            "value_state": "present",
+            "value": payload,
+            "provenance": {"owner_device": OWNER, "owner_device_name": "owner"},
+        },
+    }
+    engine._pull_blocking(OWNER, KEY, 2, digest)
+    rows = [
+        row
+        for row in server.audit.tail(50, network_id=NETWORK)
+        if str(row.get("event") or "").startswith("credential.copy")
+    ]
+    events = {row["event"]: row for row in rows}
+    assert set(events) == {"credential.copy_refused", "credential.copy_applied"}, rows
+    refused = events["credential.copy_refused"]
+    assert refused["actor"] == MEMBER and refused["network_id"] == NETWORK, refused
+    assert refused["detail"] == {
+        "credential_key": KEY,
+        "act": MEMBER,
+        "sub": OWNER,
+        "reason": "digest_mismatch",
+    }, refused
+    applied = events["credential.copy_applied"]
+    assert applied["actor"] == MEMBER and applied["network_id"] == NETWORK, applied
+    assert applied["detail"]["act"] == MEMBER and applied["detail"]["sub"] == OWNER
+    assert applied["detail"]["gen"] == 2, applied
+    server.audit.close()

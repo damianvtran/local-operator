@@ -104,6 +104,25 @@ SYNC_LOCK_FILENAME = ".sync.lock"
 #: number a frame carries (``types.peer_int``, whose ceiling is 2**53).
 GEN_CEILING = 2**53
 
+#: The adoption bound for a member-supplied ``held`` (review round 1, R1): an
+#: owner only ADOPTS a wire generation that still leaves this much room below
+#: :data:`GEN_CEILING`, because every later change must bump PAST the number
+#: adopted. A frame (or a corrupt row) naming the ceiling would freeze the
+#: key's generation: bumps clamp at the ceiling and a member AT the ceiling
+#: drops every reply (``served <= held``), a permanent liveness break for one
+#: key from one frame. 2**20 is deliberately vast next to any real change count
+#: (a counter that reached a million is already absurd) and tiny next to the
+#: ceiling, so the bound refuses nonsense without ever touching an honest
+#: device.
+GEN_ADOPT_HEADROOM = 2**20
+
+#: The highest generation this engine will ADOPT FROM THE WIRE, and the line
+#: above which its own loaded rows are treated as corruption: rows at or above
+#: it are dropped at load (the load docstring's ``unreadable falls back to a
+#: fresh one`` rule), and a ``copy`` frame asking to continue from one is
+#: refused by name instead of adopted.
+GEN_SAFE_MAX = GEN_CEILING - GEN_ADOPT_HEADROOM
+
 #: Bounded work per exchange (§5.1: "one bounded unit"): at most this many keys
 #: are announced to one member in one tick, so a large copy-set cannot turn a
 #: tick into a burst.
@@ -361,8 +380,11 @@ class SyncState:
     counters; the ack ledger is who-holds-what-how-fresh; the applied map names a
     store ROW ID, never a value. The one secret-shaped thing this module must
     never write down is the value itself, and it never does: the value travels
-    on the authenticated link and lands in the encrypted store, exactly as the
-    copy invariant (§8.2) requires.
+    on the authenticated link and lands in this device's own credential
+    storage — for a class-4 copy, the same 0600 ``auth.db`` row a local login
+    writes, which is the existing static-key posture; a class-2 copy's re-seal
+    into ``secrets/`` belongs to S4 (design §8.2, restated per review round 1,
+    Q-6).
     """
 
     def __init__(self, network_id: str, *, root: Path | None = None) -> None:
@@ -446,7 +468,10 @@ class SyncState:
                     continue
                 gen = peer_int(row.get("gen"), maximum=GEN_CEILING)
                 digest = _bounded_digest(row.get("digest"))
-                if gen <= 0:
+                # A row AT OR ABOVE the adoption bound is corruption, not a
+                # counter: dropped like an unreadable one (review round 1,
+                # R1's corrupt-state path), so it cannot pin the key.
+                if gen <= 0 or gen >= GEN_SAFE_MAX:
                     continue
                 state.generations[name] = {
                     "gen": gen,
@@ -464,7 +489,8 @@ class SyncState:
                     if not name or not isinstance(row, dict):
                         continue
                     gen = peer_int(row.get("gen"), maximum=GEN_CEILING)
-                    if gen <= 0:
+                    # Same corruption rule as the generations loop above.
+                    if gen <= 0 or gen >= GEN_SAFE_MAX:
                         continue
                     state.acks.setdefault(device_id, {})[name] = {
                         "gen": gen,
@@ -478,7 +504,10 @@ class SyncState:
                 if not name or not isinstance(row, dict):
                     continue
                 gen = peer_int(row.get("gen"), maximum=GEN_CEILING)
-                if gen <= 0:
+                # Same corruption rule: a dropped ``applied`` row makes this
+                # device re-pull the key, which is the healing half of R1's
+                # corrupt-member-state path.
+                if gen <= 0 or gen >= GEN_SAFE_MAX:
                     continue
                 state.applied[name] = {
                     "gen": gen,
@@ -503,17 +532,25 @@ class SyncState:
         return (self.acks.get(device) or {}).get(key)
 
     def record_ack(self, device: str, key: str, *, gen: int, digest: str, at: float) -> None:
-        """Record what a member holds. MONOTONIC by generation.
+        """Record what a member holds. Monotonic by generation, EXCEPT on a reset.
 
-        A late ack for an older generation is a reordering, not news — keeping it
-        would regress the ledger and buy a pointless announce round. Ties update
-        in place (same generation, new digest cannot happen from an honest
-        member; recording it anyway keeps the ledger honest about what arrived).
+        A late ack for an older generation is normally a reordering, not news —
+        keeping it would regress the ledger and buy a pointless announce round.
+        The exception (review round 1, Q-2) is the counter-reset edge: after the
+        owner's generation row is lost, the member adopts the fresh counter DOWN
+        to the number the owner now serves and acks it, and THAT ack carries the
+        same digest as the row it supersedes. Refusing it (the old rule) left the
+        ledger reading ``stale (gen 4 of 1)`` forever and re-announced every
+        cycle; an equal digest is proof no value moved, so the ledger follows the
+        member down. A lower gen with a DIFFERENT digest is still refused: that
+        one can only be a reorder from before a value change, and the announce
+        gate converges it.
         """
         by_key = self.acks.setdefault(device, {})
         existing = by_key.get(key)
         if existing is not None and int(existing.get("gen") or 0) > int(gen):
-            return
+            if str(existing.get("digest") or "") != str(digest or ""):
+                return
         by_key[key] = {"gen": int(gen), "digest": digest, "at": float(at)}
         self._dirty = True
 
@@ -656,8 +693,14 @@ class SyncEngine:
 
         return placement_mod.PlacementDocument.resolve(self._root, self_device=self._self_device)
 
-    def _audit_row(self, event: str, **fields: Any) -> None:
-        """One audit record, best effort (the broker's own discipline)."""
+    def _audit_row(self, event: str, *, network_id: str = "", **fields: Any) -> None:
+        """One audit record, best effort (the broker's own discipline).
+
+        ``actor`` and ``network_id`` ride the row the way the owner's
+        ``credential.copy`` sets them: a member-side row that leaves ``actor``
+        at the dataclass default ``"self"`` reads as actor-less on the one
+        surface an incident review reads (review round 1, N2).
+        """
         if self._audit is None:
             return
         try:
@@ -666,7 +709,9 @@ class SyncEngine:
             self._audit.record(
                 AuditEvent(
                     event=event,
+                    network_id=network_id,
                     epoch=None,
+                    actor=self._self_device,
                     actor_name=self._self_device_name,
                     actor_kind="device",
                     **fields,
@@ -831,6 +876,16 @@ class SyncEngine:
                 "the announcement carried no usable key, generation or digest; "
                 "nothing was pulled",
             )
+        if gen >= GEN_SAFE_MAX:
+            # An owner at the adoption bound cannot be followed (review round
+            # 1, R1's member-side belt): adopting its number would pin THIS
+            # device the moment the owner runs out of headroom.
+            return _sync_error(
+                "generation_out_of_range",
+                key,
+                "the announced generation is outside the range this device serves; "
+                "nothing was pulled",
+            )
         document = self._placement()
         if document is None:
             return _sync_error(
@@ -972,6 +1027,7 @@ class SyncEngine:
             # payload — either way, nothing is written and the row says why.
             self._audit_row(
                 "credential.copy_refused",
+                network_id=document.network_id,
                 subject=owner,
                 detail={
                     "credential_key": key,
@@ -984,6 +1040,14 @@ class SyncEngine:
         if str(detail.get("value_state") or VALUE_STATE_PRESENT) != VALUE_STATE_PRESENT:
             return
         served = peer_int(detail.get("gen"), maximum=GEN_CEILING)
+        if served >= GEN_SAFE_MAX:
+            # AN OWNER AT THE BOUND CANNOT BE FOLLOWED (review round 1, R1's
+            # member-side belt): applying its number would pin this device, so
+            # the reply is dropped whole.
+            logger.debug(
+                "credentials sync: %s served an out-of-range generation for %s", owner, key
+            )
+            return
         if served <= held_gen:
             # NEVER A VALUE ROLLBACK (§5.2's monotonicity rule): a generation at
             # or below what this device holds is dropped however it arrived.
@@ -1000,6 +1064,7 @@ class SyncEngine:
             )
         self._audit_row(
             "credential.copy_applied",
+            network_id=document.network_id,
             subject=owner,
             detail={"credential_key": key, "act": self._self_device, "sub": owner, "gen": served},
         )
@@ -1188,6 +1253,22 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
         return refused
     requested = peer_int(frame.get("gen"), maximum=GEN_CEILING)
     held = peer_int(frame.get("held"), maximum=GEN_CEILING)
+    if held >= GEN_SAFE_MAX:
+        # THE ADOPTION BOUND (review round 1, R1): adopting ``held + 1`` at the
+        # ceiling would freeze this key's generation forever — bumps clamp and
+        # the member drops every reply. A number this high is a forgery or a
+        # corrupt member state, never an honest counter, so it is refused by
+        # name and NOTHING is recorded from it. (The member heals itself: its
+        # own load drops the corrupt row and it re-pulls from zero.)
+        return broker._refuse(
+            link,
+            key,
+            key,
+            by,
+            "generation_out_of_range",
+            "the generation this request asked to continue from is not one this "
+            "device will adopt; nothing was copied",
+        )
     entry = broker._entry(key)  # noqa: SLF001 — the broker's own document read
     if (
         entry is None
@@ -1218,7 +1299,7 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
             key,
             key,
             by,
-            "not_a_member",
+            "member_not_active",
             f"{by} is not an active member of this network; nothing was copied",
         )
     meta = None

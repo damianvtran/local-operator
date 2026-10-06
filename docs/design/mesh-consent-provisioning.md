@@ -63,7 +63,10 @@ Three lifecycles, one machine:
 The one invariant this design **alters**, named plainly in §8: *"token material … never
 touches the receiving device's disk"* (`mesh-credentials.md` §0). For the copy classes
 only, material lands on the receiving device — only ever inside that device's own
-encrypted store, never as plaintext, never as the owner's master key. The threat delta
+credential storage, per class (§2.1): a class-2 copy is re-sealed into the node's
+encrypted secret store, and a class-4 copy lands as the node's own credential record —
+the same 0600 `auth.db` row a locally-entered static key gets (the tree's existing
+no-keychain posture). Never a world-readable file, never the owner's master key. The threat delta
 is stated there, with the ceiling: **a leaked copy cannot be selectively revoked; the
 final remedy is rotation at the source**, and the design says so on every surface that
 can end a share.
@@ -73,7 +76,9 @@ The model in five lines (for the report and the release notes):
 1. One approval provisions the node: definitions, MCP defs, git identity, placement
    grants, and the per-class credential set — no per-credential commands.
 2. Rotating logins stay brokered (owner-only refresh); static keys and secrets become
-   copies into the node's own encrypted store; device-bound/host-local items refuse.
+   copies into the node's own credential storage (class 4: the node's own 0600 rows,
+   the local-login posture; class 2: the node's encrypted store); device-bound/
+   host-local items refuse.
 3. Copies stay fresh via generation counters + announce-over-the-existing-tick + pull,
    ~1 minute to a reachable peer, and in-flight work never stalls on the sync path.
 4. Repair re-acquires automatically where the owner's source allows; the one interactive
@@ -176,7 +181,9 @@ Today's join-time defaults are a closed table (`credentials/offers.py:83-92`):
 The reduce-only step stays on every surface: the operator sees the list and can drop any
 row before signing; a post-approval narrowing keeps the existing `credential revoke`
 semantics. The card copy gains one line when a copy-class row is on it: what is copied
-lands in *this node's own* encrypted store, and the ceiling sentence from §8.
+lands in *this node's own* credential storage — the same 0600 rows a local login
+writes (class 4), or the node's encrypted store (class 2) — and the ceiling sentence
+from §8.
 
 Two exclusions do not move, because they are facts rather than postures:
 
@@ -226,9 +233,13 @@ the copy's limits.
 What follows from it, for copies specifically:
 
 - The far-side storage discipline is not decoration, it is the whole bounding story:
-  values land **only** in the node's own encrypted store, re-sealed under the node's own
-  master key (`secrets/store.py:755-825` is the re-seal path; `keys.py:39` the `0600`
-  file mode; the broker socket `0600` inside `0700`, `secrets/broker.py:197,238`).
+  values land **only** in the node's own credential storage. A class-2 copy is
+  re-sealed under the node's own master key (`secrets/store.py:755-825` is the re-seal
+  path; `keys.py:39` the `0600` file mode; the broker socket `0600` inside `0700`,
+  `secrets/broker.py:197,238`); a class-4 copy lands as the node's own credential
+  record — the 0600 `auth.db` row a local login writes, the same store and posture
+  every locally-entered static key already has (review round 1, Q-6: this paragraph
+  said "encrypted store" for both classes, which only the class-2 half has).
   Never the owner's `master.key`, never a plaintext env file, never another host's git
   credential helper (the F1 close already guarantees that for the forge path,
   `github.py:30-41`).
@@ -420,9 +431,11 @@ The **bounding story**, stated as five concrete bounds:
    (i) the `ref:<NAME>` refs the node's pushed bundles declare — "the keys to set" is
    already computed (`mcpdefs.state_rows:782-825`) — and (ii) the operator's standing
    `sync` keys. A node whose work needs three secrets gets three, not the store.
-4. **The destination.** Only the node's own encrypted store, re-sealed under the node's
-   master key, with provenance marking (new: an `origin`/`owner_device` field or sidecar
-   index on the receiving side, so `local-only` marks and wipe notices are computable).
+4. **The destination.** Only the node's own credential storage — per class: the node's
+   encrypted store re-sealed under its own master key (class 2), or the node's own 0600
+   credential rows (class 4, the local-login posture) — with provenance marking (new: an
+   `origin`/`owner_device` field or sidecar index on the receiving side, so `local-only`
+   marks and wipe notices are computable).
 5. **The ending.** Wipe + rotate (§2.3, §5.5).
 
 **Explicitly rejected in the other direction:** copying the owner's whole `secrets/`
@@ -743,7 +756,12 @@ explicit switch, that is a one-line default change at the transaction (Q5).
 
 - `copy_requires_active_holder`: no copy to a non-member, a removed member, or a pool
   member — same check as the broker's, not a parallel one.
-- `copies_are_node_local_encrypted`: no plaintext file, no owner key, node key only.
+- `copies_are_node_local`: no file of its own beyond the node's OWN credential
+  storage (class-4 copies: the same 0600 `auth.db` rows a local login writes;
+  class-2: the node's encrypted store, re-sealed under the node's own key); no
+  owner key; never a world-readable file. (Renamed from
+  `copies_are_node_local_encrypted` in review round 1, Q-6, because the class-4
+  half was never encrypted-store.)
 - `sync_never_blocks_use`: a use with a stale copy completes or fails on its own terms;
   no code path awaits the syncer.
 - `generation_monotonic`: an older gen never overwrites a newer copy.
