@@ -293,6 +293,19 @@ CLOSE_FLUSH_S = 1.0
 #: there reads like the deadline that made the shutdown correct; it never was.
 STOP_BYE_SETTLE_S = 0.05
 
+#: How long :meth:`RelayServer.stop` waits for the page-loop thread to close its
+#: loop before returning (agent review & QA round 2, F1/Q2-1).
+#:
+#: THE JOIN IS A BOUND, NOT A GUARANTEE, and that is worth stating: the thread is
+#: a daemon that closes its own loop whenever ``run_forever`` returns (see
+#: ``RelayServer._page_loop_main``), so a stop that could not wait still leaves
+#: nothing corrupt behind — it would only report shutdown before the close
+#: landed. What the bound buys is determinism in the common case: the close is
+#: done by the time ``stop`` returns, which is what a caller tearing a relay down
+#: and immediately counting fds is entitled to assume. Generous on purpose, since
+#: a page read is milliseconds unless the loop is already wedged.
+PAGE_LOOP_STOP_JOIN_S = 5.0
+
 # ---------------------------------------------------------------------------
 # Slow ops: off-reader dispatch (mesh build plan §0 finding 4)
 # ---------------------------------------------------------------------------
@@ -2946,8 +2959,9 @@ SESSION_HISTORY_DEFAULT_LIMIT = 100
 #: The ENCODED ceiling for ONE ``net_session_history`` reply, and the reason this
 #: op bounds its own by SIZE instead of trusting the link to (agent review round 1,
 #: R1-1). The reply travels as one link record, whose plaintext ceiling is
-#: ``wire.MAX_RECORD_BYTES`` — and ``LinkCodec.seal`` refuses a larger record by
-#: RAISING, which ``PeerLink._write_loop`` answers by closing the WHOLE link. So an
+#: ``wire.MAX_RECORD_BYTES`` — and ``wire.LinkCrypto.seal`` RAISES
+#: ``wire.LinkCryptoError`` for a larger record, which ``PeerLink._write_loop``
+#: answers by closing the WHOLE link. So an
 #: oversized page was not "refused by the link": it killed the mesh to that peer
 #: (every other op, stream and session on the link with it) and told the reader
 #: nothing, because the hop then expired byte-identically to an unreachable relay.
@@ -3043,7 +3057,7 @@ def validate_history_limit(raw: Any) -> int:
 
 
 def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
-    """The byte length of the reply frame ``wire.LinkCodec.seal`` will serialize.
+    """The byte length of the reply frame ``wire.LinkCrypto.seal`` will serialize.
 
     ``_run_handler`` wraps every handler's answer as
     ``{"op": "ack", "req": …, "detail": …}`` and the writer seals exactly that,
@@ -4224,15 +4238,39 @@ class RelayServer:
         with self._slow_lock:
             if self._slow_pool is not None:
                 self._slow_pool.shutdown(wait=False, cancel_futures=True)
-        # THE PAGE LOOP STOPS WITH THE RELAY. A read already submitted on it runs
-        # first (the stop callback is queued behind it); a read that arrives later
-        # builds a fresh loop rather than hand one to a thread that has finished.
+        # THE PAGE LOOP STOPS WITH THE RELAY, AND IS CLOSED BY ITS OWN THREAD.
+        # ``loop.stop`` only ends ``run_forever``: the loop's selector, its
+        # self-pipe and its default executor stay open until ``loop.close()``, so a
+        # stopped-but-unclosed loop leaks a fixed set of descriptors per generation
+        # (agent review & QA round 2, F1/Q2-1 — six read+stop cycles took fds 8 to
+        # 23 with ``is_closed()`` false on every sample). The close cannot be issued
+        # from HERE: it would race a read still being submitted to the loop. So it
+        # lives in ``_page_loop_main``'s ``finally``, on the loop's own thread, and
+        # the bounded join below is what makes it have happened by the time this
+        # method returns. A read that arrives after all this builds a FRESH loop
+        # rather than hand one to a thread that has finished.
+        #
+        # A READ ALREADY SUBMITTED IS NOT RECLAIMED BY THE QUEUE ORDER, only by the
+        # bound, and the earlier comment here claimed the opposite. A coroutine
+        # awaiting ``asyncio.to_thread`` never resolves once the loop carrying it
+        # has stopped — ``run_forever`` returns with the task still pending and
+        # discards it — so a reader parked in ``future.result`` waits out
+        # ``SESSION_HISTORY_PAGE_READ_BOUND_S`` and then sees ``TimeoutError``.
+        # That is the contract the bound exists for: an honest wait with an end,
+        # not a promise that the read completes.
         with self._page_loop_lock:
-            if self._page_loop is not None:
-                self._page_loop.call_soon_threadsafe(self._page_loop.stop)
+            loop = self._page_loop
+            thread = self._page_loop_thread
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
                 self._page_loop = None
                 self._page_loop_thread = None
                 self._page_loop_shelved = True
+        # OUTSIDE THE LOCK. The join is bounded but it is still a wait, and a read
+        # that arrives during it should not have to queue on this lock to learn
+        # that it needs a new loop.
+        if thread is not None:
+            thread.join(timeout=PAGE_LOOP_STOP_JOIN_S)
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
@@ -7062,12 +7100,39 @@ class RelayServer:
             if self._page_loop is None or self._page_loop_shelved:
                 loop = asyncio.new_event_loop()
                 self._page_loop_thread = threading.Thread(
-                    target=loop.run_forever, name="mesh-page-loop", daemon=True
+                    target=self._page_loop_main,
+                    args=(loop,),
+                    name="mesh-page-loop",
+                    daemon=True,
                 )
                 self._page_loop_thread.start()
                 self._page_loop = loop
                 self._page_loop_shelved = False
             return self._page_loop
+
+    @staticmethod
+    def _page_loop_main(loop: asyncio.AbstractEventLoop) -> None:
+        """Run the page loop, and CLOSE IT on this thread once it stops (Q2-1).
+
+        NOT ``target=loop.run_forever``, and the difference is the whole point:
+        ``run_forever`` returning is not the loop being finished with. Its
+        selector, its self-pipe and its default executor stay open until
+        ``close()`` — which is also what shuts that executor down
+        (``executor.shutdown(wait=False)``), so the ``to_thread`` pool the page
+        reader uses does not outlive its loop either.
+
+        WHY HERE AND NOT IN ``stop``. ``loop.stop`` is queued behind whatever the
+        loop is already running, so a ``close()`` issued from the stopping thread
+        could land while a read is still being submitted to the same loop; after
+        ``run_forever`` has returned, this thread is the one place the loop is
+        provably idle. ``stop`` joins this thread so the close has happened by the
+        time shutdown returns. The ``finally`` holds the close even if
+        ``run_forever`` raises.
+        """
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
 
     def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).

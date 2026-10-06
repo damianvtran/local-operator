@@ -1499,7 +1499,7 @@ def test_an_oversized_stored_page_is_bounded_and_never_tears_the_link_down(
     """R1-1 (agent review round 1): a page too big for one frame is SERVED in part.
 
     THE DEFECT THIS PINS, and it was far worse than "too large": the reply travels
-    as ONE link record, and ``wire.LinkCodec.seal`` refuses a record over 8 MiB by
+    as ONE link record, and ``wire.LinkCrypto.seal`` refuses a record over 8 MiB by
     RAISING — which ``PeerLink._write_loop`` answers by closing the WHOLE link. So
     one long conversation read closed the mesh to that peer: every other op,
     stream and session on the link died with it, and the reader was told nothing
@@ -1573,6 +1573,16 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
     Both halves are asserted, because either alone is satisfiable the wrong way:
     the ONE loop is read off ``asyncio.get_running_loop()`` inside the façade, and
     the single read is counted at the reader the flight wraps.
+
+    WAIT ON THE EVENT, NEVER ON THE CLOCK (agent review round 2, F2). The leader
+    used to sleep 0.3 s to hold its decode open for the second reader, which made
+    the cell's meaning depend on how fast that reader got there: under load it
+    could arrive after the window and the two requests would decode in SEQUENCE,
+    redding a cell about concurrency while the code was correct. The barrier is
+    now an event counted at the façade itself — the second ENTRY into
+    ``load_transcript_page`` releases the leader — so the state under test (one
+    decode while a second caller is inside the façade) is guaranteed rather than
+    scheduled. Nothing needs the leader to be slow, only to be the leader.
     """
     from local_operator.session import page_cache
 
@@ -1593,19 +1603,33 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
 
     loops: list[Any] = []
     reads: list[int] = []
+    #: Set by the SECOND caller to stand on the façade, so the leader's read is
+    #: held open by an event rather than by a sleep (see the docstring).
+    both_inside = threading.Event()
+    inside = 0
     real_load = page_cache.load_transcript_page
     real_read = page_cache.read_transcript_page
 
     async def recording_load(*args: Any, **kwargs: Any) -> Any:
+        """The façade entry point, counted: this is where both callers stand.
+
+        It runs on the page loop (the leader registers its flight before it ever
+        awaits, so the second caller cannot overtake it), and the follower reaches
+        it too — one loop, two entries, one decode.
+        """
+        nonlocal inside
         loops.append(asyncio.get_running_loop())
+        inside += 1
+        if inside >= 2:
+            both_inside.set()
         return await real_load(*args, **kwargs)
 
     def slow_read(*args: Any, **kwargs: Any) -> Any:
-        # Held open long enough that the second reader thread arrives WHILE the
-        # first read is in flight -- which is the state under test, rather than a
-        # race the scheduler could avoid.
+        # Held open until the SECOND reader is inside the façade -- which is the
+        # state under test, not a race the scheduler could avoid. The timeout is a
+        # failure signal (the second caller never arrived), never the window.
         reads.append(1)
-        time.sleep(0.3)
+        assert both_inside.wait(timeout=30), "the second reader never reached the façade"
         return real_read(*args, **kwargs)
 
     monkeypatch.setattr(page_cache, "load_transcript_page", recording_load)
@@ -1644,6 +1668,59 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
         link_a.close("test")
         link_c.close("test")
         server_c.stop()
+
+
+def test_stopping_the_relay_closes_the_page_loop_it_shelved(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1/Q2-1 (agent review & QA round 2): ``stop()`` CLOSES the loop it shelves.
+
+    THE DEFECT THIS PINS. ``stop()`` ended the page loop with ``loop.stop`` and
+    dropped the reference, but nothing ever closed it — unlike the sibling
+    ``_slow_pool.shutdown`` a few lines above it. ``loop.stop`` only ends
+    ``run_forever``: the loop's selector, its self-pipe and its default executor
+    stay open until ``loop.close()``, so every read+stop generation leaked a fixed
+    set of descriptors (QA measured fds 8 → 11 → 14 → 17 → 20 → 23 over six
+    cycles, ``is_closed()`` false on every sample). Bounded in production, because
+    this is the shutdown path — but a long-lived process that starts and stops
+    relays accumulates them, and the thread this runs on was write-only state: the
+    loop was never closed AND never joined.
+
+    The close now happens on the loop's OWN thread (a ``finally`` around
+    ``run_forever``, so it cannot race a read still being submitted to the loop)
+    and ``stop()`` joins that thread, which is what makes the assertions below
+    true by the time it returns. The loop is captured BEFORE the stop because
+    ``stop`` clears the attribute.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+        )
+        assert reply.get("op") == "ack", reply
+        assert reply["detail"]["entries"], reply
+        # The OWNER is the device that read the page, so the owner is the device
+        # whose loop this cell is about.
+        loop = server_b._page_loop
+        thread = server_b._page_loop_thread
+        assert loop is not None, "the stored-page read built no page loop to shelve"
+        assert not loop.is_closed(), "the page loop was already closed before the stop"
+
+        server_b.stop()
+
+        assert loop.is_closed(), "stop() shelved the page loop without closing it"
+        assert (
+            thread is not None and not thread.is_alive()
+        ), "stop() returned while the page-loop thread was still running"
+    finally:
+        link.close("test")
 
 
 def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
