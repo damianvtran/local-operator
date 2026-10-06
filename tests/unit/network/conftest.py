@@ -92,3 +92,20 @@ def socketpair() -> Any:
                 sock.close()
             except OSError:
                 pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this suite may DISCOVER the real gh (review round 2, n3).
+
+    ``github.find_gh`` is the only discovery seam for the forge ladder's gh arm,
+    and the real gh's keychain lookup is user-global: a stray discovery in a
+    test process could reach the operator's login. Pinning the seam to "not
+    found" here covers every file in this directory — present and future —
+    rather than the single file that happened to need it first; cells that
+    exercise the ask-gh path install their own stub and override this pin
+    explicitly, and the discovery itself never runs the binary.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)

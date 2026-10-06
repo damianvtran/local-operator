@@ -279,6 +279,15 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
     "github_repo_refused": 0,
+    # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
+    # that RESOLVED but could not be read refuses by arm rather than falling
+    # through to a wider one. Owner-side states no retry from the borrower can
+    # change, so they cache long like the App's own codes.
+    "github_token_unusable": 300_000,
+    "github_gh_unusable": 300_000,
+    # The store itself could not be read, so no arm could be resolved — the
+    # ladder STOPS rather than serving a wider arm (review round 1, M1).
+    "github_store_unreadable": 300_000,
     # The frame named a sender other than the device the transport authenticated
     # (review round 1, F1). An honest client never produces it, so it is cached like
     # an authorisation refusal rather than retried.
