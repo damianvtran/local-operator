@@ -83,6 +83,12 @@ POLL_S = 0.05
 def _the_queue_is_live(monkeypatch: pytest.MonkeyPatch) -> None:
     """The queued arm, stated rather than inherited (the sibling e2e file's rule)."""
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    # The ask gate is pinned OFF for the same reason as the sibling queue file:
+    # the seeding run is scripted for the queue's own calls only, and the
+    # gate's forked check is an extra provider request its tape does not carry.
+    # The gate's real-path cells (where the fork IS scripted) are
+    # tests/e2e/test_ask_gate_e2e.py.
+    monkeypatch.setattr(policy, "ASK_GATE", False)
 
 
 async def _never_answers(questions: list[Any]) -> dict[str, list[str]] | None:

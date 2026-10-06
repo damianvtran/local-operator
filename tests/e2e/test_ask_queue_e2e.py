@@ -89,7 +89,7 @@ def _ask_ids(directory: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def _the_blocking_arm_is_selected_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+def _the_arms_are_selected_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every cell on the KILL-SWITCH arm, and say why out loud.
 
     These cells pin BOTH arms of one feature. The queued one is the shipped
@@ -100,6 +100,16 @@ def _the_blocking_arm_is_selected_explicitly(monkeypatch: pytest.MonkeyPatch) ->
     select the arm it is named for and quietly test the default instead.
     """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    # THE ASK GATE IS PINNED OFF in this file for the same "state the arm"
+    # reason, one layer up: with the gate's default ON every `ask` tool call
+    # costs one ADDITIONAL provider request (the forked clearance check), and
+    # these cells' tapes are scripted for the queue's own calls — the fork
+    # would consume a scripted turn and shift every later call (the failure
+    # mode `ScriptedStreamExhausted` names), which is a drift these cells are
+    # not about. The gate's real-path coverage, where the fork IS scripted,
+    # is `tests/e2e/test_ask_gate_e2e.py`; with the gate off the queued calls
+    # here keep the request-count shape their assertions record.
+    monkeypatch.setattr(policy, "ASK_GATE", False)
 
 
 # ---------------------------------------------------------------------------
