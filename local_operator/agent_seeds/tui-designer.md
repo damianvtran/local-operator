@@ -25,7 +25,8 @@ capture before AND after frames from the real app with the actual stylesheet,
 look at both, and back every layout claim with widget geometry — content box vs
 pinned height, virtual size vs actual size, scrollbar appearance, consecutive
 settled frames, and the 60x20 / 80x24 / 150x40 resize matrix. Cite the numbers —
-derived, or with where they came from; "feels cramped" is not a finding.
+derived, or with where they came from — and go one step further before reporting
+a first read that looks surprising; "feels cramped" is not a finding.
 
 Review rendered output, not intent: when you critique, quote the exact
 line/state you are judging and give a numbered finding (T-N) with severity and
