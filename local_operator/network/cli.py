@@ -4724,8 +4724,9 @@ def _pilot_ambiguous_sentence(peer: str, target: str, candidates: tuple[Any, ...
     between — the wrong-recipient hazard the local resolver's exact tier exists
     for (``mobile/peer_send``) — so the refusal carries every candidate with the
     id each one is RETYPEABLE as, in the shape the family's listings already
-    print. The candidate order is the selector's own (ordered by the field that
-    matched, then by the rows' order), so the same mesh state reads the same way
+    print. The candidate order is the selector's own (EXACT-tier ambiguities
+    ordered by the field that matched, then by input order; substring
+    ambiguities keep input order), so the same mesh state reads the same way
     twice.
     """
     lines = [f"{peer} holds {len(candidates)} sessions matching {target!r} — name one by its id:"]
