@@ -174,3 +174,33 @@ read"; session-scoped like every `net_session_*` op):
   unreachable — with the wire audit showing no spawn on a read.
 - Docs + a real-device re-check when the pairing is up again (the lane's
   post-outage instrumented run slot).
+
+## Next slice (queued — NOT in this PR; scope stays as above)
+
+The same producer's other half, found by the UI lane (`2197cee0a558`) and
+routed here as a follow-up (Aida, 2026-10-06):
+
+**A wire-served row is stamped with the reader's clock.** `_remote_history`
+serves wire rows as `{"ts": <serve time>, ...}` because the display-window
+messages carry no entry time of their own (the stated limit in the method's
+docstring). Joining a session mid-turn makes the ordering consequence visible:
+the wire's user row carries a serve-stamp while the snapshot seed's tool start
+carries its true `started_at_epoch`, so the transcript renders tool-above-user
+— sticky while mounted, healing on remount, on base AND on the UI lane's own
+fix — because the two stamps are not comparable facts, and no held-echo rule
+can reach that. The design note for that slice (before its code) must settle:
+
+1. **A row served without a true entry time SAYS SO on the wire** — never a
+   silently substituted reader-clock stamp. An absent (or explicitly null)
+   stamp the reader can see is strictly better than an invented one it cannot.
+2. **The consumer contract is written down**: what a reader does with a served
+   row that carries no true stamp — its ordering, its merge with true-stamp
+   rows, its display — so downstream ordering rules can be written against a
+   contract rather than a guess.
+
+Known constraints from this slice's work: the window DTO is `extra="forbid"`,
+so a new field cannot ride un-negotiated past older viewers' validation
+(capability-key discipline, as every other additive wire field); and the
+stored-page source this PR adds already carries TRUE entry timestamps — the
+two sources will share whichever shape that slice settles.
+
