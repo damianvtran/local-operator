@@ -1253,6 +1253,56 @@ def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
         _stop_all(served)
 
 
+def test_a_stored_session_refuses_a_peek_and_stays_cold(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§8.3, over a real link: the gate reads the row state BEFORE any viewer.
+
+    The tempting implementation of a remote read is to open the viewer and let
+    the bind warm whatever is there — that is what ENGAGE does, and it is why
+    this cell sits beside the cold-engage one: the refusal is only half the
+    claim; the other half is read off the OWNER's own rows afterwards, because
+    a gate that merely raised after a bind would still have started a runtime
+    on a device nobody is watching.
+
+    Driven through the CLI's own handler over the real relay control socket,
+    so the RESOLUTION (a real fan-out, a real stored row) and the GATE run as
+    one path.
+    """
+    from local_operator.network import cli as network_cli
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed(server_b.root, SESSION)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+        capsys.readouterr()
+        assert (
+            network_cli.main(  # the entry point argv dispatches to
+                argparse.Namespace(
+                    network_command="sessions",
+                    json=True,
+                    peer=server_b.identity.device_id,
+                    peek=SESSION,
+                )
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["code"] == "session_stored", payload
+        assert "engage" in payload["message"] and "resume" in payload["message"], payload
+        states = [
+            item["state"] for item in server_b.local_session_rows() if item["session_id"] == SESSION
+        ]
+        assert states == ["stored"], (
+            "the peek started the session on its owner; its rows now read " f"{states!r}"
+        )
+    finally:
+        link.close("test")
+
+
 def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
