@@ -2550,3 +2550,123 @@ def test_mesh_field_refusals_name_the_local_route() -> None:
     assert refusal is not None and "minted on that device" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="info", peer="p", session="s", pid=3))
     assert refusal is not None and "`pid` names a process on THIS machine" in refusal
+
+
+# ---------------------------------------------------------------------------
+# the peer hint — a bare remote id names the peer that holds it
+# ---------------------------------------------------------------------------
+#
+# The same fix-forward as the send tool's (see tests/unit/tools/test_send_tool.py
+# for the full arm matrix — warm/cold reads, no mesh, unreadable relay, unknown
+# id). info/peek/stop/resume resolve through the ONE `_sessions_target`, so all
+# four inherit the hint at one call site; these cells pin the inheritance and
+# the guards the ops side owns: the warm cache answers with no read, a NAME
+# miss stays a local question, and the local success path pays nothing.
+
+
+def _hint_peer_row(session_id: str = "ffff12345678", *, device_name: str = "cloud-node-1"):
+    from local_operator.resume import SessionRow
+
+    return SessionRow(
+        session_id,
+        1.0,
+        "remote work",
+        locality="remote",
+        owner_device="d_cloud_node_1",
+        owner_device_name=device_name,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["info", "peek", "stop", "resume"])
+async def test_a_bare_remote_id_names_the_peer_on_every_addressed_op(
+    root: Path, monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    """The four ops that take an address and an optional `peer` all refuse
+    through `_sessions_target`; the exact-id miss now names the device that
+    holds the id, on every one of them. The warm cache must answer — the read
+    is poisoned, matching the send tool's zero-read guard."""
+    from local_operator.paths import config_dir
+    from local_operator.session import peer_rows as peer_rows_mod
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _hint_peer_row())
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a warm cache hit paid a listing read")
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+
+    args: dict[str, Any] = {"op": op, "session": "ffff12345678"}
+    if op == "resume":
+        # A local resume requires a prompt by validation; the miss must still be
+        # resolved (and named) BEFORE anything would be launched.
+        args["prompt"] = "go"
+    result = await execute_sessions("t", args, None, None, _context(root))
+    assert result.is_error
+    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_exact_id_keeps_the_resolver_sentence(root: Path) -> None:
+    """No relay on this device, so no catalogue is asked and nothing moves: the
+    resolver's own sentence stands — the exact sentence the defect reported."""
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    result = await execute_sessions(
+        "t", {"op": "info", "session": "ffff99998888"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert result.text == "no session found with session id 'ffff99998888'"
+
+
+@pytest.mark.asyncio
+async def test_a_locally_resolved_info_pays_no_peer_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ops half of the zero-read guard: a session THIS device holds resolves
+    from the registry with both peer-catalogue entry points poisoned."""
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    _publish_record(root, "aaaa11112222", "local work")
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a local resolution paid a peer read")
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_row", _forbidden)
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+    result = await execute_sessions(
+        "t", {"op": "info", "session": "aaaa11112222"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "local work" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_name_miss_stays_a_local_question(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact FULL-ID matching only: a name that matches nothing locally is not
+    searched against the peer catalogue — a name can match sessions on two
+    devices, and a diagnostic sentence must not pick between them. Both
+    catalogue entry points are poisoned, so any lookup fails the cell."""
+    from local_operator.paths import config_dir
+    from local_operator.session import peer_rows as peer_rows_mod
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _hint_peer_row(session_id="aaaa11112222"))
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a name miss asked the peer catalogue")
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_row", _forbidden)
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", _forbidden)
+
+    result = await execute_sessions(
+        "t", {"op": "info", "target": "remote work"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert result.text == "no session matches 'remote work' (searched live and stored sessions)"

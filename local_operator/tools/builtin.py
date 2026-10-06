@@ -13425,6 +13425,14 @@ async def execute_send(
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"
+        # THE PEER HINT: an exact id that is nowhere on this device may be a
+        # session a PEER is holding — the miss then names that device instead
+        # of sending the caller back to look locally again (one turn was
+        # spent on exactly that, 2026-10-06). Every other error form returns
+        # None before any read; see _peer_holder_hint.
+        hint = await _peer_holder_hint(params.session or "", error or "")
+        if hint:
+            error = hint
         return _error(tool_call_id, "send", error or "no target resolved")
 
     # Self-send guard: the tool runs INSIDE the sender's session process, so
@@ -14607,7 +14615,100 @@ async def _sessions_target(
             return _SessionsTarget(None, "", [], False, stored_error)
     if error and peer_send.live_scan_found_nothing(error):
         error = f"no session matches {params.target!r} (searched live and stored sessions)"
+    # THE PEER HINT: the exact-id miss may name a session a PEER holds; every
+    # other error form is untouched (see _peer_holder_hint).
+    hint = await _peer_holder_hint(params.session or "", error or "")
+    if hint:
+        error = hint
     return _SessionsTarget(None, "", [], False, error or "no session resolved")
+
+
+# ---------------------------------------------------------------------------
+# the peer hint — an exact-id miss names the device that holds it
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT IT ANSWERS (operator-visible, 2026-10-06): ``send`` called with a
+# REMOTE session id and no ``peer`` answered "no session found with session id
+# '<id>'" — accurate for this device and MISLEADING anywhere it was read: the
+# session exists, on a peer, and the caller spent a turn concluding it did
+# not. Wanted, and what this section composes: "`<id>` is held by <device> —
+# pass `peer=<device>`".
+#
+# THE SENTENCE STAYS OUT OF ``mobile/peer_send``: that module is deliberately
+# import-light and loopback-scoped, and a peer catalogue is a mesh concern.
+# The refusal it produces is unchanged; the hint is composed by the CONSUMERS
+# (the ``send`` tool and the ``sessions`` ops), which is also the only layer
+# that can afford the fan-out and knows which refusals are exact-id misses.
+
+#: The live resolver's exact-id MISS form, verbatim from
+#: ``mobile/peer_send.resolve_peer_target`` (its ``session`` branch). The hint
+#: fires on THIS sentence and no other. The tool's other refusal forms — a
+#: wedged record, the stale form, the unengaged gate, a conflicting selector
+#: pair — are each a fact about a session this device REACHED, and a peer read
+#: would be answering a different question. Matching the sentence rather than
+#: re-deriving the state follows the tool's own predicates
+#: (``session_id_unowned``, ``live_scan_found_nothing``): the refusal IS the
+#: interface here.
+_EXACT_ID_MISS = "no session found with session id"
+
+
+def _peer_holder_sentence(session_id: str) -> str | None:
+    """The sentence naming the peer that holds ``session_id``, else ``None``.
+
+    Blocking (a cache read, and on a miss one bounded relay fan-out): call
+    off the event loop — :func:`_peer_holder_hint` is the wrapper the tools
+    use.
+
+    THE LOOKUP, and every way it stays cheap:
+
+    * cache-first — ``peer_session_row`` never reads and never dials, so an id
+      the last federated listing reported costs nothing;
+    * on a miss, ONE bounded federated read (``peer_session_rows`` at
+      ``ttl_s=0`` — a genuine read, the same relay projection the sidebar's
+      poll and the CLI listings ride). The relay gate lives inside that
+      machinery: with no relay record on this device it issues NO call at
+      all, and a relay that refuses, times out or cannot be read is an empty
+      answer, never an exception (``peer_rows``'s own contract). Both
+      properties are what keep a device outside any mesh — every existing
+      install — byte-identical;
+    * exact FULL-ID matching only: the row's id must equal ``session_id``.
+      Names are deliberately not searched on the peer side — a name can match
+      sessions on two devices, which is the wrong-recipient ambiguity the mesh
+      surfaces locally, and a diagnostic sentence must not pick between them;
+    * the row must be a remote row that NAMES its device, or there is no
+      sentence: ``None`` keeps the caller's refusal byte for byte.
+
+    The device is ``owner_device_name or owner_device`` — the two spellings
+    the tool's own ``peer`` argument accepts ("a peer name or id"), NEVER
+    ``owner_label``, whose fallback truncates the id to an 8-character
+    fragment that would resolve nowhere.
+    """
+    from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+
+    root = config_dir()
+    row = peer_session_row(session_id, root)
+    if row is None:
+        peer_session_rows(root, ttl_s=0)
+        row = peer_session_row(session_id, root)
+    if row is None or not row.is_remote or not row.owner_device:
+        return None
+    device = row.owner_device_name or row.owner_device
+    return f"`{session_id}` is held by {device} — pass `peer={device}`"
+
+
+async def _peer_holder_hint(session_id: str, error: str) -> str | None:
+    """``_peer_holder_sentence`` for an exact-id miss refusal, else ``None``.
+
+    THE ONE CALL the ``send`` tool and the ``sessions`` ops both make, so the
+    trigger and the lookup cannot drift between them. Fires only when the
+    resolution actually named an id (``session=``) AND the refusal is the
+    resolver's miss form; every other error — and every caller that still has
+    a record — returns before a thread is spawned, so a local success and
+    every non-miss refusal stay at zero peer reads.
+    """
+    if not session_id or _EXACT_ID_MISS not in error:
+        return None
+    return await asyncio.to_thread(_peer_holder_sentence, session_id)
 
 
 def _sessions_candidates_text(target: _SessionsTarget) -> str:
