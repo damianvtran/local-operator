@@ -2415,10 +2415,15 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     peer's own reply (its id, and its ``record`` when the reply carries one) plus
     facts read from THIS device's membership records — which is also where the
     display name comes from, through the same local resolver ``/new remote``'s
-    autofill reads. A name this device cannot resolve is left empty (the
-    ordinary unnamed-device fallback), and a reply that names no session id
-    seeds nothing. Everything here is local disk reads; callers run on a request
-    thread.
+    autofill reads. ``owner_device`` is the membership's canonical DEVICE ID
+    whenever the destination resolves to one: ``MESH_ID_PATTERN`` admits a plain
+    name, and a name must not ride where every federated row carries an id (the
+    next read would replace it, but nothing downstream should have to know two
+    spellings of one device). A name this device cannot resolve is left empty
+    (the ordinary unnamed-device fallback), and a reply that names no session id
+    seeds nothing. Everything here is local disk reads; the caller runs it off
+    the event loop (``asyncio.to_thread``), like every other disk-touching
+    admission in the route.
     """
     from local_operator.network.peers import resolve_peer
     from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
@@ -2441,7 +2446,7 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
             started,
             name,
             locality="remote",
-            owner_device=peer,
+            owner_device=(matches[0].device_id if matches else peer),
             owner_device_name=(matches[0].name if matches else ""),
             # The peer's ``started`` claim is the row's ordering birth, exactly as
             # the federated read stamps ``created_at`` from the same claim.
@@ -2597,7 +2602,12 @@ async def create_session(body: CreateSession, request: Request):
             # ``session/peer_rows``' cached listing, and a listing read before
             # this create cannot contain its id — so this route, which HOLDS the
             # peer's reply, seeds the row it names (``_seed_created_peer_row``).
-            _seed_created_peer_row(host(request).root, body.peer, peer_reply)
+            # OFF THE LOOP: the seed reads this device's membership records — the
+            # same class of disk read every other admission in this route sends
+            # through a worker (``create_on_peer`` above included).
+            await asyncio.to_thread(
+                _seed_created_peer_row, host(request).root, body.peer, peer_reply
+            )
             return created
         pool = host(request)
         target = body.target.model_dump() if body.target else None

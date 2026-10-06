@@ -1173,6 +1173,43 @@ async def test_a_create_on_a_peer_seeds_the_id_every_route_resolves(
     assert relay.ops() == ["peer_session_create"], relay.ops()
 
 
+@pytest.mark.asyncio
+async def test_a_name_shaped_peer_still_seeds_the_membership_id(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seed keys the row by the ID every federated row carries (review NIT-2).
+
+    ``MESH_ID_PATTERN`` admits a plain name and the resolver accepts id-or-name,
+    so a create addressed by name must still seed ``owner_device`` as the
+    membership's canonical id — not the spelling the request happened to use,
+    which nothing else in the row vocabulary writes a device with.
+    """
+    client, root = mesh_api
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=MINE, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(device_id=PEER, name="build-box", role="drive")
+    )
+    network_store.save(record, root)
+    relay = FakeRelay(
+        {"peer_session_create": {"session_id": OTHER, "admitted": False, "record": {}}}
+    )
+    _join(monkeypatch, relay)
+    from local_operator.session.peer_rows import clear_cache, peer_session_row
+
+    clear_cache()
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": "build-box"},
+    )
+    assert response.status_code == 200, response.text
+    row = peer_session_row(OTHER, root)
+    assert row is not None
+    assert row.owner_device == PEER, "the name must not ride where ids are expected"
+    assert row.owner_device_name == "build-box"
+
+
 # ---------------------------------------------------------------------------
 # Transfer: one answer, request_id accepted, unconfirmed is not "nothing changed"
 # ---------------------------------------------------------------------------
