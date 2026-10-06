@@ -1435,6 +1435,17 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
+    #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
+    #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
+    #: wherever it is, so its presence IS the mode, one fact. TOTAL and
+    #: fail-open: it returns a diversion mapping (``{"text": …, "details": …}``
+    #: carrying the hidden marker) or ``None``, and NEVER raises for any
+    #: policy, provider, parse or timeout condition — ``None`` means "enqueue,
+    #: unchanged". The in-callable policy read owns the kill switch; the
+    #: tool-side guard around the await is the last line so even a contract
+    #: breach cannot lose the ask (design §2.2's failure-semantics table).
+    gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
