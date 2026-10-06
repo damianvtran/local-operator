@@ -10521,6 +10521,7 @@ def _grant_pair_shares(
     with an audit row and left out of the receipt, which names the remedy. Labels
     and emails never enter the audit (§9: masked is display-level).
     """
+    from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.types import BROKER_CAPABILITY
@@ -10552,7 +10553,14 @@ def _grant_pair_shares(
                         identity_label=label,
                         by=record.self_device_id,
                     )
-                entry = document.grant(key, joiner_id, scope="session", by=record.self_device_id)
+                # THE SHARE VERB'S PER-KIND SCOPE, mirrored (one rule, two write
+                # sites): the GitHub App key is device-scoped by construction and
+                # ``grant`` refuses ``session`` for it BY NAME — a session scope
+                # here dropped every github-app grant as a per-key refusal, which
+                # was invisible while the row's default was False and is exactly
+                # what the §1.4 flip would have had the offer promise.
+                scope = "device" if github_mod.is_github_key(key) else "session"
+                entry = document.grant(key, joiner_id, scope=scope, by=record.self_device_id)
                 granted.append(key)
                 _audit_pair_grant(audit, record, joiner_id, key, holders=len(entry.holders))
             except MeshRefusal:

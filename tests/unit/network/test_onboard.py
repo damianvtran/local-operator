@@ -541,9 +541,23 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         "local_operator.network.identity.load",
         lambda *a, **k: SimpleNamespace(device_id="d_mac", name="this-mac"),
     )
+
+    def _member_row(device_id: str) -> Any:
+        # The provisioning step reads THIS device's copy of the node's member row
+        # (role and kind decide what is provisioned, §1.3); the real accessor is
+        # ``NetworkRecord.member``. The card's device is ``d_node`` with the
+        # default drive role.
+        return SimpleNamespace(
+            device_id=device_id,
+            active=True,
+            role="drive",
+            kind="device",
+            name="cloud-node-1",
+        )
+
     monkeypatch.setattr(
         "local_operator.network.store.list_networks",
-        lambda *a, **k: [SimpleNamespace(network_id="n_1", name="damian-mesh")],
+        lambda *a, **k: [SimpleNamespace(network_id="n_1", name="damian-mesh", member=_member_row)],
     )
     # The node rig the grants step is executed against (F7): a REAL store, so the
     # node-side ``member grant`` is answered by the node's own code. The patch form
