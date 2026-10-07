@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import json
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -34,7 +34,7 @@ from local_operator.session.transcript import (
 )
 
 if TYPE_CHECKING:
-    from local_operator.session.transcript import Transcript
+    from local_operator.session.transcript import Transcript, TranscriptEntry
 
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 
@@ -722,7 +722,9 @@ def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
     return frozenset(ids)
 
 
-def _entry_time_join(entries: Any, messages: list[Any]) -> dict[str, float]:
+def _entry_time_join(
+    entries: Sequence[TranscriptEntry], messages: Sequence[AgentMessage]
+) -> dict[str, float]:
     """``{entry id: entry ts}`` for the rows a page CARRIES, and nothing more.
 
     WHY NOT THE WHOLE JOURNAL: the display window is bounded

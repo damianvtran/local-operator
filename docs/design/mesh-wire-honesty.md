@@ -152,6 +152,20 @@ note left open, recorded so the next reader does not have to re-derive them:
   producer in this codebase sets it, and absence means exactly "an older daemon". The
   model widens `HistoryEntry.ts` to `float | None` for the same reason (an `unstated`
   row is `null`).
+  **The field is REQUIRED — no default** (review round 1, R-1). A default is
+  *serialised* by the response model onto every row whose producer never classified it,
+  so a page could claim `"entry"` by omission, which is the one value a producer must
+  not be able to assert without computing it. And the nullability stays scoped: the
+  CHILD transcript route serves the raw journal envelope verbatim
+  (`TranscriptEntryEnvelope`, four keys, non-null `ts`) rather than the classifying row,
+  so a surface nobody classified keeps its exact old shape.
+* **The two display-history declarations ride the mesh hop** (QA round 1, Q1).
+  `network/dial.py`'s `AUTH_FIELDS` is a CLOSED allowlist on the owner-dial path, and
+  `display-history-entry-times-v1`'s declaration (and `display_history_audit`'s before
+  it) was not on it — so a peer's owner read no declaration, stripped the join it had
+  just built, and served `unstated`/`served` for every row. Both names are now on the
+  list, and the hop has its own test (the in-tree two-relay suite), because an
+  in-process attach cannot see a name dropped in transit.
 * **`entry_ts` also rides `GET .../{id}/events`**, so the snapshot embedded in the SSE
   open frame answers exactly like `GET .../{id}`. The note named "the snapshot request
   path"; the open frame carries the same `DesktopSnapshot`, and leaving it out would
