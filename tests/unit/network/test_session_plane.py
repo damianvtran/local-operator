@@ -1755,15 +1755,16 @@ def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
     interleaving rather than a hope that it happened. The timeouts are failure
     signals (the stop never got there, the test never released), never the window.
 
-    The outcome is the user-visible half, and it is deliberately a CLASS and not a
-    single value: the fix removes ``RuntimeError`` and nothing else. Which of the
-    other outcomes lands — a page, a cancellation, or the bound — depends on
-    whether the loop got to run the queued submit before the stop it is racing
-    did, and every one of them is an honest end. THE BOUND IS PATCHED DOWN so the
-    last one is reachable inside this cell's join: a submit the stopping loop never
-    got to run is the case the bound is documented for ("a read already submitted
-    is not reclaimed by the queue order"), and leaving it at 60 s would make this
-    cell's runtime depend on which branch the scheduler picked.
+    The outcome is the user-visible half, and agent review round 1's M-R-1 is what
+    made it a CLASS rather than a single value: a read that races a stop has two
+    honest ends, and which one lands depends on whether the loop got to run the
+    queued submit before the stop it is racing did — the read returns its PAGE when
+    its task completed and only the completion notification was still queued, and it
+    is released with a cancellation when the task was still pending. Neither is an
+    error and neither is the bound. THE BOUND IS PATCHED DOWN only so that a
+    regression which re-opens the park-out lands inside this cell's join in seconds
+    instead of a minute — M-R-1 measured that shape unpatched: the reader got
+    ``TimeoutError`` with its page already decoded and discarded.
     """
     _server_a, server_b, _h, _p = peer_pair
     _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
@@ -1834,11 +1835,18 @@ def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
 
     assert not reader.is_alive(), "the racing read never ended"
     assert not stopper.is_alive(), "the racing stop never ended"
-    error = outcome.get("error")
-    assert not isinstance(error, RuntimeError), f"submitted onto the closed loop: {error!r}"
     assert held["locked"], (
         "the submit was taken OUTSIDE the lock the stop shelves the loop under, so "
         "a stop can close that loop between choosing it and submitting to it"
+    )
+    error = outcome.get("error")
+    assert not isinstance(error, RuntimeError), f"submitted onto the closed loop: {error!r}"
+    # NOT ONLY THE ERROR CLASS (M-R-1): a regression that re-opens the park-out
+    # lands on ``TimeoutError``, which is neither an error the caller can tell apart
+    # nor the ending this read is owed — the page it decoded is the answer.
+    assert "page" in outcome or isinstance(error, concurrent.futures.CancelledError), (
+        "the racing read neither returned the page it decoded nor was released with "
+        f"a cancellation — it was left to the bound: {error!r}"
     )
     assert loop.is_closed(), "stop() shelved the page loop without closing it"
 
@@ -1959,6 +1967,15 @@ def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
         "the parked read did not end with a cancellation — it parked out the bound "
         f"instead: {error!r} / page={outcome.get('page')!r}"
     )
+    # THE CONTAINMENT CLAIM RESTS ON THE TYPE (M-R-5, agent review round 1): it is
+    # ``_run_handler``'s ``except Exception`` that turns this release into the same
+    # contained internal-error frame the old bound produced, and that arm catches it
+    # only because ``concurrent.futures.CancelledError`` — which is what
+    # ``future.result()`` raises here — is a plain ``Exception`` subclass, unlike
+    # ``asyncio.CancelledError``, a ``BaseException`` that would ESCAPE it. Pinned
+    # because the whole argument is a fact about which class this is.
+    assert issubclass(concurrent.futures.CancelledError, Exception)
+    assert not issubclass(asyncio.CancelledError, Exception)
 
 
 def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
