@@ -673,8 +673,15 @@ def test_a_relay_start_reaps_a_terminal_record_without_a_new_request(root: Path)
         while time.time() < deadline and path.exists():
             time.sleep(0.1)
         assert not path.exists(), "the boot sweep did not reap the terminal record"
-        # The tombstone the prune wrote: the spent id stays refused.
-        assert any(row.get("pruned_at") for row in A.read_index(root))
+        # The tombstone the prune wrote is THIS record's: the assertion binds to
+        # the request rather than to "any tombstone at all", so a stray row from
+        # another test — or a rewrite that dropped ours — cannot pass it (agent
+        # review round 1, F2).
+        tombstones = [
+            row for row in A.read_index(root) if row.get("request_id") == record["request_id"]
+        ]
+        assert tombstones, "no tombstone row for the reaped request"
+        assert tombstones[-1].get("terminal_state") == "denied"
     finally:
         server.stop()
 
