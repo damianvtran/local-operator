@@ -42,7 +42,9 @@ shows up in the container log instead of being taken on trust.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -68,6 +70,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "write this process's pid here so the entrypoint's environ watcher can "
             "aim its memory probe at the agent rather than guess it from a cmdline "
             "that the process renames under itself"
+        ),
+    )
+    parser.add_argument(
+        "--selftest-child",
+        action="store_true",
+        help=(
+            "spawn one bash child the way the product's tools do and report what it "
+            "inherited, instead of starting the CLI (the coexistence check)"
         ),
     )
     parser.add_argument("lop_argv", nargs=argparse.REMAINDER, help="arguments for the lop CLI")
@@ -112,6 +122,44 @@ def _self_environ_clean(key: str) -> bool:
         return True  # no procfs (a macOS dev box): nothing to claim either way
 
 
+def _selftest_child(provider_env: str, key: str) -> int:
+    """Spawn one bash child the way the product's tools do, and report what it inherited.
+
+    WHY THIS EXISTS (agent review round 2, SEC-13): the five acceptance runs are mock, so
+    the agent spawns no tool child, and their green 4e reading covers a container with no
+    bash grandchild in it. The coexistence case — this launcher HOLDING the key while a
+    child it spawns runs — is the one that matters, and it is measured here rather than
+    inferred. The child's environment comes from
+    ``local_operator.tools.shell_env.child_environment``, which is the function the bash
+    tool and the eval tool build their children with, so this is the real filter and not a
+    copy of it. Exit 0 iff the child ran and did not inherit the key by name or by value.
+    """
+    from local_operator.tools.shell_env import child_environment
+
+    env = child_environment()
+    inherited_by_name = bool(provider_env) and provider_env in env
+    inherited_by_value = bool(key) and any(key in value for value in env.values())
+    completed = subprocess.run(
+        ["sh", "-c", "sleep 2"], env=env, capture_output=True, text=True, check=False
+    )
+    report = {
+        "child_argv": ["sh", "-c", "sleep 2"],
+        "child_exit": completed.returncode,
+        "child_env_entries": len(env),
+        "key_value_anywhere_in_child_env": inherited_by_value,
+        "parent_self_environ_clean": _self_environ_clean(key),
+        "provider_var_in_child_env": inherited_by_name,
+    }
+    report["pass"] = (
+        completed.returncode == 0
+        and not inherited_by_name
+        and not inherited_by_value
+        and report["parent_self_environ_clean"]
+    )
+    print(json.dumps(report, sort_keys=True), flush=True)
+    return 0 if report["pass"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
 
@@ -148,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     lop_argv = list(args.lop_argv)
+    if args.selftest_child:
+        # The key is already set in this process's memory by the block above, which is
+        # exactly the state the check needs: a parent holding it, a child that must not.
+        return _selftest_child(args.provider_env, key)
     if lop_argv and lop_argv[0] == "--":
         lop_argv = lop_argv[1:]
     # `cli.main()` parses `sys.argv` itself and takes no argument, so the launch

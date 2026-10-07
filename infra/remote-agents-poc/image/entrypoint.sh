@@ -7,10 +7,20 @@
 #
 # NEVER add `set -x`. From the first line to the last this script holds the model
 # key in a shell variable, and a trace would put it in CloudWatch — the one place
-# it must never reach. The key is read out of the environment (the task definition
-# injects it as an ECS secret) and the environment variable is UNSET immediately,
-# so the agent process gets it only through the explicit subshell export below.
+# it must never reach. The task definition injects it as an ECS secret, it is taken
+# out of the environment HERE before anything else runs, and from then on it reaches
+# the agent only over a file descriptor, through image/lop_launch.py, which sets it
+# in-process (see the key-delivery block below).
 set -euo pipefail
+
+# THE KEY LEAVES THE ENVIRONMENT BEFORE ANYTHING ELSE — before the uid check and
+# before the first `stamp`, because both used to spawn a child (`id -u`, `date`)
+# while the value was still in this process's environment. A child's INITIAL
+# environment is a file the model's own bash child can read (`/proc/$PPID/environ`),
+# so those two children were the last copies of the exposure this POC closes (agent
+# review round 2, SEC-12). `$EUID` is a bash builtin and spawns nothing.
+MODEL_KEY="${LOP_POC_MODEL_KEY:-}"
+unset LOP_POC_MODEL_KEY
 
 # NO privilege drop here, and that is the point: the task definition runs this as
 # uid 10001 from the first instruction, because the image declares
@@ -20,8 +30,8 @@ set -euo pipefail
 # worked, and it is gone because it should not have been necessary. Probe 4d
 # asserts uid 10001 on every run, so a regression here fails the run rather than
 # the isolation claim.
-if [ "$(id -u)" != "10001" ]; then
-    echo "FATAL: expected uid 10001, got $(id -u): the non-root contract is broken" >&2
+if [ "$EUID" != "10001" ]; then
+    echo "FATAL: expected uid 10001, got $EUID: the non-root contract is broken" >&2
     exit 1
 fi
 
@@ -128,8 +138,6 @@ stamp t_container_start
 # PHASE A is the only process that ever HAS the value in its environment, and it
 # does not survive: it execs itself away.
 if [ -z "${LOP_POC_KEY_FD:-}" ]; then
-    MODEL_KEY="${LOP_POC_MODEL_KEY:-}"
-    unset LOP_POC_MODEL_KEY
     rm -f "$KEY_FIFO"
     mkfifo -m 600 "$KEY_FIFO"
     # The writer is a fork holding the value in its memory; it exits the moment the
@@ -259,24 +267,48 @@ stamp t_probes_done
 printf '{"probe_rc":%s}\n' "$PROBE_RC" >"$OUT/probe_rc.json"
 put_file "$POC_PROBES_URL" "$OUT/probes.json"
 
-# ------------------------------------------------- watcher self-test (on demand)
-# PROVES THE WATCHER CAN GO RED, in this container, without a rebuild. Guarded by an
-# environment variable the driver never sets, so no real run pays for it. It launches
-# a child THE OLD WAY — the key exported into its environment, which is exactly what
-# SEC-1 replaced — and runs the watcher against it: the watcher must FIND it, and its
-# exit code (1) is the proof. A probe that can only ever be green is not evidence.
-if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
+# ---------------------------------------- watcher self-tests (on demand, never by
+# the driver): PROVE THE INSTRUMENT AND THE COEXISTENCE CASE, in this container,
+# without a rebuild.
+#
+# POC_ENVIRON_WATCH_SELFTEST=1 — the RED case. A child is launched THE OLD WAY (the key
+# exported into its environment, which is what SEC-1 replaced) and the watcher must
+# FIND it; its exit code (1) is the proof.
+#
+# POC_ENVIRON_WATCH_COEXIST=1 — the COEXISTENCE case the five mock runs do not cover
+# (they spawn no tool child at all; agent review round 2, SEC-13). The real launcher,
+# holding the key in its memory, spawns a bash child through the PRODUCT'S OWN filter
+# (`shell_env.child_environment`, what the bash and eval tools use) while the watcher
+# samples; the watcher must stay GREEN.
+#
+# Both modes upload their artifacts before exiting, so the reading is re-derivable from
+# the artifact set instead of only from CloudWatch.
+if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ] || [ "${POC_ENVIRON_WATCH_COEXIST:-0}" = "1" ]; then
     stamp t_watch_selftest_start
-    ( export LOP_POC_MODEL_KEY="$MODEL_KEY"; exec sleep 60 ) &
-    leaky_pid=$!
-    sleep 2
+    child_rc=0
+    if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
+        ( export LOP_POC_MODEL_KEY="$MODEL_KEY"; exec sleep 60 ) &
+        probe_child_pid=$!
+    else
+        /opt/lop/bin/python /usr/local/bin/lop-launch.py --key-fd 3 \
+            --provider-env LOP_POC_MODEL_KEY --selftest-child \
+            3< <(printf '%s' "$MODEL_KEY") >"$OUT/selftest_child.json" 2>&1 &
+        probe_child_pid=$!
+    fi
+    sleep 3
     selftest_rc=0
     /opt/probe/bin/python /opt/probe/probes.py --watch-environ \
         --out "$OUT/proc-env-watch.json" --stop-file "$WORKSPACE/tmp/never" \
-        --key-fd 3 --key-prefix-chars 0 --max-samples 2 \
+        --key-fd 3 --key-prefix-chars 0 --max-samples 3 \
         3< <(printf '%s' "$MODEL_KEY") || selftest_rc=$?
-    kill "$leaky_pid" 2>/dev/null || true
-    echo "watcher self-test rc=$selftest_rc: 1 means it DETECTED the key in a child's environment, which is the red proof"
+    if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
+        kill "$probe_child_pid" 2>/dev/null || true
+    else
+        wait "$probe_child_pid" || child_rc=$?
+    fi
+    tar -czf "$WORKSPACE/selftest-results.tar.gz" -C "$OUT" .
+    put_file "$POC_RESULTS_URL" "$WORKSPACE/selftest-results.tar.gz" || true
+    echo "watcher self-test rc=$selftest_rc (0 green / 1 red); child rc=$child_rc; artifacts uploaded"
     exit "$selftest_rc"
 fi
 

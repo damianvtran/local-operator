@@ -1025,6 +1025,188 @@ def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> 
     verifier.check("acceptance4.key_scan", scanner.returncode == 0, result)
 
 
+#: Every probe, in one fixed order, so two runs' rows line up under each other.
+_PROBE_ORDER = (
+    "4a_creds_endpoint",
+    "4b_egress",
+    "4c_no_secret_on_disk",
+    "4c_env_no_key_in_child_env",
+    "4d_platform",
+    "4f_no_ps",
+)
+
+#: The phases the results doc's table publishes, in the order it reads them. The span
+#: row is here because the three ECS phases cover `createdAt`→`startedAt` and NOT
+#: `RunTask`→`RUNNING`: those differ by the control plane's own ~1 s, and a table that
+#: prints both without naming the span is how they get read as the same interval.
+_PHASE_ORDER = (
+    ("runtask_to_running_wall_ms", "RunTask call → first RUNNING (driver wall clock)"),
+    (
+        "ecs_created_to_pull_started_ms",
+        "**scheduling + ENI attach** (`createdAt` → `pullStartedAt`)",
+    ),
+    ("ecs_pull_started_to_pull_stopped_ms", "**image pull** (`pullStartedAt` → `pullStoppedAt`)"),
+    ("ecs_pull_stopped_to_started_ms", "**container start** (`pullStoppedAt` → `startedAt`)"),
+    ("ecs_created_to_started_ms", "the three phases above as one span (`createdAt` → `startedAt`)"),
+    ("container_start_to_probes_start_ms", "container's first stamp → probes start"),
+    ("probes_duration_ms", "**probes (4a–4f, incl. the whole-filesystem key scan)**"),
+    ("probes_done_to_first_model_event_ms", "probes done → first model event"),
+    ("container_start_to_first_model_event_ms", "container start → first model event"),
+    ("runtask_to_first_model_event_ms", "RunTask → first model event (raw)"),
+    (
+        "runtask_to_first_model_event_minus_probes_ms",
+        "**RunTask → first model event, minus the probes**",
+    ),
+)
+
+
+def _record_dirs(out_dir: Path) -> list[Path]:
+    """Run directories under ``out_dir``, oldest first."""
+    if not out_dir.is_dir():
+        return []
+    return sorted(
+        (path for path in out_dir.iterdir() if path.is_dir() and (path / "run.json").exists()),
+        key=lambda path: (path / "run.json").stat().st_mtime,
+    )
+
+
+def _record(run_dir: Path) -> dict[str, Any] | None:
+    """One run's record, or None when it has no pair of files to derive from."""
+    try:
+        run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        described = json.loads((run_dir / "describe-tasks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    containers = described.get("containers") or [{}]
+    return {
+        "dir": run_dir,
+        "run_id": str(run.get("run_id", run_dir.name)),
+        "task_arn": str(run.get("task_arn", "")),
+        "digest": str(containers[0].get("imageDigest") or ""),
+        "cpu": str(run.get("cpu_architecture", "")),
+        "stop_code": str(run.get("stop_code", "")),
+        "exit_code": run.get("exit_code"),
+        "cold": run.get("cold_start", {}) or {},
+        "probes": run.get("probes", {}).get("probes", {}) or {},
+        "watch": run.get("environ_watch", {}) or {},
+        # ECS's own creation time, for a CHRONOLOGICAL table: file mtimes reorder when
+        # artifacts are re-downloaded, and a table whose rows move between readings is
+        # harder to diff against the artifacts than one whose order is the run order.
+        "created_at": str((run.get("ecs_timestamps") or {}).get("createdAt", "")),
+    }
+
+
+def _probe_flags(probes: dict[str, Any]) -> str:
+    """P / F / n per probe in a fixed order.
+
+    ``n`` is a probe that returned ``pass=None``: this run had nothing to look at (4c
+    with no key injected), which is neither a pass nor a failure and must not be
+    printed as either.
+    """
+    flags: list[str] = []
+    for name in _PROBE_ORDER:
+        entry = probes.get(name)
+        if entry is None:
+            flags.append("-")
+        elif entry.get("pass") is True:
+            flags.append("P")
+        elif entry.get("pass") is False:
+            flags.append("F")
+        else:
+            flags.append("n")
+    return "/".join(flags)
+
+
+def _secs(value: Any) -> str:
+    return f"{value / 1000.0:.2f}" if isinstance(value, (int, float)) else "—"
+
+
+def _min_median_max(values: list[float]) -> tuple[float, float, float]:
+    ordered = sorted(values)
+    return ordered[0], ordered[len(ordered) // 2], ordered[-1]
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Render the results doc's evidence tables FROM the recorded artifacts.
+
+    WHY THIS EXISTS (agent review round 2, finding 1): the cold-start table's per-run
+    decomposition was typed by hand, and three of its fifteen cells were values that
+    occur nowhere in the records — while the identity columns and the summary row were
+    right, which is exactly the shape that survives review. Every number below is read
+    from ``run.json``/``describe-tasks.json``, so a reviewer's sweep either matches cell
+    for cell or the tool is wrong, and the fix for the next drift is one command.
+    """
+    out_dir = Path(args.out_dir)
+    records = [record for record in (_record(path) for path in _record_dirs(out_dir)) if record]
+    if not records:
+        print(f"no run records under {out_dir}", file=sys.stderr)
+        return 2
+    records.sort(key=lambda record: (str(record["created_at"]), str(record["run_id"])))
+    digest = str(args.digest or "").strip()
+    if digest in ("", "latest"):
+        digest = str(records[-1]["digest"])
+    chosen = [record for record in records if record["digest"] == digest]
+    if not chosen:
+        print(f"no runs on digest {digest} under {out_dir}", file=sys.stderr)
+        return 2
+    print(f"<!-- generated by: remote_agents_poc.py report {out_dir} --digest {digest} -->")
+    print()
+    print(f"#### Per-run cells, {len(chosen)} run(s) on `{digest}`")
+    print()
+    print(
+        "| run id | task arn (suffix) | cpuArch | stopCode | exit | RunTask→RUNNING s "
+        "| scheduling/ENI s | image pull s | container start s | probes s "
+        "| RunTask→1st model event s | minus probes s | probes | 4e |"
+    )
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for record in chosen:
+        cold = record["cold"]
+        print(
+            f"| {record['run_id']} | `…{record['task_arn'][-12:]}` | {record['cpu']} "
+            f"| {record['stop_code']} | {record['exit_code']} "
+            f"| {_secs(cold.get('runtask_to_running_wall_ms'))} "
+            f"| {_secs(cold.get('ecs_created_to_pull_started_ms'))} "
+            f"| {_secs(cold.get('ecs_pull_started_to_pull_stopped_ms'))} "
+            f"| {_secs(cold.get('ecs_pull_stopped_to_started_ms'))} "
+            f"| {_secs(cold.get('probes_duration_ms'))} "
+            f"| {_secs(cold.get('runtask_to_first_model_event_ms'))} "
+            f"| {_secs(cold.get('runtask_to_first_model_event_minus_probes_ms'))} "
+            f"| {_probe_flags(record['probes'])} "
+            f"| {'P' if record['watch'].get('pass') is True else record['watch'].get('pass')} |"
+        )
+    print()
+    print(f"#### Summary over those {len(chosen)} run(s): min / median / max, seconds")
+    print()
+    print("| phase | min | median | max |")
+    print("| --- | --- | --- | --- |")
+    for key, label in _PHASE_ORDER:
+        values = [
+            record["cold"][key]
+            for record in chosen
+            if isinstance(record["cold"].get(key), (int, float))
+        ]
+        if not values:
+            print(f"| {label} | — | — | — |")
+            continue
+        low, middle, high = _min_median_max([float(value) for value in values])
+        print(f"| {label} | {low / 1000.0:.2f} | {middle / 1000.0:.2f} | {high / 1000.0:.2f} |")
+    print()
+    print("#### Population: every recorded run, grouped by the digest it RAN (not by what")
+    print("the task definition says now)")
+    print()
+    print("| image digest | runs | run ids |")
+    print("| --- | --- | --- |")
+    by_digest: dict[str, list[str]] = {}
+    for record in records:
+        by_digest.setdefault(str(record["digest"]), []).append(str(record["run_id"]))
+    for other, ids in sorted(by_digest.items(), key=lambda item: -len(item[1])):
+        marker = " **← this table**" if other == digest else ""
+        print(f"| `{other[:20]}…`{marker} | **{len(ids)}** | {', '.join(ids)} |")
+    print()
+    print(f"total recorded runs: {len(records)}")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -1151,6 +1333,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="the lop binary used to prove the transplanted session loads",
     )
     verify.set_defaults(func=cmd_verify)
+
+    report = subparsers.add_parser(
+        "report", help="render the evidence tables from the recorded artifacts"
+    )
+    _add_common(report)
+    report.add_argument("out_dir")
+    report.add_argument(
+        "--digest",
+        default="latest",
+        help="the image digest whose runs to tabulate ('latest' = the newest record's)",
+    )
+    report.set_defaults(func=cmd_report)
     return parser
 
 

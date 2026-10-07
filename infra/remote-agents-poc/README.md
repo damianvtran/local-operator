@@ -180,6 +180,23 @@ also exists in the ECS task definition's secret reference and in the container's
 declared environment as the ECS agent sees it, outside the container's `/proc`.
 Nothing in this repository, and no process the driver starts, ever reads or prints it.
 
+**TWO CONDITIONS on the "no process's initial environment carries it" claim, both
+enforced.** (1) It covers children started under the container's `allowlist`
+shell-environment policy — the policy the bash and eval tools build children with, and
+reproduced against this image's own `config.yml`. (2) It is conditional on there being
+**no `ps` in the image**, because two product spawn sites hand the CALLER's environment
+to `ps`: `local_operator/tools/group_reaper.py:229` runs `ps -o lstart= -p <pid>` with
+`env={**os.environ, "LC_ALL": "C"}` (from the bash tool's group registration and the
+teardown reaper) and `local_operator/memory_guard.py`'s `_default_runner` runs
+`ps -axo pid=,pgid=,rss=` with **no `env=` at all**, on every tick of every guarded
+command. Either child is a child of the process holding the key, so its own
+`/proc/<pid>/environ` would carry it and the model's same-uid bash child could read
+that file. Probe **4f** asserts no `ps` — including a `busybox`/`toybox` `ps` — is
+reachable at runtime, and the Dockerfile **fails the build** if one ever appears.
+4e cannot catch it: a `ps` lasts tens of milliseconds against 4e's one-second samples.
+Closing it product-side (a filtered environment at those two sites, or a delivery that
+never enters `os.environ`) is deferred product work, recorded in the PR thread.
+
 ## Running
 
 ```sh
@@ -198,10 +215,16 @@ lifecycle, probes and cold start and never produces a fix — that is expected.
 `verify` reports three outcomes, and only a FAIL makes it exit non-zero. **BLOCKED**
 is for the checks a mock run cannot answer: acceptance 2 needs a branch, and a run
 whose model made no edit has none, while the local key scan needs the real key in the
-secret store. On a recorded mock run that leaves 6 PASS — acceptance 3 in full (the
-session transplants into a fresh config root and `lop sessions --all --json` lists it
-as `state: stored` with its transcript) plus all five container probes — and 2
-BLOCKED, both of which say they need the real key.
+secret store. On a recorded mock run that leaves **10 PASS** and 2 BLOCKED, and the ten
+name what they actually check: the transplanted session is listed by `lop sessions
+--all --json` (`state: stored`) AND driven on the real resume path —
+`lop exec --resume <id> --hosting test --model test-model --json ping` with stdin from
+`/dev/null`, asserting the same session id comes back, the transcript grows 8 → 16
+lines, and the first 8 are byte-identical — plus `transcript_non_empty`, all six
+container probes (4a, 4b, 4c, 4c-env, 4d, **4f**) and probe 4e's no-key-in-any-process-
+environment reading. It is not the TUI's `lop --resume`: that loads the same store
+through the same loader, and `exec` is the form a non-TTY driver can run. Both BLOCKED
+entries say they need the real key.
 
 The pinned fixture is **https://github.com/olafagbemi/lop-poc-fixture.git at
 `69db7e55fc14f918cccdf2fea62894fc37f1f642`** (public, so the container can clone it
@@ -285,16 +308,23 @@ otherwise.
    failed" reads to us as including an isolation claim that did not hold. Probe 4c's
    `pass: null` (no key in a mock run) is NOT a failure and does not do this;
    `probes.json["failed"]` is the authoritative list either way.
-9. **The provider key is exported in a subshell, not via `env KEY=… lop exec`.** The
-   spec's example puts the key in a process's argv, where `ps` in the task can read
-   it; a subshell `export` followed by `exec` keeps it in the environment of exactly
-   one process tree.
+9. **The provider key was first exported in a subshell — SUPERSEDED BY 21.** The spec's
+   example puts the key in a process's argv, where `ps` in the task can read it, so this
+   POC's first revision exported it in a subshell before `exec` instead. That is still the
+   wrong channel: a subshell export leaves the value in the LAUNCHED process's initial
+   environment, which the agent's own bash child reads with `cat /proc/$PPID/environ` —
+   the read agent review round 1 raised as SEC-1 and divergence 21 replaced with the
+   file-descriptor delivery.
 10. **`lop exec` runs with stdin from `/dev/null`.** That is what makes the run
     unattended, which is the condition under which the `--tools read,write,edit,bash`
     declaration stands as the approval for those tools (a tty would re-prompt, and a
     headless run without it would deny every write).
 11. **`timings.json` is folded from a `timings.jsonl` in an EXIT trap**, so a run that
-    fails still ships its timings. The timings of a failure are evidence too.
+    fails AFTER the results tarball is sealed still ships its timings (a probe rc, an
+    agent rc). It does not cover the earlier failures: `$OUT` only reaches S3 at step 9,
+    so the pre-upload key-scan refusal, a failed `git clone` and a failed probes PUT ship
+    no timings at all — the entrypoint's own comment names that list, and this one used to
+    over-claim them all.
 12. **The driver's `--out-dir` defaults to `$LOCAL_OPERATOR_SCRATCHPAD`, else
     `./poc-runs`.** The spec's `$LOCAL_OPERATOR_SCRATCH` does not exist in this
     harness; `LOCAL_OPERATOR_SCRATCHPAD` is the variable that does.
@@ -416,5 +446,27 @@ otherwise.
     while a child started with the key in its environment did not (false negative).
     The watcher's verdict is therefore Linux-only by construction, and the unit test
     stubs the environ source for the logic cases.
+30. **Probe 4f, and the Dockerfile guard behind it.** The claim "no process's initial
+    environment carries the key" is conditional on the image shipping **no `ps`**,
+    because two product spawns hand the CALLER's environment to it
+    (`tools/group_reaper.py:229`, `memory_guard._default_runner`). 4f asserts no `ps` is
+    reachable (PATH, the six knowable paths, and a `busybox`/`toybox` `ps`), the
+    Dockerfile fails the build if one ever appears, and both README and results doc
+    state the condition instead of the unconditional claim. Closing it product-side is
+    deferred work: this POC runs the released `local-operator==0.68.3` wheel and patches
+    no product code.
+31. **The watcher self-tests come in two modes, and both upload their artifacts.**
+    `POC_ENVIRON_WATCH_SELFTEST=1` launches a child the OLD way (the red case);
+    `POC_ENVIRON_WATCH_COEXIST=1` has the real launcher hold the key and spawn a bash
+    child through `shell_env.child_environment` while 4e samples (the coexistence case,
+    which the five mock runs cannot cover because a mock agent spawns no tool child).
+    Neither is ever set by the driver, and the branch tars `$OUT` and PUTs it before
+    exiting, so a self-test reading lives in the artifact set rather than only in
+    CloudWatch.
+32. **`report` renders the evidence tables from the artifacts.** Every per-run cell, the
+    summary row and the digest population are read from `run.json` /
+    `describe-tasks.json` by one subcommand, because the first version of the cold-start
+    table was typed by hand and three of its fifteen cells were values that occur
+    nowhere in the records (agent review round 2, finding 1).
 
 

@@ -276,7 +276,7 @@ available).
 | | (a) EKS, namespace per task | (b) ECS Fargate task per agent | (c) Firecracker microVMs | (d) EC2 instance per task |
 |---|---|---|---|---|
 | Isolation | Namespace + NetworkPolicy + ResourceQuota: **shared kernel** unless gVisor (syscall interposition) or Kata (VM per pod) is added. A namespace is a policy boundary, not a security boundary | "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface" [F1]. Fargate runs on Firecracker [F3] | A VM per sandbox on KVM [F4]. Strongest at the highest density | Full VM per task (Nitro) |
-| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **24.9 s median** (22.4–27.8 s), which decomposes as **scheduling + ENI attach 15.9 s**, **image pull 4.5 s** (pullStartedAt→pullStoppedAt) and **container start 3.7 s** (pullStoppedAt→startedAt); RunTask → a first model event **47.6 s median** raw, **26.4 s median** once the 21.2 s whole-filesystem probe scan is subtracted. Pull is ~18% of the arrival, so SOCI's ceiling here is ~4.5 s; SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
+| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **22.1 s median** (21.1–22.6 s), which decomposes as **scheduling + ENI attach 13.4 s**, **image pull 4.75 s** (pullStartedAt→pullStoppedAt) and **container start 3.6 s** (pullStoppedAt→startedAt) — the three ECS phases span `createdAt`→`startedAt`, **21.3 s median**, so the ~0.8 s between that and the RunTask figure is the control-plane round trip rather than a phase; RunTask → a first model event **44.7 s median** raw, **23.4 s median** once the 21.2 s whole-filesystem probe scan is subtracted. Pull is ~21% of the arrival, so SOCI's ceiling here is ~4.8 s; SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
 | Compute $/task-hour (Price List API) | m7g.xlarge $0.1819/h ÷ 2 = **$0.091** + CP $0.10/h amortised (≈$0.101 at 10 concurrent, ≈$0.092 at 100) | 2×$0.03565 + 4×$0.00389 = **$0.0869**; Fargate Spot up to 70% off (ECS only, interruptible) | c6g.metal $2.3808/h ÷ 24 ≈ **$0.099** (÷32 ≈ $0.074); nested-virt c8i.xlarge $0.2051/h ÷ 2 ≈ **$0.103** | m7g.large (8 GiB) **$0.091**, per-second billing, 60 s minimum |
 | Fixed monthly floor | EKS CP **$73** + NAT/endpoints; +$133 per idle warm m7g.xlarge | **$0** compute at idle; NAT/endpoints only | +$1,738 for an always-on metal host (or scale-to-zero hosts with slower starts) | $0 compute at idle |
 | Ops burden | Highest: cluster upgrades, Karpenter, CNI policy, admission control, runtime classes | Lowest: task definition, IAM, security groups | High: own scheduler, image/snapshot pipeline, host fleet, jailer. **Or** managed Lambda MicroVMs (see below) | Medium: AMI pipeline, boot scripts, instance reaping |
@@ -356,7 +356,7 @@ transcripts outside our AWS account and region, which conflicts with data reside
 |---|---|---|
 | Built today | Radient is a provider (`providers/registry.py` `radient`, `radient-key`) fronting OpenRouter (`providers/clients.py`). There is no per-task token mint | Broker built (`net_broker`); provider logins and API keys are offered to device members (`offers.py`) |
 | Home offline | Works | Stalls within ≤15 min (§3.4) |
-| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, injected as an ECS task-level secret. ECS delivers that as a container environment variable, so it is **not on disk**, and Slice 0 implemented and measured the stronger form its own v1 note asked for: the entrypoint takes the value out of its own environment, carries it across a re-exec and hands it to the agent over a file descriptor, so **no process's initial environment carries it** (probe 4e: 0 of every readable `/proc/<pid>/environ`, over 5 runs, with a self-test proving the probe goes red on the old delivery). The residual is the agent's memory — measured, not asserted: `yama_ptrace_scope=1`, and a same-uid non-descendant could not open `/proc/<pid>/mem` (PermissionError). A leaked token is worth at most the task's remaining budget. Evidence: `remote-cloud-agents-poc-results.md` § Test 4e | A bearer valid ≤900 s, in memory only (credentials §6.2) |
+| Secret on the pod | A per-task Radient token, **budget-capped and expiring at `expires_at`**, injected as an ECS task-level secret. ECS delivers that as a container environment variable, so it is **not on disk**, and Slice 0 implemented and measured the stronger form its own v1 note asked for: the entrypoint takes the value out of its own environment, carries it across a re-exec and hands it to the agent over a file descriptor, so **no process's initial environment carries it** (probe 4e: 0 of every readable `/proc/<pid>/environ`, over 5 runs, with a self-test proving the probe goes red on the old delivery). **v1 must also close the two spawn sites that receive the caller's environment** — `tools/group_reaper.py:229` and `memory_guard._default_runner`, both `ps` invocations — by passing a filtered environment there, or by delivering the token in a way that never enters `os.environ`, because until then the closure is conditional on the image shipping no `ps` (Slice 0's probe 4f and its Dockerfile guard enforce exactly that condition, and only that). The residual is the agent's memory — measured, not asserted: `yama_ptrace_scope=1`, and a same-uid non-descendant could not open `/proc/<pid>/mem` (PermissionError). A leaked token is worth at most the task's remaining budget. Evidence: `remote-cloud-agents-poc-results.md` § Test 4e | A bearer valid ≤900 s, in memory only (credentials §6.2) |
 | Metering | Exact. The gateway already meters tokens in Radient credits | Tokens are billed to the user's own provider account. Radient meters compute only |
 | Data path | Model traffic goes Radient → OpenRouter → upstream provider. **Not Canada-resident** (§7.6) | User's chosen provider |
 | Work needed | Control-plane endpoint to mint and revoke task-scoped gateway tokens with a spend cap | C1, plus documenting the home-online requirement |
@@ -379,6 +379,14 @@ pod's own device key; a per-task model token (budget-capped); a **scoped git cre
 that only the git proxy honours**; nothing else. The ECS **task role has no AWS
 permissions**. The execution role (image pull and logs) is not reachable from inside the
 container.
+
+**Two conditions on the token's delivery** (measured in Slice 0, §6): the closure holds
+for children started under the `allowlist` shell-environment policy, and it **depends on
+the image shipping no `ps`** — `tools/group_reaper.py:229` and
+`memory_guard._default_runner` pass the caller's environment to `ps`, so **v1 must filter
+the environment at those two sites, or deliver the token so it never enters
+`os.environ`**. Probes 4e/4f and the Dockerfile's no-`ps` guard keep the condition
+visible until then (`remote-cloud-agents-poc-results.md` § Test 4e/4f).
 
 | Attack | Blast radius | Control |
 |---|---|---|
@@ -654,12 +662,12 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 
 1. Measured Fargate cold start for a ~1.5 GB lop image, with and without SOCI.
    **Answered for the image as built, without SOCI** (5 runs on the accepted digest,
-   2026-10-07): RunTask → first `RUNNING` 24.9 s median (22.4–27.8 s), decomposing as
-   scheduling + ENI attach 15.9 s, image pull 4.5 s, container start 3.7 s; RunTask → first
-   model event 47.6 s median raw and 26.4 s median with the 21.2 s whole-filesystem probe
-   scan subtracted; the agent's own first token lands 1.4 s after the probes finish. The
-   pull is ~18% of the arrival rather than the ~57% an earlier revision claimed, so SOCI's
-   ceiling here is ~4.5 s. **With SOCI: not tested.** Numbers and per-run records:
+   2026-10-07): RunTask → first `RUNNING` 22.1 s median (21.1–22.6 s), decomposing as
+   scheduling + ENI attach 13.4 s, image pull 4.75 s, container start 3.6 s; RunTask → first
+   model event 44.7 s median raw and 23.4 s median with the 21.2 s whole-filesystem probe
+   scan subtracted; the agent's own first token lands ~1.4 s after the probes finish. The
+   pull is ~21% of the arrival rather than the ~57% an earlier revision claimed, so SOCI's
+   ceiling here is ~4.8 s. **With SOCI: not tested.** Numbers and per-run records:
    [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md).
 2. Can `lop exec` run usefully with a read-only root filesystem and only the workspace
    writable? (Config root, uv cache and scratch locations need checking.)

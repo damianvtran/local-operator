@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -389,6 +390,61 @@ def probe_platform() -> dict[str, Any]:
     return _result("4d_platform", passed, detail, note)
 
 
+#: Every path a ``ps`` could be reached by. ``busybox ps`` and ``toybox ps`` matter
+#: because both implement it without a ``ps`` file of their own.
+_PS_PATHS = (
+    "/bin/ps",
+    "/usr/bin/ps",
+    "/sbin/ps",
+    "/usr/sbin/ps",
+    "/usr/local/bin/ps",
+    "/usr/local/sbin/ps",
+)
+_PS_MULTIPLEXERS = ("busybox", "toybox")
+
+
+def probe_ps_absent() -> dict[str, Any]:
+    """Probe 4f: no ``ps`` the agent's own tool children could spawn.
+
+    WHY A PROBE AND NOT ONLY THE DOCKERFILE GUARD. Two spawn sites in the product hand
+    the CALLER's environment to ``ps``: ``tools/group_reaper.py`` runs ``ps -o lstart=
+    -p <pid>`` with ``env={**os.environ, "LC_ALL": "C"}`` (reached from the bash tool's
+    group registration and the teardown reaper) and ``memory_guard._default_runner``
+    runs ``ps -axo pid=,pgid=,rss=`` with no ``env=`` at all, on every guarded command's
+    tick. Either child is a child of the process that holds the key, so its own
+    ``/proc/<pid>/environ`` would carry it — and the model's same-uid bash child could
+    read that file, which is the read path SEC-1 closed. So "no process's initial
+    environment carries the key" is CONDITIONAL on there being no ``ps`` to run, and
+    this probe is what makes the condition visible: add procps to this image for any
+    reason and 4f fails, instead of the closure quietly reopening. 4e cannot catch it —
+    the guard's reads last tens of milliseconds against 4e's one-second samples.
+
+    Closing it product-side (passing a filtered environment at those two sites) is
+    deferred work recorded in the PR thread: this POC runs the RELEASED wheel and does
+    not patch product code, which is what makes the condition worth stating.
+    """
+    on_path = shutil.which("ps")
+    present = [path for path in _PS_PATHS if os.path.exists(path)]
+    multiplexers = [name for name in _PS_MULTIPLEXERS if shutil.which(name)]
+    passed = on_path is None and not present and not multiplexers
+    detail = {
+        "which_ps": on_path,
+        "checked_paths": list(_PS_PATHS),
+        "paths_present": present,
+        "multiplexers_present": multiplexers,
+    }
+    note = (
+        ""
+        if passed
+        else (
+            "a `ps` is reachable, so the two inherited-environment spawn sites "
+            "(tools/group_reaper.py, memory_guard._default_runner) can carry the key into a "
+            "child's initial environment"
+        )
+    )
+    return _result("4f_no_ps", passed, detail, note)
+
+
 def _comm_of(pid: str) -> str:
     """The process's `comm`, which is a NAME and never a value."""
     try:
@@ -441,9 +497,11 @@ def _proc_environ_scan(
     On Linux this reads ``/proc/<pid>/environ`` — the environment image the kernel
     copied at ``exec``, which is the whole reason the entrypoint re-execs itself after
     taking the key out of its environment, and the read path ``shell_env.py``
-    documents as ``cat /proc/$PPID/environ``. On Darwin ``ps -Eww`` answers the same
-    question. Only counts, PIDs and comm names are returned; never a byte of the
-    environment itself.
+    documents as ``cat /proc/$PPID/environ``. **Procfs is the only source this probe
+    will use**: the Darwin substitute was written, measured and removed
+    (``_environ_blobs`` records why), and without procfs the watcher reports BLOCKED
+    rather than guessing. Only counts, PIDs and comm names are returned; never a byte
+    of the environment itself.
     """
     counts: dict[str, int] = dict.fromkeys(needles, 0)
     hits: list[dict[str, Any]] = []
@@ -719,6 +777,7 @@ def main(argv: list[str] | None = None) -> int:
         probe_no_secret_on_disk(key, args.key_prefix_chars),
         probe_key_absent_from_child_env(key),
         probe_platform(),
+        probe_ps_absent(),
     ]
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

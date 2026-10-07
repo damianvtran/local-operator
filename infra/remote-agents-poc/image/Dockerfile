@@ -19,6 +19,25 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*
 
+# FAIL THE BUILD IF THIS IMAGE EVER GAINS A `ps`.
+#
+# Two spawn sites in the product hand the CALLER's environment to `ps`:
+# tools/group_reaper.py (`ps -o lstart= -p <pid>` with `env={**os.environ, "LC_ALL": "C"}`)
+# and memory_guard._default_runner (`ps -axo pid=,pgid=,rss=`, no `env=` at all, on every
+# tick of every guarded command). Either child is a child of the process holding the
+# model key, so its own /proc/<pid>/environ would carry the key and the model's same-uid
+# bash child could read that file — the read path this POC closed. "No process's initial
+# environment carries the key" is therefore CONDITIONAL on there being no `ps` to run,
+# and this guard turns that condition into a build failure: adding procps for any reason
+# (a debugging tool, a base-image change) stops here rather than silently reopening it.
+# Probe 4f asserts the same thing at run time, because the runtime is what the claim is
+# about. Closing it product-side — a filtered env at those two sites — is deferred work
+# (see the PR thread).
+RUN ! command -v ps \
+ && ! test -e /bin/ps && ! test -e /usr/bin/ps && ! test -e /sbin/ps \
+ && ! test -e /usr/sbin/ps \
+ && ! command -v busybox && ! command -v toybox
+
 # uv, pinned by digest for the same reason as the base, and copied from the
 # publisher's own image rather than pip-installed so the binary is the artifact
 # upstream signed off on.
