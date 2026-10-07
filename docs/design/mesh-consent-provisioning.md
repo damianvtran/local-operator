@@ -472,7 +472,16 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
   copies survived silently. A member unreachable at that instant keeps its copy with
   the ledger row left OPEN and the receipt naming the count plus the ceiling sentence:
   deleted-and-confirmed / open-and-named is the whole receipt vocabulary, so a removal
-  with live copies never reads as a clean sweep.
+  with live copies never reads as a clean sweep. **Re-sized and given a third class
+  (S4, review round 2 F1):** the frame bound matches the tick's 10 s — 3 s could not
+  cover a loaded member's store open (measured 5.02 s in the open alone, the request
+  returning `None` at exactly 3.00 s with the member finishing its delete ~2 s later),
+  the loop carries a 25 s wall budget, and the CLI wait (35 s) covers probe + budget so
+  the local-write fallback can never swap in mid-exchange. A give-up that may still be
+  in flight renders as `timed out — the member may still complete the deletion`, its own
+  class apart from `could NOT be confirmed deleted` (nothing was contacted): an OPEN
+  ledger row after a removal means NOT CONFIRMED — never "still there" — and the row is
+  never reconciled, because a removed member is never contacted again.
 - **Rotate.** The only ending for a copy that may have left the node. The design's
   guidance: rotate at the provider (API keys), `gh auth logout`/token revocation (forge),
   `lop secret` update on the owner then sync (store secrets — though for a suspected

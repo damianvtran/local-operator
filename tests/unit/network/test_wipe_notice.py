@@ -32,6 +32,7 @@ The delivery runs two real relays on loopback roots, exactly as
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -128,7 +129,7 @@ def test_an_offline_member_is_wiped_on_reconnect(copied_mesh: Any) -> None:
 
 
 def test_member_rm_delivers_the_ending_while_the_member_is_contactable(
-    copied_mesh: Any, capsys: pytest.CaptureFixture[str]
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Un-approve through the REAL verb: the removal path carries the ending.
 
@@ -139,10 +140,35 @@ def test_member_rm_delivers_the_ending_while_the_member_is_contactable(
     sentence. This drives the verb: the relay's handler runs the bounded ending
     exchange BEFORE the tombstone, the member deletes and the ledger closes,
     and the receipt says the ending was confirmed.
+
+    THE MEMBER'S STORE OPEN IS DELAYED PAST THE OLD BOUND, deterministically
+    (review round 2, F1): a loaded member measured 5.02 s in
+    ``access.open_store`` ALONE, and against the original 3 s frame bound the
+    request returned ``None`` at exactly 3.00 s, the member finished its delete
+    ~2 s later, and the owner's ledger row stayed open forever — the cell
+    failed 6/6 under load. The simulated delay below is 5 s: >= the old bound
+    (so this cell fails on the old code) and inside the new one, the tick's own
+    10 s (so the new code confirms). It discriminates whether or not the host
+    happens to be loaded.
     """
+    from local_operator.secrets import access as access_mod
+
     mesh = copied_mesh
-    record = store.load(mesh.network_id, mesh.a.root)
-    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    real_open = access_mod.open_store
+
+    def slow_open(root: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(str(root)) == Path(str(mesh.b.root)):
+            time.sleep(5.0)
+        return real_open(root, *args, **kwargs)
+
+    monkeypatch.setattr(access_mod, "open_store", slow_open)
+    try:
+        record = store.load(mesh.network_id, mesh.a.root)
+        assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    finally:
+        # The member's delete ran INLINE inside the relay op, so the delay has
+        # done its work; un-patching keeps the poll below fast.
+        monkeypatch.setattr(access_mod, "open_store", real_open)
     out = capsys.readouterr().out
     assert net_fixtures.wait_for(
         lambda: not _member_has(mesh.b.root, SECRET_NAME)
@@ -155,6 +181,49 @@ def test_member_rm_delivers_the_ending_while_the_member_is_contactable(
     # member is never ticked again — no later contact can re-deliver anything.
     removed = store.load(mesh.network_id, mesh.a.root).member(mesh.member)
     assert removed is not None and not removed.active
+
+
+def test_a_removal_timeout_renders_distinctly_from_unreachable(
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1's second half: a give-up that may still complete renders as its own class.
+
+    The owner's frame bound is lowered below the member's simulated store open
+    (1 s vs 2 s), so the exchange outruns the bound exactly as F1 measured under
+    load — deterministically, and in ~2 s rather than a loaded 5 s. The receipt
+    must then say ``timed out — the member may still complete the deletion``,
+    NOT ``could NOT be confirmed deleted`` (which asserts nothing was
+    contacted). The member DOES complete ~a second after the receipt, and the
+    cell waits for the copy to be gone to prove the wording describes the real
+    half-life of this failure. The ledger row stays open — the one honest
+    value nobody can recompute, because a removed member is never contacted
+    again.
+    """
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.secrets import access as access_mod
+
+    mesh = copied_mesh
+    real_open = access_mod.open_store
+
+    def slow_open(root: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(str(root)) == Path(str(mesh.b.root)):
+            time.sleep(2.0)
+        return real_open(root, *args, **kwargs)
+
+    monkeypatch.setattr(access_mod, "open_store", slow_open)
+    monkeypatch.setattr(sync_mod, "REMOVAL_FRAME_TIMEOUT_S", 1.0)
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    out = capsys.readouterr().out
+    assert "timed out — the member may still complete the deletion" in out, out
+    assert "could NOT be confirmed deleted" not in out, out
+    # The wording is a claim about the real half-life: the member finishes the
+    # delete it started, ~1 s after the owner gave up on the answer.
+    monkeypatch.setattr(access_mod, "open_store", real_open)
+    assert net_fixtures.wait_for(
+        lambda: not _member_has(mesh.b.root, SECRET_NAME)
+    ), "the timed-out member did NOT complete; the receipt wording would be a lie"
+    assert not _ledger_wiped(mesh), "no confirmation arrived, so the row must stay open"
 
 
 def test_member_rm_without_contact_records_the_open_ending(

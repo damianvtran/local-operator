@@ -9462,15 +9462,16 @@ class RelayServer:
         # runs BEFORE the tombstone, because afterwards this device's own dial is
         # refused by design (``_ensure_link_with_reason`` skips inactive members) and
         # every copy on the removed member would end silently. Bounded inside the
-        # engine (probe + cap); the counts ride the receipt so an unreachable
-        # member's copies read as OPEN — rotate at the source — rather than gone.
+        # engine (probe + total budget); the counts ride the receipt so an unreachable
+        # member's copies read as OPEN — rotate at the source — rather than gone, and
+        # a give-up that may still be in flight (F1) reads as its own class.
         from local_operator.network.credentials.sync import sync_for_relay
 
         engine = sync_for_relay(self)
         endings = (
             engine.deliver_removal_endings(device_id)
             if engine is not None
-            else {"copies": 0, "wiped": 0}
+            else {"copies": 0, "wiped": 0, "timed_out": 0}
         )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
@@ -9499,6 +9500,7 @@ class RelayServer:
             "queued": len(store.queued_frames(device_id, self.root)),
             "copies": int(endings.get("copies") or 0),
             "wiped": int(endings.get("wiped") or 0),
+            "timed_out": int(endings.get("timed_out") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:

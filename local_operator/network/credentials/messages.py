@@ -432,7 +432,9 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     )
 
 
-def render_removal_endings(peer_name: str, *, copies: int, wiped: int) -> list[str]:
+def render_removal_endings(
+    peer_name: str, *, copies: int, wiped: int, timed_out: int = 0
+) -> list[str]:
     """What a ``member rm`` receipt says about the copies that member holds.
 
     §2.3's discipline, applied to the removal path (review round 1, Q1): an
@@ -441,17 +443,38 @@ def render_removal_endings(peer_name: str, *, copies: int, wiped: int) -> list[s
     whatever the removal exchange confirmed is final, and every unconfirmed copy
     is the operator's to end by rotation. The counts come from the same ledger
     the listing reads, so receipt and ledger cannot disagree.
+
+    THREE CLASSES, because they mean different things (review round 2, F1):
+    ``wiped`` is confirmed by the member's own answer; ``timed_out`` is an
+    attempt whose answer did not arrive inside the frame bound — the member MAY
+    still be completing the delete (measured: it finished ~2 s after the owner
+    gave up) — and the remainder were never contacted at all (no link, an error
+    answer, or the budget ran out), where the copy is certainly still there.
+    The timeout line must not be the unreachable line: an operator told
+    "could NOT be confirmed deleted" about a copy that was deleted reads the
+    ledger as still holding material it does not hold.
     """
     if copies <= 0:
         return []
     unconfirmed = max(0, copies - wiped)
     if unconfirmed == 0:
         return [f"{copies} copied secret(s) on {peer_name} were deleted (the ending is confirmed)"]
-    return [
-        f"{unconfirmed} of {copies} copied secret(s) on {peer_name} could NOT be confirmed "
-        "deleted; a removed member is never contacted again",
-        COPY_CEILING_SENTENCE,
-    ]
+    lines: list[str] = []
+    timed = min(max(0, timed_out), unconfirmed)
+    missed = unconfirmed - timed
+    if timed:
+        lines.append(
+            f"{timed} of {copies} copied secret(s) on {peer_name} timed out — the member "
+            "may still complete the deletion; it is never contacted again, so it cannot "
+            "be re-checked"
+        )
+    if missed:
+        lines.append(
+            f"{missed} of {copies} copied secret(s) on {peer_name} could NOT be confirmed "
+            "deleted; a removed member is never contacted again"
+        )
+    lines.append(COPY_CEILING_SENTENCE)
+    return lines
 
 
 #: The head every account-change notice carries. The '[session …]' form is this

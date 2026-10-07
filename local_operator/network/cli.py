@@ -2579,10 +2579,21 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
     # epoch rotation and the queue write all happen here (below), and the payload
     # says the rotation is queued rather than fanning out.
+    #
+    # ``timeout=REMOVAL_CLI_TIMEOUT_S``, not the 5 s default (review round 2, F1):
+    # the relay's ending exchange is probe (3 s) + a 25 s frame budget by
+    # construction, and a CLI that gave up first would fall back to the LOCAL
+    # write while the relay was still mid-exchange — the double-write
+    # ``allow_no_answer`` exists to prevent, not to enable.
     from local_operator.network.credentials import messages as messages_mod
+    from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
 
     live = _relay_call(
-        "net_member_rm", network=args.network, device_id=device_id, allow_no_answer=True
+        "net_member_rm",
+        network=args.network,
+        device_id=device_id,
+        allow_no_answer=True,
+        timeout=REMOVAL_CLI_TIMEOUT_S,
     )
     if live is not None:
         # THE REMOVAL'S COPY SENTENCE (review round 1, Q1): the relay ran the
@@ -2593,6 +2604,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             _member_name(record, device_id) or str(live.get("removed") or device_id),
             copies=int(live.get("copies") or 0),
             wiped=int(live.get("wiped") or 0),
+            timed_out=int(live.get("timed_out") or 0),
         )
         return _emit(
             args,
@@ -2648,6 +2660,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "relay": "not running — applied locally and queued",
             "copies": copies,
             "wiped": 0,
+            "timed_out": 0,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",

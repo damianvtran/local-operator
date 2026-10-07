@@ -144,14 +144,28 @@ ANNOUNCE_CAP = 8
 ANNOUNCE_TIMEOUT_S = 10.0
 COPY_TIMEOUT_S = 30.0
 
-#: The member-removal ending exchange's bounds (review round 1, Q1). The whole
-#: delivery must finish inside the 5 s ``_relay_call`` gives the relay's
-#: ``net_member_rm`` answer before the CLI falls back to the local write, and a
-#: dead endpoint has to answer within its own probe cap rather than hang the
-#: removal: one bounded dial, then short per-frame bounds, and any failure stops
-#: the run with the count reported.
+#: The member-removal ending exchange's bounds (review round 1, Q1; re-sized
+#: after review round 2, F1). One bounded dial, then bounded frames, and every
+#: give-up is REPORTED. The sizes are not free choices:
+#:
+#: - ``REMOVAL_FRAME_TIMEOUT_S`` matches the tick's ``ANNOUNCE_TIMEOUT_S``
+#:   because the member work is the SAME local delete: under load the member's
+#:   store open alone measured 5.02 s, so the original 3 s bound returned
+#:   ``None`` at exactly 3.00 s while the member finished the delete ~2 s
+#:   later — the confirmed arm of the removal was unreachable exactly when the
+#:   fleet needed it, and the row stayed open forever (F1, 6/6 under load).
+#: - ``REMOVAL_TOTAL_BUDGET_S`` bounds the WHOLE frame loop, so the relay's
+#:   answer (and the CLI's wait) stays bounded even when every frame burns its
+#:   full bound; rows the budget never reaches were NOT sent, which is why they
+#:   count as not-confirmed rather than timed-out.
+#: - The CLI's ``net_member_rm`` call passes ``timeout=REMOVAL_CLI_TIMEOUT_S``,
+#:   which must exceed probe + budget, or the CLI would fall back to the local
+#:   write while the relay is still mid-exchange (the double-write the
+#:   allow_no_answer comment warns about).
 REMOVAL_PROBE_TIMEOUT_S = 3.0
-REMOVAL_FRAME_TIMEOUT_S = 3.0
+REMOVAL_FRAME_TIMEOUT_S = ANNOUNCE_TIMEOUT_S
+REMOVAL_TOTAL_BUDGET_S = 25.0
+REMOVAL_CLI_TIMEOUT_S = 35.0
 
 #: ``value_state`` on an announce/copy: whether the owner holds a value for the
 #: key. ``absent`` is the WIPE NOTICE (§5.5c, §4.3): the member deletes its
@@ -1211,20 +1225,31 @@ class SyncEngine:
         the same per-key ``absent`` announces the tick carries, sent once, now.
 
         Bounded: one dial (probe-bounded), then at most ``ANNOUNCE_CAP`` frames
-        with a short per-frame timeout; any failure stops the run and is
-        REPORTED. A row left unconfirmed stays open on the ledger, and the caller
-        turns ``copies``/``wiped`` into the removal receipt's ending sentence —
-        the open state is visible rather than silent (§2.3's discipline: a
-        revocation that cannot complete says so).
+        inside ``REMOVAL_TOTAL_BUDGET_S``; every give-up is REPORTED, in two
+        classes because they mean different things (review round 2, F1):
+        ``timed_out`` — an attempt whose answer did not arrive inside the frame
+        bound, where the member may still be completing the delete — counts
+        separately from the rows never contacted (no link, error answer, or
+        budget spent), because for a removed member there is no next contact to
+        reconcile either fact. The caller turns ``copies``/``wiped``/
+        ``timed_out`` into the removal receipt's ending sentences — the open
+        state is visible rather than silent (§2.3's discipline), and the
+        TIMEOUT wording is not the unreachable wording.
+
+        THE LEDGER ROW LEFT OPEN MEANS "NOT CONFIRMED", NEVER "still there":
+        after a removal nothing will ever contact this member again, so the row
+        can only record what an answer proved; a timed-out exchange may already
+        have ended the copy on the member. The receipt carries which flavour
+        this was; the ledger deliberately does not guess.
         """
         document = self._placement()
         if document is None or not device_id:
-            return {"copies": 0, "wiped": 0}
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
         network_id = str(document.network_id)
         try:
             state = SyncState.load(network_id, root=self._root)
         except Exception:  # noqa: BLE001 — unreadable state: nothing derivable
-            return {"copies": 0, "wiped": 0}
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
         rows = state.acks.get(device_id) or {}
         pending: list[dict[str, Any]] = []
         for key in sorted(rows):
@@ -1238,14 +1263,27 @@ class SyncEngine:
                     {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
                 )
         if not pending:
-            return {"copies": 0, "wiped": 0}
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
         link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam
             device_id, probe_timeout_s=REMOVAL_PROBE_TIMEOUT_S
         )
         if link is None:
-            return {"copies": len(pending), "wiped": 0}
+            return {"copies": len(pending), "wiped": 0, "timed_out": 0}
         confirmed = 0
+        timed_out = 0
+        attempted = 0
+        deadline = time.monotonic() + REMOVAL_TOTAL_BUDGET_S
         for item in pending[:ANNOUNCE_CAP]:
+            if time.monotonic() > deadline:
+                # NOT ATTEMPTED, so NOT timed-out: these rows keep the
+                # "could NOT be confirmed" meaning — nothing was ever sent.
+                logger.debug(
+                    "credentials sync: removal ending budget spent for %s; "
+                    "%d row(s) not attempted",
+                    device_id,
+                    len(pending[:ANNOUNCE_CAP]) - attempted,
+                )
+                break
             frame = {
                 "op": "net_broker",
                 "kind": "announce",
@@ -1255,17 +1293,41 @@ class SyncEngine:
                 "req": self._server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
                 **item,
             }
+            attempted += 1
             try:
                 reply = link.request(frame, timeout=REMOVAL_FRAME_TIMEOUT_S)
-            except Exception:  # noqa: BLE001 — stop the run; the count stays honest
+            except Exception:  # noqa: BLE001 — the link itself is failing; stop the run
+                # NOT the timed-out class: the measured give-up is ``None`` below
+                # (the wait expiring), while an exception here is the send/wait
+                # machinery failing and the rest of the frames would ride the same
+                # broken link. The rows left unattempted stay "could NOT be
+                # confirmed" — nothing was proven sent — and the ordering keeps a
+                # programming-error raise from silently counting as a soft timeout.
                 logger.debug(
-                    "credentials sync: removal ending for %s failed",
+                    "credentials sync: removal ending for %s failed on the link",
                     item.get("key"),
                     exc_info=True,
                 )
                 break
+            if reply is None:
+                # THE GIVE-UP THAT IS NOT SILENT (F1): ``request`` returns None
+                # when its wait expires (or the send failed), and in the measured
+                # shape the member was still deleting — so this counts in the
+                # may-still-complete class the receipt renders.
+                logger.debug(
+                    "credentials sync: removal ending for %s timed out (bound %ss)",
+                    item.get("key"),
+                    REMOVAL_FRAME_TIMEOUT_S,
+                )
+                timed_out += 1
+                continue
             detail = reply.get("detail") if isinstance(reply, dict) else None
             if not isinstance(detail, dict) or str(detail.get("kind") or "") == "error":
+                logger.debug(
+                    "credentials sync: removal ending for %s answered %s",
+                    item.get("key"),
+                    detail,
+                )
                 continue
             if str(detail.get("action") or "") == "wiped":
                 self._record_wipe_reply(network_id, device_id, item, detail)
@@ -1282,7 +1344,7 @@ class SyncEngine:
             wiped = max(0, len(pending) - open_now)
         except Exception:  # noqa: BLE001 — the reply count is the best datum left
             wiped = confirmed
-        return {"copies": len(pending), "wiped": wiped}
+        return {"copies": len(pending), "wiped": wiped, "timed_out": timed_out}
 
     def _read_value(self, key: str, entry: Any) -> dict[str, Any] | None:
         """Read the owner's value for a copy, via the owner's own store.
