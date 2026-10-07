@@ -256,6 +256,27 @@ def render_broker_error(
             f"{owner} refused this request: this device is not allowed to ask for '{label}'. "
             "Nothing was changed on either device."
         )
+    if error.code == "local_only":
+        # §4.2's kill switch, said where a would-be borrower meets it: the mark
+        # is the operator's, on the owning device, and the remedy is named
+        # there rather than here.
+        return (
+            f"'{label}' is marked local-only on {owner}, so it never crosses to another "
+            "device. Nothing was copied; if it should travel, remove the mark on "
+            f"{owner} ('lop network credential mark {key} default')."
+        )
+    if error.code == "copy_stale":
+        # THE COPY PATH'S ONE ADDED CODE (design §6.1): the value this device
+        # holds is older than the owner's and the provider refused it. The
+        # remedy is the owner's own next contact; the ending, if it never
+        # heals, is the §2.3 ceiling sentence — a copied secret ends at its
+        # source, not at the device.
+        return (
+            f"the stored copy of '{label}' is older than {owner}'s, and the provider "
+            f"refused it. {owner} announces the current value on its next contact — "
+            "nothing is blocked meanwhile; if it keeps failing, rotate the secret at "
+            "its source."
+        )
     if error.code == "identity_mismatch":
         return (
             f"{owner} refused this request because it named a different sending device than "
@@ -377,6 +398,37 @@ def render_repair_notice(peer_name: str, key: str) -> str:
     return (
         f"{peer_name} needs '{repair_command(key)}' here — "
         "its borrowed credential cannot be refreshed"
+    )
+
+
+#: THE ONE SENTENCE THE DESIGN COMMITS TO (§2.3), on every surface that ends a
+#: copy: share receipt, guide, and `credential revoke` output. It is not a
+#: disclaimer — it states the actual limit of a wipe (reachable copies end; an
+#: exfiltrated one does not) and the only effective ending (rotation at the
+#: source).
+COPY_CEILING_SENTENCE = (
+    "This removed the copies it could reach. A copy that already left that device "
+    "can only be ended by rotating the secret at its source."
+)
+
+
+def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: bool) -> str:
+    """What a revoke says about the COPY half, per state (§4.3, "which happened").
+
+    ``copied`` — the ack ledger says this device confirmed holding a copy;
+    ``wiped`` — it has since confirmed deleting it. Both come from the same
+    ledger the owner's listing reads, so the receipt and the listing cannot
+    disagree about whether a copy is outstanding.
+    """
+    if not copied:
+        return (
+            f"no copy of '{key}' was confirmed on {peer_name}, so there is nothing to " "wipe there"
+        )
+    if wiped:
+        return f"the copy of '{key}' on {peer_name} was already wiped"
+    return (
+        f"a wipe notice for '{key}' is queued for {peer_name}: the copy is deleted on "
+        "its next contact"
     )
 
 

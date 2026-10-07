@@ -435,7 +435,13 @@ The **bounding story**, stated as five concrete bounds:
    encrypted store re-sealed under its own master key (class 2), or the node's own 0600
    credential rows (class 4, the local-login posture) — with provenance marking (new: an
    `origin`/`owner_device` field or sidecar index on the receiving side, so `local-only`
-   marks and wipe notices are computable).
+   marks and wipe notices are computable). **As built (S4):** the marker is `origin` — a
+   small bounded object sealed INSIDE each record's payload (`secrets/store.py`'s
+   `_payload`/`_validate_origin`; never plaintext on disk, surviving `update` and
+   `rotate`), and `MESH_ORIGIN_KEY` inside each class-4 row's `data`, where the existing
+   row shape already carries it. The `applied` sidecar keeps gen/digest/row-ids as the
+   fast path, but the WIPE scans by the marker, never by the sidecar: a lost sidecar
+   must not orphan a copy.
 5. **The ending.** Wipe + rotate (§2.3, §5.5).
 
 **Explicitly rejected in the other direction:** copying the owner's whole `secrets/`
@@ -448,14 +454,26 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
 - **Wipe.** Un-approve or unshare → the owner sends one wipe notice per covered key
   (§5.5); the node deletes rows by provenance (`origin = mesh:<owner_device>`) and acks.
   Deletion is the store's ordinary delete path (`secrets/store.py:1186`; class-4 rows:
-  the credential row delete), so no new deletion semantics are invented.
+  the credential row delete), so no new deletion semantics are invented. **As built
+  (S4), the notice and its confirmation:** the notice is an announce carrying
+  `value_state: absent`, recomputed on each contact — never a queued frame — and the
+  confirmation rides the notice's own REPLY, not a fresh request: a deactivated
+  member's `broker_credential` capability left with its grants, and the transport
+  refuses `net_broker` from its rows (measured), so a fresh-request ack would be
+  refused at the owner's door for exactly the members a wipe matters most for. The
+  member therefore deletes inline on its slow-op worker (local, bounded — no dial, no
+  transfer) and answers `wiped`; the owner records the ledger row from that reply. The
+  member-side delete is bound by the marker it scans, not by the grant it outlives.
 - **Rotate.** The only ending for a copy that may have left the node. The design's
   guidance: rotate at the provider (API keys), `gh auth logout`/token revocation (forge),
   `lop secret` update on the owner then sync (store secrets — though for a suspected
   exfiltration the provider side is the real rotation).
 - **The receipt says which happened**, and both sentences are shipped in
   `credentials/messages.py`'s house style — one home per surface
-  (`mesh-credentials.md` §4 intro).
+  (`mesh-credentials.md` §4 intro). **As built (S4):** `render_copy_revoke_notice`
+  renders the per-state line (a queued notice / an already-wiped copy / no confirmed
+  copy) from the same ledger the listing reads, and `COPY_CEILING_SENTENCE` is the
+  §2.3 ceiling, printed by `credential revoke` whenever a copy existed at all.
 
 ---
 
@@ -608,7 +626,9 @@ operator can act before the failure, and the repair path catches it after.
 Un-approve / unshare runs: (1) broker refusal is immediate for new grants (measured
 2.3 s) and the link-level membership rules are unchanged; (2) one wipe notice per copied
 key with this owner's provenance — reachable members delete and ack, unreachable ones
-get it on next contact (same catch-up as (a)); (3) the receipt states the ceiling and
+get it on next contact (same catch-up as (a)); **as built (S4), the ack for a wipe is
+the reply to the notice itself — an un-approved member can no longer open a frame —
+see §4.3's as-built note**; (3) the receipt states the ceiling and
 the rotate guidance (§2.3). In-flight sessions on that node are **not** killed: they are
 the node's sessions, and the removal is a credential-and-link event; running turns keep
 what they hold (its borrowed grants die at their TTL; its copies die at the wipe or the

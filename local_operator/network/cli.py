@@ -724,7 +724,7 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help="What this device owns, and what it borrows from whom",
     ).add_argument("--json", action="store_true")
 
-    credential = actions.add_parser("credential", help="Share or revoke one credential")
+    credential = actions.add_parser("credential", help="Share, revoke, or mark one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
     cred_share = credential_actions.add_parser(
         "share",
@@ -780,6 +780,29 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_revoke.add_argument("--json", action="store_true")
+    cred_mark = credential_actions.add_parser(
+        "mark",
+        # §4.2's selection marks (S4): these are the operator's standing words
+        # about a STORE secret's copy policy — the default set is the needs-list
+        # ∪ `sync`, and `local-only` is the kill switch.
+        help=(
+            "Set a secret's copy policy — 'sync' sends it to approved devices by "
+            "default, 'local-only' keeps it here, 'default' clears the mark"
+        ),
+    )
+    cred_mark.add_argument(
+        "key",
+        help="A secret name (or secret:<name>), e.g. GITHUB_TOKEN",
+    )
+    cred_mark.add_argument(
+        "mark",
+        choices=("sync", "local-only", "default"),
+        help="'sync' | 'local-only' | 'default' (clears)",
+    )
+    cred_mark.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    cred_mark.add_argument("--json", action="store_true")
 
     uninstall = actions.add_parser(
         "uninstall", help="Remove the LaunchAgent (and --purge the store)"
@@ -1522,7 +1545,12 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # 7, last acked 14:02)``. Read from the sync document only: a
                 # listing never dials and never reads a store, and a copy
                 # relationship with no generation yet shows NO segment (absent,
-                # never "failed" — the rollout segment's own rule).
+                # never "failed" — the rollout segment's own rule). The §4.2
+                # selection mark rides the same read (S4): one document, so the
+                # mark cannot disagree with the holders it governs.
+                mark = sync_state.mark_for(key)
+                if mark:
+                    row["mark"] = mark
                 current = sync_state.generation(key)
                 if current is not None:
                     for holder_row in row["holders"]:
@@ -1547,6 +1575,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 lines.append(
                     f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
                 )
+                if row.get("mark"):
+                    mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
+                    lines.append(f"      marked {row['mark']}{mark_tail}")
                 for holder in row["holders"]:
                     # The owner's own row and this device's are not "shares": the first
                     # is what makes the entry coherent and the second is the reader.
@@ -1993,6 +2024,11 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     identity = load_identity()
     if identity is None:
         raise MeshRefusal("no_identity", "this device has no key yet; join a network first")
+    if verb == "mark":
+        # THE MARK VERB HAS NO `--device` (S4): a mark is per (network, key),
+        # not per holder, so it returns before the device resolution the other
+        # verbs need.
+        return _credential_mark(args, record, identity)
     device = _resolve_device(record, args.device)
     if device is None:
         raise MeshRefusal(
@@ -2092,6 +2128,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # token's own expiry. An incident response that believed "revoked" meant
         # "dead" would stop looking too early, so the payload and the lines say both.
         from local_operator.network.credentials import grant_ttl_s
+        from local_operator.network.credentials import messages as messages_mod
+        from local_operator.network.credentials.types import is_secret_key
 
         ttl_s = int(grant_ttl_s())
         # THE MINT-REVOKE CONTRACT'S IMMEDIATE HALF (github adapter, F4): the
@@ -2114,12 +2152,37 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if isinstance(detail, dict):
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
+        if is_secret_key(key):
+            # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the
+            # receipt says which happened — a queued notice, an already-wiped
+            # copy, or no confirmed copy to wipe — and carries the ceiling
+            # sentence whenever a copy existed at all.
+            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            payload["copy"] = {
+                "confirmed": copied,
+                "wiped": wiped,
+                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+            }
+            lines.append(
+                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+            )
+            if copied:
+                lines.append(messages_mod.COPY_CEILING_SENTENCE)
+            return _emit(args, payload, lines)
         # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
         # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
         # so "until the token expires" was a bound that does not exist — false in
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
+        copied, wiped = _copy_ledger_state(record.network_id, device, key)
+        if copied:
+            # The class-4 copy half, same vocabulary as class 2's (§4.3: the
+            # receipt says which happened).
+            payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            lines.append(
+                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+            )
         if github_mod.is_github_key(key):
             # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
             # window end + on this revoke; the 60-minute figure is the fallback).
@@ -2155,6 +2218,100 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                 "a bearer copied out of that device stays valid at the provider until the "
                 f"token expires: to end it now, sign out of {key!r} at the provider"
             )
+    return _emit(args, payload, lines)
+
+
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
+    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+
+    The same document the listing's segments read, so the receipt and the
+    listing cannot disagree about whether a copy is outstanding. An unreadable
+    ledger confirms nothing — the closed direction, and the receipt then says
+    "no confirmed copy" rather than inventing one.
+    """
+    from local_operator.network.credentials.sync import SyncState
+
+    try:
+        state = SyncState.load(network_id)
+    except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
+        return False, False
+    row = state.ack_for(device, key)
+    if not isinstance(row, dict):
+        return False, False
+    return True, bool(row.get("wiped"))
+
+
+def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> int:
+    """The §4.2 selection marks: ``sync`` / ``local-only`` / ``default``.
+
+    OWNER-ONLY BY CONSTRUCTION: the mark lives in THIS device's sync document
+    for THIS network, and the verb refuses anything this device does not hold —
+    a mark on a name it cannot serve would be a policy row about nothing.
+
+    Class-2 only, in this slice: the mark table exists for the ``lop secret``
+    store's keys (S4's own scope; the provider classes keep their per-kind share
+    defaults). A bare name is prefixed, so the operator types the name they see
+    in ``lop secret list``.
+    """
+    from local_operator.network.credentials import offers as offers_mod
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import (
+        credential_key_for_secret,
+        is_secret_key,
+        secret_name_from_key,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    raw = str(args.key).strip()
+    if not raw:
+        raise MeshRefusal("bad_request", "give the secret to mark by name")
+    key = raw if is_secret_key(raw) else credential_key_for_secret(raw)
+    name = secret_name_from_key(key)
+    if not offers_mod.credential_here(key, _config_dir()):
+        raise MeshRefusal(
+            "no_local_credential",
+            f"this device holds no secret named {name!r}, so there is nothing to mark; "
+            f"store it first ('lop secret set {name} ...')",
+        )
+    mark = "" if str(args.mark) == "default" else str(args.mark)
+    with sync_mod.mutate(record.network_id) as state:
+        state.record_mark(key, mark or None)
+    outstanding = 0
+    sync_state = sync_mod.SyncState.load(record.network_id)
+    for by_key in sync_state.acks.values():
+        row = by_key.get(key) if isinstance(by_key, dict) else None
+        if isinstance(row, dict) and not row.get("wiped"):
+            outstanding += 1
+    if mark == "sync":
+        lines = [f"'{name}' is marked sync: approved devices get it by default from now on"]
+    elif mark == "local-only":
+        lines = [f"'{name}' is marked local-only: it never crosses to another device"]
+        if outstanding:
+            plural = "copies" if outstanding > 1 else "copy"
+            lines.append(
+                f"{outstanding} existing {plural} end with a wipe notice on the "
+                "holder's next contact"
+            )
+    else:
+        lines = [
+            f"'{name}' has no mark: it is copied only where a device's own declared "
+            "needs call for it"
+        ]
+    _audit(
+        "credential_marked",
+        actor=identity.device_id,
+        subject=record.network_id,
+        network_id=record.network_id,
+        detail={"credential_key": key, "mark": mark or "default"},
+    )
+    payload = {
+        "ok": True,
+        "network": record.name,
+        "network_id": record.network_id,
+        "key": key,
+        "mark": mark or "default",
+        "copies_outstanding": outstanding,
+    }
     return _emit(args, payload, lines)
 
 
@@ -7433,17 +7590,19 @@ def _audit(event: str, **fields: Any) -> None:
 def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     """``lop network credential`` with no verb is a usage error, not a default act.
 
-    Neither verb is safe as a default: ``share`` widens who may spend the operator's
-    account, and ``revoke`` silently cuts a working device off. So the verb is
-    required and the message names both, which is the same rule ``member`` states.
+    No verb is safe as a default: ``share`` widens who may spend the operator's
+    account, ``revoke`` silently cuts a working device off, and ``mark`` changes
+    what every future approval copies. So the verb is required and the message
+    names them, which is the same rule ``member`` states.
     """
     verb = getattr(args, "credential_command", None)
-    if verb in ("share", "revoke"):
+    if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
         "usage: lop network credential share  <provider|mcp:<url>> --with <device> "
         "[--scope session|device]\n"
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
+        "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )

@@ -8479,7 +8479,9 @@ class RelayServer:
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
 
-            send_offer, offer_items, offer_detail = _pair_offer_for(handshake, self.root)
+            send_offer, offer_items, offer_detail = _pair_offer_for(
+                handshake, self.root, record.network_id
+            )
             if send_offer:
                 sock.sendall(
                     codec.seal(
@@ -11016,9 +11018,13 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path
+    handshake: Handshake, root: Path, network_id: str
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
+
+    ``network_id`` is the ceremony's own network: class-2 rows take their
+    per-key default from THAT network's ``sync`` marks (§4.2), so an offer built
+    without it would silently ignore an operator's standing marks.
 
     THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
     ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
@@ -11043,7 +11049,7 @@ def _pair_offer_for(
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
     try:
-        items = offers_mod.build_items(root)
+        items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
         empty = offers_mod.digest_of([])
         return (
