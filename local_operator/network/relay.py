@@ -86,6 +86,7 @@ from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.credentials.repair import repair_checks
+from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
@@ -10175,6 +10176,10 @@ class RelayServer:
             # relay by a heartbeat, and the doctor is the one surface that must not
             # report a state its own process has already moved past.
             findings.extend(repair_checks(record, log=self.audit))
+            # THE SYNC SEGMENTS (S3): one derivation, read by this doctor and by
+            # the CLI's local fallback (``sync_checks``), so the two surfaces
+            # cannot disagree about which holders have confirmed which generation.
+            findings.extend(sync_checks(record, root=self.root))
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
