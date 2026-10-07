@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
+import gc
 import json
+import logging
 import os
 import socket
 import threading
@@ -1721,6 +1724,258 @@ def test_stopping_the_relay_closes_the_page_loop_it_shelved(
         ), "stop() returned while the page-loop thread was still running"
     finally:
         link.close("test")
+
+
+def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-1 (agent review & QA round 2 residual): the submit is atomic with the shelving.
+
+    THE DEFECT THIS PINS. ``_stored_page_read`` chose its loop in one statement and
+    submitted to it in the next, and the accessor it chose it with released
+    ``_page_loop_lock`` in between. A ``stop()`` landing in that gap ran the loop's
+    whole teardown — ``loop.stop``, the shelve, the close — so the submit that
+    followed hit a CLOSED loop and raised ``RuntimeError: Event loop is closed``
+    instead of the bounded wait the read promises. That is QA round 2's cfg4(b): a
+    real ``_stored_page_read`` with the stop injected between the two statements
+    (cfg4(a) is the primitive, a submit onto an already-closed loop). It was
+    contained by ``_run_handler``'s broad ``except`` — no link ever tore down — so
+    it fails fast rather than serving the read, which is why it was deferred.
+
+    WHAT IS ASSERTED, AND WHY IT IS AN INVARIANT RATHER THAN A HOPE. The read is
+    parked AT the submit point (``loop.call_soon_threadsafe``, which is where
+    ``asyncio.run_coroutine_threadsafe`` reaches the loop) and the fact read there
+    is whether it stands inside the critical section ``stop`` stops and shelves the
+    loop under. If it does, a stop CANNOT have closed that loop under this read —
+    the two are mutually exclusive, which is the whole fix — so the harness
+    releases at once and asserts the outcome. If it does not, the pre-fix shape,
+    then a stop IS free to land: the harness waits for the racing stop to have
+    actually closed the loop and only then releases, which is the recorded
+    interleaving rather than a hope that it happened. The timeouts are failure
+    signals (the stop never got there, the test never released), never the window.
+
+    The outcome is the user-visible half, and agent review round 1's M-R-1 is what
+    made it a CLASS rather than a single value: a read that races a stop has two
+    honest ends, and which one lands depends on whether the loop got to run the
+    queued submit before the stop it is racing did — the read returns its PAGE when
+    its task completed and only the completion notification was still queued, and it
+    is released with a cancellation when the task was still pending. Neither is an
+    error and neither is the bound. THE BOUND IS PATCHED DOWN only so that a
+    regression which re-opens the park-out lands inside this cell's join in seconds
+    instead of a minute — M-R-1 measured that shape unpatched: the reader got
+    ``TimeoutError`` with its page already decoded and discarded.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    directory = server_b.root / "sessions" / SESSION
+    monkeypatch.setattr(relay, "SESSION_HISTORY_PAGE_READ_BOUND_S", 5.0)
+
+    # ONE REAL READ FIRST: this cell races a stop against an ALREADY BUILT page
+    # loop, which is the state the gap lives in (the accessor has something to
+    # return, and the stop has something to close).
+    assert server_b._stored_page_read(directory, before_id=None, limit=50).entries
+    loop = server_b._page_loop
+    assert loop is not None, "the stored-page read built no page loop"
+
+    real_submit = loop.call_soon_threadsafe
+    real_close = loop.close
+    at_submit = threading.Event()
+    released = threading.Event()
+    closed = threading.Event()
+    held: dict[str, bool] = {}
+    gate = [True]
+
+    def gated_submit(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        if gate[0]:
+            gate[0] = False
+            # THE FACT UNDER TEST, read exactly where the fix puts it: is THIS
+            # submit — the one that must not land on a closed loop — taken inside
+            # the critical section the stop shelves the loop under?
+            held["locked"] = server_b._page_loop_lock.locked()
+            at_submit.set()
+            if not held["locked"]:
+                # Pre-fix shape: nothing holds the lock, so the racing stop is free
+                # to close the loop under this parked submit. Wait for it to have
+                # done so — the recorded interleaving, made deterministic — rather
+                # than hope the scheduler arranged it. (Post-fix this branch is
+                # unreachable: the lock read above is what prevents it.)
+                assert closed.wait(timeout=30), "the racing stop never closed the loop"
+            assert released.wait(timeout=30), "the test never released the parked submit"
+            handle = real_submit(callback, *args, **kwargs)
+            return handle
+        return real_submit(callback, *args, **kwargs)
+
+    def watched_close() -> None:
+        # AFTER the close, never before: a waiter woken first would submit onto a
+        # loop that had not closed YET, and the cell would pass on a race it exists
+        # to remove.
+        real_close()
+        closed.set()
+
+    monkeypatch.setattr(loop, "call_soon_threadsafe", gated_submit)
+    monkeypatch.setattr(loop, "close", watched_close)
+
+    outcome: dict[str, Any] = {}
+
+    def read_a_page() -> None:
+        try:
+            outcome["page"] = server_b._stored_page_read(directory, before_id=None, limit=50)
+        except BaseException as exc:  # noqa: BLE001 — the outcome IS the evidence
+            outcome["error"] = exc
+
+    reader = threading.Thread(target=read_a_page, name="racing-page-read")
+    stopper = threading.Thread(target=server_b.stop, name="racing-stop")
+    reader.start()
+    assert at_submit.wait(timeout=30), "the read never reached the submit point"
+    stopper.start()
+    released.set()
+    reader.join(timeout=30)
+    stopper.join(timeout=30)
+
+    assert not reader.is_alive(), "the racing read never ended"
+    assert not stopper.is_alive(), "the racing stop never ended"
+    assert held["locked"], (
+        "the submit was taken OUTSIDE the lock the stop shelves the loop under, so "
+        "a stop can close that loop between choosing it and submitting to it"
+    )
+    error = outcome.get("error")
+    assert not isinstance(error, RuntimeError), f"submitted onto the closed loop: {error!r}"
+    # NOT ONLY THE ERROR CLASS (M-R-1): a regression that re-opens the park-out
+    # lands on ``TimeoutError``, which is neither an error the caller can tell apart
+    # nor the ending this read is owed — the page it decoded is the answer.
+    assert "page" in outcome or isinstance(error, concurrent.futures.CancelledError), (
+        "the racing read neither returned the page it decoded nor was released with "
+        f"a cancellation — it was left to the bound: {error!r}"
+    )
+    assert loop.is_closed(), "stop() shelved the page loop without closing it"
+
+
+def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """M-2 (agent review & QA round 2 residual): the parked read ENDS at the close.
+
+    THE DEFECT THIS PINS. ``loop.stop`` ends ``run_forever`` with the read's task
+    still PENDING — it is awaiting ``to_thread``, and the callback that would
+    deliver the decode is one the stopped loop never runs — and ``loop.close()``
+    then destroyed a pending task, which asyncio reports as ``Task was destroyed
+    but it is pending!``. QA round 2's cfg3 recorded it on the parked-read-during-
+    stop path, with the reader left to park out the whole bound. Both halves are
+    asserted here because only the pair is the fix: the complaint must be gone AND
+    the read must have ENDED, not merely been abandoned more quietly.
+
+    THE DECODE IS HELD OPEN ON A REAL ``to_thread`` WORKER (the state cfg3 was in)
+    and released only in the ``finally``, so a failing cell cannot leave a decode
+    blocked for the rest of the session. The collect is driven explicitly because
+    the complaint is emitted by the task DESTRUCTOR — left to the interpreter, it
+    lands whenever gc next runs, which is not a moment a test can assert on.
+    """
+    from local_operator.session import page_cache
+
+    _server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    directory = server_b.root / "sessions" / SESSION
+
+    parked = threading.Event()
+    hold = threading.Event()
+    real_read = page_cache.read_transcript_page
+
+    def blocked_read(*args: Any, **kwargs: Any) -> Any:
+        # A real decode, on a real executor thread, parked until the test says
+        # otherwise: the timeout is a failure signal (the decode never started),
+        # never the window.
+        parked.set()
+        assert hold.wait(timeout=30), "the test never released the decode"
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(page_cache, "read_transcript_page", blocked_read)
+    # THE BOUND IS DROPPED so the pre-fix shape — a reader parking out the WHOLE
+    # bound — is observable in seconds rather than in a minute. It is not the
+    # window; the window is the ``parked`` event.
+    monkeypatch.setattr(relay, "SESSION_HISTORY_PAGE_READ_BOUND_S", 5.0)
+
+    outcome: dict[str, Any] = {}
+
+    def read_a_page() -> None:
+        try:
+            outcome["page"] = server_b._stored_page_read(directory, before_id=None, limit=50)
+        except BaseException as exc:  # noqa: BLE001 — the outcome IS the evidence
+            outcome["error"] = exc
+
+    reader = threading.Thread(target=read_a_page, name="parked-page-read")
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        try:
+            reader.start()
+            assert parked.wait(timeout=30), "the decode never started"
+            loop = server_b._page_loop
+            assert loop is not None, "the read built no page loop"
+            server_b.stop()
+            assert loop.is_closed(), "stop() shelved the page loop without closing it"
+            # THE CAUSE, asserted before the symptom: a closed loop with a task
+            # still pending ON it is precisely what the destructor reports, and it
+            # is readable here without waiting for a collector to say so.
+            still_pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            assert not still_pending, (
+                "stop() closed the page loop over a task still pending, which is "
+                f"exactly asyncio's destroyed-task complaint: {still_pending}"
+            )
+        finally:
+            # THE WORKER IS RELEASED EVEN WHEN AN ASSERTION FIRED: the executor
+            # thread is what holds the parked task alive, so a cell that fails must
+            # not leave a decode blocked for the rest of the session.
+            hold.set()
+            reader.join(timeout=30)
+        # THE COMPLAINT ITSELF, at the only moment a test can assert on it: the
+        # destructor emits it whenever the collector next runs, so the collector is
+        # driven here rather than left to the interpreter.
+        gc.collect()
+        destroyed = [
+            r.getMessage() for r in caplog.records if "Task was destroyed" in r.getMessage()
+        ]
+
+        def _capture_can_see_the_complaint() -> bool:
+            """Prove the filter above CAN fail, on a task that certainly will complain.
+
+            NOT DECORATION. Pre-fix the parked task is kept alive by the page
+            cache's in-flight map and by the shield that wraps the decode, so the
+            destructor's line is not emitted at any point this cell can wait for —
+            the retention is a leak that the same fix removes. "No line captured"
+            is therefore true for the wrong reason unless the capture is shown to
+            work, and this control emits the line on purpose so the assertion
+            above cannot pass vacuously.
+            """
+            control = asyncio.new_event_loop()
+            stray = control.create_task(asyncio.Event().wait())
+            control.run_until_complete(asyncio.sleep(0))
+            control.close()
+            del stray
+            gc.collect()
+            return any("Task was destroyed" in r.getMessage() for r in caplog.records)
+
+        assert not destroyed, f"a read parked at stop was destroyed pending: {destroyed}"
+        assert _capture_can_see_the_complaint(), (
+            "the log capture cannot see asyncio's complaint, so the assertion above "
+            "would pass vacuously"
+        )
+
+    assert not reader.is_alive(), "the parked read never ended"
+    error = outcome.get("error")
+    assert isinstance(error, concurrent.futures.CancelledError), (
+        "the parked read did not end with a cancellation — it parked out the bound "
+        f"instead: {error!r} / page={outcome.get('page')!r}"
+    )
+    # THE CONTAINMENT CLAIM RESTS ON THE TYPE (M-R-5, agent review round 1): it is
+    # ``_run_handler``'s ``except Exception`` that turns this release into the same
+    # contained internal-error frame the old bound produced, and that arm catches it
+    # only because ``concurrent.futures.CancelledError`` — which is what
+    # ``future.result()`` raises here — is a plain ``Exception`` subclass, unlike
+    # ``asyncio.CancelledError``, a ``BaseException`` that would ESCAPE it. Pinned
+    # because the whole argument is a fact about which class this is.
+    assert issubclass(concurrent.futures.CancelledError, Exception)
+    assert not issubclass(asyncio.CancelledError, Exception)
 
 
 def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
