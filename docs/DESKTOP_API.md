@@ -1291,10 +1291,13 @@ What a client may rely on:
   `/events` all reach it through the same error ladder, so a client sees one code
   for one situation whichever read it made. The same miss refuses with the same
   sentence on the shell: `lop --resume <id>` (its startup pre-check composes it
-  from the same read) and the TUI's in-app `/resume` (the session factory's
-  viewer arm, through `open_remote_viewer`). `lop network <verb>` is NOT one of
-  them: it resolves through its own refusal taxonomy (`session_unknown` /
-  `peer_unreachable`) and does not reach the shared composer.
+  from the same read, for a real session id only — the bare `--resume` sentinel
+  and a path-shaped string keep their own refusals) and the TUI's in-app
+  `/resume` (the `viewer_factory` arm in `cli.py`, which guards the mid-session
+  path). `lop network <verb>` resolves through its own refusal taxonomy
+  (`session_unknown` / `peer_unreachable`) on the id-resolution path; it can still
+  raise `session_unresolved` through `open_remote_viewer` when a row resolved from
+  the cache and the later open then misses, so the composer is shared there too.
 
 **The surface contract (the UI lane's half, `mesh-wire-honesty.md` §S2):** an
 unresolved id must not be presented as a deletion and must not close the

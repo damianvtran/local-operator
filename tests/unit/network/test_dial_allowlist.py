@@ -146,6 +146,50 @@ def _dict_keys(node: ast.AST, line: int, declared: set[str], opaque: list[str]) 
         opaque.append(f"line {line}: a value assigned into auth that is not a dict display")
 
 
+#: Methods a read may call on the dict without declaring anything. ``update`` and
+#: ``setdefault`` are the declaring ones and are read by ``_scan_source`` itself.
+_READ_METHODS = frozenset({"get", "keys", "values", "items", "update", "setdefault"})
+
+
+def _flag_unsanctioned_uses(tree: ast.AST, opaque: list[str]) -> None:
+    """Report every use of ``auth`` the scan cannot account for (F-3).
+
+    The complement of the shapes ``_scan_source`` reads: a name that is aliased,
+    handed to a helper or returned can be mutated where this walk does not look.
+    """
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    for node in ast.walk(tree):
+        if not _is_auth(node):
+            continue
+        parent = parents.get(node)
+        line = getattr(node, "lineno", 0)
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            continue
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            if parent.attr in _READ_METHODS:
+                continue
+            opaque.append(f"line {line}: auth.{parent.attr} is not a shape the scan reads")
+            continue
+        if isinstance(parent, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            if node in targets:
+                continue
+            opaque.append(f"line {line}: auth is aliased by an assignment")
+            continue
+        if isinstance(parent, ast.Dict) and node in parent.values:
+            continue  # the frame that is SENT: a read, not a declaration
+        if (
+            isinstance(parent, ast.Call)
+            and node in parent.args
+            and ast.unparse(parent.func) == "json.dumps"
+        ):
+            continue
+        opaque.append(f"line {line}: auth is used in a way the scan cannot follow")
+
+
 def _scan_source(source: str) -> tuple[set[str], list[str]]:
     """``(declared names, opaque sites)`` for one client's source text.
 
@@ -162,10 +206,23 @@ def _scan_source(source: str) -> tuple[set[str], list[str]]:
     ``**splat``, ``auth.update(other)``) is returned as OPAQUE, and the invariant
     refuses it: a scan that quietly skips what it cannot read goes blind in exactly
     the way it exists to prevent.
+
+    THE SCAN FOLLOWS THE NAME ``auth`` AND NOTHING ELSE, and it closes the escape
+    hatches that name leaves open instead of merely stating the limit (agent review
+    round 1, F-3): an alias (``_a = auth; _a["x"] = 1``) or a call that mutates it
+    from outside (``dict.update(auth, x=1)``, ``helper(auth)``) would declare a field
+    through a name the walk never sees. So every use of ``auth`` that is not one of
+    the SANCTIONED shapes — a subscript, a method call on it, an assignment TO it,
+    being a value in the frame dict that is sent, being the argument of
+    ``json.dumps`` — is reported OPAQUE and refused. Fail-closed on purpose: a new
+    way of handling the dict needs a deliberate edit here, which is the review the
+    guard exists to force.
     """
     declared: set[str] = set()
     opaque: list[str] = []
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    _flag_unsanctioned_uses(tree, opaque)
+    for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
         if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -281,6 +338,11 @@ def test_the_scan_reads_every_shape_a_declaration_can_take(source: str, expected
         "auth.update(**other)",
         "auth.setdefault(name, 1)",
         "auth = build()",
+        '_a = auth\n_a["x"] = 1',
+        "dict.update(auth, x=1)",
+        "helper(auth)",
+        "return auth",
+        "auth.copy()",
     ],
     ids=[
         "computed-subscript",
@@ -290,6 +352,11 @@ def test_the_scan_reads_every_shape_a_declaration_can_take(source: str, expected
         "update-splat",
         "computed-setdefault",
         "assigned-a-call",
+        "aliased",
+        "dict-update-from-outside",
+        "handed-to-a-helper",
+        "returned",
+        "copied",
     ],
 )
 def test_a_declaration_the_scan_cannot_read_is_refused_not_skipped(source: str) -> None:

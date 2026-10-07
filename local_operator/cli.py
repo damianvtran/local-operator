@@ -13670,6 +13670,7 @@ def main() -> int:
                 backfill_session_origins,
                 backfill_session_titles,
                 format_age,
+                is_session_id_shape,
                 recent_sessions,
                 resolve_resume_id,
             )
@@ -13732,8 +13733,20 @@ def main() -> int:
                     unresolved_peer_sentence,
                 )
 
+                #
+                # ONLY FOR AN ID A DEVICE COULD BE HOLDING (agent review round 1,
+                # F-1). The bare ``--resume`` sentinel and a path-shaped string
+                # name no conversation on any device, so a silent peer is not
+                # evidence about them: they keep their own refusals ("no previous
+                # session to resume", "not a session id") rather than being
+                # reported as a peer's silence.
                 remote_row, silent = remote_row_and_silence(str(args.resume), config_dir())
-                if remote_row is None and silent:
+                if (
+                    remote_row is None
+                    and silent
+                    and str(args.resume) != RESUME_LATEST
+                    and is_session_id_shape(str(args.resume))
+                ):
                     # Same refusal family as the unreachable arm below: nothing
                     # boots locally for an id a silent device may be holding
                     # (INV-1), and no recent-sessions listing — this machine's
