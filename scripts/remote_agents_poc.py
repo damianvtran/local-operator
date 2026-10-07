@@ -667,18 +667,28 @@ def cmd_status(args: argparse.Namespace) -> int:
                     },
                 }
             )
+    # The verdict line carries its own TIME AND COUNT. The inventory moves between
+    # readings (STOPPED task records age out about an hour after each stop), so a quoted
+    # line without a timestamp cannot be checked against a heading that counted later —
+    # which is exactly how "45 tagged resources" ended up under a "51 ARNs" heading
+    # (agent review round 3, finding 3).
+    observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report = {
         "cluster": cluster,
         "active_tasks": active,
         "active_count": len(active),
         "tagged_resource_count": len(inventory),
+        "observed_at": observed_at,
         "tagged_resources": sorted(inventory, key=lambda item: str(item["arn"])),
     }
     print(json.dumps(report, indent=2, default=str))
     if active:
-        _log(f"FAIL: {len(active)} active task(s) in {cluster}")
+        _log(f"FAIL: {len(active)} active task(s) in {cluster} at {observed_at}")
         return 1
-    _log(f"OK: no RUNNING or PENDING tasks in {cluster}; {len(inventory)} tagged lop-poc resources")
+    _log(
+        f"OK: no RUNNING or PENDING tasks in {cluster}; {len(inventory)} tagged lop-poc "
+        f"resources at {observed_at}"
+    )
     return 0
 
 
@@ -1117,6 +1127,20 @@ def _probe_flags(probes: dict[str, Any]) -> str:
     return "/".join(flags)
 
 
+def _watch_flag(watch: dict[str, Any]) -> str:
+    """P / F / n for the watcher column, the same convention ``_probe_flags`` uses.
+
+    A run with no ``environ_watch`` at all is ``n`` — "nothing to read" — not the string
+    ``None`` printed into a column of P/F letters.
+    """
+    value = watch.get("pass")
+    if value is True:
+        return "P"
+    if value is False:
+        return "F"
+    return "n"
+
+
 def _secs(value: Any) -> str:
     return f"{value / 1000.0:.2f}" if isinstance(value, (int, float)) else "—"
 
@@ -1136,7 +1160,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     from ``run.json``/``describe-tasks.json``, so a reviewer's sweep either matches cell
     for cell or the tool is wrong, and the fix for the next drift is one command.
     """
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.report_dir)
     records = [record for record in (_record(path) for path in _record_dirs(out_dir)) if record]
     if not records:
         print(f"no run records under {out_dir}", file=sys.stderr)
@@ -1172,7 +1196,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             f"| {_secs(cold.get('runtask_to_first_model_event_ms'))} "
             f"| {_secs(cold.get('runtask_to_first_model_event_minus_probes_ms'))} "
             f"| {_probe_flags(record['probes'])} "
-            f"| {'P' if record['watch'].get('pass') is True else record['watch'].get('pass')} |"
+            f"| {_watch_flag(record['watch'])} |"
         )
     print()
     print(f"#### Summary over those {len(chosen)} run(s): min / median / max, seconds")
@@ -1335,10 +1359,16 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(func=cmd_verify)
 
     report = subparsers.add_parser(
-        "report", help="render the evidence tables from the recorded artifacts"
+        "report",
+        help="render the evidence tables from the recorded artifacts",
+        description=(
+            "Reads only the contents of a driver --out-dir: no AWS profile and no Pulumi "
+            "backend are needed, so the directory is the one positional argument and this "
+            "subcommand does NOT take the common options. It used to take both, and the "
+            "optional silently won over the positional (agent review round 3, finding 5)."
+        ),
     )
-    _add_common(report)
-    report.add_argument("out_dir")
+    report.add_argument("report_dir", metavar="out-dir", help="the driver's --out-dir")
     report.add_argument(
         "--digest",
         default="latest",
@@ -1350,7 +1380,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not args.backend_url and not args.outputs:
+    # `report` deliberately carries none of the common options, so this default is
+    # applied only for the subcommands that have a backend to point at.
+    if not getattr(args, "backend_url", None) and not getattr(args, "outputs", None):
         args.backend_url = f"file://{Path.home()}/.lop-poc-pulumi-state"
     return int(args.func(args))
 

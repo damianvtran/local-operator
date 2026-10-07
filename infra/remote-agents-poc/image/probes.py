@@ -491,8 +491,8 @@ def _environ_blobs() -> list[tuple[str, bytes, str]]:
 
 def _proc_environ_scan(
     needles: dict[str, bytes],
-) -> tuple[dict[str, int], list[dict[str, Any]], int]:
-    """Count processes whose INITIAL environment carries a needle.
+) -> tuple[dict[str, int], list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """Count processes whose INITIAL environment carries a needle — and say what was read.
 
     On Linux this reads ``/proc/<pid>/environ`` — the environment image the kernel
     copied at ``exec``, which is the whole reason the entrypoint re-execs itself after
@@ -502,19 +502,26 @@ def _proc_environ_scan(
     (``_environ_blobs`` records why), and without procfs the watcher reports BLOCKED
     rather than guessing. Only counts, PIDs and comm names are returned; never a byte
     of the environment itself.
+
+    The fourth element is the OBSERVED set: every process whose environment was read,
+    matched or not. Coverage is a claim about a window — "this sampled while the child
+    was alive" — and a claim about a window that cannot be checked against the artifact
+    is the same defect as a green probe that never looked (agent review round 3).
     """
     counts: dict[str, int] = dict.fromkeys(needles, 0)
     hits: list[dict[str, Any]] = []
+    observed: list[dict[str, Any]] = []
     blobs = _environ_blobs()
     if not blobs:
-        return counts, hits, 0
+        return counts, hits, 0, observed
     for label, blob, comm in blobs:
         pid: Any = int(label) if label.isdigit() else label
+        observed.append({"pid": pid, "comm": comm})
         for needle_label, needle in needles.items():
             if needle and needle in blob:
                 counts[needle_label] += 1
                 hits.append({"pid": pid, "comm": comm, "needle": needle_label})
-    return counts, hits, len(blobs)
+    return counts, hits, len(blobs), observed
 
 
 def _agent_pid(pid_file: Path | None) -> int | None:
@@ -649,13 +656,21 @@ def watch_environ(
         "processes_scanned_max": 0,
         "matches_by_needle": dict.fromkeys(needles, 0),
         "matching_processes": [],
+        "observed_processes": [],
         "residual": {},
     }
     deadline = time.monotonic() + max_seconds
     while True:
-        counts, hits, scanned = _proc_environ_scan(needles)
+        counts, hits, scanned, observed = _proc_environ_scan(needles)
         report["samples"] += 1
         report["processes_scanned_max"] = max(report["processes_scanned_max"], scanned)
+        # What was OBSERVED, not only what matched: PIDs and comms are names, and a byte
+        # of no environment is recorded. This is what makes the coexistence row's
+        # "while 4e sampled" checkable against the artifact instead of asserted.
+        for entry in observed:
+            if entry not in report["observed_processes"]:
+                report["observed_processes"].append(entry)
+        report["observed_processes"] = report["observed_processes"][:32]
         for label, count in counts.items():
             report["matches_by_needle"][label] = max(report["matches_by_needle"][label], count)
         for hit in hits:
@@ -693,6 +708,7 @@ def watch_environ(
                 "pass": report["pass"],
                 "samples": report["samples"],
                 "processes_scanned_max": report["processes_scanned_max"],
+                "observed_processes": report["observed_processes"],
                 "matches_by_needle": report["matches_by_needle"],
                 "matching_processes": report["matching_processes"][:10],
             },

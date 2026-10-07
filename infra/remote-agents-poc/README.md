@@ -456,13 +456,18 @@ otherwise.
     deferred work: this POC runs the released `local-operator==0.68.3` wheel and patches
     no product code.
 31. **The watcher self-tests come in two modes, and both upload their artifacts.**
-    `POC_ENVIRON_WATCH_SELFTEST=1` launches a child the OLD way (the red case);
     `POC_ENVIRON_WATCH_COEXIST=1` has the real launcher hold the key and spawn a bash
     child through `shell_env.child_environment` while 4e samples (the coexistence case,
-    which the five mock runs cannot cover because a mock agent spawns no tool child).
-    Neither is ever set by the driver, and the branch tars `$OUT` and PUTs it before
-    exiting, so a self-test reading lives in the artifact set rather than only in
-    CloudWatch.
+    which the five mock runs cannot cover because a mock agent spawns no tool child);
+    `POC_ENVIRON_WATCH_SELFTEST=1` runs the SAME launcher and the same child argv with
+    the environment **inherited** instead of filtered (the shape
+    `tools/group_reaper.py:229` and `memory_guard._default_runner` use), so the two
+    differ in exactly one thing and both are measurable. `--child-sleep 20` keeps the
+    child alive across the whole sampling window — a child that dies before the first
+    sample is not a coexistence case (agent review round 3, r3-1) — and the watcher's
+    `observed_processes` records which PIDs and comms it actually read, so the coverage
+    claim is checkable against the artifact. Neither variable is ever set by the driver,
+    and the branch tars `$OUT` and reports its PUT's return code before exiting.
 32. **`report` renders the evidence tables from the artifacts.** Every per-run cell, the
     summary row and the digest population are read from `run.json` /
     `describe-tasks.json` by one subcommand, because the first version of the cold-start

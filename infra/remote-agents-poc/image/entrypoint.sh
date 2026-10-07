@@ -271,44 +271,50 @@ put_file "$POC_PROBES_URL" "$OUT/probes.json"
 # the driver): PROVE THE INSTRUMENT AND THE COEXISTENCE CASE, in this container,
 # without a rebuild.
 #
-# POC_ENVIRON_WATCH_SELFTEST=1 — the RED case. A child is launched THE OLD WAY (the key
-# exported into its environment, which is what SEC-1 replaced) and the watcher must
-# FIND it; its exit code (1) is the proof.
+# POC_ENVIRON_WATCH_SELFTEST=1 — the RED case, in the shape that matters. The launcher
+# spawns a child with its environment INHERITED (the `group_reaper`/`memory_guard` shape)
+# while the watcher samples, and the watcher must FIND the key in that child; the task's
+# exit code (1) is the proof. The old bare `export …; exec sleep 60` proved that the
+# watcher can see an environment — not that it can see THIS one.
 #
 # POC_ENVIRON_WATCH_COEXIST=1 — the COEXISTENCE case the five mock runs do not cover
 # (they spawn no tool child at all; agent review round 2, SEC-13). The real launcher,
 # holding the key in its memory, spawns a bash child through the PRODUCT'S OWN filter
 # (`shell_env.child_environment`, what the bash and eval tools use) while the watcher
-# samples; the watcher must stay GREEN.
+# samples; the watcher must stay GREEN and must be able to say which processes it read.
 #
 # Both modes upload their artifacts before exiting, so the reading is re-derivable from
 # the artifact set instead of only from CloudWatch.
 if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ] || [ "${POC_ENVIRON_WATCH_COEXIST:-0}" = "1" ]; then
     stamp t_watch_selftest_start
-    child_rc=0
+    # BOTH MODES SPAWN THE CHILD THROUGH THE LAUNCHER, so green and red differ in exactly
+    # one thing — the environment the child is given — and the child lives
+    # `--child-sleep` seconds so the watcher's samples land INSIDE its life. A child that
+    # dies before the first sample is not a coexistence case at all, and a green reading
+    # from a window the child was never in proves nothing (agent review round 3, r3-1).
+    child_mode="--selftest-child"
     if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
-        ( export LOP_POC_MODEL_KEY="$MODEL_KEY"; exec sleep 60 ) &
-        probe_child_pid=$!
-    else
-        /opt/lop/bin/python /usr/local/bin/lop-launch.py --key-fd 3 \
-            --provider-env LOP_POC_MODEL_KEY --selftest-child \
-            3< <(printf '%s' "$MODEL_KEY") >"$OUT/selftest_child.json" 2>&1 &
-        probe_child_pid=$!
+        child_mode="--selftest-child-inherited"
     fi
+    /opt/lop/bin/python /usr/local/bin/lop-launch.py --key-fd 3 \
+        --provider-env LOP_POC_MODEL_KEY "$child_mode" --child-sleep 20 \
+        3< <(printf '%s' "$MODEL_KEY") >"$OUT/selftest_child.json" 2>&1 &
+    child_pid=$!
     sleep 3
     selftest_rc=0
     /opt/probe/bin/python /opt/probe/probes.py --watch-environ \
         --out "$OUT/proc-env-watch.json" --stop-file "$WORKSPACE/tmp/never" \
-        --key-fd 3 --key-prefix-chars 0 --max-samples 3 \
+        --key-fd 3 --key-prefix-chars 0 --interval-ms 1000 --max-samples 6 \
         3< <(printf '%s' "$MODEL_KEY") || selftest_rc=$?
-    if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
-        kill "$probe_child_pid" 2>/dev/null || true
-    else
-        wait "$probe_child_pid" || child_rc=$?
-    fi
+    child_rc=0
+    wait "$child_pid" || child_rc=$?
     tar -czf "$WORKSPACE/selftest-results.tar.gz" -C "$OUT" .
-    put_file "$POC_RESULTS_URL" "$WORKSPACE/selftest-results.tar.gz" || true
-    echo "watcher self-test rc=$selftest_rc (0 green / 1 red); child rc=$child_rc; artifacts uploaded"
+    # The rc is CAPTURED AND PRINTED: an upload that did not happen must not read as one
+    # (a failed PUT is the failure divergence 11 records, and this branch exists for the
+    # traceability it would have lost).
+    put_rc=0
+    put_file "$POC_RESULTS_URL" "$WORKSPACE/selftest-results.tar.gz" || put_rc=$?
+    echo "watcher self-test rc=$selftest_rc (0 green / 1 red); child rc=$child_rc; upload rc=$put_rc"
     exit "$selftest_rc"
 fi
 

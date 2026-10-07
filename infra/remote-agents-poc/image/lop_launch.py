@@ -76,8 +76,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--selftest-child",
         action="store_true",
         help=(
-            "spawn one bash child the way the product's tools do and report what it "
-            "inherited, instead of starting the CLI (the coexistence check)"
+            "spawn one bash child the way the product's tools do (FILTERED) and report "
+            "what it inherited, instead of starting the CLI (the coexistence check)"
+        ),
+    )
+    parser.add_argument(
+        "--selftest-child-inherited",
+        action="store_true",
+        help=(
+            "the same child with the environment INHERITED rather than filtered — the "
+            "shape group_reaper/memory_guard use — so 4e's red case is measurable "
+            "through this same code path"
+        ),
+    )
+    parser.add_argument(
+        "--child-sleep",
+        type=int,
+        default=20,
+        help=(
+            "seconds the self-test child lives; it must outlive the watcher's sampling "
+            "window or the run proves nothing about coexistence (agent review round 3)"
         ),
     )
     parser.add_argument("lop_argv", nargs=argparse.REMAINDER, help="arguments for the lop CLI")
@@ -122,38 +140,53 @@ def _self_environ_clean(key: str) -> bool:
         return True  # no procfs (a macOS dev box): nothing to claim either way
 
 
-def _selftest_child(provider_env: str, key: str) -> int:
-    """Spawn one bash child the way the product's tools do, and report what it inherited.
+def _selftest_child(provider_env: str, key: str, *, filtered: bool, sleep_seconds: int) -> int:
+    """Spawn one bash child and report what it inherited, from the real code paths.
 
-    WHY THIS EXISTS (agent review round 2, SEC-13): the five acceptance runs are mock, so
-    the agent spawns no tool child, and their green 4e reading covers a container with no
-    bash grandchild in it. The coexistence case — this launcher HOLDING the key while a
-    child it spawns runs — is the one that matters, and it is measured here rather than
-    inferred. The child's environment comes from
-    ``local_operator.tools.shell_env.child_environment``, which is the function the bash
-    tool and the eval tool build their children with, so this is the real filter and not a
-    copy of it. Exit 0 iff the child ran and did not inherit the key by name or by value.
+    WHY THIS EXISTS (agent review rounds 2 and 3): the five acceptance runs are mock, so
+    the agent spawns no tool child, and their green 4e reading cannot cover coexistence.
+    Two shapes are measured here, through the SAME launcher and the same child argv, so
+    "green" and "red" differ in exactly one thing — the environment the child is given:
+
+    * ``filtered`` — ``local_operator.tools.shell_env.child_environment``, the function
+      the bash and eval tools build their children with. Exit 0 iff the child ran and
+      the key is not in it.
+    * ``inherited`` — ``{**os.environ, "LC_ALL": "C"}``, which is what
+      ``tools/group_reaper.py:229`` passes to ``ps`` and what
+      ``memory_guard._default_runner`` does by passing no ``env=`` at all. Exit 0 iff
+      the child ran and the key IS in it, i.e. the shape is as leaky as the probe must
+      be able to see. Without this half, a green coexistence reading means nothing.
+
+    The child is a real ``sh -c 'sleep N'`` whose ``/proc/<pid>/environ`` the entrypoint's
+    watcher can read while it is alive, and ``--child-sleep`` exists because a child that
+    dies before the first sample is not a coexistence case at all.
     """
-    from local_operator.tools.shell_env import child_environment
+    if filtered:
+        from local_operator.tools.shell_env import child_environment
 
-    env = child_environment()
+        env = child_environment()
+    else:
+        env = {**os.environ, "LC_ALL": "C"}
+    argv = ["sh", "-c", f"sleep {sleep_seconds}"]
+    child = subprocess.Popen(argv, env=env)
+    child_rc = child.wait()
     inherited_by_name = bool(provider_env) and provider_env in env
     inherited_by_value = bool(key) and any(key in value for value in env.values())
-    completed = subprocess.run(
-        ["sh", "-c", "sleep 2"], env=env, capture_output=True, text=True, check=False
-    )
     report = {
-        "child_argv": ["sh", "-c", "sleep 2"],
-        "child_exit": completed.returncode,
+        "child_argv": argv,
         "child_env_entries": len(env),
-        "key_value_anywhere_in_child_env": inherited_by_value,
+        "child_exit": child_rc,
+        "child_pid": child.pid,
+        "child_sleep_seconds": sleep_seconds,
+        "expected_key_in_child_env": not filtered,
+        "key_value_in_child_env": inherited_by_value,
+        "mode": "filtered" if filtered else "inherited",
         "parent_self_environ_clean": _self_environ_clean(key),
         "provider_var_in_child_env": inherited_by_name,
     }
     report["pass"] = (
-        completed.returncode == 0
-        and not inherited_by_name
-        and not inherited_by_value
+        child_rc == 0
+        and inherited_by_value == report["expected_key_in_child_env"]
         and report["parent_self_environ_clean"]
     )
     print(json.dumps(report, sort_keys=True), flush=True)
@@ -196,10 +229,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     lop_argv = list(args.lop_argv)
-    if args.selftest_child:
+    if args.selftest_child or args.selftest_child_inherited:
         # The key is already set in this process's memory by the block above, which is
-        # exactly the state the check needs: a parent holding it, a child that must not.
-        return _selftest_child(args.provider_env, key)
+        # exactly the state the checks need: a parent holding it, and a child given
+        # either the filtered environment or the inherited one.
+        return _selftest_child(
+            args.provider_env,
+            key,
+            filtered=args.selftest_child,
+            sleep_seconds=args.child_sleep,
+        )
     if lop_argv and lop_argv[0] == "--":
         lop_argv = lop_argv[1:]
     # `cli.main()` parses `sys.argv` itself and takes no argument, so the launch

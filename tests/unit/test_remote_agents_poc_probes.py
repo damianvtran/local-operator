@@ -19,7 +19,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -113,6 +113,53 @@ def test_the_watcher_blocks_instead_of_passing_without_procfs(
     rc = probes.watch_environ(out, TEST_KEY, 8, tmp_path / "stop", 1000, 5.0, 1)
     assert rc == 2
     assert json.loads(out.read_text(encoding="utf-8"))["blocked"] is True
+
+
+def test_probe_4f_is_green_without_a_ps_and_red_with_one(
+    probes: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """4f is the instrument behind the "no `ps` in the image" condition.
+
+    Both directions, and both shapes the condition can fail in: a `ps` reachable by NAME
+    and one reachable only by an ABSOLUTE PATH (which is what this Dockerfile's own
+    `/usr/local/bin` would be), plus a multiplexer that implements `ps` without a `ps`
+    file. A condition asserted by a probe that cannot fail is the defect the rest of this
+    file exists to prevent.
+    """
+    monkeypatch.setattr(probes, "shutil", SimpleNamespace(which=lambda name: None))
+    monkeypatch.setattr(probes, "_PS_PATHS", ())
+    green = probes.probe_ps_absent()
+    assert green["pass"] is True
+    assert green["detail"]["which_ps"] is None
+
+    monkeypatch.setattr(
+        probes,
+        "shutil",
+        SimpleNamespace(which=lambda name: "/usr/bin/ps" if name == "ps" else None),
+    )
+    red = probes.probe_ps_absent()
+    assert red["pass"] is False
+    assert red["detail"]["which_ps"] == "/usr/bin/ps"
+
+    # A `ps` that only an ABSOLUTE PATH finds, via a real file: monkeypatching
+    # `os.path.exists` would patch it for every module in the interpreter.
+    ps_file = tmp_path / "ps"
+    ps_file.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(probes, "shutil", SimpleNamespace(which=lambda name: None))
+    monkeypatch.setattr(probes, "_PS_PATHS", (str(ps_file),))
+    path_red = probes.probe_ps_absent()
+    assert path_red["pass"] is False
+    assert path_red["detail"]["paths_present"] == [str(ps_file)]
+
+    monkeypatch.setattr(probes, "_PS_PATHS", ())
+    monkeypatch.setattr(
+        probes,
+        "shutil",
+        SimpleNamespace(which=lambda name: "/bin/busybox" if name == "busybox" else None),
+    )
+    multiplexer_red = probes.probe_ps_absent()
+    assert multiplexer_red["pass"] is False
+    assert multiplexer_red["detail"]["multiplexers_present"] == ["busybox"]
 
 
 def _scan(directory: Path, key: str) -> subprocess.CompletedProcess[str]:

@@ -35,8 +35,13 @@ RUN apt-get update \
 # (see the PR thread).
 RUN ! command -v ps \
  && ! test -e /bin/ps && ! test -e /usr/bin/ps && ! test -e /sbin/ps \
- && ! test -e /usr/sbin/ps \
+ && ! test -e /usr/sbin/ps && ! test -e /usr/local/bin/ps \
+ && ! test -e /usr/local/sbin/ps \
  && ! command -v busybox && ! command -v toybox
+# ^ THE SAME SIX PATHS probe 4f publishes, plus the two multiplexers. `/usr/local/bin`
+# is where this Dockerfile itself puts `uv` and the `lop` symlink, so it is exactly the
+# directory a future `PATH` change would expose — the build-time guard must not be the
+# weaker of the two lists (agent review round 3, r3-4).
 
 # uv, pinned by digest for the same reason as the base, and copied from the
 # publisher's own image rather than pip-installed so the binary is the artifact

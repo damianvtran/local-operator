@@ -276,7 +276,7 @@ available).
 | | (a) EKS, namespace per task | (b) ECS Fargate task per agent | (c) Firecracker microVMs | (d) EC2 instance per task |
 |---|---|---|---|---|
 | Isolation | Namespace + NetworkPolicy + ResourceQuota: **shared kernel** unless gVisor (syscall interposition) or Kata (VM per pod) is added. A namespace is a policy boundary, not a security boundary | "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface" [F1]. Fargate runs on Firecracker [F3] | A VM per sandbox on KVM [F4]. Strongest at the highest density | Full VM per task (Nitro) |
-| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **22.1 s median** (21.1–22.6 s), which decomposes as **scheduling + ENI attach 13.4 s**, **image pull 4.75 s** (pullStartedAt→pullStoppedAt) and **container start 3.6 s** (pullStoppedAt→startedAt) — the three ECS phases span `createdAt`→`startedAt`, **21.3 s median**, so the ~0.8 s between that and the RunTask figure is the control-plane round trip rather than a phase; RunTask → a first model event **44.7 s median** raw, **23.4 s median** once the 21.2 s whole-filesystem probe scan is subtracted. Pull is ~21% of the arrival, so SOCI's ceiling here is ~4.8 s; SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
+| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **24.8 s median** (20.0–25.9 s), which decomposes as **scheduling + ENI attach 15.4 s**, **image pull 4.53 s** (pullStartedAt→pullStoppedAt) and **container start 3.1 s** (pullStoppedAt→startedAt) — the three ECS phases span `createdAt`→`startedAt`, **23.7 s median**, so the ~1.1 s between that and the RunTask figure is the control-plane round trip rather than a phase; RunTask → a first model event **47.8 s median** raw, **26.3 s median** once the 21.2 s whole-filesystem probe scan is subtracted. Pull is ~18% of the arrival, so SOCI's ceiling here is ~4.5 s; SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
 | Compute $/task-hour (Price List API) | m7g.xlarge $0.1819/h ÷ 2 = **$0.091** + CP $0.10/h amortised (≈$0.101 at 10 concurrent, ≈$0.092 at 100) | 2×$0.03565 + 4×$0.00389 = **$0.0869**; Fargate Spot up to 70% off (ECS only, interruptible) | c6g.metal $2.3808/h ÷ 24 ≈ **$0.099** (÷32 ≈ $0.074); nested-virt c8i.xlarge $0.2051/h ÷ 2 ≈ **$0.103** | m7g.large (8 GiB) **$0.091**, per-second billing, 60 s minimum |
 | Fixed monthly floor | EKS CP **$73** + NAT/endpoints; +$133 per idle warm m7g.xlarge | **$0** compute at idle; NAT/endpoints only | +$1,738 for an always-on metal host (or scale-to-zero hosts with slower starts) | $0 compute at idle |
 | Ops burden | Highest: cluster upgrades, Karpenter, CNI policy, admission control, runtime classes | Lowest: task definition, IAM, security groups | High: own scheduler, image/snapshot pipeline, host fleet, jailer. **Or** managed Lambda MicroVMs (see below) | Medium: AMI pipeline, boot scripts, instance reaping |
@@ -662,12 +662,12 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 
 1. Measured Fargate cold start for a ~1.5 GB lop image, with and without SOCI.
    **Answered for the image as built, without SOCI** (5 runs on the accepted digest,
-   2026-10-07): RunTask → first `RUNNING` 22.1 s median (21.1–22.6 s), decomposing as
-   scheduling + ENI attach 13.4 s, image pull 4.75 s, container start 3.6 s; RunTask → first
-   model event 44.7 s median raw and 23.4 s median with the 21.2 s whole-filesystem probe
-   scan subtracted; the agent's own first token lands ~1.4 s after the probes finish. The
-   pull is ~21% of the arrival rather than the ~57% an earlier revision claimed, so SOCI's
-   ceiling here is ~4.8 s. **With SOCI: not tested.** Numbers and per-run records:
+   2026-10-07): RunTask → first `RUNNING` 24.8 s median (20.0–25.9 s), decomposing as
+   scheduling + ENI attach 15.4 s, image pull 4.53 s, container start 3.1 s; RunTask → first
+   model event 47.8 s median raw and 26.3 s median with the 21.2 s whole-filesystem probe
+   scan subtracted; the agent's own first token lands ~1.5 s after the probes finish. The
+   pull is ~18% of the arrival rather than the ~57% an earlier revision claimed, so SOCI's
+   ceiling here is ~4.5 s. **With SOCI: not tested.** Numbers and per-run records:
    [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md).
 2. Can `lop exec` run usefully with a read-only root filesystem and only the workspace
    writable? (Config root, uv cache and scratch locations need checking.)
