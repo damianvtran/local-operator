@@ -1463,6 +1463,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     verb's refusal used to be the first word of. Read-only, like everything else here.
     """
     from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.sync import SyncState, sync_segment
     from local_operator.network.identity import load as load_identity
 
     pulled = _relay_call("credential_placement", timeout=_listing_timeout(), allow_no_answer=True)
@@ -1481,6 +1482,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
         state = PlacementState.load(document.network_id)
+        sync_state = SyncState.load(document.network_id)
         keys: list[dict[str, Any]] = []
         if not document.entries:
             continue
@@ -1514,6 +1516,22 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             }
             if not row["owned_here"] and entry.is_holder(self_device):
                 row["observation"] = state.status(key) or "not_asked"
+            if row["owned_here"]:
+                # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
+                # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
+                # 7, last acked 14:02)``. Read from the sync document only: a
+                # listing never dials and never reads a store, and a copy
+                # relationship with no generation yet shows NO segment (absent,
+                # never "failed" — the rollout segment's own rule).
+                current = sync_state.generation(key)
+                if current is not None:
+                    for holder_row in row["holders"]:
+                        if holder_row["device"] == self_device:
+                            continue
+                        acked = sync_state.ack_for(holder_row["device"], key)
+                        segment = sync_segment(acked=acked, current=current)
+                        if segment:
+                            holder_row["sync"] = segment
             keys.append(row)
         if not keys:
             lines.append(f"{network_name}: nothing is shared in this network yet")
@@ -1534,9 +1552,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     # is what makes the entry coherent and the second is the reader.
                     if holder["device"] in (self_device, row["owner_device"]):
                         continue
+                    sync_tail = f" — {holder['sync']}" if holder.get("sync") else ""
                     lines.append(
                         f"      shared with {holder['name'] or holder['device']} "
-                        f"({holder['scope']})"
+                        f"({holder['scope']}){sync_tail}"
                     )
                 if row.get("observation") and row["observation"] not in ("active", "not_asked"):
                     lines.append(f"      borrowed: {row['observation']}")
@@ -7085,6 +7104,7 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     from local_operator.network import store
     from local_operator.network.audit import AuditLog
     from local_operator.network.credentials.repair import repair_checks
+    from local_operator.network.credentials.sync import sync_checks
     from local_operator.network.identity import identity_path
     from local_operator.network.relay import membership_state
 
@@ -7131,6 +7151,11 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
         # the owner of a dead login is exactly the device that needs the notice when
         # nothing else answers it (``credentials/repair.py`` owns the derivation).
         checks.extend(repair_checks(record, log=repair_log))
+        # THE SYNC SEGMENTS (S3), beside the repair rows and for the same reason:
+        # derived from the ledger document, so with the relay down the owner still
+        # sees which holders have not confirmed the current generation. Read-only
+        # and never dialling — a doctor run must not move the state it reports.
+        checks.extend(sync_checks(record))
         for member in record.active_members():
             if member.device_id == record.self_device_id:
                 continue

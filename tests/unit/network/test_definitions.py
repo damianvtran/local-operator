@@ -1053,6 +1053,62 @@ def test_a_refused_push_is_parked_for_half_an_hour_not_retried_every_tick(
     ]
 
 
+def test_an_unanswered_push_is_not_a_refusal_and_keeps_the_fast_retry(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A NO-ANSWER IS A TRANSPORT FAILURE, NOT A POLICY ANSWER (review round 1, Q-1).
+
+    ``link.request`` returning None is a timeout or a dead link; the push used
+    to file it with the ANSWERED refusals, which park the member for
+    REFUSED_MIN_INTERVAL_S with no retry and no log line — one blip stranded a
+    member for 30 minutes (live repro: 240 s of zero contacts after one
+    unanswered push; a clean re-drive caught up in 1 s). This cell drives the
+    syncer over the mapped code, so the fast-retry half is pinned end to end;
+    the mapping itself is pinned below.
+    """
+    from types import SimpleNamespace
+
+    syncer = definitions.DefinitionsSyncer(SimpleNamespace(root=root))  # type: ignore[arg-type]
+    monkeypatch.setattr(syncer, "_targets", lambda: [_SYNC_PEER])
+    responses = [
+        {"ok": False, "code": "no_answer", "message": "did not answer"},
+        {"ok": True, "code": "in_sync", "message": "same definitions"},
+    ]
+    monkeypatch.setattr(
+        definitions, "push_to_peer", lambda server, device_id, **fields: responses.pop(0)
+    )
+    assert syncer.tick(now=1000.0) == [(_SYNC_PEER, "no_answer")]
+    assert syncer._refused_at.get(_SYNC_PEER, 0.0) == 0.0, "a no-answer must not park"
+    # One tick later it asks again — the same fast retry a transport failure gets.
+    assert syncer.tick(now=1016.0) == [(_SYNC_PEER, "in_sync")]
+
+
+def test_push_to_peer_files_no_answer_off_the_policy_codes(root: Path) -> None:
+    """The MAPPING site (review round 1, Q-1): ``None`` -> ``no_answer``, not ``refused``.
+
+    Read from the real ``push_to_peer`` rather than the syncer, because the
+    collapse lived in the mapping: the ``refused`` default below it remains for
+    the codeless ANSWERED case, and that half must keep parking.
+    """
+    del root
+
+    class _Link:
+        def request(self, frame: dict[str, Any], timeout: float = 0) -> Any:
+            return None
+
+    class _Server:
+        def _ensure_link(self, device_id: str) -> Any:
+            return _Link()
+
+        def _next_relay_req(self) -> int:
+            return 1
+
+    result = definitions.push_to_peer(_Server(), "d_" + "a" * 32)  # type: ignore[arg-type]
+    assert result["code"] == "no_answer", result
+    assert "no_answer" not in definitions.POLICY_REFUSAL_CODES
+    assert "refused" in definitions.POLICY_REFUSAL_CODES  # the answered case still parks
+
+
 def test_a_member_that_cannot_hold_the_op_is_not_asked_on_a_timer(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

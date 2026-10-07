@@ -463,6 +463,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
     ),
+    "local_operator/network/credentials/sync.py": (
+        1,
+        "``.sync.lock`` under ``network/credentials/<network_id>/`` (its ``sync.json`` "
+        "sibling is not a path-shaped constant the derivation reports): the sync "
+        "engine's flock file beside the generation/ack record — a store file beside "
+        "``sessions/``, never an entry a session directory holds",
+    ),
     "local_operator/network/credentials/github.py": (
         2,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "

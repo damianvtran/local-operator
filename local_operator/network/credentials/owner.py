@@ -219,6 +219,7 @@ class MeshCredentialBroker:
         client: MeshCredentialClient | None = None,
         identity: Any = None,
         github_minter: Any = None,
+        server: Any = None,
     ) -> None:
         # NO ``placement`` ATTRIBUTE, on purpose (F2): a document held here is a copy
         # that a revoke in the CLI process never reaches. See :meth:`_document`.
@@ -228,6 +229,11 @@ class MeshCredentialBroker:
         self.network_id = network_id
         self.audit = audit
         self.identity = identity
+        #: The relay this broker serves, for the sync engine's member half (S3).
+        #: ``None`` when a test constructs the broker directly; only an
+        #: ``announce`` reaching this broker needs it, and that path is the
+        #: relay's (``relay_handler``) in every production construction.
+        self._server = server
         self._auth_store = auth_store
         self._client = client
         #: The github adapter's minter seam (a test injects a fake transport here)
@@ -271,6 +277,16 @@ class MeshCredentialBroker:
             # into (``broker_for_relay``).
             broker = broker_for_relay(server)
             if broker is None:
+                # THE MEMBER HALF NEEDS NO BROKER (sync engine, S3): a device that
+                # owns nothing can still be a HOLDER, and an ``announce`` is
+                # addressed to exactly that device — behind the by-name refusal
+                # below it could never receive one, and the whole cadence would
+                # be inert for every borrower-only peer. Only ``announce`` is
+                # routed here; every other kind keeps the pre-existing refusal.
+                if str((frame or {}).get("kind") or "") == "announce":
+                    from local_operator.network.credentials import sync as sync_mod
+
+                    return sync_mod.member_announce(server, link, frame)
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -302,6 +318,10 @@ class MeshCredentialBroker:
             audit=getattr(server, "audit", None),
             identity=identity,
             client=MeshCredentialClient.for_relay(server),
+            # THE RELAY THIS BROKER SERVES (S3): the sync engine's member half
+            # needs the dial seam and the loop, and a second object holding them
+            # would hold a second set of in-flight guards.
+            server=server,
         )
 
     # -- the relay's peer handler ------------------------------------------
@@ -331,7 +351,18 @@ class MeshCredentialBroker:
                 "nothing was refreshed or lent",
             )
         kind = str(frame.get("kind") or "")
-        if kind == "grant":
+        if kind in ("announce", "copy", "ack"):
+            # THE SYNC KINDS (S3). One import for the three branches; the module
+            # is stdlib-only at import, the package's stated rule.
+            from local_operator.network.credentials import sync as sync_mod
+
+            if kind == "announce":
+                detail = sync_mod.member_announce(self._server, link, frame)
+            elif kind == "copy":
+                detail = sync_mod.owner_copy(self, link, frame)
+            else:
+                detail = sync_mod.owner_ack(self, link, frame)
+        elif kind == "grant":
             detail = self.grant(link, frame)
         elif kind == "report":
             detail = self.report(link, frame)

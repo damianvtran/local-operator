@@ -202,7 +202,12 @@ def install(server: RelayServer) -> None:
     the relay started is served without a restart.
     """
     from local_operator.network.credentials import owner as owner_mod
+    from local_operator.network.credentials import sync as sync_mod
 
+    # THE CADENCE REGISTERS HERE (S3): the sync step rides the definitions
+    # syncer's tick, so it must be registered wherever the ops are — the same
+    # place ``mcpdefs.install`` registers its step.
+    sync_mod.install()
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     ops = _LocalOps(server)
     server.register_ops(
