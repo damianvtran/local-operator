@@ -2482,17 +2482,31 @@ before-frame note above is about MAKING a stash in a shared checkout; this is
 about USING one. `refs/stash` lives in the shared `.git`, so every worktree of
 this repository has ONE list — two worktrees answer `git stash list` with the
 same entries — and bare `git stash apply`/`pop` resolves `stash@{0}`: the
-newest stash of the WHOLE repository, made by anyone, on any branch. Each
-entry's subject names its origin (`On <branch>: <message>`), so read it
-against your own HEAD first; prefer a stash you just made in THIS worktree, or
-the entry by its stash-commit id, and `git stash show -p` reads one without
-landing it. A foreign entry that conflicts lands as stage 1/2/3 index entries
-with `AUTO_MERGE` set and NO `MERGE_HEAD` — no merge is happening, and that
-combination is the tell (reproduced in a scratch repo, 2026-10-07; the same
-day, an apply in one feature worktree staged five files from another branch's
-stashed work — the patch was banked elsewhere so nothing was lost, but the
-tree was wrong). On that signature, stop and restore rather than resolving:
-the foreign entry stays in the list until whoever made it drops it.
+newest stash of the WHOLE repository, made by anyone, on any branch. Entries
+persist until someone drops them, and any push renumbers every `stash@{n}`,
+which is why the stash-commit id is the stable name. Each entry's subject
+names its origin (`On <branch>: <message>` for `-m`, `WIP on <branch>: …`
+otherwise), so read it against your own HEAD before applying; prefer a stash
+you just made in THIS worktree, or the entry by its stash-commit id — and
+`git stash show -p` reads one without landing it (`--include-untracked` for
+`-u` stashes).
+
+A foreign entry that applies CLEANLY is the silent case: nothing in the output
+says the changes are not yours. If it conflicts, you get stage 1/2/3 index
+entries with `AUTO_MERGE` set and none of `MERGE_HEAD`, `CHERRY_PICK_HEAD` or
+`REBASE_HEAD` — stage 1/2/3 plus `AUTO_MERGE` alone is what a conflicted
+cherry-pick or rebase shows too; those heads are the difference, and their
+absence here is the tell, with the entry still listed. On it, stop and
+restore: `git reset --hard HEAD` (plus `git clean -fd` for files the entry
+created) returns the pre-apply tree, but only where you are alone in the
+worktree — this is the same whole-file blast radius the rule below is about.
+Bank any of your OWN uncommitted work first
+(`git diff > <scratch>/mine.patch`), because the reset cannot tell yours from
+the entry's; in a shared checkout,
+recover path by path with the peers. The foreign entry itself is never
+touched. Reported 2026-10-07: an apply in one feature worktree staged five
+files from a stash made weeks earlier on another branch (the patch was banked
+elsewhere, so nothing was lost — the tree was wrong).
 
 **The undo for a mistaken edit is a reverse edit of your own hunk, never a
 whole-file operation.** Everything above is written against a deliberate act —
