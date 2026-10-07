@@ -213,3 +213,38 @@ def test_resume_of_an_unresolved_id_every_device_answered_keeps_the_generic_copy
     err = capsys.readouterr().err
     assert "no session 'a1b2c3d4e5f6' to resume" in err, err
     assert "did not answer" not in err, err
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected", "tty"),
+    [
+        # The bare ``--resume`` flag (argparse hands the sentinel) with no local sessions.
+        ("@latest", "no previous session to resume", False),
+        ("@latest", "no previous session to resume", True),
+        # A path-shaped string is not an id at all.
+        ("../x", "not a session id", False),
+        ("a/b", "not a session id", False),
+    ],
+    ids=["bare-latest", "bare-latest-tty", "dotdot", "slash"],
+)
+def test_a_silent_device_does_not_rewrite_the_refusals_of_a_non_id(
+    config: Path, monkeypatch, capsys, requested: str, expected: str, tty: bool
+) -> None:
+    """F-1: silence is evidence about an id a device could HOLD, not about a non-id.
+
+    With a silent device and no local sessions the startup arm used to speak for
+    ``@latest`` and for path-shaped strings too, replacing "no previous session to
+    resume" / "not a session id" with the peer sentence.
+    """
+    import local_operator.cli as cli_mod
+
+    config.mkdir(parents=True, exist_ok=True)
+    _silent_mesh(monkeypatch, silent=True, config=config)
+    monkeypatch.setattr(cli_mod.sys.stdout, "isatty", lambda: tty)
+    monkeypatch.setattr("sys.argv", ["local-operator", "--resume", requested])
+
+    assert cli_main() == 1
+
+    err = capsys.readouterr().err
+    assert expected in err, err
+    assert "did not answer" not in err, err
