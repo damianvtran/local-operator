@@ -14,16 +14,19 @@ because the drop happens in a hop they do not cross — which is exactly how it
 shipped. So the test has to cross it: two real relays, a real session on the
 owner, and the viewer declaring on one side and reading the page on the other.
 
-The owner's runtime here is REAL (a ``ServingSessionHandle`` over a real journal),
-not a projection fake: the capability is advertised only to a handle that can
-actually page history, and a fake that cannot would make the advertisement — and
-therefore the whole cell — vacuous.
+The owner's runtime here is REAL, on a LOOP OF ITS OWN
+(``test_session_plane._serve_real_sessions``): the capability is advertised only
+to a handle that can actually page history, and — the part a first draft of this
+file got wrong — ``ServingSessionHandle`` publishes the loop it was built on for
+the runtime to hop to, so building it on the CALLER's loop leaves the hop
+addressing a loop that ``asyncio.run`` buries as soon as the engage returns. The
+welcome then cannot land and the dial expires its ``WELCOME_TIMEOUT_S``, which
+reads as a load-correlated flake rather than as a rig defect (agent review round
+2, R2-1: 3/46 failures, failing runs 11.5-14.4 s against 1.2-1.7 s passing).
 """
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,17 +39,19 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
 from tests.unit.network.test_session_plane import (
     SESSION,
     _dial_to,
+    _RealServed,
     _seed_journal,
-    _stop_all,
+    _serve_real_sessions,
+    _stop_real,
     _StreamClient,
     _viewer,
     _warm,
 )
 
-#: The auth field this file is about: the name the VIEWER declares and the
-#: relay allowlist must forward. Spelled once, from its own parts, so a grep
-#: for the literal cannot silently miss the cell that exists to pin it.
-ENTRY_TIMES_AUTH_FIELD = "display_history_" + "entry_times"
+#: The auth field this file is about: the name the VIEWER declares and the relay
+#: allowlist must forward. Spelled once, from its own parts, so a grep for the
+#: literal cannot silently miss the cell that exists to pin it.
+ENTRY_TIMES_AUTH_FIELD = "display_history_entry_times"
 
 #: The frame ops that can carry a display page on the way in.
 _PAGE_OPS = ("frontend_sync", "welcome", "snapshot")
@@ -65,65 +70,6 @@ def peer_pair(request: pytest.FixtureRequest) -> Devices:
     """
     pair: Devices = request.getfixturevalue("devices")
     return pair
-
-
-class _Runtime:
-    """A runtime this file started, and how to stop it.
-
-    Its own class rather than the shared ``_Served``: that one is typed for
-    ``test_session_plane``'s projection fake, and this handle is a real
-    ``ServingSessionHandle`` — a nominal mismatch pyright is right to refuse.
-    The dictionary the callers share is typed ``Any`` at both ends.
-    """
-
-    def __init__(self, handle: Any, runtime: Any) -> None:
-        self.handle = handle
-        self.runtime = runtime
-
-    def stop(self) -> None:
-        try:
-            self.runtime.close()
-        except Exception:  # noqa: BLE001 — teardown must not mask a failure
-            pass
-
-
-def _serve_windowed(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, Any]:
-    """``engage_runtime`` on ``root``, stood in for by a runtime over a REAL session.
-
-    The same shape as ``test_session_plane``'s ``_serve``, with the one difference
-    this file needs: the handle is a real ``ServingSessionHandle``, so the owner
-    advertises the display-window capabilities and can build the join. A
-    projection fake has no ``history_page``, so the runtime would advertise
-    neither capability and the cell would prove nothing about the hop.
-    """
-    served: dict[str, Any] = {}
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-
-    async def engage(session_id: str, cwd: str, work: Any, **kwargs: Any) -> Any:
-        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-        if session_id not in served:
-            from local_operator.session.runtime.server import RuntimeServer
-            from local_operator.session.runtime.serving import ServingSessionHandle
-            from tests.e2e.harness import ScriptedStream, build_session
-
-            directory = root / "sessions" / session_id
-            session = build_session(directory, ScriptedStream([]), cwd=root)
-            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
-            runtime = RuntimeServer(handle, kind="tui")
-            runtime.start()
-            served[session_id] = _Runtime(handle, runtime)
-        from local_operator.session.runtime import registry
-
-        async with asyncio.timeout(20):
-            while not any(
-                record.session_id == session_id and status == "live"
-                for record, status in registry.scan(root)
-            ):
-                await asyncio.sleep(0.01)
-        return None
-
-    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
-    return served
 
 
 def _page_from(client: _StreamClient, *, rounds: int = 80) -> dict[str, Any]:
@@ -145,6 +91,20 @@ def _page_from(client: _StreamClient, *, rounds: int = 80) -> dict[str, Any]:
     raise AssertionError(f"no display page arrived; frames seen: {seen}")
 
 
+def _journal_times(served: dict[str, _RealServed], ids: list[str]) -> dict[str, float]:
+    """The owner's OWN journal times for ``ids``, read off its disk.
+
+    The expected values are taken from the owner rather than restated as
+    constants: the claim is that the wire carries the journal's instants, and a
+    fixture that merely echoed a literal back would be asserting that the test's
+    own arithmetic is consistent with itself.
+    """
+    wanted = set(ids)
+    return {
+        row["id"]: row["ts"] for row in served[SESSION].transcript_entries() if row["id"] in wanted
+    }
+
+
 def test_the_entry_time_declaration_survives_the_relay_hop(
     peer_pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,8 +114,8 @@ def test_the_entry_time_declaration_survives_the_relay_hop(
     Three facts, one wire path. The owner BUILT a join (its own journal has the
     rows). The viewer DECLARED it can read one. And the page it received carries
     that join, keyed by the owner's own ids with the owner's own entry times —
-    not the serve stamp, whose value is 70 million seconds away from these
-    fixtures' journal.
+    not the serve stamp, whose value is ~90 million seconds from these fixtures'
+    journal, so no serve-clock guess can satisfy the comparison.
 
     Without the allowlist entry the middle fact never arrives, the owner strips
     what it built, and this page comes back with no ``entry_times`` at all.
@@ -164,13 +124,17 @@ def test_the_entry_time_declaration_survives_the_relay_hop(
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     # The OWNER holds the conversation; the VIEWER is B, whose relay dials A.
     ids = _seed_journal(server_a.root, SESSION, ["the first question", "the second"])
-    served = _serve_windowed(monkeypatch, server_a.root)
+    served = _serve_real_sessions(monkeypatch, server_a.root)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
     client = None
     try:
         _warm(server_a.root, SESSION)
         _viewer(server_b)
         assert _dial_to(server_b, record, host_a, port_a) is not None
+        expected = _journal_times(served, ids)
+        assert len(expected) == len(
+            ids
+        ), f"the owner's journal lost the fixture rows: {served[SESSION].transcript_entries()}"
 
         client = _StreamClient(server_b.root)
         opened = client.open_stream(
@@ -190,13 +154,11 @@ def test_the_entry_time_declaration_survives_the_relay_hop(
         assert isinstance(
             join, dict
         ), "the declaration did not survive the hop: the page carries no join at all"
-        assert set(join) == set(ids), (join, ids)
-        # The VALUES are the owner's journal times, not this device's clock.
-        assert sorted(join.values()) == [1_700_000_000.0, 1_700_000_001.0]
+        assert join == expected, "the wire's join is not the owner's own journal"
     finally:
         if client is not None:
             client.close()
-        _stop_all(served)
+        _stop_real(served)
 
 
 def test_a_viewer_that_does_not_declare_still_gets_no_join_across_the_hop(
@@ -214,7 +176,7 @@ def test_a_viewer_that_does_not_declare_still_gets_no_join_across_the_hop(
     server_a, server_b, host_a, port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     ids = _seed_journal(server_a.root, SESSION, ["the first question", "the second"])
-    served = _serve_windowed(monkeypatch, server_a.root)
+    served = _serve_real_sessions(monkeypatch, server_a.root)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
     client = None
     try:
@@ -241,4 +203,4 @@ def test_a_viewer_that_does_not_declare_still_gets_no_join_across_the_hop(
     finally:
         if client is not None:
             client.close()
-        _stop_all(served)
+        _stop_real(served)
