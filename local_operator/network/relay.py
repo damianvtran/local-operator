@@ -1799,6 +1799,26 @@ def capability_change_event(record: NetworkRecord, change: CapabilityChange) -> 
     )
 
 
+def rotation_lock_refusal(record: NetworkRecord, *, now: float | None = None) -> None:
+    """Refuse a rotation the lock covers, in the ONE sentence both readers use.
+
+    TWO READERS, which is why this is a function rather than an inline check:
+    ``rotate_epoch`` itself, and the member-removal handler's precheck (review
+    round 3's QA observation — the ending exchange and the removal must be one
+    unit of decision, so a refusal must fire BEFORE the endings run; measured:
+    a lock-refused ``member rm`` wiped the member's copies while the refusal
+    said nothing about them). Factored the instant it had a second caller, so
+    the sentence cannot drift between the two.
+    """
+    moment = time.time() if now is None else now
+    if record.rotation_lock_until > moment:
+        raise MeshRefusal(
+            "rotation_in_progress",
+            f"a rotation of {record.name} is already in progress; wait "
+            f"{int(record.rotation_lock_until - moment)}s and try again",
+        )
+
+
 def rotate_epoch(
     record: NetworkRecord,
     state: SecretState,
@@ -1826,12 +1846,7 @@ def rotate_epoch(
     from secrets import token_bytes
 
     moment = time.time() if now is None else now
-    if record.rotation_lock_until > moment:
-        raise MeshRefusal(
-            "rotation_in_progress",
-            f"a rotation of {record.name} is already in progress; wait "
-            f"{int(record.rotation_lock_until - moment)}s and try again",
-        )
+    rotation_lock_refusal(record, now=moment)
     previous_epoch = record.epoch
     record.epoch = record.epoch + 1
     state.rotate(wire.b64u(token_bytes(32)), record.epoch)
@@ -9458,6 +9473,15 @@ class RelayServer:
         resolved = self._require_network(str(frame.get("network") or ""))
         state = store.require_secrets(resolved.network_id, self.root)
         device_id = str(frame.get("device_id") or "")
+        # ONE UNIT OF DECISION (review round 3 QA observation): a removal the
+        # rotation lock will refuse must not run its ending exchange first —
+        # measured, a lock-refused `member rm` wiped the member's copies while
+        # the refusal said nothing about them, and the member stayed an active
+        # holder a tick could re-deliver the copy to. The precheck reads the
+        # record the write will touch; `rotate_epoch` still re-checks inside
+        # the write lock, so a rotation landing in the window between the two
+        # is refused there exactly as before (the pre-existing race).
+        rotation_lock_refusal(store.load(resolved.network_id, self.root))
         # THE LAST CONTACT THE COPIES GET (review round 1, Q1): the ending exchange
         # runs BEFORE the tombstone, because afterwards this device's own dial is
         # refused by design (``_ensure_link_with_reason`` skips inactive members) and

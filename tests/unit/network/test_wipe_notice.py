@@ -97,8 +97,18 @@ def test_an_offline_member_is_wiped_on_reconnect(copied_mesh: Any) -> None:
     Reachability is simulated at the endpoint (a dead port), not by stopping a
     relay: ``stop``/``start`` is not a supported cycle in this build, and the
     product property under test is the DIAL, not the process.
+
+    THE SURVIVING LIVE LINK IS CLOSED FIRST (review round 3, F3): a live link
+    carries the wipe however dead the endpoint reads — measured while writing
+    the sibling cell, and here as an intermittent red (1 of 8 full-file runs)
+    where the async exchange won the race against the immediate store read.
+    Closing what the idle reaper eventually would (``LINK_IDLE_S`` is 120 s, far
+    past a cell) makes the dial the only path, deterministically.
     """
     mesh = copied_mesh
+    for link in list(mesh.a.links.values()):
+        if getattr(link, "device_id", "") == mesh.member:
+            link.close("test: the member becomes unreachable")
     with store.mutate(mesh.network_id, mesh.a.root) as record:
         member_row = record.member(mesh.member)
         assert member_row is not None
@@ -224,6 +234,109 @@ def test_a_removal_timeout_renders_distinctly_from_unreachable(
         lambda: not _member_has(mesh.b.root, SECRET_NAME)
     ), "the timed-out member did NOT complete; the receipt wording would be a lie"
     assert not _ledger_wiped(mesh), "no confirmation arrived, so the row must stay open"
+
+
+def test_the_removal_wait_covers_the_exchange_envelope() -> None:
+    """F2 (review round 3): the caller's wait must exceed the exchange's envelope.
+
+    The loop clamps each frame's wait by the remaining budget, so its true
+    envelope is probe + budget — and BOTH callers (the CLI's ``net_member_rm``
+    and the desktop route's call of the same op) wait ``REMOVAL_CLI_TIMEOUT_S``.
+    If a future bound change makes the wait fit INSIDE the envelope, the caller
+    falls back to the local write mid-exchange; this cell fails first, before
+    that window can exist. The behavioral half — that the clamp is what keeps
+    the envelope at budget rather than budget + frame — is pinned by
+    ``test_the_frame_wait_is_clamped_to_the_remaining_budget`` below.
+    """
+    from local_operator.network.credentials import sync as sync_mod
+
+    envelope = sync_mod.REMOVAL_PROBE_TIMEOUT_S + sync_mod.REMOVAL_TOTAL_BUDGET_S
+    assert sync_mod.REMOVAL_CLI_TIMEOUT_S > envelope, (
+        "the caller's wait must cover probe + budget (the loop's clamped envelope): "
+        f"{sync_mod.REMOVAL_CLI_TIMEOUT_S}s vs {envelope}s"
+    )
+
+
+def test_the_frame_wait_is_clamped_to_the_remaining_budget(
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2's clamp, behaviorally: a frame cannot outrun the loop's budget.
+
+    The budget is lowered below the member's simulated open while the frame
+    bound stays long: an UNCLAMPED wait would let the member answer inside its
+    full bound (the exchange would confirm at the member's pace, past the
+    budget), while the clamped wait gives up when the budget expires — which is
+    what keeps the caller's wait safe by construction. The receipt carries the
+    timed-out class, and the member still completes afterwards; the wall check
+    is secondary to that class assertion, which no load can flip.
+    """
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.secrets import access as access_mod
+
+    mesh = copied_mesh
+    real_open = access_mod.open_store
+
+    def slow_open(root: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(str(root)) == Path(str(mesh.b.root)):
+            time.sleep(3.5)
+        return real_open(root, *args, **kwargs)
+
+    monkeypatch.setattr(access_mod, "open_store", slow_open)
+    monkeypatch.setattr(sync_mod, "REMOVAL_FRAME_TIMEOUT_S", 5.0)
+    monkeypatch.setattr(sync_mod, "REMOVAL_TOTAL_BUDGET_S", 1.5)
+    started = time.monotonic()
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    elapsed = time.monotonic() - started
+    out = capsys.readouterr().out
+    # The class assertion is the discriminator: an unclamped wait would let the
+    # member's 3.5 s open answer inside the 5 s bound and CONFIRM the wipe; the
+    # clamped wait expires with the budget, so the owner reads the give-up class.
+    assert "timed out" in out, out
+    # Sanity bound only (the class above is the discriminator): a clamped loop
+    # answers in ~budget + overhead; even a loaded host stays well inside this,
+    # while an unclamped wait on a slower member would sit at its full bound.
+    assert elapsed < 4.5, f"the loop outran its 1.5 s budget: {elapsed:.1f}s"
+    monkeypatch.setattr(access_mod, "open_store", real_open)
+    assert net_fixtures.wait_for(
+        lambda: not _member_has(mesh.b.root, SECRET_NAME)
+    ), "the member still completes after the owner's budget expired"
+
+
+def test_a_lock_refused_removal_does_not_run_its_ending_exchange(
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA r3 observation: the ending exchange and the removal are one decision.
+
+    A ``member rm`` refused by the rotation lock used to run its ending
+    exchange FIRST — measured by QA: G's copies were wiped while the refusal
+    said nothing about them, and the member stayed an active holder a tick
+    could re-deliver the copy to. The lock is checked before the exchange now,
+    with the same sentence ``rotate_epoch`` raises; the copies are untouched.
+    Clearing the lock, the retried removal delivers the ending normally.
+    """
+    mesh = copied_mesh
+    with store.mutate(mesh.network_id, mesh.a.root) as record:
+        # The state a just-run rotation leaves behind (the QA repro armed it
+        # with a real second removal; this is that record value, directly).
+        record.rotation_lock_until = time.time() + 27.0
+        store.save(record, mesh.a.root)
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 1
+    captured = capsys.readouterr()
+    assert "already in progress" in captured.err, captured
+    assert _member_has(mesh.b.root, SECRET_NAME), "a refused removal must not wipe"
+    assert not _ledger_wiped(mesh)
+    # The lock clears; the same verb now runs the whole unit of decision.
+    with store.mutate(mesh.network_id, mesh.a.root) as record:
+        record.rotation_lock_until = 0.0
+        store.save(record, mesh.a.root)
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    out = capsys.readouterr().out
+    assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
+    assert net_fixtures.wait_for(lambda: _ledger_wiped(mesh))
+    assert "were deleted (the ending is confirmed)" in out, out
 
 
 def test_member_rm_without_contact_records_the_open_ending(

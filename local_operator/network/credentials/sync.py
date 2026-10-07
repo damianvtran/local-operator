@@ -156,12 +156,15 @@ COPY_TIMEOUT_S = 30.0
 #:   fleet needed it, and the row stayed open forever (F1, 6/6 under load).
 #: - ``REMOVAL_TOTAL_BUDGET_S`` bounds the WHOLE frame loop, so the relay's
 #:   answer (and the CLI's wait) stays bounded even when every frame burns its
-#:   full bound; rows the budget never reaches were NOT sent, which is why they
-#:   count as not-confirmed rather than timed-out.
+#:   full bound; the loop CLAMPS each frame's wait by the remaining budget
+#:   (review round 3, F2), so it can never outrun this number. Rows the budget
+#:   never reaches were NOT sent, which is why they count as not-confirmed
+#:   rather than timed-out.
 #: - The CLI's ``net_member_rm`` call passes ``timeout=REMOVAL_CLI_TIMEOUT_S``,
-#:   which must exceed probe + budget, or the CLI would fall back to the local
-#:   write while the relay is still mid-exchange (the double-write the
-#:   allow_no_answer comment warns about).
+#:   which must exceed probe + budget — the loop's true envelope, now that the
+#:   clamp exists — or the CLI would fall back to the local write while the
+#:   relay is still mid-exchange (the double-write the allow_no_answer comment
+#:   warns about). test_wipe_notice.py pins the inequality.
 REMOVAL_PROBE_TIMEOUT_S = 3.0
 REMOVAL_FRAME_TIMEOUT_S = ANNOUNCE_TIMEOUT_S
 REMOVAL_TOTAL_BUDGET_S = 25.0
@@ -1274,7 +1277,8 @@ class SyncEngine:
         attempted = 0
         deadline = time.monotonic() + REMOVAL_TOTAL_BUDGET_S
         for item in pending[:ANNOUNCE_CAP]:
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 # NOT ATTEMPTED, so NOT timed-out: these rows keep the
                 # "could NOT be confirmed" meaning — nothing was ever sent.
                 logger.debug(
@@ -1294,8 +1298,17 @@ class SyncEngine:
                 **item,
             }
             attempted += 1
+            # THE WAIT IS CLAMPED BY THE BUDGET (review round 3, F2): checking
+            # the budget only BEFORE a frame left the loop's true envelope at
+            # budget + one full frame (25 + 10 = 35 s, and 38 s with the
+            # probe) — one frame bound past the caller's wait, i.e. a window
+            # where the CLI would fall back to the local write mid-exchange.
+            # Clamping means the loop can never outrun REMOVAL_TOTAL_BUDGET_S,
+            # so the envelope is probe + budget and the caller's wait covers it
+            # by construction (pinned in test_wipe_notice.py).
+            wait_s = min(REMOVAL_FRAME_TIMEOUT_S, remaining)
             try:
-                reply = link.request(frame, timeout=REMOVAL_FRAME_TIMEOUT_S)
+                reply = link.request(frame, timeout=wait_s)
             except Exception:  # noqa: BLE001 — the link itself is failing; stop the run
                 # NOT the timed-out class: the measured give-up is ``None`` below
                 # (the wait expiring), while an exception here is the send/wait
