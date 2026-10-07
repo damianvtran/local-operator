@@ -639,6 +639,24 @@ def test_push_surfaces_a_peer_refusal_with_its_code(root: Path) -> None:
     assert (result["code"], result["ok"]) == ("not_authorised", False)
 
 
+def test_push_to_peer_files_no_answer_off_the_policy_codes(root: Path) -> None:
+    """A NO-ANSWER IS A TRANSPORT FAILURE, NOT A POLICY ANSWER (definitions' Q-1).
+
+    ``link.request`` returning None is a timeout or a dead-link send — nobody
+    answered — and its old collapse into the ``refused`` default below filed it
+    with the ANSWERED refusals, which PARK the member for
+    REFUSED_MIN_INTERVAL_S (1800 s) with no retry and no log line. Read from the
+    real ``push_to_peer`` rather than the syncer, because the collapse lived in
+    the mapping: the ``refused`` default below it remains for the codeless
+    ANSWERED case, and that half must keep parking.
+    """
+    link = _FakeLink(capabilities=wire.LINK_CAPABILITIES, replies=[None])
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
+    assert result["code"] == "no_answer", result
+    assert "no_answer" not in definitions.POLICY_REFUSAL_CODES
+    assert "refused" in definitions.POLICY_REFUSAL_CODES  # the answered case still parks
+
+
 def test_push_reports_a_conflict_by_name(root: Path) -> None:
     _write_servers(root, {"crm": {"type": "http", "url": "https://example.test/mcp"}})
     link = _FakeLink(
@@ -783,6 +801,79 @@ def test_a_step_runs_after_the_push_and_a_policy_code_parks_the_member(
     assert len(pushes) == 1
     syncer.tick(now=1000.0 + definitions.REFUSED_MIN_INTERVAL_S + 1)
     assert len(pushes) == 2
+
+
+def test_an_unanswered_push_is_not_a_refusal_and_keeps_the_fast_retry(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A NO-ANSWER IS A TRANSPORT FAILURE, NOT A POLICY ANSWER (definitions' Q-1).
+
+    The same collapse as definitions': ``link.request`` returning None (a
+    timeout or a dead link) fell into the ``refused`` default, ``refused`` is a
+    policy code, and the syncer parked the member for REFUSED_MIN_INTERVAL_S
+    with no retry and no log line. This cell drives the REAL step over the REAL
+    push and a link that never answers, so the mapping and the fast retry are
+    pinned end to end: one tick later the cadence asks again, exactly as it
+    does after ``unreachable``.
+    """
+    monkeypatch.setattr(definitions, "_TICK_STEPS", [])
+    _write_servers(root, {"gl": {"type": "stdio", "command": "npx"}})
+    link = _FakeLink(capabilities=wire.LINK_CAPABILITIES, replies=[None, None])
+    monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "")
+    # The syncer's OWN push is not under test here; keep it a transient failure
+    # so the only refusal-shaped answer could be the step's.
+    monkeypatch.setattr(
+        definitions,
+        "push_to_peer",
+        lambda _s, _d, **fields: {"ok": False, "code": "unreachable", "message": "not answering"},
+    )
+    definitions.add_tick_step(mcpdefs.mesh_tick_step)
+    syncer = definitions.DefinitionsSyncer(_fake_server(root, link))
+    monkeypatch.setattr(syncer, "_targets", lambda: [PEER])
+    syncer.tick(now=1000.0)
+    assert len(link.requests) == 1, "the step must have dialed once"
+    assert syncer._refused_at.get(PEER, 0.0) == 0.0, "a no-answer must not park"
+    # One tick later it asks again — the same fast retry a transport failure gets.
+    syncer.tick(now=1016.0)
+    assert len(link.requests) == 2, "a no-answer must be re-contacted on the next tick"
+
+
+def test_a_refused_mcp_push_still_parks_the_member(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AN ANSWERED REFUSAL STILL PARKS (the other half of definitions' Q-1).
+
+    The codeless ANSWERED case keeps the ``refused`` default, and ``refused``
+    is a policy code: the no-answer fix must not un-park it. The answer to "may
+    I write MCP servers here" does not change between ticks, so the member
+    waits REFUSED_MIN_INTERVAL_S — then re-attempts, because a capability
+    granted on the peer's side must be discovered rather than hidden.
+    """
+    monkeypatch.setattr(definitions, "_TICK_STEPS", [])
+    _write_servers(root, {"gl": {"type": "stdio", "command": "npx"}})
+    link = _FakeLink(
+        capabilities=wire.LINK_CAPABILITIES,
+        replies=[{"op": "error", "req": 1}, {"op": "error", "req": 2}],
+    )
+    monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "")
+    monkeypatch.setattr(
+        definitions,
+        "push_to_peer",
+        lambda _s, _d, **fields: {"ok": False, "code": "unreachable", "message": "not answering"},
+    )
+    definitions.add_tick_step(mcpdefs.mesh_tick_step)
+    syncer = definitions.DefinitionsSyncer(_fake_server(root, link))
+    monkeypatch.setattr(syncer, "_targets", lambda: [PEER])
+    syncer.tick(now=1000.0)
+    assert len(link.requests) == 1
+    assert syncer._refused_at.get(PEER, 0.0) == 1000.0 + definitions.REFUSED_MIN_INTERVAL_S
+    # Parked: every tick in the next half hour asks nobody ...
+    assert syncer.tick(now=1016.0) == []
+    syncer.tick(now=2000.0)
+    assert len(link.requests) == 1, "a refusal must park the member, not re-ask every tick"
+    # ... and half an hour later it asks again — a re-attempt, not a permanent skip.
+    syncer.tick(now=1000.0 + definitions.REFUSED_MIN_INTERVAL_S + 16.0)
+    assert len(link.requests) == 2
 
 
 # ---------------------------------------------------------------------------

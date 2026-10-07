@@ -1139,6 +1139,25 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001 — a probe failure is reported, not raised
         return {"ok": False, "code": "state_failed", "message": str(exc), "device_id": device_id}
+    if state is None:
+        # A NO-ANSWER IS NOT A REFUSAL (definitions' Q-1; the same collapse
+        # existed here). ``link.request`` returning None is a timeout or a
+        # dead-link send — nobody answered — and its old collapse into the
+        # ``refused`` default below filed it with the ANSWERED refusals, which
+        # PARK the member for REFUSED_MIN_INTERVAL_S (1800 s) with no retry and
+        # no log line: one blip against a frozen member starved the whole
+        # cadence (live repro on the definitions twin: 240 s of zero contacts
+        # after one unanswered push; a clean re-drive caught up in 1 s).
+        # ``no_answer`` is deliberately NOT a policy code, so the next tick
+        # retries it exactly like ``unreachable``; the ``refused`` default
+        # below stays for the codeless ANSWERED case its comment describes.
+        return {
+            "ok": False,
+            "code": "no_answer",
+            "message": "that device did not answer (a timeout or a closed link); "
+            "its MCP servers will be retried",
+            "device_id": device_id,
+        }
     if not isinstance(state, dict) or state.get("op") == "error":
         detail = state if isinstance(state, dict) else {}
         # A PEER THAT ANSWERED IS NOT A PEER THAT DID NOT (definitions' Q-R1-3):
