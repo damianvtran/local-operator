@@ -1148,6 +1148,19 @@ def test_the_human_listing_renders_a_row_whose_unseen_is_true(
             )
             named = capsys.readouterr()
             assert "ask" not in _rendered_row(named.out, _UNSEEN_ROW), named.out
+
+        # AND THE JSON HALF OF THE SAME COMMAND (agent review round 2, F4): the
+        # stored row's claim is dropped from `--json` too, not only from the
+        # table — the dump goes through the same row-level rule.
+        assert (
+            main_cli.sessions_command(
+                _ordinary_sessions_args(peer=server.identity.device_id, json=True)
+            )
+            == 0
+        )
+        dumped = json.loads(capsys.readouterr().out)
+        dumped_stored = [row for row in dumped if row.get("session_id") == _UNSEEN_ROW]
+        assert dumped_stored and dumped_stored[0]["pending"] is None, dumped_stored
     finally:
         server.stop()
 
