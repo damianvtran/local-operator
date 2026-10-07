@@ -4138,6 +4138,7 @@ class RelayServer:
         self.publish()
         self._flush_outboxes()
         self._run_start_hooks()
+        self._sweep_approvals_once()
 
     def _run_start_hooks(self) -> None:
         """Run each slice's one-shot start hook, on its own daemon thread.
@@ -4160,6 +4161,33 @@ class RelayServer:
 
             thread = threading.Thread(target=_run, name=f"mesh-start-{label}", daemon=True)
             thread.start()
+
+    def _sweep_approvals_once(self) -> None:
+        """One best-effort retention sweep for the device-local approvals store.
+
+        WHY THIS SEAT (2026-10-07). The approvals store's retention rides the
+        CREATE path (``approvals.sweep``'s own docstring: "no timer process" by
+        design), so a device that stops onboarding new devices also stops
+        reaping: measured on the operator's own machine, nine terminal records
+        from a single onboarding week sat untouched, and nothing would have
+        touched them until the next request — which may never come. The relay
+        start is the one non-timer event a device reaches without new approval
+        activity (every update restarts the relay; any mesh verb that finds no
+        relay starts one), so the sweep runs here too: once, off-thread, on the
+        same terms the slice hooks above run under — a failure is reported and
+        swallowed, never a reason a relay or a command fails.
+        """
+
+        def _run() -> None:
+            try:
+                from local_operator.network import approvals
+
+                approvals.sweep(root=self.root)
+            except Exception as exc:  # noqa: BLE001 — see the docstring
+                print(f"mesh relay: approvals sweep failed ({exc})", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name="mesh-start-approvals", daemon=True)
+        thread.start()
 
     def serve_forever(self) -> None:
         """The foreground runner (``lop network serve``): block until signalled."""

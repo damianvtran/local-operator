@@ -1686,9 +1686,13 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
     """Materialize due expiries, prune 30-day-terminal records, age tombstones.
 
     NO TIMER PROCESS EXISTS by design (§2.4): this runs opportunistically from
-    writer paths (create, below), and the counts it returns are for the caller's
-    audit line. Best-effort by construction — a record locked by a live runner
-    is skipped rather than waited on.
+    writer paths (create, below) and once at relay start (``relay.RelayServer.
+    _sweep_approvals_once``, the 2026-10-07 seat) — a device that stops
+    onboarding stops touching the create path, so terminal records would
+    otherwise sit past their window until a request that may never come. The
+    counts it returns are for the caller's audit line. Best-effort by
+    construction — a record locked by a live runner is skipped rather than
+    waited on.
     """
     moment = time.time() if now is None else now
     materialized = pruned = 0

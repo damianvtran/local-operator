@@ -364,7 +364,10 @@ requested ────┤
   (`approval_already_connected`).
 - **Expiry owner:** lazy-on-read + sweep — the first WRITER to observe `now ≥ expires_at`
   materializes `expired` under the lock (reads fold the same way, the asks-store discipline);
-  the retention sweep materializes it for untouched records. No timer process.
+  the retention sweep materializes it for untouched records. No timer process. The sweep
+  rotates from the create path and, since 2026-10-07, once at relay start
+  (`relay.RelayServer._sweep_approvals_once`) — a device that stops onboarding stops touching
+  create, and the boot seat is the one non-timer event left that still reaps.
 - **Who may deny:** any surface that can reach the record (the safe-direction rule); the
   denial is written with `decided_at` + audit event.
 - **Who may approve:** a verified operator signature only (Touch ID on macOS; device cert from
