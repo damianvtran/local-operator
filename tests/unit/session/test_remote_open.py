@@ -31,13 +31,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from local_operator.network import projection, store
 from local_operator.session import peer_rows as peer_rows_mod
 from local_operator.session.peer_rows import peer_session_row
-from local_operator.session.remote_open import remote_row_for
+from local_operator.session.remote_open import (
+    PeerSessionUnresolved,
+    open_remote_viewer,
+    remote_row_for,
+)
 from tests.unit.session.test_peer_rows import _Catalog, _Facts, _Row
 
 
@@ -152,3 +157,68 @@ def test_an_id_nobody_holds_is_none_at_the_cost_of_one_live_read(
     )
     assert remote_row_for("s_missing", root) is None
     assert after.calls == 1, "one live read — and still the honest None"
+
+
+# ---------------------------------------------------------------------------
+# `open_remote_viewer`'s miss: None means "not a peer's", never "nobody said"
+# ---------------------------------------------------------------------------
+
+
+async def _never_take_over() -> Any:
+    """A remote viewer never takes over: the owner is the peer, not this device."""
+    raise RuntimeError("a remote viewer never takes over a session")
+
+
+@pytest.mark.asyncio
+async def test_a_silent_device_refuses_the_viewer_instead_of_answering_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ANSWER EVERY CALLER READS AS "NOT A PEER'S".
+
+    ``None`` here sends the CLI's ``--resume`` to the LOCAL cold viewer below it
+    — a viewer for a conversation this device does not hold, whose first write
+    would engage a runtime HERE under somebody else's id (the two-writer case
+    INV-1 forbids). When the read that missed also reports a device that did not
+    answer, the honest answer is a refusal that says so, not that ``None``.
+    """
+    root = tmp_path / "root"
+    catalog = _relay(
+        monkeypatch,
+        _Catalog(
+            [
+                _Facts(
+                    "d_silent",
+                    "build-box",
+                    reachable=False,
+                    reason="connect_failed:ConnectionRefusedError",
+                ),
+                _Facts("d_live", "radiant-m4", reachable=True),
+            ],
+            [],
+        ),
+    )
+
+    with pytest.raises(PeerSessionUnresolved) as raised:
+        await open_remote_viewer("s_missing", config_dir=root, takeover=_never_take_over)
+
+    assert raised.value.session_id == "s_missing"
+    assert raised.value.code == "session_unresolved"
+    assert [peer.name for peer in raised.value.unanswered] == ["build-box"]
+    assert "did not answer" in str(raised.value)
+    assert " is on " not in str(raised.value), "silence was turned into an ownership claim"
+    assert catalog.calls == 1, "the refusal must ride the read that already missed"
+
+
+@pytest.mark.asyncio
+async def test_a_listing_that_answered_still_answers_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No silence ⇒ the seam's contract is unchanged: ``None``, one read, no raise."""
+    root = tmp_path / "root"
+    catalog = _relay(
+        monkeypatch,
+        _Catalog([_Facts("d_live", "radiant-m4", reachable=True)], [_Row("s_1", "d_live")]),
+    )
+
+    assert await open_remote_viewer("s_missing", config_dir=root, takeover=_never_take_over) is None
+    assert catalog.calls == 1

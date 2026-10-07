@@ -7381,10 +7381,34 @@ class DesktopSessions:
                                 ),
                                 None,
                             )
-                        from local_operator.session.remote_open import remote_row_for
+                        from local_operator.session.peer_rows import unanswered_peers
+                        from local_operator.session.remote_open import (
+                            PeerSessionUnresolved,
+                            remote_row_for,
+                        )
 
                         row = remote_row_for(session_id, self.root)
                         if row is None:
+                            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
+                            # ``remote_row_for`` ends in a genuine read
+                            # (``ttl_s=0``) precisely so a just-created peer id
+                            # resolves; that read also reports the devices that
+                            # did NOT reply, and this is the one place that fact
+                            # is turned into an answer for a route. NO SECOND
+                            # DIAL: ``unanswered_peers`` rides the cache entry
+                            # the rows were just written under, so the read that
+                            # missed is the read whose silence is consulted.
+                            #
+                            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
+                            # shared 404 is what the renderer turns into
+                            # "missing" — "This conversation is no longer on this
+                            # machine", composer refused. That is a deletion claim
+                            # this device cannot support while a peer is silent,
+                            # so the two cases must not arrive as one KeyError
+                            # (mesh-wire-honesty.md §S2).
+                            silent = unanswered_peers(self.root)
+                            if silent:
+                                raise PeerSessionUnresolved(session_id, silent)
                             raise KeyError("Unknown session")
                         if not row.reachable:
                             # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME

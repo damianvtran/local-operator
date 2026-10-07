@@ -19,6 +19,10 @@ than an implementation detail:
 * an UNREACHABLE peer still refuses, with the SAME sentence the TUI refuses the
   same state with (``remote_open.unreachable_peer_sentence`` — the shared
   composer exists so two surfaces cannot describe one situation two ways);
+* an id that did not RESOLVE while a device stayed SILENT is refused with its
+  own code (``409 session_unresolved``) rather than the shared 404 — the miss is
+  not evidence of absence, and the 404 is what the renderer paints as a deleted
+  conversation (mesh-wire-honesty.md §S2);
 * an id nobody holds is still the shared 404, and a LOCAL id is untouched —
   including its cost: the peer projection is never consulted for a directory
   this device already holds;
@@ -39,6 +43,7 @@ import base64
 import hashlib
 import json
 import os
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,9 +60,14 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.owner import SessionSeed
+from local_operator.session.peer_rows import UnansweredPeer
 from local_operator.session.placement import SessionPlacement
-from local_operator.session.remote_open import unreachable_peer_sentence
+from local_operator.session.remote_open import (
+    unreachable_peer_sentence,
+    unresolved_peer_sentence,
+)
 from local_operator.session.retention import DESKTOP_MARKER_NAME
+from tests.unit.session.test_peer_rows import _Catalog, _Facts
 
 MINE = "c" * 12
 OTHER = "e" * 12
@@ -193,6 +203,47 @@ def _seed_local(root: Path, session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _fresh_peer_listing() -> Iterator[None]:
+    """``peer_rows`` caches by root at MODULE level: no test may inherit a read."""
+    from local_operator.session import peer_rows
+
+    peer_rows.clear_cache()
+    yield
+    peer_rows.clear_cache()
+
+
+def _relay(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    silent: Sequence[tuple[str, str]] = (),
+    live: Sequence[tuple[str, str]] = (),
+    rows: Sequence[Any] = (),
+) -> _Catalog:
+    """Put a relay record behind this root and answer its reads from a counting read.
+
+    THE COUNT IS THE POINT (mesh-wire-honesty.md §S2's evidence plan): the new
+    refusal must consult the silence carried by the SAME listing read that
+    missed, so ``calls`` — one per ``peers()``, i.e. one per listing read — is
+    the observable that distinguishes "rode the read that already happened"
+    from "paid a second fan-out". The catalogue is the injection seam the
+    producer's own tests use (``tests/unit/session/test_peer_rows``), and every
+    layer above it — the TTL, ``_read_all``, the miss path's live read, the
+    consult — is production code.
+    """
+    from local_operator.network import projection, store
+
+    facts = [
+        _Facts(device_id, name, reachable=False, reason="connect_failed:ConnectionRefusedError")
+        for device_id, name in silent
+    ]
+    facts += [_Facts(device_id, name, reachable=True) for device_id, name in live]
+    catalog = _Catalog(facts, list(rows))
+    monkeypatch.setattr(store, "find_own_relay", lambda root=None: object())
+    monkeypatch.setattr(projection, "RelayPeerCatalog", lambda root: catalog)
+    return catalog
+
+
 @pytest.mark.asyncio
 async def test_an_unreachable_peer_refuses_in_the_tuis_own_words(
     remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
@@ -232,6 +283,99 @@ async def test_an_unknown_id_is_still_the_shared_404(
     response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
     assert response.status_code == 404, response.text
     assert asked == ["f" * 12], "the id was not even asked about"
+
+
+@pytest.mark.asyncio
+async def test_a_silent_device_makes_an_unknown_id_unresolved_not_missing(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """409 ``session_unresolved``: the read missed AND a device did not answer.
+
+    THE ANSWER THIS REPLACES WAS A CLAIM ABOUT THE USER'S WORK. One 404 answered
+    both "every device answered and none holds this id" and "a device did not
+    reply", and the renderer turns a 404 into ``missing`` — "This conversation
+    is no longer on this machine", composer refused. The silence is not evidence
+    of absence, so it gets its own code, its own sentence, and a remedy that
+    names no holder to distrust.
+    """
+    client, _root = remote_api
+    catalog = _relay(
+        monkeypatch, silent=[("d_silent", "build-box")], live=[("d_live", "radiant-m4")]
+    )
+    unknown = "f" * 12
+
+    response = await client.get(f"/v1/desktop/sessions/{unknown}")
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_unresolved"
+    assert detail["message"] == unresolved_peer_sentence(
+        unknown,
+        (UnansweredPeer("d_silent", "build-box", "connect_failed:ConnectionRefusedError"),),
+    )
+    assert "build-box" in detail["message"], "the silent device went unnamed"
+    assert "did not answer" in detail["message"], "silence was not named as silence"
+    assert "connect_failed:ConnectionRefusedError" not in detail["message"]
+    assert " is on " not in detail["message"], "silence was turned into an ownership claim"
+    assert "no longer" not in detail["message"], "an unprovable absence was stated as a deletion"
+    assert catalog.calls == 1, "the consult paid a SECOND listing read"
+
+
+@pytest.mark.asyncio
+async def test_the_unresolved_refusal_rides_the_same_door_as_the_snapshot(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/history`` inherits it: one code for one situation, whichever read was made."""
+    client, _root = remote_api
+    _relay(monkeypatch, silent=[("d_silent", "build-box")])
+
+    response = await client.get(f"/v1/desktop/sessions/{'f' * 12}/history")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "session_unresolved"
+
+
+@pytest.mark.asyncio
+async def test_every_device_answering_keeps_the_shared_404(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real unknown must STAY unknown: no silence, no new state, same cost."""
+    client, _root = remote_api
+    catalog = _relay(monkeypatch, live=[("d_live", "radiant-m4")])
+
+    response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Requested session, profile, team or subscription not found"
+    assert catalog.calls == 1, "the miss itself still costs exactly ONE listing read"
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_row_is_never_replaced_by_the_silence_refusal(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolved-but-unreachable row is a DIFFERENT fact from an unresolved id.
+
+    The branch order is the assertion. A row that resolved names the device that
+    holds the conversation and why it cannot be reached, which is strictly MORE
+    than "a device did not answer"; reaching the silence consult for it would
+    throw that away. The consult is installed as a tripwire rather than counted,
+    so a future reorder fails loudly instead of quietly changing the sentence.
+    """
+    client, _root = remote_api
+    row = _peer_row(reachable=False, unreachable_reason="connect_failed:ConnectionRefusedError")
+    _answer_rows(monkeypatch, row)
+    from local_operator.session import peer_rows
+
+    def _must_not_be_consulted(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the silence was consulted for a RESOLVED row")
+
+    monkeypatch.setattr(peer_rows, "unanswered_peers", _must_not_be_consulted)
+
+    response = await client.get(f"/v1/desktop/sessions/{OTHER}")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "session_is_remote"
 
 
 @pytest.mark.asyncio

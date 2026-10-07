@@ -186,6 +186,30 @@ state, never "unknown". Attribution never pins a silent peer to an id.**
   unknown copy's wording once every device HAS answered ("no longer on this machine" is
   the UI lane's to refine; flagged, not silently changed here).
 
+**As built (S2, branch `fix/mesh-unresolved`).** Three choices this note left open,
+recorded here so the next reader does not have to re-derive them:
+
+- **The typed state lives in `session/remote_open.py`, beside the sentence composer —
+  not beside `PeerSessionUnreachable`.** Both seams raise it and the second one IS that
+  module, while the tree keeps ONE direction of dependency: nothing under
+  `local_operator/session/**` imports `local_operator.server` (the same decision
+  `session/store_failures.py`'s placement note records for the same reason). Homing the
+  type in the server module would force `remote_open` to import the HTTP layer to raise
+  its own refusal. The routes import it from `session.remote_open` directly.
+- **The sentence, as landed:** `<id> could not be resolved: <names> did not answer, so
+  this conversation may be on that device|one of them. That is not the same as gone —
+  retry once the link is back; /network doctor diagnoses the link.` Silent devices are
+  named AS silent, ownership is never claimed, no single device is pinned as the holder
+  (`one of them` whenever more than one is silent), and `/network doctor` is bare — the
+  subcommand takes `--peer` optionally.
+- **`unanswered_peers(root)` is the same read, structurally:** `remote_row_for`'s miss
+  ends in a `ttl_s=0` read and both halves are cached under one key, so the consult
+  issues no second dial — asserted at the injected catalogue's call counter rather than
+  in prose. One consequence, stated: on the residue corner (a local `sessions/<id>/`
+  directory exists but the door will not open) `remote_row_for` performs NO read, so the
+  consult may issue the first one; no read means no silence, and an empty cache answers
+  `404` exactly as before.
+
 ### Evidence plan
 
 Unit: silent peer + unknown id → the new state with names and no ownership claim; all
