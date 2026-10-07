@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 REGION = "ca-central-1"
@@ -154,6 +155,23 @@ def load_outputs(args: argparse.Namespace) -> dict[str, Any]:
     return read_stack_outputs(Path(args.infra_dir), args.backend_url)
 
 
+def s3_client(session: Any) -> Any:
+    """An S3 client whose PRESIGNED URLs address the regional endpoint.
+
+    botocore signs `generate_presigned_url` for S3 against the LEGACY global host
+    (`<bucket>.s3.amazonaws.com`) even when the client's own endpoint is regional —
+    measured, botocore 1.43.109 — and S3 answers a request for a ca-central-1 bucket
+    that way with `307 TemporaryRedirect`. Naming the signature version and the
+    addressing style is what puts the bucket's own region back in the Host header,
+    which is the only form the signature is good for.
+    """
+    return session.client(
+        "s3",
+        endpoint_url=f"https://s3.{REGION}.amazonaws.com",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
+
+
 def presign_put(s3: Any, bucket: str, key: str) -> str:
     """A presigned PUT for exactly one object key.
 
@@ -255,11 +273,28 @@ def cold_start_numbers(
 
 
 def _load_timings(results_dir: Path) -> dict[str, int]:
-    path = results_dir / "timings.json"
-    if not path.exists():
+    """The container's step timings, from `timings.json`, falling back to the jsonl.
+
+    The jsonl is what the entrypoint appends to AS IT GOES; `timings.json` is the
+    folded copy. Reading only the folded file left every cold-start number null on a
+    run whose jsonl carried them all — the fold is written by the entrypoint's EXIT
+    trap, which runs after the results tarball is already sealed. The fallback is the
+    difference between a real measurement and an empty field.
+    """
+    folded = results_dir / "timings.json"
+    if folded.exists():
+        payload = json.loads(folded.read_text(encoding="utf-8"))
+        return {str(event["name"]): int(event["epoch_ms"]) for event in payload.get("events", [])}
+    raw = results_dir / "timings.jsonl"
+    if not raw.exists():
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return {str(event["name"]): int(event["epoch_ms"]) for event in payload.get("events", [])}
+    stamps: dict[str, int] = {}
+    for line in raw.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            event = json.loads(line)
+            stamps[str(event["name"])] = int(event["epoch_ms"])
+    return stamps
 
 
 def download_artifacts(s3: Any, bucket: str, run_id: str, run_dir: Path) -> dict[str, Any]:
@@ -305,8 +340,16 @@ def run_once(
     s3: Any,
     outputs: dict[str, Any],
     run_id: str,
+    definition: dict[str, Any],
 ) -> dict[str, Any]:
-    """One task, from RunTask to stopped-and-downloaded. Returns its run.json."""
+    """One task, from RunTask to stopped-and-downloaded. Returns its run.json.
+
+    ``definition`` is the task definition, resolved by the caller with the OPERATOR
+    session: the controller role deliberately does not hold
+    `ecs:DescribeTaskDefinition` (the spec's policy ends at "Nothing else"), and the
+    driver needs it for the CPU architecture, which DescribeTasks does not return
+    for Fargate.
+    """
     bucket = str(outputs["bucket"])
     probes_url = presign_put(s3, bucket, f"runs/{run_id}/probes.json")
     results_url = presign_put(s3, bucket, f"runs/{run_id}/results.tar.gz")
@@ -371,12 +414,9 @@ def run_once(
     containers = described.get("containers") or [{}]
     # DescribeTasks does NOT return `runtimePlatform` for Fargate — measured, the
     # first recorded run read None from here — so the architecture is read from the
-    # TASK DEFINITION, which is where it is actually declared. The describe-tasks
-    # reading is kept beside it so the divergence is visible rather than explained
-    # away in prose.
-    definition = ecs.describe_task_definition(taskDefinition=str(outputs["taskDefinitionArn"]))[
-        "taskDefinition"
-    ]
+    # TASK DEFINITION (resolved and required ACTIVE before RunTask, above), which
+    # is where the architecture is actually declared. The describe-tasks reading is
+    # kept beside it so the divergence is visible rather than explained away.
     record = {
         "run_id": run_id,
         "task_arn": task_arn,
@@ -493,16 +533,47 @@ def _driver_session(args: argparse.Namespace) -> tuple[Any, dict[str, Any], Any]
     return operator, outputs, driver
 
 
+def active_task_definition(operator: Any, outputs: dict[str, Any]) -> dict[str, Any]:
+    """The task definition the stack points at, required to be ACTIVE.
+
+    A `pulumi up` that changes the task definition REPLACES it, retiring the
+    previous revision; a stale outputs file then names an inactive ARN and RunTask
+    answers the unhelpful "TaskDefinition is inactive". Naming the cause here is the
+    difference between a five-second fix and an hour spent looking at IAM. Read with
+    the OPERATOR session, because the controller role deliberately holds no
+    `ecs:DescribeTaskDefinition`.
+    """
+    definition = operator.client("ecs").describe_task_definition(
+        taskDefinition=str(outputs["taskDefinitionArn"])
+    )["taskDefinition"]
+    if str(definition.get("status", "")).upper() != "ACTIVE":
+        raise SystemExit(
+            f"task definition {outputs['taskDefinitionArn']} is {definition.get('status')!r}: "
+            "its ARN is stale (a replaced task definition retires the old revision) — "
+            "re-read the stack outputs before running"
+        )
+    return definition
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     operator, outputs, driver = _driver_session(args)
     ecs = driver.client("ecs")
-    s3 = driver.client("s3")
+    s3 = s3_client(driver)
+    definition = active_task_definition(operator, outputs)
+    _log(
+        "task definition {family}:{revision} ({cpu}), image {image}".format(
+            family=definition.get("family"),
+            revision=definition.get("revision"),
+            cpu=(definition.get("runtimePlatform") or {}).get("cpuArchitecture"),
+            image=(definition.get("containerDefinitions") or [{}])[0].get("image"),
+        )
+    )
     records: list[dict[str, Any]] = []
     for _ in range(args.runs):
         # Re-asserted per run, not once per sweep: `--runs 5` is five RunTasks, and
         # the guard that matters is the one immediately before each of them.
         assert_expected_account(operator)
-        record = run_once(args, ecs, s3, outputs, new_run_id())
+        record = run_once(args, ecs, s3, outputs, new_run_id(), definition)
         records.append(record)
         _log(
             "{run_id}: cpu={cpu} stop={stop} exit={exit_code} "

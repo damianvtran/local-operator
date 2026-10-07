@@ -169,15 +169,38 @@ def probe_credentials(model_secret_arn: str, region: str) -> dict[str, Any]:
 
 
 def _connect(host: str, port: int) -> tuple[bool, str]:
-    """Try one TCP connect; return (connected, human-readable detail)."""
+    """Try one TCP connect to a target, under ONE deadline for the whole target.
+
+    The budget is the spec's "within 5 s" for the TARGET, not for each address it
+    resolves to. A dual-stack name whose families both black-hole used to cost two
+    full timeouts — measured: example.com:80 reported 10 009 ms for a connection that
+    was correctly refused. The verdict was right and the number was wrong, which is
+    the kind of instrument that gets quoted forward.
+    """
     started = time.monotonic()
+    deadline = started + CONNECT_TIMEOUT_SECONDS
     try:
-        with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS):
-            elapsed = (time.monotonic() - started) * 1000
-            return True, f"connected in {elapsed:.0f} ms"
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as error:
         elapsed = (time.monotonic() - started) * 1000
         return False, f"failed in {elapsed:.0f} ms: {type(error).__name__}"
+    last = "no address resolved"
+    for family, socktype, proto, _canonical, sockaddr in addresses:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last = "deadline exhausted"
+            break
+        with socket.socket(family, socktype, proto) as probe:
+            probe.settimeout(remaining)
+            try:
+                probe.connect(sockaddr)
+            except OSError as error:
+                last = type(error).__name__
+                continue
+        elapsed = (time.monotonic() - started) * 1000
+        return True, f"connected in {elapsed:.0f} ms"
+    elapsed = (time.monotonic() - started) * 1000
+    return False, f"failed in {elapsed:.0f} ms: {last}"
 
 
 def probe_egress() -> dict[str, Any]:

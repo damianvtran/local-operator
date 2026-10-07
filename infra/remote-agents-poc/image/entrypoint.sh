@@ -51,9 +51,36 @@ stamp() {
     printf '{"name":"%s","epoch_ms":%s}\n' "$1" "$(date +%s%3N)" >>"$OUT/timings.jsonl"
 }
 
-write_timings() {
-    rc=$?
-    stamp t_container_end
+# Upload to a presigned PUT URL, and REQUIRE a 2xx.
+#
+# WHY this is not just `curl -fsS --upload-file`: `curl -f` fails on 4xx/5xx and
+# treats 3xx as SUCCESS. S3 answers a request for a ca-central-1 bucket sent to the
+# legacy global host with `307 TemporaryRedirect` and no body, so the upload silently
+# did nothing while the run exited 0 with no artifacts — measured, and the single
+# most misleading failure in this POC. A redirect is not a successful upload.
+put_file() {
+    local url="$1"
+    local file="$2"
+    local code
+    code="$(curl -sS --max-time 300 -o /workspace/tmp/curl-body.txt -w '%{http_code}' \
+        -X PUT --upload-file "$file" "$url")" || {
+        echo "FATAL: upload of $file to the presigned URL failed (curl exit $?)" >&2
+        return 1
+    }
+    case "$code" in
+    2??)
+        rm -f /workspace/tmp/curl-body.txt
+        return 0
+        ;;
+    *)
+        echo "FATAL: upload of $file got HTTP $code, not a 2xx" >&2
+        cat /workspace/tmp/curl-body.txt >&2 || true
+        return 1
+        ;;
+    esac
+}
+
+fold_timings() {
     /opt/lop/bin/python - "$OUT/timings.jsonl" "$OUT/timings.json" <<'PY' || true
 import json
 import sys
@@ -73,9 +100,19 @@ for event in events:
 with open(sys.argv[2], "w", encoding="utf-8") as handle:
     json.dump({"events": events}, handle, indent=2, sort_keys=True)
 PY
+}
+
+# The EXIT trap folds the timings and stamps the end — but it is NOT the only caller
+# of fold_timings: the trap runs after the results tarball has been sealed, so relying
+# on it alone ships a raw timings.jsonl with no folded timings.json. Measured: the
+# first artifact-bearing run had every cold-start number null for exactly that reason.
+on_exit() {
+    rc=$?
+    stamp t_container_end
+    fold_timings
     exit "$rc"
 }
-trap write_timings EXIT
+trap on_exit EXIT
 
 stamp t_container_start
 
@@ -182,7 +219,7 @@ printf '%s' "$MODEL_KEY" | /opt/probe/bin/python /opt/probe/probes.py \
     --model-secret-arn "${POC_MODEL_SECRET_ARN:-}" || PROBE_RC=$?
 stamp t_probes_done
 printf '{"probe_rc":%s}\n' "$PROBE_RC" >"$OUT/probe_rc.json"
-curl -fsS --max-time 60 -X PUT --upload-file "$OUT/probes.json" "$POC_PROBES_URL"
+put_file "$POC_PROBES_URL" "$OUT/probes.json"
 
 # ------------------------------------------------------------- step 5: agent
 stamp t_agent_start
@@ -343,8 +380,10 @@ stamp t_rescan_done
 
 # ------------------------------------------------------------ step 9: upload
 stamp t_upload_start
+# BEFORE the tarball: see `on_exit` for why this cannot be the trap's job alone.
+fold_timings
 tar -czf "$WORKSPACE/results.tar.gz" -C "$OUT" .
-curl -fsS --max-time 300 -X PUT --upload-file "$WORKSPACE/results.tar.gz" "$POC_RESULTS_URL"
+put_file "$POC_RESULTS_URL" "$WORKSPACE/results.tar.gz"
 stamp t_upload_done
 
 # The exit code answers "did the pipeline work AND did the isolation hold":
