@@ -21,7 +21,7 @@ built in CodeBuild, never on a laptop.
 | `image/requirements-probe.in` | The probe venv's input: `boto3` |
 | `image/requirements-probe.txt` | Its hash-locked output |
 | `image/entrypoint.sh` | Container steps 1-9 of §9.2 (timings, key handling, clone, probes, agent, commit, upload) |
-| `image/probes.py` | The deterministic isolation probes (4a-4d) and the pre-upload key rescan |
+| `image/probes.py` | The deterministic isolation probes (4a, 4b, 4c, 4c-env, 4d) and the pre-upload key rescan |
 | `image/buildspec.yml` | CodeBuild buildspec (arm64 native, pushes by tag, prints the digest) |
 | `../../scripts/remote_agents_poc.py` | The driver: `run`, `verify`, `status`, `stop-all` |
 
@@ -209,8 +209,13 @@ otherwise.
    pull secrets` before the entrypoint runs — so the five mock runs would all have
    been BLOCKED on a key that does not exist yet. The deploy therefore writes a
    PLACEHOLDER value, `LOP-POC-PLACEHOLDER-NO-KEY`, and that value is never treated
-   as a key: a mock run uses lop's own `mock` provider, and probe 4c records
-   `pass: null` ("no key in this run") rather than a fabricated pass. Replacing the
+   as a key: a mock run uses lop's own `mock` provider. Probe 4c is still a real
+   verdict in a mock run — it searches for the EXACT injected value, placeholder
+   included, plus the first 8 characters of a real key — and records only counts,
+   the value's length and a truncated SHA-256 of it. `pass: null` survives only for
+   the case that cannot happen in a deployed task: no value injected at all.
+   `4c-env` then checks the other half of the same claim, that a child spawned after
+   the unset sees the key in none of its environment entries. Replacing the
    placeholder with the real key is the documented `put-secret-value` command above.
 2. **`image/requirements.in` and `image/requirements-probe.in` are extra files.** The
    spec lists only the hash-locked `.txt` outputs. Without the `.in` inputs the

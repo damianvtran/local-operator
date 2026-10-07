@@ -111,6 +111,14 @@ PY
     fi
 fi
 
+# What probe 4c searches for beyond the exact injected value: the first 8 characters
+# of the key, and only for a REAL key. A mock run's value is a placeholder, so there
+# is no credential-shaped prefix in it to hunt for.
+KEY_PREFIX_CHARS=0
+if [ "$POC_MOCK" != "1" ]; then
+    KEY_PREFIX_CHARS=8
+fi
+
 # The child environment a MODEL-authored command sees. `allowlist` is what keeps
 # the provider key out of every bash/eval child the agent starts; the key is in
 # the lop process's own environment, which is the one place it has to be.
@@ -147,6 +155,7 @@ stamp t_probes_start
 PROBE_RC=0
 printf '%s' "$MODEL_KEY" | /opt/probe/bin/python /opt/probe/probes.py \
     --out "$OUT/probes.json" \
+    --key-prefix-chars "$KEY_PREFIX_CHARS" \
     --model-secret-arn "${POC_MODEL_SECRET_ARN:-}" || PROBE_RC=$?
 stamp t_probes_done
 printf '{"probe_rc":%s}\n' "$PROBE_RC" >"$OUT/probe_rc.json"
@@ -296,7 +305,7 @@ stamp t_session_done
 stamp t_rescan_start
 SCAN_RC=0
 scan_out="$(printf '%s' "$MODEL_KEY" | /opt/probe/bin/python /opt/probe/probes.py \
-    --scan-dir "$OUT")" || SCAN_RC=$?
+    --key-prefix-chars "$KEY_PREFIX_CHARS" --scan-dir "$OUT")" || SCAN_RC=$?
 if [ "$SCAN_RC" -ne 0 ]; then
     # Refuse the upload rather than shipping whatever contains the key. The
     # refusal is recorded without the key itself, and the task exits non-zero.

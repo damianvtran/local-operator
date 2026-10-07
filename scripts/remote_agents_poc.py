@@ -467,11 +467,14 @@ def _driver_session(args: argparse.Namespace) -> tuple[Any, dict[str, Any], Any]
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    _operator, outputs, driver = _driver_session(args)
+    operator, outputs, driver = _driver_session(args)
     ecs = driver.client("ecs")
     s3 = driver.client("s3")
     records: list[dict[str, Any]] = []
     for _ in range(args.runs):
+        # Re-asserted per run, not once per sweep: `--runs 5` is five RunTasks, and
+        # the guard that matters is the one immediately before each of them.
+        assert_expected_account(operator)
         record = run_once(args, ecs, s3, outputs, new_run_id())
         records.append(record)
         _log(
