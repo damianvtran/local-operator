@@ -1125,24 +1125,29 @@ def test_the_human_listing_renders_a_row_whose_unseen_is_true(
         # stored row (the 2026-10-07 correction — nothing can clear one).
         stored = [row for row in produced if row["session_id"] == _UNSEEN_ROW]
         assert stored and stored[0]["pending"] is None, stored
-        # AND A PRE-CORRECTION PEER STILL SHIPS THE CLAIM: the renderer drops it
-        # on the row-level rule (``types.row_needs_claim``) rather than trusting
-        # the raw field — the mixed-version fleet's half of the fix.
-        legacy = [
-            {**row, "pending": "ask"} if row["session_id"] == _UNSEEN_ROW else row
-            for row in produced
-        ]
-        monkeypatch.setattr(
-            main_cli, "_remote_listing", lambda **_: main_cli._RemoteListing(legacy, [])
-        )
-        assert (
-            main_cli.sessions_command(
-                _ordinary_sessions_args(peer=server.identity.device_id, json=False)
+        # AND A PRE-CORRECTION PEER STILL SHIPS THE CLAIM — in EITHER spelling
+        # it ever shipped: the ``"ask"`` string and the legacy bool before it.
+        # The renderer drops each on the row-level rule
+        # (``types.row_needs_claim``) rather than trusting the raw field — the
+        # mixed-version fleet's half of the fix (agent review round 1, F3: the
+        # paragraph above said "however the claim was spelled" while this block
+        # injected the string only).
+        for legacy_spelling in ("ask", True):
+            legacy = [
+                {**row, "pending": legacy_spelling} if row["session_id"] == _UNSEEN_ROW else row
+                for row in produced
+            ]
+            monkeypatch.setattr(
+                main_cli, "_remote_listing", lambda **_: main_cli._RemoteListing(legacy, [])
             )
-            == 0
-        )
-        named = capsys.readouterr()
-        assert "ask" not in _rendered_row(named.out, _UNSEEN_ROW), named.out
+            assert (
+                main_cli.sessions_command(
+                    _ordinary_sessions_args(peer=server.identity.device_id, json=False)
+                )
+                == 0
+            )
+            named = capsys.readouterr()
+            assert "ask" not in _rendered_row(named.out, _UNSEEN_ROW), named.out
     finally:
         server.stop()
 

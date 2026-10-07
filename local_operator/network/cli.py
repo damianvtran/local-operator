@@ -5997,6 +5997,14 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             if str((row.get("peer") or {}).get("device_id") or "").lower() == wanted
             or str((row.get("peer") or {}).get("name") or "").lower() == wanted
         ]
+    # NO STORED ROW CARRIES A NEEDS CLAIM, in the TEXT or the JSON (agent
+    # review round 1, F1): the rule is the reader's (``types.row_needs_claim``),
+    # so it settles where the answer does — a pre-correction peer's ``"ask"``
+    # (or the legacy bool) must not reach a consumer through ``--json`` when the
+    # table beside it already refuses it.
+    from local_operator.network.types import row_without_stored_claims
+
+    remote = [row_without_stored_claims(row) for row in remote]
     lines: list[str] = []
     cells: list[tuple[str, str, str, str]] = []
     from local_operator.resume import session_state_words

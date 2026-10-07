@@ -14979,6 +14979,14 @@ async def _sessions_list(
         merged.extend(local_rows)
     if scope in ("all", "remote"):
         merged.extend(remote_rows)
+    # THE MACHINE PAYLOAD GETS THE SAME RULE AS THE TEXT (agent review round 1,
+    # F1): ``details["rows"]`` hands consumers these dicts verbatim, so a legacy
+    # peer's stored-row claim is dropped HERE rather than only inside
+    # ``_session_row_brief`` — one row, one shape, whichever half of the result
+    # a caller reads.
+    from local_operator.network.types import row_without_stored_claims
+
+    merged = [row_without_stored_claims(row) for row in merged]
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in merged:
