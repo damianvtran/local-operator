@@ -73,7 +73,7 @@ async def _snapshot_that_bursts(bridge: Any, original: Any, count: int) -> Any:
     snapshot that supersedes them exists.
     """
 
-    async def snapshot_and_burst() -> dict[str, Any]:
+    async def snapshot_and_burst(**_kwargs) -> dict[str, Any]:
         for n in range(count):
             bridge.publish("event", {"burst": n})
         return await original()

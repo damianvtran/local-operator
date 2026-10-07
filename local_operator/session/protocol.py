@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 140 public members and a POSITIVE
+    than stylistic. This protocol carries 141 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -692,7 +692,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     answer and two refusals), 140 once the queued-ask revision rung needed
     ``revise_ask`` — :meth:`respond_ask`'s sanctioned exception (design §10, the
     in-flight answer revision) rides the same atomic whole-ask path and the same
-    cold-arm bind, so it is one more member on that rung rather than a new one), so
+    cold-arm bind, so it is one more member on that rung rather than a new one,
+    141 once the DESK READER needed ``history_entry_times`` — a wire row is a
+    message with no entry time of its own, so the desktop bridge could only stamp
+    it with the moment this device served it until the owner's own
+    ``{entry id: ts}`` join had a seam to read (``Mesh wire honesty`` §S1)), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1120,6 +1124,22 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def history_last_message(self) -> Any:
         """The newest message in the loaded window, or ``None``."""
+        ...
+
+    def history_entry_times(self) -> dict[str, float]:
+        """``{entry id: true entry ts}`` the OWNER shipped for the loaded rows.
+
+        The wire carries MESSAGES, and a message has no entry time of its own —
+        so a reader downstream that must stamp a wire row with the moment it was
+        WRITTEN, rather than the moment it was served, has exactly one honest
+        source: the ``{entry id: ts}`` join the owner puts on a display page when
+        this viewer negotiated ``display-history-entry-times-v1``.
+
+        A row ABSENT from the map has NO provable entry time (it was subtracted
+        from the owner's display replay, or it arrived live after the page); a
+        consumer reads that as "unstated" rather than substituting its own clock.
+        Empty for an owner too old to ship the join.
+        """
         ...
 
     def pending_display_tool_ids(self) -> set[str]:

@@ -272,10 +272,23 @@ class OwnerDial:
 #: ``frontend_state``, ``display_window``, ``slash_consumers`` and ``surface``
 #: are per-CONNECTION facts, which is exactly why the relay forwards one
 #: upstream connection per viewer rather than multiplexing them).
+#:
+#: ``display_history_audit`` AND ``display_history_entry_times`` ARE ON THIS
+#: LIST FOR THE REASON THE OTHERS ARE: they are the same kind of per-connection
+#: declaration, and they gate whether the owner may put extra fields on a
+#: display page. A silent drop here is worse than a refusal — the owner reads no
+#: declaration, strips the fields it would otherwise send (the page model forbids
+#: extras, so this is by design), and the viewer sees a page that is honest but
+#: POORER than its build can render, with nothing logged anywhere. Measured on a
+#: real two-relay pair: with the entry-times key missing, the owner built a
+#: four-row join and served `unstated`/`served` for every row; adding the name
+#: here was the entire fix.
 AUTH_FIELDS: tuple[str, ...] = (
     "events",
     "frontend_state",
     "display_window",
+    "display_history_audit",
+    "display_history_entry_times",
     "slash_consumers",
     "surface",
 )

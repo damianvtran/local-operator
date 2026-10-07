@@ -40,11 +40,13 @@ filesystem and through the real ``errors()`` ladder.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -584,11 +586,14 @@ async def test_the_transcript_is_read_off_the_wire_not_off_this_disk(
     assert [entry["id"] for entry in page["entries"]] == [row.id for row in rows]
     assert [entry["payload"]["kind"] for entry in page["entries"]] == ["message", "message"]
     assert "hello from the peer" in json.dumps(page["entries"])
-    # ONE STAMP PER PAGE, and it is THIS device's clock: the wire carries no entry
-    # time (see the method), so a page is dated when it is served rather than
-    # pretending to know when the user sent it.
+    # ONE STAMP PER PAGE, and it is THIS device's clock: this request did NOT
+    # negotiate ``entry_ts``, so the wire carries no entry time for these rows and
+    # a page is dated when it is served rather than pretending to know when the
+    # user sent it. The vocabulary says so on every row (see the method and
+    # ``docs/DESKTOP_API.md``) instead of leaving the reader to infer it.
     assert len({entry["ts"] for entry in page["entries"]}) == 1
     assert page["entries"][0]["ts"] > 0
+    assert {entry["ts_source"] for entry in page["entries"]} == {"served"}
 
 
 @pytest.mark.asyncio
@@ -923,3 +928,214 @@ async def test_a_peer_bound_prompt_sends_and_stages_what_the_owner_will_journal(
     tiny_digest = hashlib.sha256(base64.b64decode(tiny_prepared[0]["data_b64"])).hexdigest()[:32]
     assert not (store / f"{tiny_digest}.bin").exists()
     assert sorted(p.name for p in store.glob("*.bin")) == [f"{digest}.bin"]
+
+
+# ---------------------------------------------------------------------------
+# The entry-time vocabulary at the ROUTE layer (agent review round 1, R-2).
+#
+# `entry_ts=1` is the per-request signal the whole feature hangs on: it is what
+# tells the daemon a renderer can read `ts_source`, and therefore what decides
+# whether a wire row the owner cannot stamp comes back `null` + "unstated"
+# instead of a fabricated serve-stamp. The unit cells for it all called
+# `bridge.history(entry_times=…)` DIRECTLY or drove the raw socket, so a renamed
+# or unthreaded parameter on any of the three route doors shipped silently —
+# measured by the reviewer: wrapping `snapshot` to force `entry_times=False` left
+# `tests/unit/server` fully green.
+# ---------------------------------------------------------------------------
+
+#: The owner's own clock, far enough from `time.time()` that a serve-stamp cannot
+#: be mistaken for it.
+OWNER_ENTRY_TS = 1_700_000_000.0
+
+
+def _wire_facade(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    *,
+    rows: list[Any],
+    entry_times: dict[str, float],
+) -> None:
+    """A REAL cold facade whose wire window is ``rows`` and whose join is ``entry_times``.
+
+    ``is_cold`` is the ONE predicate this lies about, and it is the predicate that
+    chooses between the wire branch and the owner's stored journal — which is the
+    branch the ``ts_source`` table lives on. Everything else is the production
+    facade (its frontend state store, its tokens, its placement), so the pool, the
+    identity check and the snapshot's own field reads stay real.
+    """
+    from local_operator.session import remote_open
+
+    async def fake_open(session_id: str, **kwargs: Any) -> Any:
+        async def refuse_takeover() -> None:
+            raise AssertionError("a remote viewer never takes over")
+
+        owner = StubRemoteOwner()
+        session = await AttachedSession.cold(
+            session_id,
+            config_dir=kwargs.get("config_dir", root),
+            cwd="",
+            takeover_factory=refuse_takeover,
+            surface=kwargs.get("surface", "desktop"),
+            owner=owner,
+            seed=owner.seed(),
+        )
+        session.history = lambda: list(rows)  # type: ignore[method-assign]
+        session.history_entry_times = lambda: dict(entry_times)  # type: ignore[method-assign]
+        return session
+
+    monkeypatch.setattr(remote_open, "open_remote_viewer", fake_open)
+    monkeypatch.setattr(AttachedSession, "is_cold", property(lambda self: False))
+
+
+def _entry_time_rig(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[str, str]:
+    """Install the peer row + facade, and answer ``(shippable id, unshippable id)``.
+
+    A mid-turn pair as the wire would carry it: a user row the owner CAN stamp
+    (it is in the join) beside one it cannot (a live suffix, absent from the join
+    by construction). One page, two vocabularies — the real shape.
+    """
+    _answer_rows(monkeypatch, _peer_row())
+    shippable = Message.user("the durable row")
+    unshippable = Message.user("a live suffix")
+    _wire_facade(
+        monkeypatch,
+        root,
+        rows=[shippable, unshippable],
+        entry_times={shippable.id: OWNER_ENTRY_TS},
+    )
+    return shippable.id, unshippable.id
+
+
+def _by_id(page: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["id"]: row for row in page["entries"]}
+
+
+@pytest.mark.asyncio
+async def test_the_history_route_honours_entry_ts(remote_api, monkeypatch) -> None:
+    """R-2, door one: ``/history``, both settings of the flag, one page."""
+    client, root = remote_api
+    shippable, unshippable = _entry_time_rig(monkeypatch, root)
+
+    asked = (await client.get(f"/v1/desktop/sessions/{OTHER}/history?entry_ts=1")).json()["result"]
+    rows = _by_id(asked)
+    assert rows[shippable]["ts"] == OWNER_ENTRY_TS, "the owner's instant was not used"
+    assert rows[shippable]["ts_source"] == "entry"
+    assert rows[unshippable]["ts"] is None, "an unprovable instant was fabricated"
+    assert rows[unshippable]["ts_source"] == "unstated"
+
+    # The same request WITHOUT the flag: today's bytes, one stamp per page, and
+    # the vocabulary says which clock it is.
+    legacy = (await client.get(f"/v1/desktop/sessions/{OTHER}/history")).json()["result"]
+    legacy_rows = _by_id(legacy)
+    # A row the owner CAN stamp keeps "entry" without the flag too: the join is a
+    # FACT about the row, not something the renderer turns on. The flag decides
+    # only what happens to a row the owner CANNOT stamp.
+    assert legacy_rows[shippable]["ts_source"] == "entry"
+    assert legacy_rows[shippable]["ts"] == OWNER_ENTRY_TS
+    assert legacy_rows[unshippable]["ts_source"] == "served"
+    assert (
+        abs(legacy_rows[unshippable]["ts"] - OWNER_ENTRY_TS) > 1_000_000
+    ), "the serve-stamp is this device's clock, not the owner's"
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_route_threads_entry_ts_into_its_embedded_page(
+    remote_api, monkeypatch
+) -> None:
+    """R-2, door two — and the one an opening renderer actually paints from.
+
+    The snapshot's ``payload.history`` is served by the same reader, so it must
+    answer the flag identically; a snapshot that ignored it would hand the
+    renderer one vocabulary at open and another on its first scroll.
+    """
+    client, root = remote_api
+    shippable, unshippable = _entry_time_rig(monkeypatch, root)
+
+    asked = (await client.get(f"/v1/desktop/sessions/{OTHER}?entry_ts=1")).json()["result"]
+    rows = _by_id(asked["payload"]["history"])
+    assert rows[shippable]["ts_source"] == "entry"
+    assert rows[shippable]["ts"] == OWNER_ENTRY_TS
+    assert rows[unshippable]["ts_source"] == "unstated" and rows[unshippable]["ts"] is None
+
+    legacy = (await client.get(f"/v1/desktop/sessions/{OTHER}")).json()["result"]
+    legacy_rows = _by_id(legacy["payload"]["history"])
+    assert legacy_rows[shippable]["ts_source"] == "entry"
+    assert legacy_rows[shippable]["ts"] == OWNER_ENTRY_TS
+    assert legacy_rows[unshippable]["ts_source"] == "served"
+    assert abs(legacy_rows[unshippable]["ts"] - OWNER_ENTRY_TS) > 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_the_events_route_forwards_entry_ts_into_the_open_frame(remote_api, monkeypatch):
+    """R-2, door three, split the way the transport forces it to be.
+
+    The ``/events`` response is an SSE stream and QA round 1 could not get a frame
+    out of it under httpx's ASGITransport in a 25 s bound, so this pins the two
+    halves separately rather than faking one: the ROUTE forwards the flag into
+    ``bridge.events`` (a recording double — the half a missing forward fails), and
+    the GENERATOR's open frame is asserted directly on the real bridge below.
+    """
+    client, root = remote_api
+    _answer_rows(monkeypatch, _peer_row())
+    seen: list[dict[str, Any]] = []
+
+    class _RecordingBridge(SimpleNamespace):
+        def subscribe(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(id="sub", frontend_replace=kwargs.get("frontend_replace"))
+
+        def note_stream_ended(self, sub: Any) -> None:
+            return None
+
+        def events(self, sub: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs)
+
+            async def _empty() -> Any:
+                if False:  # pragma: no cover — keeps this an async generator
+                    yield {}
+
+            return _empty()
+
+    bridge = _RecordingBridge()
+
+    class _Pool:
+        @contextlib.asynccontextmanager
+        async def session(self, session_id: str, **kwargs: Any):
+            yield bridge
+
+    client._transport.app.state.desktop_sessions = _Pool()
+    await client.get(f"/v1/desktop/sessions/{OTHER}/events?entry_ts=1")
+    assert seen and seen[0].get("entry_times") is True, seen
+
+    seen.clear()
+    await client.get(f"/v1/desktop/sessions/{OTHER}/events")
+    assert seen and seen[0].get("entry_times") is False, seen
+
+
+@pytest.mark.asyncio
+async def test_the_events_open_frame_obeys_entry_ts(remote_api, monkeypatch) -> None:
+    """The generator half of the cell above, on the real bridge.
+
+    QA's row 10 in-tree: the frame the stream opens with is the snapshot, so its
+    embedded page must carry the same vocabulary the standalone ``/history`` does
+    for the same rows.
+    """
+    _client, root = remote_api
+    shippable, unshippable = _entry_time_rig(monkeypatch, root)
+
+    pool = DesktopSessions(root)
+    async with pool.session(OTHER) as bridge:
+        sub = bridge.subscribe()
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=bridge.sequence, entry_times=True)
+        try:
+            frame = None
+            async for candidate in stream:
+                if candidate.get("type") == "snapshot":
+                    frame = candidate
+                    break
+        finally:
+            await stream.aclose()
+    assert frame is not None, "the stream opened without ever yielding its snapshot"
+    page = frame["payload"]["history"]
+    rows = _by_id(page)
+    assert rows[shippable]["ts_source"] == "entry"
+    assert rows[unshippable]["ts_source"] == "unstated"
