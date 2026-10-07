@@ -509,9 +509,12 @@ async def test_a_silent_device_does_not_withdraw_or_re_announce_its_park() -> No
 async def test_a_stored_unread_completion_raises_no_card() -> None:
     """The §2 discriminator, end to end: a stored row is not a park.
 
-    The relay's stored half writes ``pending: "ask"`` for an unread completion
-    and paints ``live_state: ""``; treating it as a park would page a person
-    for a turn that finished hours ago and needs nobody.
+    The shape a producer that predates the 2026-10-07 correction shipped: a
+    stored row (``live_state: ""``) carrying ``pending: "ask"`` minted from an
+    unread completion. The producer no longer mints it and the row reader
+    drops it (``network.types.row_needs_claim``), but a row that already
+    carries the legacy claim must still not page a person for a turn that
+    finished hours ago and needs nobody.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:

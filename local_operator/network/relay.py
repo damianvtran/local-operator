@@ -124,7 +124,6 @@ from local_operator.network.invite import release
 from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
-    NEEDS_ASK,
     NET_PAIR_OPS,
     Granted,
     LinkContext,
@@ -6074,18 +6073,30 @@ class RelayServer:
                     "cwd": "",
                     "model_label": "",
                     "busy": False,
-                    # THE FIELD'S CONTRACT IS A STRING (Q-R7-1). This used to
-                    # publish ``bool(entry.unseen)``, which crashed the ONE
-                    # human reader of the field — `lop sessions --all-peers`
-                    # and `--peer <dev>` render `pending` through
-                    # ``rich.cells.cell_len`` — while the live half of the same
-                    # catalogue published ``SessionRecord.pending``, a string.
-                    # "An unread completion is waiting" is a NEEDS claim, so it
-                    # says so in the record's own vocabulary rather than
-                    # answering a what-is-needed question with a yes/no
-                    # (``types.NEEDS_ASK``, beside the normaliser that reads the
-                    # same field off the wire).
-                    "pending": NEEDS_ASK if entry.unseen else None,
+                    # NO NEEDS CLAIM (correction, 2026-10-07). ``pending``
+                    # answers "what is a person being waited on" in the live
+                    # half's own vocabulary (``types.NEEDS_APPROVAL``/
+                    # ``NEEDS_ASK``, ``SessionRecord.pending``), and a stored
+                    # session has no runtime and therefore no gate. An earlier
+                    # cut synthesised ``"ask"`` here from the owner's
+                    # ``unseen`` flag; the defect that removed it is that NO
+                    # surface could ever clear the claim: this row carries no
+                    # completion token, so no receipt can name the completion,
+                    # while every sidebar paints the row as "needs you" for as
+                    # long as the completion stays unread (measured: 20 dead
+                    # probe sessions on one peer = 20 permanent answer-needed
+                    # marks in every sidebar). The owner's unread fact stays
+                    # where it can be seen and cleared — its attention store,
+                    # read by that device's own surfaces and by any viewer that
+                    # opens the conversation (the receipt hop routes the clear
+                    # to the owner). ``peer_rows.park_edges`` already refused to
+                    # announce these as parks ("a turn that finished on the peer
+                    # hours ago ... needs nobody"); the field now agrees.
+                    # Rows from a producer that predates the correction are
+                    # dropped at the row level, not the value level
+                    # (``types.row_needs_claim``), so a mixed-version fleet
+                    # paints this row the same way.
+                    "pending": None,
                     "detached": True,
                     "started": float(getattr(entry.row, "mtime", 0.0) or 0.0),
                     "pid": 0,

@@ -702,14 +702,18 @@ def test_two_devices_parking_one_id_are_two_episodes() -> None:
 
 
 def test_a_stored_unread_completion_is_not_a_park() -> None:
-    """The §2 discriminator, pinned against the producer's real stored shape.
+    """The §2 discriminator, pinned against the shape a legacy peer still ships.
 
-    The relay's stored half mints ``state: "stored"``, ``detached: True`` for a
-    session with no runtime, and translates an unread COMPLETION into
-    ``pending: "ask"``. ``_live_state`` maps ``stored`` to the empty string, so
-    the row the helper must refuse is refused THROUGH the real producer — a
-    completion that already finished needs nobody, and announcing it as a park
-    would page a person for an answered turn.
+    A producer that predates the 2026-10-07 correction minted ``state:
+    "stored"``, ``detached: True`` for a session with no runtime AND translated
+    an unread COMPLETION into ``pending: "ask"``; the row-level reader drops
+    that claim now (``network.types.row_needs_claim``), and this fixture seeds
+    it directly so ``park_edges``'s own discriminator stays covered for any row
+    that already carries the legacy shape — a cached row ingested before the
+    fix, or a peer whose build is older than this test. ``_live_state`` maps
+    ``stored`` to the empty string, so the row is refused THROUGH the real
+    helper — a completion that already finished needs nobody, and announcing it
+    as a park would page a person for an answered turn.
     """
     catalog = _Catalog(
         [_Facts("d_aa", "radiant-m4", reachable=True)],
@@ -717,7 +721,7 @@ def test_a_stored_unread_completion_is_not_a_park() -> None:
     )
     (row,) = peer_session_rows(catalog=catalog)
     assert row.live_state == "", "the stored half is a cold row"
-    assert row.pending == "ask", "...carrying the translation this test is about"
+    assert row.pending == "ask", "...the seeded legacy claim the discriminator must still refuse"
     edges, state = park_edges({}, [row])
     assert edges == () and state == {}
 

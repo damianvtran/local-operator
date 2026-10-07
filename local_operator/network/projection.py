@@ -66,9 +66,9 @@ from local_operator.mobile.attach_client import (
 )
 from local_operator.network.types import (
     PEER_NUMBER_CEILING,
-    normalise_pending,
     peer_number,
     peer_whole_int,
+    row_needs_claim,
 )
 from local_operator.session.owner import SessionSeed
 from local_operator.session.placement import (
@@ -301,7 +301,7 @@ class PeerRow:
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
             busy=_bool("busy"),
-            pending=normalise_pending(data.get("pending")),
+            pending=row_needs_claim(state=data.get("state"), pending=data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=peer_number(data.get("started"), default=STARTED_UNKNOWN_S),

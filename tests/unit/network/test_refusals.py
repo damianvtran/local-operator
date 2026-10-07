@@ -1096,6 +1096,14 @@ def test_the_human_listing_renders_a_row_whose_unseen_is_true(
     operator has: ``--all-peers`` (real relay, real producer, real renderer) and
     ``--peer <dev>`` (the same producer's row with the hop stubbed, because the row
     is what crashed, not the hop).
+
+    AND THE ROW CARRIES NO NEEDS CLAIM (correction, 2026-10-07). A stored session
+    has no runtime, so a claim derived from ``unseen`` names a waiting nothing can
+    answer — and no surface can clear it, because the row carries no completion
+    token for any receipt to name. So the producer mints none, and the readers
+    drop one a pre-correction peer still sends (``types.row_needs_claim``); this
+    test pins both halves: the row RENDERS (Q-R7-1's crash guard) with an EMPTY
+    NEEDS cell however the claim was spelled on the wire.
     """
     from local_operator import cli as main_cli
 
@@ -1105,14 +1113,27 @@ def test_the_human_listing_renders_a_row_whose_unseen_is_true(
 
         assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True, json=False)) == 0
         merged = capsys.readouterr()
-        assert "ask" in _rendered_row(merged.out, _UNSEEN_ROW), merged.out
+        # NO NEEDS CLAIM, and no crash (Q-R7-1's guard): the stored row renders
+        # with an empty NEEDS cell.
+        assert "ask" not in _rendered_row(merged.out, _UNSEEN_ROW), merged.out
 
         produced = [
             {**main_cli._REMOTE_ROW_FILL, **row, "locality": "remote"}
             for row in server.local_session_rows()
         ]
+        # THE PRODUCER'S OWN ANSWER, before any renderer: no needs claim on a
+        # stored row (the 2026-10-07 correction — nothing can clear one).
+        stored = [row for row in produced if row["session_id"] == _UNSEEN_ROW]
+        assert stored and stored[0]["pending"] is None, stored
+        # AND A PRE-CORRECTION PEER STILL SHIPS THE CLAIM: the renderer drops it
+        # on the row-level rule (``types.row_needs_claim``) rather than trusting
+        # the raw field — the mixed-version fleet's half of the fix.
+        legacy = [
+            {**row, "pending": "ask"} if row["session_id"] == _UNSEEN_ROW else row
+            for row in produced
+        ]
         monkeypatch.setattr(
-            main_cli, "_remote_listing", lambda **_: main_cli._RemoteListing(produced, [])
+            main_cli, "_remote_listing", lambda **_: main_cli._RemoteListing(legacy, [])
         )
         assert (
             main_cli.sessions_command(
@@ -1121,7 +1142,46 @@ def test_the_human_listing_renders_a_row_whose_unseen_is_true(
             == 0
         )
         named = capsys.readouterr()
-        assert "ask" in _rendered_row(named.out, _UNSEEN_ROW), named.out
+        assert "ask" not in _rendered_row(named.out, _UNSEEN_ROW), named.out
+    finally:
+        server.stop()
+
+
+def test_a_live_parked_record_still_carries_its_needs_claim(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the rule: LIVE rows keep ``SessionRecord.pending``.
+
+    The correction removes claims from STORED rows only. A runtime parked on a
+    gate has a person genuinely waiting on an answer, and its claim must cross
+    the federated listing unchanged — pinned here against the real producer so
+    the no-claim rule cannot creep into the live half.
+    """
+    import os
+
+    from local_operator.session.runtime import registry
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        record = registry.SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id="l1ve-parked-0001",
+            conversation_name="A parked live session",
+            cwd=str(root),
+            model_label="test/mock",
+            control_port=1,
+            control_key="k" * 32,
+            started=True,
+            pending="approval",
+        )
+        registry.publish(record, root)
+
+        rows = [
+            row for row in server.local_session_rows() if row["session_id"] == "l1ve-parked-0001"
+        ]
+        assert rows and rows[0]["state"] != "stored", rows
+        assert rows[0]["pending"] == "approval", rows
     finally:
         server.stop()
 
