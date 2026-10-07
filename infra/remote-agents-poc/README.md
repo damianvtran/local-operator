@@ -120,10 +120,13 @@ aws sts get-caller-identity                    # MUST be 325492156725
 PUL="lop secret run --secret LOP_POC_PULUMI_PASSPHRASE=PULUMI_CONFIG_PASSPHRASE -- pulumi"
 
 # Phase 1 — everything except the task definition and the controller role.
+# The URNs name the PULUMI RESOURCE KEYS (taskDefinition, controllerRole,
+# controllerRolePolicy), not the AWS-side names; divergence 7 has the measurement
+# behind that, and `--exclude '*::…'` globs matched nothing when it was tried.
 $PUL up \
-  --exclude '*::aws:ecs/taskDefinition:TaskDefinition::lop-poc-agent' \
-  --exclude '*::aws:iam/role:Role::lop-poc-controller' \
-  --exclude '*::aws:iam/rolePolicy:RolePolicy::lop-poc-controller'
+  --exclude 'urn:pulumi:poc::remote-agents-poc::aws:ecs/taskDefinition:TaskDefinition::taskDefinition' \
+  --exclude 'urn:pulumi:poc::remote-agents-poc::aws:iam/role:Role::controllerRole' \
+  --exclude 'urn:pulumi:poc::remote-agents-poc::aws:iam/rolePolicy:RolePolicy::controllerRolePolicy'
 
 # Build the image (context zip -> S3, CodeBuild builds and pushes, prints the digest).
 BUCKET=$($PUL stack output bucket)
@@ -145,19 +148,37 @@ so no `--exclude-dependents` is needed.
 
 ## The model key
 
-The secret exists after phase 1 with **no value**. The task definition injects it as
-an ECS secret, so the entrypoint never needs to fetch it. Put the real key with this
-exact command (it reads the value over stdin, so it is never an argument, never in
-the shell history):
+The secret exists after phase 1 with **no value**, and ECS cannot start a task whose
+task-level secret resolves to nothing — so the five mock runs need a value in it
+first. It is a placeholder, and the entrypoint never treats it as a credential:
 
 ```sh
+# 1. The placeholder, written the same way as the real key: over stdin, never argv.
+printf '%s' LOP-POC-PLACEHOLDER-NO-KEY | aws secretsmanager put-secret-value \
+    --secret-id lop-poc/model-key --secret-string file:///dev/stdin
+
+# 2. Later, the real key (from the local store, never printed, never an argument):
 lop secret get LOP_POC_MODEL_KEY | aws secretsmanager put-secret-value \
     --secret-id lop-poc/model-key --secret-string file:///dev/stdin
 ```
 
-Until a value exists, only `--mock` runs will work — see "Divergences", the mock-run
-note. Nothing in this repository, and no process the driver starts, ever reads or
-prints that key.
+**How it reaches the agent, and what that does and does not close.** The entrypoint
+takes the value out of its own environment, carries it across a re-exec on a FIFO, and
+hands it to every child over a file descriptor; `lop_launch.py` reads it there and sets
+it with `os.environ[...]` — `setenv` writes the heap copy, while `/proc/PID/environ`
+exposes the image the kernel copied at `exec`. So the key is in **no process's initial
+environment**: the model's own bash child cannot read it out of its parent with `cat
+/proc/$PPID/environ`, which is the path `local_operator/tools/shell_env.py` documents
+and the one this POC originally left open. Probe 4e watches every readable
+`/proc/<pid>/environ` while the agent runs and reports counts only.
+
+**What it does not close, stated plainly.** The key is in the launcher process's
+*memory*, every process in the task is uid 10001, and the watcher records whether a
+same-uid non-descendant could open `/proc/<lop-pid>/mem` together with
+`yama/ptrace_scope` — that residual is measured per run, not asserted away. The value
+also exists in the ECS task definition's secret reference and in the container's
+declared environment as the ECS agent sees it, outside the container's `/proc`.
+Nothing in this repository, and no process the driver starts, ever reads or prints it.
 
 ## Running
 
@@ -336,5 +357,64 @@ otherwise.
     which deletes the bucket's encryption configuration entirely. The fix that
     converged stack and reality was `aws s3api put-bucket-encryption` with the
     intended rule, after which `pulumi preview` reports the resource unchanged.
+21. **The key reaches the agent over a file descriptor, through a launcher
+    (`image/lop_launch.py`), not through the environment** — the fix for SEC-1 of
+    agent review round 1. The entrypoint carries it across a re-exec on a FIFO and
+    hands it to each child on fd 3; the launcher reads it there and sets it in-process.
+    The alternative that was rejected first (exporting it in a subshell, which this
+    POC shipped and which is what a naive reading of "move it out of the environment"
+    produces) leaves it in the `lop` process's LAUNCH environment, where the model's
+    own bash child reads it with `cat /proc/$PPID/environ` — this repository's own
+    `tools/shell_env.py` documents exactly that read. The residual (the key in memory,
+    same uid) is stated in "The model key" above and measured per run by probe 4e.
+22. **`linuxParameters.initProcessEnabled` is NOT set, though the spec asked for it.**
+    With the ECS init shim as PID 1, PID 1 is a process the entrypoint cannot re-exec,
+    so its `/proc/1/environ` keeps carrying the key for the life of the task and the
+    agent can read it — which would make probe 4e RED, correctly. The entrypoint is
+    PID 1 instead and re-execs itself once after taking the key out of its environment.
+    The cost is the shim's zombie reaping; the agent reaps its own children and the
+    task is 2 h bounded.
+23. **The VPC's default security group is adopted and left rule-less**
+    (`aws:ec2/defaultSecurityGroup`). AWS creates one per VPC with an allow-all
+    self-ingress rule, and anything later added to this VPC without an explicit
+    security group inherits it. It is the one pre-existing resource the stack manages,
+    it lives inside the VPC the stack created, and AWS does not let it be deleted.
+24. **The entrypoint carries a guarded watcher self-test** (`POC_ENVIRON_WATCH_SELFTEST=1`,
+    never set by the driver). It launches a child the OLD way — key exported into its
+    environment — and runs probe 4e against it, so the probe's RED case can be produced
+    in the real container on demand. A probe that can only ever be green is not
+    evidence, and the run's exit code (1) is the proof; the reading is recorded in the
+    results doc.
+25. **The controller role is broader than §9.2's list, and each extra action is
+    named here with the driver function that needs it** (SEC-3 of the security review):
+    `ecs:ListTasks` — `cmd_status` and `cmd_stop_all`; `ecs:TagResource` (gated on
+    `ecs:CreateAction: RunTask`, scoped to `task/lop-poc/*`) — the run-id tags on
+    `run_task`; `s3:GetObject` on `runs/*` — `download_artifacts`; and
+    `logs:GetLogEvents`/`logs:FilterLogEvents` on the agent log group — the driver's
+    log tail. §9.2 says "only RunTask/StopTask/DescribeTasks, PassRole, PutObject", so
+    the four are a delta against the spec rather than against the code.
+26. **The task has a public IPv4** (`mapPublicIpOnLaunch: true` on both subnets,
+    `assignPublicIp: ENABLED` on `RunTask`), because there is no NAT gateway and no VPC
+    endpoints — the POC's own cost decision. The address is not reachable: the task SG
+    has `Ingress: []` (verified live). What 443-to-anywhere still permits is
+    **exfiltration over HTTPS to any host**, and name resolution through the VPC
+    resolver (probe 4b's `1.1.1.1:53` failure proves only that *that* resolver is
+    unreachable). The empty task role bounds the VALUE of a leak, not the ability to
+    make one; §7.2's allowlist proxy is the v1 control.
+27. **The CodeBuild builder image is pinned by TAG (`…-standard:3.0`), the one build
+    input that is not digest-pinned.** AWS publishes no per-region digest for its
+    managed CodeBuild images, so a tag is the only pin available; every other base in
+    this POC (the product image, both Dockerfile bases, the task definition's image)
+    is digest-pinned. Recorded rather than hidden.
+28. **Probe 4b dials two third-party hosts** (`portquiz.net:8080`, `1.1.1.1:53`). They
+    are negative controls — the probe needs addresses that must be UNREACHABLE — and
+    they cost one DNS lookup plus a refused connection each. Named here so the next
+    reader does not have to wonder why the POC touches a public service.
+29. **The watcher requires procfs and reports BLOCKED without it.** A Darwin fallback
+    through `ps -Eww -ax` was written, measured, and removed: on this host `ps -E`
+    printed only ARGV, so a key in some process's command line matched (false positive)
+    while a child started with the key in its environment did not (false negative).
+    The watcher's verdict is therefore Linux-only by construction, and the unit test
+    stubs the environ source for the logic cases.
 
 

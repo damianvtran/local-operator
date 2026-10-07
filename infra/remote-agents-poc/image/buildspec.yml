@@ -22,7 +22,9 @@ env:
   variables:
     DOCKER_BUILDKIT: "1"
     # ECR_REPO_URL is supplied by the project's own environment.
-    LOP_VERSION: "0.68.3"
+    # LOP_VERSION is NOT set here: it is derived from requirements.in in pre_build,
+    # so the tag cannot drift from the version actually installed in the image
+    # (review SEC-8 — the hand-copied "0.68.3" could).
 
 phases:
   install:
@@ -33,6 +35,10 @@ phases:
       - 'REGISTRY="${ECR_REPO_URL%%/*}"'
       - 'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"'
       - 'CTX_SHA=$(find "$CODEBUILD_SRC_DIR" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)'
+      # The version comes from the ONLY pin that is installed: requirements.in. A tag
+      # a human reads in CloudWatch is worth deriving from the artifact, not copying.
+      - 'LOP_VERSION=$(sed -n "s/^local-operator==//p" "$CODEBUILD_SRC_DIR/requirements.in" | head -1)'
+      - 'if [ -z "$LOP_VERSION" ]; then echo "FATAL: requirements.in does not pin local-operator"; exit 1; fi'
       - 'IMAGE_TAG="$LOP_VERSION-$CTX_SHA"'
       - 'echo "context sha=$CTX_SHA tag=$IMAGE_TAG"'
   build:

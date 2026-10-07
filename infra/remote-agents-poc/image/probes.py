@@ -389,6 +389,261 @@ def probe_platform() -> dict[str, Any]:
     return _result("4d_platform", passed, detail, note)
 
 
+def _comm_of(pid: str) -> str:
+    """The process's `comm`, which is a NAME and never a value."""
+    try:
+        return Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return "?"
+
+
+def _procfs_available() -> bool:
+    """Whether this host has procfs, i.e. whether the watcher can observe at all.
+
+    A named predicate rather than an inline ``isdir`` so the BLOCKED path is testable
+    on a host that HAS procfs — which is the host that matters, because a probe whose
+    blocked case has never been exercised is a probe whose blocked case does not work.
+    """
+    return os.path.isdir("/proc")
+
+
+def _environ_blobs() -> list[tuple[str, bytes, str]]:
+    """Every readable process's INITIAL environment: (pid label, blob, comm).
+
+    THE BLOB IS THE ENVIRONMENT ALONE, NEVER A COMMAND LINE, and procfs is the only
+    source this probe will use. Two measured reasons: ``/proc/<pid>/environ`` is
+    exactly the environment image the kernel copied at ``exec``, and the Darwin
+    substitute is not — ``ps -Eww -ax`` on this host printed only ARGV, so a key
+    sitting in some process's command line matched it (a false positive) while the
+    child started with the key in its environment did not (a false negative). An
+    instrument that can only return the wrong answer is worse than one that says it
+    cannot observe, so the watcher reports BLOCKED where there is no procfs.
+    """
+    if not _procfs_available():
+        return []
+    blobs: list[tuple[str, bytes, str]] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/environ", "rb") as handle:
+                blobs.append((entry, handle.read(), _comm_of(entry)))
+        except OSError:
+            continue
+    return blobs
+
+
+def _proc_environ_scan(
+    needles: dict[str, bytes],
+) -> tuple[dict[str, int], list[dict[str, Any]], int]:
+    """Count processes whose INITIAL environment carries a needle.
+
+    On Linux this reads ``/proc/<pid>/environ`` — the environment image the kernel
+    copied at ``exec``, which is the whole reason the entrypoint re-execs itself after
+    taking the key out of its environment, and the read path ``shell_env.py``
+    documents as ``cat /proc/$PPID/environ``. On Darwin ``ps -Eww`` answers the same
+    question. Only counts, PIDs and comm names are returned; never a byte of the
+    environment itself.
+    """
+    counts: dict[str, int] = dict.fromkeys(needles, 0)
+    hits: list[dict[str, Any]] = []
+    blobs = _environ_blobs()
+    if not blobs:
+        return counts, hits, 0
+    for label, blob, comm in blobs:
+        pid: Any = int(label) if label.isdigit() else label
+        for needle_label, needle in needles.items():
+            if needle and needle in blob:
+                counts[needle_label] += 1
+                hits.append({"pid": pid, "comm": comm, "needle": needle_label})
+    return counts, hits, len(blobs)
+
+
+def _agent_pid(pid_file: Path | None) -> int | None:
+    """The agent process, from the launcher's own pid file.
+
+    The launcher writes its pid because the entrypoint cannot know it (the agent runs
+    in the foreground) and a cmdline scan is unreliable: ``lop`` renames itself with
+    ``prctl``, so by the time the watcher samples, the cmdline it would have matched on
+    is gone. Fallback: the cmdline scan, for a run whose launcher is a different build.
+    """
+    if pid_file is not None:
+        try:
+            return int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pass
+    return _find_agent_pid()
+
+
+def _find_agent_pid() -> int | None:
+    """The launcher process, found by cmdline scan.
+
+    The watcher is a sibling of the agent rather than its parent (both are children
+    of the entrypoint), which is what makes the memory check below a same-uid
+    NON-DESCENDANT read — the case ``yama/ptrace_scope`` exists to decide.
+
+    ``None`` where there is no procfs, which is also where the memory question cannot
+    be answered at all: the caller records that as ``mem_openable: null`` with the
+    platform named, rather than as ``False``, because "no procfs" is not "protected".
+    """
+    if not _procfs_available():
+        return None
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            cmdline = (
+                Path(f"/proc/{entry}/cmdline")
+                .read_bytes()
+                .replace(b"\x00", b" ")
+                .decode("utf-8", "replace")
+            )
+        except OSError:
+            continue
+        if "lop_launch" in cmdline or "lop-launch" in cmdline:
+            return int(entry)
+    return None
+
+
+def _residual(agent_pid: int | None) -> dict[str, Any]:
+    """The two residuals the environ claim cannot speak for.
+
+    (1) The key lives in the agent's MEMORY, and every process here is uid 10001.
+    (2) Whether a same-uid non-descendant may read that memory is the kernel's
+    answer, not ours: ``yama/ptrace_scope`` decides, and the check is an actual
+    open of ``/proc/<pid>/mem`` rather than a restatement of the policy.
+    """
+    residual: dict[str, Any] = {"platform": sys.platform}
+    try:
+        residual["yama_ptrace_scope"] = (
+            Path("/proc/sys/kernel/yama/ptrace_scope").read_text(encoding="utf-8").strip()
+        )
+    except OSError as error:
+        residual["yama_ptrace_scope"] = f"unreadable: {type(error).__name__}"
+    if agent_pid is None:
+        residual["mem_openable"] = None
+        residual["mem_target"] = None
+        return residual
+    if not _procfs_available():
+        # No procfs: nothing to open, and that is NOT the same as "protected".
+        residual["mem_target"] = {"pid": agent_pid, "comm": "ps"}
+        residual["mem_openable"] = None
+        residual["mem_note"] = (
+            f"no procfs on {sys.platform}; the memory question is measured on Linux only"
+        )
+        return residual
+    residual["mem_target"] = {"pid": agent_pid, "comm": _comm_of(str(agent_pid))}
+    try:
+        with open(f"/proc/{agent_pid}/mem", "rb"):
+            residual["mem_openable"] = True
+            residual["mem_note"] = (
+                "a same-uid, NON-descendant process opened the agent's memory: the key is "
+                "recoverable from /proc/<pid>/mem (the in-memory residual, disclosed)"
+            )
+    except OSError as error:
+        residual["mem_openable"] = False
+        residual["mem_error"] = f"{type(error).__name__}: {error.strerror or ''}".strip()
+    return residual
+
+
+def watch_environ(
+    out: Path,
+    key: str,
+    prefix_chars: int,
+    stop_file: Path,
+    interval_ms: int,
+    max_seconds: float,
+    max_samples: int | None = None,
+    agent_pid_file: Path | None = None,
+) -> int:
+    """Probe 4e: sample every process's initial environment while the agent runs.
+
+    WHY A WATCHER AND NOT A ONE-SHOT. Probe 4c-env spawns ``env`` from the probe
+    process before the agent exists, so it can see "the entrypoint forgot to unset
+    ``LOP_POC_MODEL_KEY``" and cannot see "the value was handed to the agent as its
+    launch environment" — the pair of processes that matters only coexist while the
+    agent is running. This samples that window, and the key it searches for is
+    itself delivered over the key fd, never through the environment it is scanning.
+
+    The report is rewritten after every sample, so a killed watcher still leaves its
+    last state behind. Exit 0 iff no process's environ ever matched.
+    """
+    needles = _needles(key, prefix_chars)
+    if not _procfs_available():
+        # BLOCKED, not a pass: without procfs this probe can observe nothing, and a
+        # green reading from an instrument that never looked is the failure mode
+        # AGENTS.md names ("a dead instrument returns a reading, not an error").
+        message = {
+            "blocked": True,
+            "reason": (
+                f"no procfs on {sys.platform}: /proc/<pid>/environ is the only source "
+                "this probe uses"
+            ),
+        }
+        out.write_text(json.dumps(message, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps(message, sort_keys=True), file=sys.stderr)
+        return 2
+    report: dict[str, Any] = {
+        "samples": 0,
+        "interval_ms": interval_ms,
+        "key_length_bytes": len(key),
+        "key_sha256_first8": hashlib.sha256(key.encode()).hexdigest()[:8] if key else None,
+        "processes_scanned_max": 0,
+        "matches_by_needle": dict.fromkeys(needles, 0),
+        "matching_processes": [],
+        "residual": {},
+    }
+    deadline = time.monotonic() + max_seconds
+    while True:
+        counts, hits, scanned = _proc_environ_scan(needles)
+        report["samples"] += 1
+        report["processes_scanned_max"] = max(report["processes_scanned_max"], scanned)
+        for label, count in counts.items():
+            report["matches_by_needle"][label] = max(report["matches_by_needle"][label], count)
+        for hit in hits:
+            if hit not in report["matching_processes"]:
+                report["matching_processes"].append(hit)
+        # KEEP THE FIRST DEFINITIVE MEMORY READING, not the last one. The watcher's last
+        # sample lands after the agent has exited, so probing then opens a pid that no
+        # longer exists and reports FileNotFoundError — a dead-process artifact mistaken
+        # for a measurement (measured, on the first five runs of this revision). The
+        # first sample that HAS a target pid is the one taken while the agent was alive.
+        candidate = _residual(_agent_pid(agent_pid_file))
+        if not report["residual"] or (
+            report["residual"].get("mem_target") is None and candidate.get("mem_target") is not None
+        ):
+            report["residual"] = candidate
+        total = sum(report["matches_by_needle"].values())
+        report["pass"] = total == 0
+        report["note"] = (
+            f"{total} process(es) whose INITIAL environment carried the key, over "
+            f"{report['samples']} sample(s) and up to {report['processes_scanned_max']} "
+            f"readable /proc/<pid>/environ"
+        )
+        out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if stop_file.exists() or time.monotonic() >= deadline:
+            break
+        if max_samples is not None and report["samples"] >= max_samples:
+            break
+        time.sleep(interval_ms / 1000)
+    # The digest goes to stdout, which is CloudWatch: the artifact carries the full
+    # record, and this is what makes the verdict readable in the task log without
+    # downloading anything. Counts and NAMES only — never a byte of an environment.
+    print(
+        json.dumps(
+            {
+                "pass": report["pass"],
+                "samples": report["samples"],
+                "processes_scanned_max": report["processes_scanned_max"],
+                "matches_by_needle": report["matches_by_needle"],
+                "matching_processes": report["matching_processes"][:10],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if report["pass"] else 1
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Slice-0 isolation probes")
     parser.add_argument("--out", type=Path, help="where to write probes.json")
@@ -412,12 +667,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         help="rescan mode: count files under this directory containing the key, then exit",
     )
+    parser.add_argument(
+        "--watch-environ",
+        action="store_true",
+        help="watcher mode: sample every process's initial environment until --stop-file appears",
+    )
+    parser.add_argument("--stop-file", type=Path, help="watcher mode: stop when this path exists")
+    parser.add_argument("--interval-ms", type=int, default=1000, help="watcher sampling interval")
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=7300.0,
+        help="watcher hard bound (agent deadline + slack)",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="watcher mode: stop after N samples (used by the red/green unit test)",
+    )
+    parser.add_argument(
+        "--agent-pid-file",
+        type=Path,
+        help="watcher mode: the launcher writes its pid here for the memory probe",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
     key = _read_key(args.key_fd)
+    if args.watch_environ:
+        if args.out is None or args.stop_file is None:
+            print("--watch-environ needs --out and --stop-file", file=sys.stderr)
+            return 2
+        return watch_environ(
+            args.out,
+            key,
+            args.key_prefix_chars,
+            args.stop_file,
+            args.interval_ms,
+            args.max_seconds,
+            args.max_samples,
+            args.agent_pid_file,
+        )
     if args.scan_dir is not None:
         return _main_scan(args.scan_dir, key, args.key_prefix_chars)
     probes = [
@@ -443,10 +736,21 @@ def _main_scan(root: Path, key: str, prefix_chars: int) -> int:
 
     The same needles and the same scanner as probe 4c, so "the pre-upload rescan
     passed" and "probe 4c passed" cannot disagree about what was searched for.
+
+    EXIT 2 FOR AN EMPTY KEY, not 0. A caller that treats rc 0 as "clean" would
+    otherwise report a clean scan of zero files when the key never arrived at all
+    — the failure mode ``verify``'s local scan had, and exactly the shape AGENTS.md
+    calls a dead instrument returning a reading.
     """
     if not key:
-        print(json.dumps({"scanned_files": 0, "match_count": 0, "matches_by_needle": {}}))
-        return 0
+        print(
+            json.dumps(
+                {"error": "no key was delivered on the key fd; nothing was scanned"},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     counts, scanned = _scan_for_needles(root, _needles(key, prefix_chars), frozenset())
     total = sum(counts.values())
     print(

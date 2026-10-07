@@ -39,8 +39,9 @@ RUN python -m venv /opt/lop \
  && rm -f /tmp/requirements.txt /tmp/requirements-probe.txt
 
 COPY probes.py /opt/probe/probes.py
+COPY lop_launch.py /usr/local/bin/lop-launch.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh \
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/lop-launch.py \
  && chmod 0644 /opt/probe/probes.py
 
 # uid 10001, no home of its own: HOME points into the task volume (see the task

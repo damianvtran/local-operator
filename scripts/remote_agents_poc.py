@@ -253,6 +253,7 @@ def cold_start_numbers(
     """
     created = _timestamp_ms(described.get("createdAt"))
     pull_started = _timestamp_ms(described.get("pullStartedAt"))
+    pull_stopped = _timestamp_ms(described.get("pullStoppedAt"))
     started = _timestamp_ms(described.get("startedAt"))
     container_start = timings.get("t_container_start")
     probes_start = timings.get("t_probes_start")
@@ -265,8 +266,16 @@ def cold_start_numbers(
         "runtask_to_running_wall_ms": (
             None if first_running_wall_ms is None else first_running_wall_ms - t_runtask_ms
         ),
-        "ecs_created_to_pull_started_ms": _delta(pull_started, created),
-        "ecs_pull_started_to_started_ms": _delta(started, pull_started),
+        # The THREE phases, separated because the first one is not image pull. The
+        # design doc called the 11-16 s "image pull (~57%)" and that was wrong: it is
+        # scheduling plus ENI attachment, the pull itself is 4.5-5.9 s and the
+        # container start 3.3-4.0 s (measured, six runs). SOCI would improve the pull
+        # — the phase that is the reason Q1 asks about it — so mislabelling the
+        # scheduling phase as pull overstated SOCI's upside by more than 2x.
+        "ecs_created_to_pull_started_ms": _delta(pull_started, created),  # scheduling / ENI
+        "ecs_pull_started_to_pull_stopped_ms": _delta(pull_stopped, pull_started),  # the pull
+        "ecs_pull_stopped_to_started_ms": _delta(started, pull_stopped),  # container start
+        "ecs_pull_started_to_started_ms": _delta(started, pull_started),  # pull + start, kept
         "ecs_created_to_started_ms": _delta(started, created),
         # RUNNING -> the entrypoint's first instruction, i.e. what the platform costs
         # AFTER the container is up (the payload is already resident at that point).
@@ -406,9 +415,7 @@ def run_once(
         },
         overrides=overrides,
         tags=[
-            {"key": "lop-poc", "value": "true"},
-            {"key": "owner", "value": "lopdev"},
-            {"key": "run-id", "value": run_id},
+            {"key": key, "value": value} for key, value in {**POC_TAGS, "run-id": run_id}.items()
         ],
         # enableECSManagedTags + propagateTags TASK_DEFINITION: a run that fails to
         # start still carries lop-poc, so it is still found by the inventory and by
@@ -464,6 +471,7 @@ def run_once(
         "container_timings_ms": timings,
         "downloads": downloads,
         "probes": read_probes(run_dir),
+        "environ_watch": read_environ_watch(run_dir),
         "status": read_status(run_dir),
         "git": read_git(run_dir),
     }
@@ -534,6 +542,31 @@ def read_status(run_dir: Path) -> dict[str, Any]:
 def read_git(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "results" / "git.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"available": False}
+
+
+def read_environ_watch(run_dir: Path) -> dict[str, Any]:
+    """Probe 4e's verdict: no process's INITIAL environment carried the key.
+
+    Read from the run's artifact rather than re-derived: the watcher samples only
+    while the agent is alive, and that window is gone by verify time. The residual it
+    records (yama/ptrace_scope and whether the agent's memory was openable from a
+    same-uid non-descendant) rides along, because it is the part of SEC-1 the environ
+    claim cannot speak for.
+    """
+    path = _find(run_dir, "proc-env-watch.json")
+    if path is None:
+        return {"available": False}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "available": True,
+        "pass": payload.get("pass"),
+        "samples": payload.get("samples"),
+        "processes_scanned_max": payload.get("processes_scanned_max"),
+        "matches_by_needle": payload.get("matches_by_needle"),
+        "matching_processes": payload.get("matching_processes"),
+        "residual": payload.get("residual"),
+        "note": payload.get("note"),
+    }
 
 
 def _driver_session(args: argparse.Namespace) -> tuple[Any, dict[str, Any], Any]:
@@ -663,10 +696,43 @@ def cmd_stop_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def harness_child_environment(overrides: dict[str, str]) -> dict[str, str]:
+    """The environment a HARNESS gives the real CLI it drives.
+
+    WHY NOT A BARE DICT: a child a rig drives is a session nobody is watching, and
+    the ``test`` hosting's only reply is "Hello from the mock provider!" — a
+    notification body being a snippet of the session's own last assistant line, so a
+    drive-by rig puts that sentence on the operator's lock screen (17 recorded banner
+    attempts across scratch stores in two days; see
+    ``agent_shell.harness_child_env``). The gate and its value come from that
+    helper's single definition rather than a literal here, and the nested-session
+    allowance it also sets is what lets the driven CLI open a session at all when the
+    rig itself is running inside an agent's shell. Pinned by
+    ``tests/unit/test_notification_isolation.py``, which fails any module under
+    ``scripts/`` that builds a child environment without one of the gate spellings.
+    """
+    from local_operator.agent_shell import harness_child_env
+
+    return harness_child_env(overrides)
+
+
 def _run(
-    cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None
+    cmd: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    stdin: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+    """Run a child. ``stdin`` exists for the resume check: a driven ``lop exec``
+    must read stdin as ``/dev/null`` — an unattended run — not a terminal."""
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=stdin,
+    )
 
 
 def _find(run_dir: Path, name: str) -> Path | None:
@@ -676,6 +742,18 @@ def _find(run_dir: Path, name: str) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _transcript_lines(path: Path) -> list[str]:
+    """A session transcript as non-empty lines; ``[]`` when it is absent.
+
+    Lines rather than a count, because acceptance 3 has to compare the PRIOR lines
+    after the resume — a count alone cannot tell an appended turn from a rewritten
+    store.
+    """
+    if not path.exists():
+        return []
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _fixture_test_command(clone: Path) -> list[str]:
@@ -805,13 +883,23 @@ def _verify_session(verifier: Verifier, run_dir: Path, lop: str, session_id: str
         verifier.check("acceptance3.extract", True, f"into {sessions}")
         # env -i style, and constructed rather than inherited: an inherited
         # CMUX_WORKSPACE_ID or LOP_* variable is what AGENTS.md's "Isolating a run"
-        # says must never reach a second runtime.
-        env = {
-            "HOME": iso,
-            "LOCAL_OPERATOR_CONFIG_DIR": str(root / config_name),
-            "PATH": os.environ.get("PATH", ""),
-            "TERM": "dumb",
-        }
+        # says must never reach a second runtime. `harness_child_environment` adds the
+        # notification gate the repo requires of every rig that drives the real CLI.
+        env = harness_child_environment(
+            {
+                "HOME": iso,
+                "LOCAL_OPERATOR_CONFIG_DIR": str(root / config_name),
+                "PATH": os.environ.get("PATH", ""),
+                "TERM": "dumb",
+            }
+        )
+        transcript = root / config_name / "sessions" / session_id / "transcript.jsonl"
+        before = _transcript_lines(transcript)
+        verifier.check(
+            "acceptance3.transcript_non_empty",
+            bool(before),
+            f"{len(before)} transcript line(s) before the resume",
+        )
         # `--all` is load-bearing: a bare `lop sessions` lists only ACTIVE (running)
         # sessions, so a transplanted session — which is stored, never running — comes
         # back as an empty list and looks like a failed transplant. It is not: the
@@ -823,21 +911,60 @@ def _verify_session(verifier: Verifier, run_dir: Path, lop: str, session_id: str
             listed_ok,
             f"exit {listed.returncode}: {(listed.stdout + listed.stderr).strip()[:300]}",
         )
-        transcript = root / config_name / "sessions" / session_id / "transcript.jsonl"
-        if transcript.exists():
-            lines = [line for line in transcript.read_text(encoding="utf-8").splitlines() if line]
-            verifier.check(
-                "acceptance3.transcript_non_empty", bool(lines), f"{len(lines)} transcript line(s)"
-            )
-        else:
-            verifier.check("acceptance3.transcript_non_empty", False, f"{transcript} is absent")
+        # THE REAL RESUME PATH, driven headlessly. §9.3 item 3 says the transplanted
+        # session must OPEN, and `lop --resume` (the TUI form) and `lop exec --resume`
+        # load the same store through the same loader — `exec` is the non-TTY surface
+        # of that load, so this exercises the load rather than a listing. It runs the
+        # mock hosting, so it needs no key.
+        resumed = _run(
+            [
+                lop,
+                "exec",
+                "--resume",
+                session_id,
+                "--hosting",
+                "test",
+                "--model",
+                "test-model",
+                "--json",
+                "ping",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        reused = session_id in resumed.stdout
+        verifier.check(
+            "acceptance3.resume_reuses_session",
+            resumed.returncode == 0 and reused,
+            f"exit {resumed.returncode}; same session id in the event stream: {reused}; "
+            f"{(resumed.stdout + resumed.stderr).strip()[-220:]}",
+        )
+        after = _transcript_lines(transcript)
+        verifier.check(
+            "acceptance3.resume_grew_transcript",
+            len(after) > len(before),
+            f"{len(before)} -> {len(after)} transcript line(s)",
+        )
+        verifier.check(
+            "acceptance3.resume_kept_prior_lines",
+            bool(before) and after[: len(before)] == before,
+            f"the first {len(before)} line(s) are byte-identical after the resume",
+        )
 
 
 def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> None:
     """Acceptance 4: no copy of the model key exists in what was downloaded.
 
-    The key is piped from the secret store into probes.py's stdin, never argv, so
-    it is not in this process's command line and never in this transcript.
+    The key is piped from the secret store into probes.py's stdin, never argv, so it
+    is not in this process's command line and never in this transcript — and this
+    process never holds it either: the store's stdout IS the scanner's stdin.
+
+    A SCAN THAT INSPECTED NOTHING IS NOT A PASS. Until this round the verdict was
+    ``scanner.returncode == 0``, and ``probes.py:_main_scan`` returned 0 for an empty
+    key — so a store hiccup reported PASS with ``{"scanned_files": 0}`` as its
+    evidence, the "dead instrument returns a reading" shape. Now rc 2 (no key
+    delivered), a nonzero exit from the getter, and a zero-file scan are all BLOCKED,
+    and only a scan that actually read files can pass.
     """
     if probes is None:
         verifier.check("acceptance4.key_scan", False, "probes.py not found; cannot scan")
@@ -847,13 +974,15 @@ def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> 
         verifier.blocked(
             "acceptance4.key_scan",
             "LOP_POC_MODEL_KEY is not in the secret store, so no real key exists to scan for; "
-            "the container's own 4c/4c-env probes still ran, against the injected placeholder",
+            "the container's own 4c/4c-env/4e probes still ran, against the injected placeholder",
         )
         return
+    # stderr goes to DEVNULL rather than an undrained pipe: a chatty failure on a
+    # pipe nobody reads can fill the buffer and deadlock the scan (review CODE-12).
     getter = subprocess.Popen(
         ["lop", "secret", "get", "LOP_POC_MODEL_KEY"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
     # The same needles the container used: the exact value, and its first 8
     # characters, so "the local scan passed" means what "probe 4c passed" means.
@@ -875,8 +1004,24 @@ def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> 
     )
     if getter.stdout is not None:
         getter.stdout.close()
-    getter.wait()
+    getter_rc = getter.wait()
+    if getter_rc != 0:
+        verifier.blocked(
+            "acceptance4.key_scan", f"`lop secret get` exited {getter_rc}: nothing was scanned"
+        )
+        return
     result = (scanner.stdout + scanner.stderr).strip()[:300]
+    if scanner.returncode == 2:
+        verifier.blocked("acceptance4.key_scan", f"no key reached the scanner: {result}")
+        return
+    scanned = 0
+    try:
+        scanned = int(json.loads(scanner.stdout)["scanned_files"])
+    except (ValueError, KeyError, TypeError):
+        scanned = 0
+    if scanned == 0:
+        verifier.blocked("acceptance4.key_scan", f"the scan inspected 0 files: {result}")
+        return
     verifier.check("acceptance4.key_scan", scanner.returncode == 0, result)
 
 
@@ -933,6 +1078,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "acceptance4.no_probe_failed",
         probes_summary.get("available") is True and not failed,
         f"{probes_summary.get('probes')}",
+    )
+    watch = read_environ_watch(run_dir)
+    verifier.check(
+        "acceptance4e.no_key_in_any_process_environ",
+        watch.get("pass") is True,
+        f"{watch.get('note')}; residual={watch.get('residual')}",
     )
     _verify_key_scan(verifier, run_dir, probes if probes.exists() else None)
     return verifier.report()

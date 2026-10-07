@@ -28,15 +28,23 @@ fi
 readonly OUT=/workspace/out
 readonly WORKSPACE=/workspace
 readonly FIFO=/workspace/tmp/stream.fifo
+#: Where the key crosses the re-exec. A FIFO, so the value never reaches a file.
+readonly KEY_FIFO=/workspace/tmp/key.pipe
 # 2 h, the bound §9.3's cost estimate assumes. Firing it is recorded, not hidden.
 readonly AGENT_DEADLINE_SECONDS=7200
 
 mkdir -p "$OUT" "$WORKSPACE/repo" "$WORKSPACE/tmp" "$WORKSPACE/home" \
     "${LOCAL_OPERATOR_CONFIG_DIR:-$WORKSPACE/config/local-operator}"
 
-# Every step stamps an epoch-millisecond line into timings.jsonl. The EXIT trap
-# folds that into timings.json, so a run that FAILS still leaves its timings
-# behind: the timings of a failure are evidence too.
+# Every step stamps an epoch-millisecond line into timings.jsonl, and the EXIT trap
+# folds that into timings.json.
+#
+# WHICH FAILURES THAT ACTUALLY SAVES, named exactly: the ones AFTER the results
+# tarball is sealed — a non-zero agent exit (rc), a probe that failed (exit 5). It
+# does NOT save the earlier ones, because $OUT only reaches S3 at step 9: the
+# pre-upload key-scan refusal (exit 4, deliberate), a failed `git clone`, a failed
+# probes PUT, and any other pre-upload abort ship no timings at all. Stated rather
+# than implied, because the fold reads like a guarantee it cannot give.
 stamp() {
     printf '{"name":"%s","epoch_ms":%s}\n' "$1" "$(date +%s%3N)" >>"$OUT/timings.jsonl"
 }
@@ -106,11 +114,49 @@ trap on_exit EXIT
 
 stamp t_container_start
 
-# ---------------------------------------------------------------- step 2: key
-# Out of the environment before anything else can copy that environment.
-MODEL_KEY="${LOP_POC_MODEL_KEY:-}"
-unset LOP_POC_MODEL_KEY
-stamp t_key_read
+# ------------------------------------------------------------- key delivery
+#
+# THE KEY NEVER ENTERS ANY PROCESS'S ENVIRONMENT, and this block is why.
+# `local_operator/tools/shell_env.py` states the boundary this closes: the strict
+# mode removes the key from a child's OWN environment and does not make it
+# unreadable, because "Linux — `cat /proc/$PPID/environ` does the same", and
+# unsetting in place "closes NOTHING, because ps and /proc/PID/environ report the
+# environment a process was STARTED with". So the ECS-injected value is taken out of
+# the environment here, carried across a re-exec on a pipe, and handed to the
+# launcher over a descriptor — never argv, never the environment.
+#
+# PHASE A is the only process that ever HAS the value in its environment, and it
+# does not survive: it execs itself away.
+if [ -z "${LOP_POC_KEY_FD:-}" ]; then
+    MODEL_KEY="${LOP_POC_MODEL_KEY:-}"
+    unset LOP_POC_MODEL_KEY
+    rm -f "$KEY_FIFO"
+    mkfifo -m 600 "$KEY_FIFO"
+    # The writer is a fork holding the value in its memory; it exits the moment the
+    # reader opens, milliseconds from now, and it execs nothing.
+    ( printf '%s' "$MODEL_KEY" >"$KEY_FIFO" ) &
+    exec 3<"$KEY_FIFO"
+    export LOP_POC_KEY_FD=3
+    export LOP_POC_KEY_LEN=${#MODEL_KEY}
+    stamp t_key_read
+    # Re-exec THIS script so /proc/<pid>/environ — the image the kernel copied at
+    # exec — stops carrying the key. Without it the entrypoint is one more process
+    # whose environment the agent's children can read, and probe 4e goes red on it.
+    exec "$0" "$@"
+fi
+
+# PHASE B: a clean environment image, and the key only in this shell's memory.
+stamp t_entrypoint_rescrubbed
+MODEL_KEY="$(head -c "$LOP_POC_KEY_LEN" <&3)"
+exec 3<&-
+rm -f "$KEY_FIFO"
+if [ "${#MODEL_KEY}" != "$LOP_POC_KEY_LEN" ]; then
+    echo "FATAL: key delivery truncated (${#MODEL_KEY} of $LOP_POC_KEY_LEN bytes)" >&2
+    exit 6
+fi
+unset LOP_POC_KEY_FD LOP_POC_KEY_LEN
+
+# ------------------------------------------------------- step 2: hosting + config
 
 POC_MOCK="${POC_MOCK:-0}"
 POC_HOSTING="${POC_HOSTING:-}"
@@ -203,13 +249,55 @@ stamp t_clone_done
 # in the exit code through PROBE_RC below, and in probes.json["failed"].
 stamp t_probes_start
 PROBE_RC=0
-printf '%s' "$MODEL_KEY" | /opt/probe/bin/python /opt/probe/probes.py \
+/opt/probe/bin/python /opt/probe/probes.py \
     --out "$OUT/probes.json" \
+    --key-fd 3 \
     --key-prefix-chars "$KEY_PREFIX_CHARS" \
-    --model-secret-arn "${POC_MODEL_SECRET_ARN:-}" || PROBE_RC=$?
+    --model-secret-arn "${POC_MODEL_SECRET_ARN:-}" \
+    3< <(printf '%s' "$MODEL_KEY") || PROBE_RC=$?
 stamp t_probes_done
 printf '{"probe_rc":%s}\n' "$PROBE_RC" >"$OUT/probe_rc.json"
 put_file "$POC_PROBES_URL" "$OUT/probes.json"
+
+# ------------------------------------------------- watcher self-test (on demand)
+# PROVES THE WATCHER CAN GO RED, in this container, without a rebuild. Guarded by an
+# environment variable the driver never sets, so no real run pays for it. It launches
+# a child THE OLD WAY — the key exported into its environment, which is exactly what
+# SEC-1 replaced — and runs the watcher against it: the watcher must FIND it, and its
+# exit code (1) is the proof. A probe that can only ever be green is not evidence.
+if [ "${POC_ENVIRON_WATCH_SELFTEST:-0}" = "1" ]; then
+    stamp t_watch_selftest_start
+    ( export LOP_POC_MODEL_KEY="$MODEL_KEY"; exec sleep 60 ) &
+    leaky_pid=$!
+    sleep 2
+    selftest_rc=0
+    /opt/probe/bin/python /opt/probe/probes.py --watch-environ \
+        --out "$OUT/proc-env-watch.json" --stop-file "$WORKSPACE/tmp/never" \
+        --key-fd 3 --key-prefix-chars 0 --max-samples 2 \
+        3< <(printf '%s' "$MODEL_KEY") || selftest_rc=$?
+    kill "$leaky_pid" 2>/dev/null || true
+    echo "watcher self-test rc=$selftest_rc: 1 means it DETECTED the key in a child's environment, which is the red proof"
+    exit "$selftest_rc"
+fi
+
+# ------------------------------------------------- probe 4e: the environ watcher
+# Started before the agent and stopped when it ends: it samples every process's
+# INITIAL environment for the key, which is the read path that matters while the
+# agent — and anything the model spawns — is alive. It runs as the same uid and is a
+# SIBLING of the agent, which is also what makes its /proc/<agent>/mem probe a
+# same-uid NON-descendant read (the case yama/ptrace_scope decides).
+WATCH_STOP="$WORKSPACE/tmp/agent.done"
+rm -f "$WATCH_STOP"
+AGENT_PID_FILE="$WORKSPACE/tmp/agent.pid"
+rm -f "$AGENT_PID_FILE"
+(
+    /opt/probe/bin/python /opt/probe/probes.py \
+        --watch-environ --out "$OUT/proc-env-watch.json" --stop-file "$WATCH_STOP" \
+        --key-fd 3 --key-prefix-chars "$KEY_PREFIX_CHARS" \
+        --agent-pid-file "$AGENT_PID_FILE" \
+        3< <(printf '%s' "$MODEL_KEY")
+) &
+watcher_pid=$!
 
 # ------------------------------------------------------------- step 5: agent
 stamp t_agent_start
@@ -235,26 +323,32 @@ reader_pid=$!
 
 agent_rc=0
 if [ "$POC_MOCK" = "1" ]; then
-    # `-hosting test` is lop's own mock wire (allows_missing_api_key), so a mock
-    # run needs no key: it exercises lifecycle, probes and cold start, and it
-    # produces no fix — which is expected and stated in the spec.
+    # `--hosting test` is lop's own mock wire (allows_missing_api_key), so a mock run
+    # needs no key: it exercises lifecycle, probes and cold start, and it produces no
+    # fix — which is expected. It still goes through the LAUNCHER with the key on a
+    # descriptor, so the five acceptance runs exercise the real delivery path (with
+    # the placeholder as the value) rather than a path only a real key would take.
     (
         cd "$WORKSPACE/repo"
         exec timeout "$AGENT_DEADLINE_SECONDS" \
-            lop exec --json --tools read,write,edit,bash \
+            /opt/lop/bin/python /usr/local/bin/lop-launch.py \
+            --key-fd 3 --provider-env "" --pid-file "$AGENT_PID_FILE" \
+            -- exec --json --tools read,write,edit,bash \
             --hosting test --model test-model "$POC_PROMPT"
-    ) </dev/null >"$FIFO" 2>"$OUT/agent_stderr.txt" || agent_rc=$?
+    ) 3< <(printf '%s' "$MODEL_KEY") </dev/null >"$FIFO" 2>"$OUT/agent_stderr.txt" || agent_rc=$?
 else
-    # The key is exported in a SUBSHELL, then exec'd, so it is in the environment
-    # of exactly one process tree and never in any argv vector (`env KEY=… prog`
-    # would put it in `ps` output for every process on the task).
+    # The launcher reads the key from fd 3 and sets it IN-PROCESS: it is in no
+    # process's initial environment, so the model's own bash child cannot read it out
+    # of its parent with `cat /proc/$PPID/environ`. See the launcher's module
+    # docstring, and probes.py's 4e watcher for the measurement.
     (
-        export "$PROVIDER_ENV=$MODEL_KEY"
         cd "$WORKSPACE/repo"
         exec timeout "$AGENT_DEADLINE_SECONDS" \
-            lop exec --json --tools read,write,edit,bash \
+            /opt/lop/bin/python /usr/local/bin/lop-launch.py \
+            --key-fd 3 --provider-env "$PROVIDER_ENV" --pid-file "$AGENT_PID_FILE" \
+            -- exec --json --tools read,write,edit,bash \
             --hosting "$POC_HOSTING" --model "$POC_MODEL" "$POC_PROMPT"
-    ) </dev/null >"$FIFO" 2>"$OUT/agent_stderr.txt" || agent_rc=$?
+    ) 3< <(printf '%s' "$MODEL_KEY") </dev/null >"$FIFO" 2>"$OUT/agent_stderr.txt" || agent_rc=$?
 fi
 wait "$reader_pid" || true
 if [ "$agent_rc" = 124 ]; then
@@ -262,6 +356,18 @@ if [ "$agent_rc" = 124 ]; then
 fi
 stamp t_agent_end
 printf '{"agent_rc":%s}\n' "$agent_rc" >"$OUT/agent_rc.json"
+
+# Stop the watcher and read its verdict. A watcher that FOUND the key in some
+# process's environment is a failed isolation claim, so it joins PROBE_RC and makes
+# the run exit 5 — the same treatment 4a-4d get.
+touch "$WATCH_STOP"
+watch_rc=0
+wait "$watcher_pid" || watch_rc=$?
+stamp t_watch_done
+printf '{"watch_rc":%s}\n' "$watch_rc" >"$OUT/watch_rc.json"
+if [ "$watch_rc" -ne 0 ]; then
+    PROBE_RC=1
+fi
 
 # ------------------------------------------------------------ step 6: commit
 stamp t_commit_start
@@ -354,8 +460,18 @@ stamp t_session_done
 # ------------------------------------------------- step 8: rescan before upload
 stamp t_rescan_start
 SCAN_RC=0
-scan_out="$(printf '%s' "$MODEL_KEY" | /opt/probe/bin/python /opt/probe/probes.py \
-    --key-prefix-chars "$KEY_PREFIX_CHARS" --scan-dir "$OUT")" || SCAN_RC=$?
+scan_out="$(/opt/probe/bin/python /opt/probe/probes.py --key-fd 3 --scan-dir "$OUT" \
+    --key-prefix-chars "$KEY_PREFIX_CHARS" 3< <(printf '%s' "$MODEL_KEY"))" || SCAN_RC=$?
+if [ "$SCAN_RC" -eq 2 ]; then
+    # rc 2 is "no key was delivered", not "clean": a scan that inspected nothing
+    # must never read as a scan that found nothing (AGENTS.md, "A dead instrument
+    # returns a reading, not an error").
+    printf '{"refused_upload":true,"reason":"no key delivered to the rescan"}\n' \
+        >"$OUT/key_scan.json"
+    echo "REFUSING to upload results: no key reached the rescan, so nothing was inspected" >&2
+    unset MODEL_KEY
+    exit 4
+fi
 if [ "$SCAN_RC" -ne 0 ]; then
     # Refuse the upload rather than shipping whatever contains the key. The
     # refusal is recorded without the key itself, and the task exits non-zero.

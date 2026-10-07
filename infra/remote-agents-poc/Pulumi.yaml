@@ -190,6 +190,21 @@ resources:
     options:
       provider: ${aws}
 
+  # The VPC's DEFAULT security group, taken ownership of and left rule-less.
+  # AWS creates one in every VPC WITH an allow-all self-ingress rule, and anything
+  # later added to this VPC without an explicit security group inherits it. Nothing
+  # joins it today; managing it here means a future resource cannot be silently
+  # intra-open. It is the only pre-existing resource this stack adopts, it is inside
+  # the VPC the stack created, and AWS does not let it be deleted.
+  defaultSecurityGroup:
+    type: aws:ec2/defaultSecurityGroup:DefaultSecurityGroup
+    properties:
+      vpcId: ${vpc.id}
+      ingress: []
+      egress: []
+    options:
+      provider: ${aws}
+
   # --- 5. Results bucket ----------------------------------------------------
   # SSE with the AWS-MANAGED aws/s3 key, deliberately not a CMK: a CMK cannot be
   # deleted immediately, so `pulumi destroy` would leave a pending-deletion
@@ -345,6 +360,11 @@ resources:
   executionRolePolicy:
     type: aws:iam/rolePolicy:RolePolicy
     properties:
+      # ONE `Resource: "*"` IN THIS POLICY, explained here because JSON cannot hold a
+      # comment and a Sid is terse: `ecr:GetAuthorizationToken` is minted per REGISTRY
+      # and has no resource-level support, so "*" is the only spelling. The token
+      # grants nothing by itself — the pulls it enables are scoped to one repository
+      # in the statement below.
       name: lop-poc-exec
       role: ${executionRole.id}
       policy: |
@@ -352,6 +372,7 @@ resources:
           "Version": "2012-10-17",
           "Statement": [
             {
+              "Sid": "EcrAuthTokenIsRegistryScoped",
               "Effect": "Allow",
               "Action": "ecr:GetAuthorizationToken",
               "Resource": "*"
@@ -449,6 +470,15 @@ resources:
       # volume, so a container that starts as 10001 can write its own workspace.
       # Without the VOLUME declaration the same task dies on its first `mkdir`
       # (measured), which is why the two lines are a pair and not two choices.
+      #
+      # NO `linuxParameters.initProcessEnabled` (the spec asked for it). With the ECS
+      # init shim as PID 1, PID 1 is a process the entrypoint cannot re-exec — so its
+      # /proc/1/environ keeps carrying the model key for the life of the task, and
+      # the agent can read it with `cat /proc/1/environ`. The entrypoint is PID 1
+      # instead, re-execs itself once after taking the key out of its environment, and
+      # probe 4e measures the result. The cost is the shim's zombie reaping; the
+      # agent reaps its own children and the task is 2 h bounded. See README
+      # divergences and the results doc's SEC-1 note.
       containerDefinitions: |
         [
           {
@@ -458,7 +488,6 @@ resources:
             "readonlyRootFilesystem": true,
             "user": "10001:10001",
             "stopTimeout": 30,
-            "linuxParameters": {"initProcessEnabled": true},
             "mountPoints": [
               {"sourceVolume": "workspace", "containerPath": "/workspace"}
             ],
@@ -516,6 +545,14 @@ resources:
   controllerRolePolicy:
     type: aws:iam/rolePolicy:RolePolicy
     properties:
+      # TWO UN-SCOPABLE ACTIONS in this policy, each named by its Sid because JSON
+      # cannot hold a comment: `ListTasksIsClusterConditioned` — `ecs:ListTasks` has no
+      # resource-level support, so it carries an `ecs:cluster` ARN condition instead;
+      # and `TagOnlyWhatRunTaskCreates`, whose Resource is scoped to `task/lop-poc/*`
+      # and gated on `ecs:CreateAction: RunTask`, so the role can tag what it starts and
+      # nothing else. The four actions beyond §9.2's list (`ListTasks`, `TagResource`,
+      # `s3:GetObject`, `logs:GetLogEvents`/`FilterLogEvents`) and the driver function
+      # each one serves are recorded in README divergence 3.
       name: lop-poc-controller
       role: ${controllerRole.id}
       policy: |
@@ -605,7 +642,13 @@ resources:
             {
               "Effect": "Allow",
               "Principal": {"Service": "codebuild.amazonaws.com"},
-              "Action": "sts:AssumeRole"
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {"aws:SourceAccount": "${callerIdentity.accountId}"},
+                "ArnLike": {
+                  "aws:SourceArn": "arn:aws:codebuild:ca-central-1:${callerIdentity.accountId}:project/lop-poc-image-build"
+                }
+              }
             }
           ]
         }
@@ -615,6 +658,10 @@ resources:
   codeBuildRolePolicy:
     type: aws:iam/rolePolicy:RolePolicy
     properties:
+      # ONE `Resource: "*"` IN THIS POLICY, for the same reason as the execution
+      # role's: `ecr:GetAuthorizationToken` is minted per REGISTRY and has no
+      # resource-level support. The pushes it enables are scoped to one repository
+      # below.
       name: lop-poc-codebuild
       role: ${codeBuildRole.id}
       policy: |
@@ -632,6 +679,7 @@ resources:
               "Resource": "${resultsBucket.arn}/build/*"
             },
             {
+              "Sid": "EcrAuthTokenIsRegistryScoped",
               "Effect": "Allow",
               "Action": "ecr:GetAuthorizationToken",
               "Resource": "*"
@@ -672,7 +720,11 @@ resources:
       environment:
         type: ARM_CONTAINER
         # The aarch64 standard image, so `docker build --platform linux/arm64`
-        # is native rather than qemu-emulated.
+        # is native rather than qemu-emulated. ACCEPTED AS A TAG, not a digest, and
+        # the reason is the same one that makes every other base digest-pinned: AWS
+        # publishes no per-region digest for its managed CodeBuild images, so a tag is
+        # the only pin available (the tag is AWS-owned and version-suffixed, `:3.0`).
+        # This is the one build input a rebuild can move — recorded, not hidden.
         image: aws/codebuild/amazonlinux-aarch64-standard:3.0
         computeType: BUILD_GENERAL1_SMALL
         privilegedMode: true
