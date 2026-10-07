@@ -172,7 +172,9 @@ state, never "unknown". Attribution never pins a silent peer to an id.**
   miss path and `open_remote_viewer` consult `unanswered_peers(root)`; with silent
   devices present they raise a new typed state (working name `PeerSessionUnresolved`),
   whose sentence names the SILENT DEVICES as silent ("<names> did not answer; this
-  conversation may be on one of them") and never claims ownership.
+  conversation may be on one of them") and never claims ownership. (**As built** is
+  three seams and one read — the shell's `--resume` miss is the third, and the silence
+  comes back from the same call that produced the rows; see the bullets below.)
 - Routes map it to a distinguishable response with its OWN code (409
   `"session_unresolved"` — same family as `session_is_remote`, different remedy), so the
   UI can render *unreachable* and keep the composer open. The rule for the surface (UI
@@ -186,38 +188,66 @@ state, never "unknown". Attribution never pins a silent peer to an id.**
   unknown copy's wording once every device HAS answered ("no longer on this machine" is
   the UI lane's to refine; flagged, not silently changed here).
 
-**As built (S2, branch `fix/mesh-unresolved`).** Three choices this note left open,
-recorded here so the next reader does not have to re-derive them:
+**As built (S2, branch `fix/mesh-unresolved`).** The choices this note left open — and
+the three the round-1 reviews changed — recorded here so the next reader does not have
+to re-derive them:
 
+- **THREE seams consult the silence, not two** (agent review round 1, R-2): the pool's
+  `locate()` miss, `open_remote_viewer`, and the shell's `lop --resume` (`cli.py`'s
+  peer branch), where the silent miss used to fall through to the LOCAL cold viewer —
+  the INV-1 two-writer case this state exists to close, and the one path the decision
+  above calls CLI scope. The direct `remote_row_for` consumers that never boot anything
+  (`desktop_mesh.py`, the pilot's own row-miss refusal) stay unchanged.
+- **ONE READ, BOTH HALVES** (R-1). The consult is not `unanswered_peers(root)`; it is
+  `peer_rows.read_listing(root, ttl_s=0)`, consumed through
+  `remote_open.remote_row_and_silence`, which returns the row and the silence from the
+  SAME fan-out. The two-call shape was only one read while that read completed inside
+  the TTL, and a listing that spent its own documented budget
+  (`relay.LISTING_CLIENT_TIMEOUT_S` == `_TTL_S` == 20 s, the black-hole member this
+  whole slice is about) re-dialled and then DISCARDED the re-dial's rows — so an id the
+  listing held could answer "not a peer's". `peer_session_rows` and `unanswered_peers`
+  are now the two projections of that one function.
 - **The typed state lives in `session/remote_open.py`, beside the sentence composer —
-  not beside `PeerSessionUnreachable`.** Both seams raise it and the second one IS that
-  module, while the tree keeps ONE direction of dependency: nothing under
-  `local_operator/session/**` imports `local_operator.server` (the same decision
-  `session/store_failures.py`'s placement note records for the same reason). Homing the
-  type in the server module would force `remote_open` to import the HTTP layer to raise
-  its own refusal. The routes import it from `session.remote_open` directly.
-- **The sentence, as landed:** `<id> could not be resolved: <names> did not answer, so
-  this conversation may be on that device|one of them. That is not the same as gone —
-  retry once the link is back; /network doctor diagnoses the link.` Silent devices are
-  named AS silent, ownership is never claimed, no single device is pinned as the holder
-  (`one of them` whenever more than one is silent), and `/network doctor` is bare — the
-  subcommand takes `--peer` optionally.
-- **`unanswered_peers(root)` is the same read, structurally:** `remote_row_for`'s miss
-  ends in a `ttl_s=0` read and both halves are cached under one key, so the consult
-  issues no second dial — asserted at the injected catalogue's call counter rather than
-  in prose. One consequence, stated: on the residue corner (a local `sessions/<id>/`
-  directory exists but the door will not open) `remote_row_for` performs NO read, so the
-  consult may issue the first one; no read means no silence, and an empty cache answers
-  `404` exactly as before.
+  not beside `PeerSessionUnreachable`** — and rides the established refusal family
+  (`network.types.MeshRefusal`, R-4), because `_pilot_act` (`network/cli.py`) resolves
+  the id inside the seam and catches only `TimeoutError`/`ConnectionError`, so anything
+  outside the family escapes as a traceback. The placement argument, stated precisely
+  after R-5: `local_operator.server` is imported by no session module AT MODULE SCOPE
+  (one function-local edge exists, `session/runtime/serving.py`'s completion announce),
+  and homing the type in the server module would make this module import the HTTP layer
+  at module scope to raise its own refusal. The import the class does take,
+  `network/types.py`, is the opposite direction and a leaf.
+- **The sentence, as landed** (design round 1, D1–D4):
+  `<id>: <names> did not answer, so this conversation may be on that device|one of them.
+  Retry once the connection is back; /network doctor diagnoses the link.` The silence is
+  the headline ("could not be resolved" was this product's own wording for NOT FOUND);
+  the devices are named AS silent; ownership is never claimed and no single device is
+  pinned (`one of them` for the plural, the list coordinated with "and" so a device
+  named `build-box, spare` cannot read as two); absence is neither stated nor raised in
+  order to be denied; the action names the control ("Retry") and says "connection",
+  which holds in both branches. The composer refuses an EMPTY sequence (D5) rather than
+  naming nobody, and `/network doctor` is bare — the only spelling the CLI's parser and
+  the TUI's translation both accept.
+- **The residue corner now answers what this note always said** (R-3): a local
+  `sessions/<id>/` directory that will not open means `remote_row_and_silence` performs
+  NO read, and no read means no silence to report, so it answers the shared `404` — cold
+  and warm, measured — instead of the 409 the two-call shape produced from a stale entry.
+- **The boundary, stated** (QA round 1, Q2): this state covers silence the relay
+  REPORTED. If this device's own relay is down while the peer is up, no row and no
+  silence signal arrive, and the answer is still the shared `404` — the residual
+  `park_edges`'s docstring already records.
 
 ### Evidence plan
 
 Unit: silent peer + unknown id → the new state with names and no ownership claim; all
-peers answered → 404 unchanged; unreachable-marked row → 409 unchanged; the consult
-issues no dial (cache-shared, asserted at the relay's op counter). QA: kill a peer's
-relay, open its cached session's stream/history through the real daemon → the new code,
-composer-open contract handed to the UI lane with the exact response; restart the relay →
-resolves again.
+peers answered → 404 unchanged; unreachable-marked row → 409 unchanged; the plural copy,
+the unnamed-device name and the empty-list refusal; the residue corner → 404 cold AND
+warm; the shell's `--resume` refusing instead of booting locally; the JSON `code` and
+the sentence on the wire. The no-second-dial cell uses an INJECTED CLOCK so the one read
+is slower than the TTL — the shape that reproduced `calls=2` on the two-call code and
+asserts `1` here. QA: kill a peer's relay, open its cached session's stream/history
+through the real daemon → the new code, composer-open contract handed to the UI lane
+with the exact response; restart the relay → resolves again.
 
 ---
 
