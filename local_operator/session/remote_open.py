@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 if TYPE_CHECKING:
     from local_operator.resume import SessionRow
     from local_operator.session.attached import AttachedSession
+    from local_operator.session.peer_rows import UnansweredPeer
 
 
 def unreachable_peer_sentence(session_id: str, row: "SessionRow") -> str:
@@ -49,6 +50,84 @@ def unreachable_peer_sentence(session_id: str, row: "SessionRow") -> str:
         f"({peer_reason_words(row.unreachable_reason)}). /network doctor "
         f"{row.owner_device_name or row.owner_device} diagnoses the link."
     )
+
+
+def unresolved_peer_sentence(session_id: str, unanswered: Sequence["UnansweredPeer"]) -> str:
+    """The ONE sentence for "we could not resolve that id, and a device stayed silent".
+
+    WHY IT IS NOT THE UNREACHABLE SENTENCE, AND NOT A 404. The other refusal in
+    this module names a KNOWN holder we cannot reach: the row is on the user's
+    screen, so the device and the reason are facts. Here nothing names a holder
+    at all — the resolution read missed AND at least one device did not answer
+    it — so the two sentences must not be the same, or the surface would have to
+    present a silence as a name (``mesh-ui.md`` §1.3's degraded states).
+
+    THE THREE RULES THE COPY KEEPS, each one a way to be dishonest that was
+    considered and refused:
+
+    * the silent devices are named AS SILENT ("did not answer") — a device that
+      did not reply is reported for what it did, never as a device that was
+      searched and came back empty;
+    * ownership is never claimed, and one device is never pinned as the holder:
+      silence is not evidence about WHERE the conversation is, so the sentence
+      says where it MAY be, and it says "one of them" whenever more than one
+      device is silent;
+    * absence is never stated: "it is not known to be gone" is the whole point
+      of the state — the alternative copy is the reader's "no longer on this
+      machine", which is a deletion claim nothing here can support.
+
+    ``UNNAMED_DEVICE`` rather than a bare join: a device the membership never
+    named still has to appear, and an empty string in the list would read as one
+    fewer silent peer than there is.
+    """
+    from local_operator.resume import UNNAMED_DEVICE
+
+    names = ", ".join(peer.name or UNNAMED_DEVICE for peer in unanswered)
+    subject = "that device" if len(unanswered) == 1 else "one of them"
+    return (
+        f"{session_id} could not be resolved: {names} did not answer, so this "
+        f"conversation may be on {subject}. That is not the same as gone — retry "
+        "once the link is back; /network doctor diagnoses the link."
+    )
+
+
+class PeerSessionUnresolved(Exception):
+    """A resolution miss where a device stayed SILENT — never "nobody holds it".
+
+    THE STATE THIS EXISTS FOR. A miss on the peer listing answers ``None`` from
+    :func:`remote_row_for`, and every surface above it turned that into the
+    shared 404 — which the desktop renderer maps to ``missing``, "This
+    conversation is no longer on this machine", with the composer refused. But
+    a miss is only evidence of absence when every device ANSWERED the read. When
+    the relay reports devices that did not reply, the same ``None`` means "we
+    could not find out", and the honest answer keeps the composer open with a
+    retry rather than closing the conversation the user is looking at.
+
+    TYPED HERE RATHER THAN AS AN HTTP EXCEPTION, like :class:`PeerSessionUnreachable`
+    in ``server/utils/desktop_sessions``, because the seams that raise it are not
+    routes: the pool, the CLI and the TUI all reach ``open_remote_viewer``.
+
+    WHY IT LIVES IN THIS MODULE rather than beside ``PeerSessionUnreachable``
+    (design note ``mesh-wire-honesty.md`` §S2 names the type, not its file): it
+    is raised at BOTH seams, and the second one is here — this module. The
+    desktop server module is the HTTP layer and the tree keeps one direction of
+    dependency (``session/`` never imports ``local_operator.server``; see
+    ``session/store_failures.py``'s placement note for the same decision made
+    the same way), so a type the session layer must raise cannot be defined in
+    the server module without inventing that edge. Its sentence composer sits
+    directly above it for the same reason ``unreachable_peer_sentence`` sits
+    above the other refusal.
+    """
+
+    code = "session_unresolved"
+
+    def __init__(self, session_id: str, unanswered: Sequence["UnansweredPeer"]) -> None:
+        super().__init__(unresolved_peer_sentence(session_id, unanswered))
+        self.session_id = session_id
+        #: The devices the relay reported as not answering THIS read, carried
+        #: rather than re-read: a surface that offers a retry, or names the
+        #: silent devices, must be looking at the same answer the miss was.
+        self.unanswered = tuple(unanswered)
 
 
 def remote_row_for(session_id: str, root: Path) -> "SessionRow | None":
@@ -96,6 +175,22 @@ async def open_remote_viewer(
 ) -> "AttachedSession | None":
     """A COLD viewer whose owner is the peer, or ``None`` when the id is not remote.
 
+    ``None`` MEANS "THIS DEVICE HOLDS IT, OR NOBODY DOES" and nothing weaker:
+    when the id does not resolve AND a device did not answer the read that
+    missed, this raises :class:`PeerSessionUnresolved` instead. A caller that read
+    ``None`` as "not a peer's", while a device had not answered, would go on to
+    build a LOCAL viewer — a viewer for a conversation this device does not hold,
+    whose first write would engage a runtime HERE under somebody else's id (the
+    two-writer case INV-1 forbids) — so the two answers must not be collapsed.
+
+    EVERY CALLER IN THIS TREE PASSES ``row=`` TODAY, so this guards the seam's
+    contract rather than a live path: it is here because ``row=None`` is the
+    documented way to ask this seam to resolve the id itself, and that is the
+    call whose ``None`` would be ambiguous. The callers that consult
+    ``remote_row_for`` directly (``cli.py``, ``network/cli.py``,
+    ``desktop_mesh.py``) are unchanged by the design note's decision, and the CLI
+    shell's own ``--resume`` keeps its local fall-through for a miss.
+
     Cold on purpose, exactly like a local ``lop`` boot: the first act that needs
     the runtime binds it through ``RemoteOwner.engage``/``locate``, so opening a
     peer's session costs no work on the peer until the user does something.
@@ -124,6 +219,19 @@ async def open_remote_viewer(
     if row is None:
         row = await asyncio.to_thread(remote_row_for, session_id, config_dir)
     if row is None:
+        # A MISS IS NOT AN ABSENCE UNLESS SOMEBODY ANSWERED. ``remote_row_for``
+        # ends in a GENUINE read (``ttl_s=0``), so the read that missed is the
+        # read whose silence is consulted here: ``unanswered_peers`` rides the
+        # same cache entry the rows were written under, which is why this check
+        # costs no second dial on the path that just dialled. Without it this
+        # seam's ``None`` means "not a peer's" when the truth may be "no peer
+        # said" — and a caller that read it that way would build a LOCAL viewer
+        # for somebody else's id, the two-writer case INV-1 forbids.
+        from local_operator.session.peer_rows import unanswered_peers
+
+        silent = await asyncio.to_thread(unanswered_peers, config_dir)
+        if silent:
+            raise PeerSessionUnresolved(session_id, silent)
         return None
     peer_row = PeerRow(
         session_id=session_id,

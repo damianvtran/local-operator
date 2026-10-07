@@ -1231,6 +1231,55 @@ is missing a TRANSCRIPT, not a SESSION. A renderer must therefore never claim
 exhaustion over a peer page whose `cursor_missing` is true — the same rule it
 already applies to a local page it could not anchor.
 
+### An unresolved id is not a missing conversation (`409 session_unresolved`)
+
+When this device cannot place an id at all — the id is not local and the peer
+listing does not hold it — the answer used to be the shared `404` for every
+reason, and the two reasons are not the same fact:
+
+* **every device answered, and none holds the id** — the honest `404`
+  (`"Requested session, profile, team or subscription not found"`). Unchanged.
+* **a device did not answer the read that missed** — this device does not know
+  whether the conversation exists. The answer is `409` with `code`
+  `"session_unresolved"` and a sentence naming the devices that stayed **silent**
+  (`"… did not answer, so this conversation may be on one of them. That is not
+  the same as gone …"`).
+
+The distinction is the point: a renderer maps the `404` to `missing` and paints
+"This conversation is no longer on this machine" with the composer refused — a
+deletion claim this device cannot support about a conversation the user is
+looking at. `session_unresolved` is deliberately **in the same 409 family as
+`session_is_remote`** (the conversation is not known to be gone) and just as
+deliberately a **different code**, because the remedy differs: there is no device
+to name, only a link to wait for.
+
+What a client may rely on:
+
+* **the sentence never claims ownership, and never pins one device as the
+  holder.** Silence is not evidence about WHERE the conversation is — with more
+  than one silent device the sentence says "one of them", and a silent device is
+  named only as a device that did not answer. A device the membership never named
+  still appears, as the app's own `"unnamed device"` (`resume.UNNAMED_DEVICE`).
+* **the state carries no transcript, no row and no seed** — it is a resolution
+  answer, not a session. Nothing is created or written on this device for it.
+* **it is not a retry loop's answer.** One resolution, one answer: the consult
+  reads the silence recorded by the SAME listing read that missed, so the refusal
+  costs no second fan-out (`unanswered_peers` and `peer_session_rows` are two
+  halves of one cached relay answer).
+* **it inherits through the door**: `sessions.get` (snapshot), `/history` and
+  `/events` all reach it through the same error ladder, so a client sees one code
+  for one situation whichever read it made.
+
+**The surface contract (the UI lane's half, `mesh-wire-honesty.md` §S2):** an
+unresolved id must not be presented as a deletion and must not close the
+composer; a Retry/reconnect affordance replaces "Start a new chat" as the only
+action offered. A `404` keeps today's behaviour exactly.
+
+One limit is stated rather than hidden: the genuinely-unknown `404` copy ("no
+longer on this machine") is the UI lane's to refine — this route does not change
+it, and nothing here is a claim that it is accurate once every device HAS
+answered.
+
 The snapshot frame reports WHY it is cold, in a TOKEN rather than a sentence
 (the copy belongs to the app, the same discipline `code` follows in the error
 ladder), and it also reports an in-flight attempt:
