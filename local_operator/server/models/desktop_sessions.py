@@ -545,7 +545,22 @@ class DraftReceipt(BaseModel):
     replayed: bool = False
 
 
-#: The closed vocabulary a desktop history row uses to say WHERE its ``ts`` came
+#: The FOUR keys a history row has always carried, and the EXACT shape the child
+#: transcript route serves: ``child_transcript`` returns
+#: ``TranscriptEntry.to_json()`` verbatim, and that route's own pins assert the
+#: four keys. Its own model, rather than the classifying one below, for two
+#: reasons that are one commitment — a surface that never classifies a row must
+#: not begin claiming a classification nobody computed, and ``ts`` is never null
+#: here, so the desktop surface's nullable widening stays scoped to the surface
+#: that actually needs it.
+class TranscriptEntryEnvelope(BaseModel):
+    id: str
+    ts: float
+    type: str
+    payload: dict[str, Any]
+
+
+#: The closed vocabulary a DESKTOP history row uses to say WHERE its ``ts`` came
 #: from — the wire's own honesty about a stamp it may not have.
 #:
 #: ``entry``     the row's true entry time (seconds); safe to order by and display.
@@ -561,6 +576,17 @@ HistoryTsSource = Literal["entry", "unstated", "served"]
 
 
 class HistoryEntry(BaseModel):
+    """A desktop history row: the envelope's four keys plus its stamp's provenance.
+
+    DELIBERATELY NOT a subclass of :class:`TranscriptEntryEnvelope`, on the rule
+    :class:`MessageAdmission` states for its own fields: ``ts`` widens to ``None``
+    here, and pyright's ``reportIncompatibleVariableOverride`` refuses a field
+    type that changes in a subclass — correctly, because an inherited field would
+    advertise a non-null instant on the one surface that deliberately admits it
+    may not have one. A field type is the API contract, so this one is stated in
+    full rather than narrowed.
+    """
+
     id: str
     #: WIDENED to ``None`` for the ``unstated`` case below. A row whose entry time
     #: the owner cannot prove carries ``null`` rather than a fabricated instant —
@@ -570,13 +596,16 @@ class HistoryEntry(BaseModel):
     ts: float | None
     type: str
     payload: dict[str, Any]
-    #: ADDITIVE and always present on a daemon that has this feature; pydantic's
-    #: default ``extra`` policy on this model is ``ignore``, so an older renderer
-    #: drops the key and keeps today's behaviour. The default exists so a producer
-    #: that does not set it cannot 500 the response model (this model is a
-    #: ``response_model`` on the history and snapshot routes); every producer in
-    #: this codebase sets it explicitly. See ``HistoryTsSource``.
-    ts_source: HistoryTsSource = "entry"
+    #: REQUIRED, WITH NO DEFAULT, and that is the point rather than a style choice.
+    #: A default would be SERIALISED by the response model onto every row whose
+    #: producer never classified it, so a page could claim ``entry`` by omission —
+    #: exactly the value a producer must not be able to assert without computing
+    #: it. Making it required pushes the decision to every producer, and the
+    #: "field absent" case that remains meaningful belongs to OLD DAEMONS on the
+    #: wire, which only the consumer can see and no model default can express.
+    #: ``extra`` on this model is pydantic's ``ignore``, so an older renderer drops
+    #: the key and keeps today's behaviour. See ``HistoryTsSource``.
+    ts_source: HistoryTsSource
 
 
 class HistoryPage(BaseModel):
@@ -604,15 +633,24 @@ class HistoryPage(BaseModel):
 ChildTranscriptState = Literal["ready", "pending", "gone"]
 
 
-class ChildTranscriptPage(HistoryPage):
+class ChildTranscriptPage(BaseModel):
     """One page of a CHILD's transcript, in the parent's own envelope.
 
     Derived by the backend and by nothing else (design § 9.1): the two stores
     that know a subagent exists are not witnesses to whether it has written,
     so a renderer inferring ``state`` from a roster row's status would report a
     running child as readable the moment it is registered.
+
+    DELIBERATELY NOT a subclass of :class:`HistoryPage`, one level up from
+    :class:`HistoryEntry`'s own note and for the same reason: this page's
+    ``entries`` are the RAW journal envelope the child route serves verbatim, so
+    inheriting the parent's row type would either 500 the route or (worse)
+    materialise a classification onto rows nobody classified.
     """
 
+    entries: list[TranscriptEntryEnvelope]
+    has_more: bool
+    cursor_missing: bool
     state: ChildTranscriptState
     #: EXCLUDED rather than defaulted (remediation round 1, Q1). A child read
     #: has no anchored mode — the route takes no ``around_id`` — so the

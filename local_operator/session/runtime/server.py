@@ -3809,6 +3809,12 @@ class RuntimeServer:
                         "durable_seed_ids": [],
                         "before_token": None,
                         "snapshot_token": None,
+                        # A JOIN OVER ROWS THE PAGE NO LONGER CARRIES IS NOT A
+                        # JOIN. `model_copy` keeps `entry_times` unless it is
+                        # named here, so the fallback page would describe ids
+                        # that are gone — a page whose map claims instants for
+                        # rows nobody received. Blank it with the rows it maps.
+                        "entry_times": {},
                     }
                 )
                 sync_payload["display_history"] = wire_payload(
@@ -7535,6 +7541,11 @@ class RuntimeServer:
                                     "durable_seed_tool_ids": [],
                                     "before_token": None,
                                     "snapshot_token": None,
+                                    # The second of the two fallbacks, and the
+                                    # same rule as the push frame's above: a
+                                    # join over blanked rows is cleared with
+                                    # them, never left describing absent ids.
+                                    "entry_times": {},
                                 }
                             ).model_dump(mode="json"),
                             audit_capable=audit_capable,

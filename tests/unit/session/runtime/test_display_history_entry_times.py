@@ -296,3 +296,45 @@ async def test_a_new_viewer_against_an_owner_without_the_capability_is_safe(tmp_
         payload.pop(name)
     restored = DisplayHistoryWindow.model_validate(payload)
     assert restored.entry_times == {}
+
+
+@pytest.mark.asyncio
+async def test_the_oversized_fallback_page_carries_no_join(tmp_path, monkeypatch) -> None:
+    """R-6: a page whose rows were BLANKED must not keep a join over them.
+
+    The push frame's overflow path replaces the page with an empty
+    ``full_required`` one so the transport survives. ``model_copy`` keeps every
+    field it is not told to drop, so without naming ``entry_times`` the fallback
+    travels with a map of instants for rows the same page says it does not have —
+    a join over absent ids, which is the one shape this whole feature exists to
+    refuse. Harmless only because a reader raises on ``status != "ok"`` before it
+    looks; the page should still be internally honest.
+
+    The oversize is FORCED rather than built, because a real one needs a frame
+    past the 1 MiB line limit and the fallback has to hold while it is measured:
+    the first report reports, every later one (the re-measure of the reduced
+    frame) is honest.
+    """
+    from local_operator.session import frontend_state as frontend_module
+
+    real_report = frontend_module.oversized_frame_report
+    calls = {"n": 0}
+
+    def report_once(frame, limit):  # noqa: ANN001, ANN202
+        calls["n"] += 1
+        return "forced oversize" if calls["n"] == 1 else real_report(frame, limit)
+
+    monkeypatch.setattr(frontend_module, "oversized_frame_report", report_once)
+
+    server = await _server(tmp_path, [Message.user(f"row {i}") for i in range(5)])
+    try:
+        payload = await _attach(server, announce_entry_times=True)
+    finally:
+        server.close()
+
+    page = payload["display_history"]
+    assert page["status"] == "full_required", page
+    assert page["messages"] == []
+    assert (
+        page["entry_times"] == {}
+    ), "the fallback page kept a join describing rows it no longer carries"

@@ -1400,9 +1400,11 @@ the mid-turn join sorts in the order the turn happened. `"served"` is exactly
 the value that is NOT on that clock.
 
 **When a row is `"entry"`.** Every row on a LOCAL page: the page is journal rows,
-so `ts` is the write time by construction. On a peer page, the cold stored read
-(`net_session_history`) also serves journal rows and is `"entry"` for the same
-reason. The WIRE path is the one that may not know: it carries MESSAGES, and a
+so `ts` is the write time by construction. A peer page is `"entry"` for the same
+reason where its rows come from the OWNER's stored journal — the daemon stamps
+them as it serves them, since the mesh op that fetches that page (`net_session_history`)
+returns journal rows verbatim and classifies nothing. The WIRE path is the one
+that may not know: it carries MESSAGES, and a
 message has no entry time of its own. The owner puts the true times on the
 display window it serves (an owner-side, mesh-internal capability), and the
 daemon stamps each wire row from that join when it has it. A row ABSENT from the

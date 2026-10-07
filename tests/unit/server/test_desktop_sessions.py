@@ -3368,6 +3368,17 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     assert body["state"] == "ready"
     assert [row["id"] for row in body["entries"]] == ids[-1:]
     assert body["has_more"] is True
+    # THE FOUR KEYS, ASSERTED THROUGH THE RESPONSE MODEL — which is where R-1's
+    # defect lived and why a pool-level pin could not see it. ``child_transcript``
+    # returns ``row.to_json()`` verbatim, and FastAPI then validates the body
+    # against ``CRUDResponse[ChildTranscriptPage]``; a ``ts_source`` that is
+    # merely DECLARED on that page's row type is materialised onto every row on
+    # the way out, defaults included, so the child route silently gained a
+    # classifying key nobody computed and its own e2e went red. The child page
+    # carries the raw journal envelope and must keep doing exactly that.
+    assert all(set(row) == {"id", "ts", "type", "payload"} for row in body["entries"]), body[
+        "entries"
+    ]
 
     # A 404 whose code is readable: "I cannot read that pair", retryable on the
     # next pulse when the roster snapshot catches up.
