@@ -314,6 +314,21 @@ def feature_flags() -> dict[str, Any]:
         # render is exactly the stale-paint defect the frame exists to
         # fix.
         "frontend_replace": 1,
+        # THE ENTRY-TIME VOCABULARY. `entry_ts=1` on `GET .../{id}/history` (and
+        # the snapshot route beside it, whose embedded page is served by the same
+        # reader) declares that this renderer can consume the per-row `ts_source`
+        # values `entry` / `unstated` / `served`, so a wire row with no provable
+        # entry time arrives as `ts: null` + `unstated` rather than a fabricated
+        # serve-stamp.
+        #
+        # Its own key for the rule `session_search` states above: an older
+        # renderer sends nothing and keeps today's bytes, and gating any EXISTING
+        # surface on this would hide a working panel from a backend that merely
+        # cannot say where a stamp came from. `ts_source` itself is additive and
+        # ignored by an older reader, so nothing breaks in either direction — the
+        # key exists so the NEW renderer can tell whether asking is worthwhile
+        # before it sends a flag the old backend ignores.
+        "entry_ts": 1,
         # ``/info``'s host read and ``/session``'s one-snapshot ledger
         # report. A NEW key rather than a bump of `catalogues`, and the
         # rule is the one `session_search` states above: a renderer

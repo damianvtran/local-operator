@@ -1235,6 +1235,12 @@ class AttachedSession:
         self._subagent_comms = SnapshotSubagentComms()
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
+        #: ``{entry id: true entry ts}`` the OWNER shipped on the display pages
+        #: this facade loaded, and ONLY those. A row absent from it has no provable
+        #: entry time (subtracted from the owner's display replay, or arrived live
+        #: after the page) — see :meth:`history_entry_times`. Kept in step with
+        #: ``_history``: same loaded interval, same lifetime.
+        self._entry_times: dict[str, float] = {}
         self._live_history: dict[str, Any] = {}
         self._display_window_requested = not self._owner.placement.is_local
         # (the line above used to be a flat ``False``. A REMOTE VIEWER ALWAYS
@@ -5197,6 +5203,12 @@ class AttachedSession:
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
+        # THE OWNER'S ENTRY TIMES FOR THE ROWS IT JUST SHIPPED. Tracked beside
+        # ``rows`` as the window and any older pages are prepended, so the map
+        # covers exactly the loaded interval: a row the owner could not stamp is
+        # absent, which :meth:`history_entry_times` turns into "unstated" rather
+        # than a reader-clock guess.
+        entry_times = dict(window.entry_times)
         page = window
         reset = self._hydrated_once and (
             previous is None
@@ -5213,6 +5225,7 @@ class AttachedSession:
                 if page.status != "ok":
                     raise ConnectionError("history changed during reconnect; retry attachment")
                 rows[:0] = page.messages
+                entry_times.update(page.entry_times)
         self._display_history = window.model_copy(
             update={
                 "messages": rows,
@@ -5222,6 +5235,7 @@ class AttachedSession:
             }
         )
         self._history = rows
+        self._entry_times = entry_times
         self._live_history.clear()
         self._history_hydrated = page.start == 0 and len(rows) == window.total_message_count
         # An owner too old to know about audit paging reports neither field, so
@@ -5741,6 +5755,9 @@ class AttachedSession:
             # failed fetch instead of history.
             raise ConnectionError("history page is not contiguous with the loaded window")
         self._history[:0] = page.messages
+        # The older page carries the join for ITS OWN rows; the map tracks the
+        # loaded interval the same way ``_history`` does.
+        self._entry_times.update(page.entry_times)
         self._history_ids.update(m.id for m in page.messages)
         self._display_history = window.model_copy(
             update={
@@ -5818,6 +5835,7 @@ class AttachedSession:
         if window is None:
             raise RuntimeError("no canonical display history is installed")
         rows: list[Any] = []
+        entry_times: dict[str, float] = {}
         token = window.snapshot_token
         while token:
             page = await self.history_page(token)
@@ -5871,12 +5889,17 @@ class AttachedSession:
                 rows = await asyncio.to_thread(replay)
                 break
             rows[:0] = page.messages
+            entry_times.update(page.entry_times)
             # The context phase ends here; the audit cursor is left for the
             # reader (see this method's docstring).
             token = None if page.audit_available or page.audit else page.before_token
         if self._display_history is not window:
             raise RuntimeError("history changed while materializing; retry")
         self._history = rows
+        # A local-replay escalation (above) ships no join, so the map is empty
+        # in that case and every row reads "unstated" — honest, not a guess. The
+        # ordinary path accumulated each page's join in the loop above.
+        self._entry_times = entry_times
         self._history_ids = {m.id for m in rows}
         self._history_hydrated = True
         return self.display_history_window()
@@ -6030,6 +6053,10 @@ class AttachedSession:
         selects journal entries before running the shared replay semantics.
         """
         self._history = history
+        # A source that is not the owner's display window carries NO shipped
+        # join (a legacy full replay, a transcript bind), so any entry times from
+        # a previous window are dropped with the rows they described.
+        self._entry_times = {}
         self._live_history.clear()
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
@@ -8738,6 +8765,30 @@ class AttachedSession:
                 isinstance(m, Message) and m.role == "tool" and m.tool_call_id in durable_results
             )
         ]
+
+    def history_entry_times(self) -> dict[str, float]:
+        """``{entry id: true entry ts}`` the OWNER shipped for the loaded rows.
+
+        THE OWNER'S OWN CLOCK, not this reader's. The wire carries messages, not
+        journal rows, and a message has no entry time of its own, so the only
+        honest source of "when was this row written" is the join the owner puts
+        on a display page when the viewer negotiated
+        ``display-history-entry-times-v1`` (see
+        ``session/history_window.py``).
+
+        A row ABSENT from the returned map has NO provable entry time — it was
+        subtracted from the owner's display replay, or it arrived live after the
+        page. A consumer must read that absence as "unstated" and order/label the
+        row by its own rule; it must never substitute a reader-clock stamp and
+        present it as the message's time (see ``DESKTOP_API.md``'s consumer
+        contract).
+
+        Covering the same loaded interval as :meth:`history`, and replaced with it
+        when the window resets. An owner too old to ship the join answers ``{}`` —
+        the honest "provable for nothing" rather than a guess. A copy, so a caller
+        cannot mutate this facade's state through the map it was handed.
+        """
+        return dict(self._entry_times)
 
     @property
     def history_message_count(self) -> int:

@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import json
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -34,7 +34,7 @@ from local_operator.session.transcript import (
 )
 
 if TYPE_CHECKING:
-    from local_operator.session.transcript import Transcript
+    from local_operator.session.transcript import Transcript, TranscriptEntry
 
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 
@@ -49,6 +49,15 @@ DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 #: rather than a theoretical one. The runtime emits the new fields only to a
 #: viewer that negotiated this string.
 DISPLAY_HISTORY_AUDIT_CAPABILITY = "display-history-audit-v1"
+
+#: The ENTRY-TIME carriage: the ``{entry id: entry ts}`` join for the rows a
+#: page carries. A THIRD string, separate from the two above for the reason they
+#: are separate from each other — ``DisplayHistoryWindow`` forbids extra fields,
+#: so a page carrying ``entry_times`` to a viewer built before the field existed
+#: fails that viewer's validation and turns the attach into a FAILED ATTACH (the
+#: hazard the audit comment above names). The runtime emits the field (with its
+#: data) only to a viewer that negotiated this string.
+DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY = "display-history-entry-times-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
 
@@ -108,6 +117,25 @@ class DisplayHistoryWindow(BaseModel):
     #: Lets the viewer say "earlier history above" at the moment the context
     #: phase drains, rather than claiming the conversation starts there.
     audit_available: bool = False
+    #: ``{entry id: entry ts}`` for every row THIS page CARRIES, shipped only to
+    #: a viewer that negotiated
+    #: :data:`DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY`. The wire carries MESSAGES,
+    #: not journal rows, and a message has no entry time of its own — so the only
+    #: honest way a reader downstream can stamp a wire row with the moment it was
+    #: WRITTEN (rather than the moment it was served) is for the owner to ship the
+    #: join. The message id IS the entry id (``transcript.encode_message_payload``),
+    #: so this is a plain id lookup for the reader.
+    #:
+    #: A row ABSENT from this map has NO provable entry time: it was subtracted
+    #: from the display replay (a hidden wake delivery, a diverted ask), or it
+    #: arrived live after the page. The honest reading of that absence is
+    #: "unstated", never the reader's own clock — see ``DESKTOP_API.md``'s entry
+    #: envelope and its consumer contract.
+    #:
+    #: It is a plain defaulted field so an owner that emitted pages before this
+    #: existed serializes the byte-shape it always did; for an OLDER VIEWER the
+    #: strip helper alongside the audit one is the belt to that braces.
+    entry_times: dict[str, float] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -182,6 +210,31 @@ def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[
     """
     if not audit_capable:
         for name in AUDIT_WIRE_FIELDS:
+            payload.pop(name, None)
+    return payload
+
+
+#: Fields the entry-time capability introduced. Stripped for a viewer that did
+#: not negotiate :data:`DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY`; see its comment
+#: for why emitting them unconditionally is an attach failure rather than noise.
+ENTRY_TIME_WIRE_FIELDS = ("entry_times",)
+
+
+def strip_entry_time_fields(
+    payload: dict[str, Any], *, entry_times_capable: bool
+) -> dict[str, Any]:
+    """Drop the entry-time join from a serialized page for an older viewer.
+
+    The exact discipline of :func:`strip_audit_fields`, and it applies on the
+    SAME three routes (the attach push frame and the ``history_page`` /
+    ``frontend_sync`` RPCs in ``server.py``): the hazard is the same one at the
+    same nesting level — the page model forbids extras, so a viewer built before
+    ``entry_times`` existed rejects a page that carries it, which is a FAILED
+    ATTACH rather than a degrade. Mutates in place and returns the same dict so it
+    composes with either kind of caller.
+    """
+    if not entry_times_capable:
+        for name in ENTRY_TIME_WIRE_FIELDS:
             payload.pop(name, None)
     return payload
 
@@ -270,9 +323,14 @@ def strip_input_metadata(payload: dict[str, Any], *, input_capable: bool) -> dic
     return payload
 
 
-def wire_payload(window: DisplayHistoryWindow, *, audit_capable: bool) -> dict[str, Any]:
+def wire_payload(
+    window: DisplayHistoryWindow, *, audit_capable: bool, entry_times_capable: bool = False
+) -> dict[str, Any]:
     """Serialize a page for one viewer, honouring what that viewer negotiated."""
-    return strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable)
+    return strip_entry_time_fields(
+        strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable),
+        entry_times_capable=entry_times_capable,
+    )
 
 
 def _sign(payload: dict[str, Any], key: bytes) -> str:
@@ -629,6 +687,11 @@ def _capture_audit_window(
         start=start,
         audit=True,
         audit_available=more,
+        # The audit phase serves stored journal rows verbatim, so their entry
+        # times are the owner's own and the join is total here too — the desktop
+        # reader pages back INTO these rows, and a page without the join would
+        # make them all "unstated" for no reason.
+        entry_times=_entry_time_join(entries, messages),
     )
 
 
@@ -657,6 +720,30 @@ def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
         if isinstance(details, dict) and details.get("hidden"):
             ids.add(entry.id)
     return frozenset(ids)
+
+
+def _entry_time_join(
+    entries: Sequence[TranscriptEntry], messages: Sequence[AgentMessage]
+) -> dict[str, float]:
+    """``{entry id: entry ts}`` for the rows a page CARRIES, and nothing more.
+
+    WHY NOT THE WHOLE JOURNAL: the display window is bounded
+    (``DISPLAY_HISTORY_MESSAGES`` / ``DISPLAY_HISTORY_BYTES``) and the join is
+    sized to what rides the page — at most ~120 pairs (~2 KB) against a journal
+    that can hold 17,000 entries. The scan of ``entries`` is the same O(journal)
+    walk :func:`_hidden_wake_entry_ids` already pays per page, so this adds no new
+    order and the map stays inside the frame budget that already guards the page.
+
+    TOTAL OVER WHAT THE PAGE CARRIES, and only over that: every rendered row is
+    minted from a journal entry and keeps its id (``convert_to_llm`` passes the
+    custom message's id on; ``encode_message_payload`` writes the entry id as the
+    message id), so a carried row always resolves. A row the display replay
+    SUBTRACTED — a hidden wake delivery, a diverted ask's chips — is ABSENT from
+    both the page and this map: absent, not joinless.
+    """
+    carried = {str(getattr(message, "id", "")) for message in messages}
+    carried.discard("")
+    return {entry.id: entry.ts for entry in entries if entry.id in carried}
 
 
 def _capture_display_window(
@@ -862,6 +949,9 @@ def _capture_display_window(
     return DisplayHistoryWindow(
         **envelope,
         messages=selected,
+        # The id→ts join over the rows THIS page carries, so a reader downstream
+        # can stamp a wire row with its true entry time instead of its serve time.
+        entry_times=_entry_time_join(transcript._entries, selected),
         durable_seed_tool_ids=seed_tool_ids,
         before_token=before_token,
         snapshot_token=snapshot_token,

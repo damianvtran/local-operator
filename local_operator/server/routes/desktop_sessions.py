@@ -3005,7 +3005,11 @@ async def draft_mint(body: DraftMint, request: Request):
 
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
-async def snapshot(session_id: str, request: Request):
+async def snapshot(
+    session_id: str,
+    request: Request,
+    entry_ts: int = Query(default=0, ge=0),
+):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
@@ -3035,11 +3039,18 @@ async def snapshot(session_id: str, request: Request):
     #   a machine in no network).
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
+    #
+    # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
+    # page (``payload.history``) and that page is served by the same reader — so a
+    # renderer that declared the vocabulary must get the SAME answer from the
+    # embedded page as from ``/history``, or the two frames would disagree about
+    # the same rows. The flag is additive and defaults off, exactly as on
+    # ``/history``.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot())
+        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3095,6 +3106,7 @@ async def history(
     before: int | None = Query(default=None, ge=0, le=500),
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
+    entry_ts: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3106,6 +3118,15 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
+    # ``frontend_replace`` on ``events`` beside it: it says this renderer can
+    # consume the per-row ``ts_source`` vocabulary, so a wire row with no provable
+    # entry time comes back ``ts: null`` + ``unstated`` instead of a
+    # fabricated serve-stamp. An older client sends nothing, the parameter
+    # defaults to 0, and every row keeps today's serve-stamp and today's bytes
+    # (plus the additive ``ts_source: served``, which an old reader ignores).
+    # The matching feature key is ``entry_ts`` in ``GET /v1/capabilities``' ``features``.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
@@ -3117,6 +3138,7 @@ async def history(
                 before=before,
                 after=after,
                 limit=limit,
+                entry_times=bool(entry_ts),
             )
         )
 
@@ -4683,6 +4705,7 @@ async def events(
     epoch: str | None = Query(default=None, max_length=128),
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
+    entry_ts: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4752,7 +4775,9 @@ async def events(
             # ``refresh_watch()`` on the cancellation path, both of which were
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
-            async with aclosing(bridge.events(sub, epoch=epoch, after_seq=after_seq)) as frames:
+            async with aclosing(
+                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+            ) as frames:
                 try:
                     async for frame in frames:
                         yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
