@@ -69,8 +69,17 @@ bench/
 # into the repository"). The Pulumi state is NOT here: it lives outside the repo
 # entirely, at $HOME/.lop-poc-pulumi-state (file backend). See
 # infra/remote-agents-poc/README.md, "State".
-infra/remote-agents-poc/build/
-poc-runs/
+/infra/remote-agents-poc/build/
+/poc-runs/
+# ^ ANCHORED (leading `/`) ON PURPOSE. An unanchored root rule is one the mobile/web
+# tree can defeat — its `.gitignore` re-includes directories under `src/` for
+# Tailwind's scanner, and last-match-wins, so every unanchored root rule has to be
+# restated there. These match only at the repository root: the context zip is built
+# beside its Dockerfile and the driver's default out-dir is `./poc-runs` under the
+# cwd, so neither has a nested form worth naming, and
+# `tests/unit/mobile/test_web_package_data.py::test_the_web_tree_mirrors_every_root_ignore_rule_it_can_defeat`
+# polices exactly the set that can be defeated. `infra/remote-agents-poc/`'s middle
+# slash already anchors the other two to the same effect; the slash makes it explicit.
 
 # The POC stack's own config file. It carries the passphrase backend's
 # secret-encryption SALT (`encryptionsalt:`) before it carries anything else, and
@@ -78,4 +87,4 @@ poc-runs/
 # the file is per-deployment state, not source. Read the pinned digest from
 # `pulumi stack output` / the POC report instead. See
 # infra/remote-agents-poc/README.md, "Divergences" #15.
-infra/remote-agents-poc/Pulumi.*.yaml
+/infra/remote-agents-poc/Pulumi.*.yaml
