@@ -1553,6 +1553,25 @@ def test_every_number_a_peer_sends_is_validated_at_the_boundary(value: Any) -> N
     assert document.epoch >= 0
 
 
+def test_the_grant_narrowing_round_trips_and_is_bounded() -> None:
+    """The grant's narrowing is peer-carried: it round-trips, omits when empty,
+    and an unreadable shape reads as ``{}`` rather than reaching a consumer."""
+    from local_operator.network.credentials.types import Grant
+
+    detail = {"access_token": "t", "narrowing": {"repositories": ["a/b", "c/d"]}}
+    grant = Grant.from_detail(detail)
+    assert grant.narrowing == {"repositories": ["a/b", "c/d"]}
+    assert Grant.from_detail(grant.to_detail()).narrowing == grant.narrowing
+    # The empty case is ABSENT on the wire (every non-github grant's shape).
+    assert "narrowing" not in Grant.from_detail({"access_token": "t"}).to_detail()
+    # Junk is total, like every peer value: dropped to "no narrowing".
+    assert Grant.from_detail({"access_token": "t", "narrowing": "nope"}).narrowing == {}
+    bounded = Grant.from_detail(
+        {"access_token": "t", "narrowing": {"repositories": [1, "a/b", {}, ""], "x": 7}}
+    )
+    assert bounded.narrowing == {"repositories": ["a/b"]}
+
+
 def test_a_numeric_string_from_a_peer_still_reads_as_its_number() -> None:
     """The boundary check refuses garbage, not a well-formed number in string form."""
     from local_operator.network.credentials.types import BrokerError

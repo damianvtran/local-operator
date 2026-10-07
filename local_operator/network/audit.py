@@ -202,6 +202,12 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "credential.copy",
         "credential.copy_refused",
         "credential.copy_applied",
+        # The github narrowing's delivery receipts (the adapter's §3.4 bound):
+        # the owner's designated repositories reached a borrowing device and
+        # were written to its config — or were refused, with the machine reason.
+        # `act` is the borrowing device, `sub` the owner they came from.
+        "credential.narrowing_applied",
+        "credential.narrowing_refused",
         # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). The lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or
@@ -415,6 +421,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.copy": frozenset({"credential_key", "act", "sub", "gen"}),
     "credential.copy_refused": frozenset({"credential_key", "act", "sub", "reason"}),
     "credential.copy_applied": frozenset({"credential_key", "act", "sub", "gen"}),
+    # The narrowing's delivery (the github adapter's §3.4 bound): `repositories`
+    # is the LIST APPLIED (a config value, never material); a refused delivery
+    # carries the machine reason instead.
+    "credential.narrowing_applied": frozenset({"credential_key", "act", "sub", "repositories"}),
+    "credential.narrowing_refused": frozenset({"credential_key", "act", "sub", "reason"}),
     # -- the remote onboarding approval -------------------------------------------
     #
     # `kind` is the record's own enum (device_onboard / local_authority);
