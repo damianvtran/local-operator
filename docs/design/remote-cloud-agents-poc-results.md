@@ -86,13 +86,13 @@ and uploaded `results/`:
      "ecs_list_clusters": "denied: AccessDeniedException",
      "secretsmanager_get_secret_value": "denied: AccessDeniedException"}},
   {"name": "4b_egress", "pass": true, "detail": {
-     "must_be_reachable": {"github.com:443": "connected in 15 ms"},
+     "must_be_reachable": {"github.com:443": "connected in 17 ms"},
      "must_be_unreachable": {
-       "example.com:80": "failed in 5005 ms: deadline exhausted",
-       "github.com:22": "failed in 5006 ms: TimeoutError",
-       "1.1.1.1:53": "failed in 5005 ms: TimeoutError",
-       "portquiz.net:8080": "failed in 5003 ms: TimeoutError",
-       "169.254.169.254:80": "failed in 0 ms: OSError"}}},
+       "1.1.1.1:53": "failed in 5004 ms: TimeoutError",
+       "169.254.169.254:80": "failed in 0 ms: OSError",
+       "example.com:80": "failed in 5004 ms: deadline exhausted",
+       "github.com:22": "failed in 5005 ms: TimeoutError",
+       "portquiz.net:8080": "failed in 5000 ms: TimeoutError"}}},
   {"name": "4c_no_secret_on_disk", "pass": true, "detail": {
      "files_scanned": 16708, "matches_by_needle": {"value": 0},
      "key_length_bytes": 26, "key_sha256_first8": "5a71e522"}},
@@ -139,13 +139,32 @@ rather than argued:
 | what | where | reading |
 | --- | --- | --- |
 | **GREEN, in the container** | 5/5 acceptance runs (`report`'s 4e column, all `P`) | `{"matches_by_needle": {"value": 0}, "matching_processes": [], "pass": true, "processes_scanned_max": 5, "samples": 3}` — 0 processes, over 3–5 samples of every readable `/proc/<pid>/environ`. **These five runs are mock, so the agent spawns no tool child at all** (`exec.jsonl` is `message_start(user)` → one assistant text with no `tool_use`), which is why the coexistence case below exists rather than being assumed from these readings |
-| **COEXISTENCE, in the container** | one run with `POC_ENVIRON_WATCH_COEXIST=1` (task `f88619b98cd6…`, out-dir `coexist_r2_fa29af2b7a9d`), where the real launcher holds the key in-process and spawns a bash child through the product's own filter while 4e samples | 4e stays **GREEN** (`pass: true`, 0 matches, 3 samples) and the launcher reports `{"child_argv": ["sh", "-c", "sleep 2"], "child_env_entries": 2, "child_exit": 0, "key_value_anywhere_in_child_env": false, "parent_self_environ_clean": true, "pass": true, "provider_var_in_child_env": false}` after `lop-launch: set LOP_POC_MODEL_KEY in-process (26 bytes); /proc/self/environ clean: True`. A parent holding the key, a child that inherited neither its name nor its value |
-| **COEXISTENCE, in the container** | one run with `POC_ENVIRON_WATCH_COEXIST=1` (task `abdac194ab13…`, out-dir `coexist_r2_abdac194ab13`): the real launcher holds the key in-process and spawns `sh -c 'sleep 20'` **through the product's own filter** while 4e samples | `samples: 6`, `processes_scanned_max: 5`, `observed_processes: [{pid 1, bash}, {pid 43, python}, {pid 46, sh}, {pid 47, sleep}, {pid 48, python}]`, `pass: true`, 0 matches — the child the row is about (`pid 46`, `sh`, equal to the launcher's own `child_pid`) is **in the scanned set**, so the window is the window. The launcher's half: `{"child_argv": ["sh", "-c", "sleep 20"], "child_env_entries": 2, "child_exit": 0, "child_pid": 46, "child_sleep_seconds": 20, "expected_key_in_child_env": false, "key_value_in_child_env": false, "mode": "filtered", "parent_self_environ_clean": true, "provider_var_in_child_env": false, "pass": true}` after `lop-launch: set LOP_POC_MODEL_KEY in-process (26 bytes); /proc/self/environ clean: True`. A parent holding the key, a child that inherited neither its name nor its value, and an instrument that can show it was looking at the right window. (The round-2 version of this run put its child behind a hard-coded 3 s pre-watch sleep, so `processes_scanned_max` was 2 — a child that was never sampled. That is agent review round 3's finding 1, and it is why `--child-sleep` exists.) |
+| **COEXISTENCE, in the container** | one run with `POC_ENVIRON_WATCH_COEXIST=1` (task `abdac194ab13…`, out-dir `coexist_r2_abdac194ab13`): the real launcher holds the key in-process and spawns `sh -c 'sleep 20'` **through the product's own filter** while 4e samples | `samples: 6`, `processes_scanned_max: 5`, `observed_processes: [{pid 1, bash}, {pid 43, python}, {pid 46, sh}, {pid 47, sleep}, {pid 48, python}]`, `pass: true`, 0 matches — the child the row is about (`pid 46`, `sh`, equal to the launcher's own `child_pid`) is **in the scanned set**, so the window is the window. The launcher's half: `{"child_argv": ["sh", "-c", "sleep 20"], "child_env_entries": 2, "child_exit": 0, "child_pid": 46, "child_sleep_seconds": 20, "expected_key_in_child_env": false, "key_value_in_child_env": false, "mode": "filtered", "parent_self_environ_clean": true, "provider_var_in_child_env": false, "pass": true}` after `lop-launch: set LOP_POC_MODEL_KEY in-process (26 bytes); /proc/self/environ clean: True`. A parent holding the key and a child that inherited neither its name nor its value — **and the by-NAME half of that is asserted by the DRIVER, not by the launcher's `pass` predicate**: the launcher checks the value only, and tightening it would mean changing the image the accepted runs were made with, so `verify <self-test dir>` fails when `provider_var_in_child_env != expected_key_in_child_env`. That check, and the coverage column beside it, are in `report`'s self-test panel below. |
+| **round-2 reading, SUPERSEDED** | out-dir `coexist_r2_fa29af2b7a9d` (task `f88619b98cd6…`) | **the child exited before the first sample**: a 2-second child behind a hard-coded 3-second pre-watch sleep left `processes_scanned_max` at 2 — the container's baseline of PID 1 plus the watcher — so that run never observed the coexistence window it was quoted for (agent review round 3, finding 1). Kept as one line because the correction under it is only checkable against what it corrected; its record also predates the `mode`/`expected_key_in_child_env` fields, which is why `report` does not list it. |
 | **RED, in the container, in the SAME shape** | one run with `POC_ENVIRON_WATCH_SELFTEST=1` (task `b8dc22d28d7c…`, out-dir `selftest_r2_22a95113061a`): the same launcher, the same `sh -c 'sleep 20'`, with the environment **inherited** rather than filtered — `{**os.environ, "LC_ALL": "C"}`, which is what `tools/group_reaper.py:229` passes to `ps` and what `memory_guard._default_runner` does by passing no `env=` at all | `samples: 6`, `processes_scanned_max: 5`, `observed_processes` the same five, `pass: false`, `matches_by_needle: {"value": 2}`, `matching_processes: [{"comm": "sh", "pid": 46, "needle": "value"}, {"comm": "sleep", "pid": 47, "needle": "value"}]` — the watcher sees the key in the child AND in its grandchild — and task exit code **1**. The launcher's own half reports `mode: "inherited"`, `expected_key_in_child_env: true`, `key_value_in_child_env: true`, `pass: true`: the shape is as leaky as it is designed to be. Same window, same child argv, one difference — the environment. (The round-1 instance, task `813531fe54e2…`, uploaded no artifact before the branch learned to tar `$OUT`; its reading is in CloudWatch stream `lop-poc/agent/813531fe54e2443c9fc2a5b706b3b4f9` and nowhere else.) |
-| **RED/GREEN, hermetic** | `tests/unit/test_remote_agents_poc_probes.py` (5 cases: red, green, prefix-only, blocked-without-procfs, rescan exit codes) | passes; the environ source is stubbed because a real one needs procfs |
+| **RED/GREEN, hermetic** | `tests/unit/test_remote_agents_poc_probes.py` (six cases: red, green, prefix-only, blocked-without-procfs, rescan exit codes, and 4f by name / absolute path / multiplexer) | passes; the environ source is stubbed because a real one needs procfs |
 | **no re-exec in the launcher** | every run's `agent_stderr.txt` | `lop-launch: branding re-exec plan: None` — `reexec_branded` is a no-op for a launch through `lop_launch.py`, so nothing re-execs with the key in its environment |
 | **key arrived over the fd** | every run's `agent_stderr.txt` | `lop-launch: read 26 key byte(s) from fd 3; provider_env=''; set=False` (a mock run sets no provider variable, which is why `set=False` is correct rather than a failure) |
 | **the entrypoint scrubs itself** | the key is read and unset at the top of the script, then `exec "$0"` re-execs it | the entrypoint's own `/proc/<pid>/environ` is clean from that exec on, and the two children that run before it — `$(id -u)` became `$EUID`, a builtin, and `stamp` moved below the unset (SEC-12) — are gone, which is why the watcher's 0 includes PID 1 |
+
+#### The same three properties, as `report` renders them from the recorded fields
+
+```
+.venv/bin/python scripts/remote_agents_poc.py report <out-dir> \
+  --digest sha256:d70840cf1efb5fc9323946c3f8fcbc9cab838ac2c7680bf50c848b997d1b4055
+```
+
+| out-dir | mode | child pid | child argv | child env entries | variable name | key value | watcher | samples / scanned_max | child in observed set | driver verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `coexist_r2_abdac194ab13` | filtered | 46 | `sh -c sleep 20` | 2 | False (expected False) | False (expected False) | GREEN | 6 / 5 | yes | **PASS** — mode=filtered: the variable name and the value are both absent, as this mode expects |
+| `selftest_r2_22a95113061a` | inherited | 46 | `sh -c sleep 20` | 39 | True (expected True) | True (expected True) | RED | 6 / 5 | yes | **PASS** — mode=inherited: the variable name and the value are both present, as this mode expects |
+
+The by-NAME column is the driver's check, not the launcher's `pass` predicate: the
+launcher asserts the VALUE only, and tightening it would mean changing the image the
+accepted runs were made with. `verify <self-test dir>` runs the same three checks
+(`selftest.child_env_matches_mode`, `selftest.watcher_agrees_with_mode`,
+`selftest.child_was_observed`) and exits non-zero if any of them fails; a self-test
+directory needs no `--fixture-sha`, because it is not a run.
 
 **The residual, as measured, not as asserted.** `yama_ptrace_scope: "1"` and, across the
 five accepted runs, `mem_target: {"comm": "Local Operator", "pid": 50–52}` (each run's

@@ -10,6 +10,10 @@ process-environment source stubbed, because a real one needs procfs.
 
 The container run that produced the real red reading (and the five that produce the
 green one) is recorded in `docs/design/remote-cloud-agents-poc-results.md`.
+
+One case pins the DRIVER's half (`scripts/remote_agents_poc.py`): its self-test verdict
+asserts the provider variable's NAME as well as its value, because the launcher asserts
+the value only and the image the accepted runs were made with cannot be changed here.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PROBES_PATH = ROOT / "infra/remote-agents-poc/image/probes.py"
+DRIVER_PATH = ROOT / "scripts/remote_agents_poc.py"
 
 #: A value shaped like a key, and deliberately not one. This is the fixture the
 #: watcher searches for; it is never a real credential and never derived from one.
@@ -160,6 +165,59 @@ def test_probe_4f_is_green_without_a_ps_and_red_with_one(
     multiplexer_red = probes.probe_ps_absent()
     assert multiplexer_red["pass"] is False
     assert multiplexer_red["detail"]["multiplexers_present"] == ["busybox"]
+
+
+@pytest.fixture(scope="module")
+def driver() -> ModuleType:
+    """`remote_agents_poc.py` loaded by path — `scripts/` is not a package."""
+    spec = importlib.util.spec_from_file_location("poc_driver", DRIVER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_selftest_verdict_checks_the_variable_name_as_well_as_the_value(driver: ModuleType) -> None:
+    """The launcher asserts the VALUE only; the driver asserts the NAME too.
+
+    WHY THE DRIVER: tightening the launcher's predicate means changing the image the
+    accepted runs were made with, and the repository has to keep matching that digest.
+    So both directions are pinned here — a filtered record whose child inherited the
+    variable NAME is a FAIL, which is exactly the regression the launcher's own `pass`
+    would report as a pass.
+    """
+    filtered_clean = {
+        "mode": "filtered",
+        "child_exit": 0,
+        "expected_key_in_child_env": False,
+        "key_value_in_child_env": False,
+        "provider_var_in_child_env": False,
+    }
+    ok, detail = driver.selftest_verdict(filtered_clean)
+    assert ok is True and "both absent" in detail
+
+    inherited_as_designed = {
+        "mode": "inherited",
+        "child_exit": 0,
+        "expected_key_in_child_env": True,
+        "key_value_in_child_env": True,
+        "provider_var_in_child_env": True,
+    }
+    ok, _ = driver.selftest_verdict(inherited_as_designed)
+    assert ok is True
+
+    name_only = dict(filtered_clean, provider_var_in_child_env=True)
+    ok, detail = driver.selftest_verdict(name_only)
+    assert ok is False, "a filtered child that inherited the NAME must fail"
+    assert "provider variable NAME" in detail
+
+    value_only = dict(filtered_clean, key_value_in_child_env=True)
+    ok, detail = driver.selftest_verdict(value_only)
+    assert ok is False and "key VALUE" in detail
+
+    no_expectation = {k: v for k, v in filtered_clean.items() if k != "expected_key_in_child_env"}
+    ok, detail = driver.selftest_verdict(no_expectation)
+    assert ok is False and "cannot judge the mode" in detail
 
 
 def _scan(directory: Path, key: str) -> subprocess.CompletedProcess[str]:

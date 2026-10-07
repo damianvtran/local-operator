@@ -564,6 +564,10 @@ def read_environ_watch(run_dir: Path) -> dict[str, Any]:
         "processes_scanned_max": payload.get("processes_scanned_max"),
         "matches_by_needle": payload.get("matches_by_needle"),
         "matching_processes": payload.get("matching_processes"),
+        # What the watcher READ, matched or not: the coverage claim ("the child was in
+        # the set") is only checkable if this rides along, and `verify` on a self-test
+        # directory is where it is checked.
+        "observed_processes": payload.get("observed_processes"),
         "residual": payload.get("residual"),
         "note": payload.get("note"),
     }
@@ -1228,18 +1232,166 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"| `{other[:20]}…`{marker} | **{len(ids)}** | {', '.join(ids)} |")
     print()
     print(f"total recorded runs: {len(records)}")
+    _print_selftests(out_dir)
     return 0
+
+
+def _print_selftests(out_dir: Path) -> None:
+    """The watcher self-tests' records, read from the same directories.
+
+    A self-test directory carries no run.json, so it is not one of the runs above; it is
+    where 4e's two non-mock properties are measured, and the driver's by-NAME check lives
+    only here (see `selftest_verdict` for why it is not in the launcher).
+    """
+    rows: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    if out_dir.is_dir():
+        for path in sorted(out_dir.iterdir()):
+            if not path.is_dir():
+                continue
+            record = _read_selftest(path)
+            if record is not None:
+                rows.append((path.name, record, read_environ_watch(path)))
+    if not rows:
+        return
+    print()
+    print("#### Watcher self-tests: what each mode's child inherited, and what the watcher read")
+    print()
+    print(
+        "| out-dir | mode | child pid | child argv | child env entries | variable name "
+        "| key value | watcher | samples / scanned_max | child in observed set | driver verdict |"
+    )
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for name, record, watch in rows:
+        ok, detail = selftest_verdict(record)
+        expected = record.get("expected_key_in_child_env") is True
+        observed = list(watch.get("observed_processes") or [])
+        observed_flag = (
+            "yes" if any(e.get("pid") == record.get("child_pid") for e in observed) else "no"
+        )
+        verdict = (
+            "GREEN" if watch.get("pass") is True else "RED" if watch.get("pass") is False else "n/a"
+        )
+        print(
+            f"| `{name}` | {record.get('mode')} | {record.get('child_pid')} "
+            f"| `{' '.join(str(part) for part in record.get('child_argv') or [])}` "
+            f"| {record.get('child_env_entries')} "
+            f"| {record.get('provider_var_in_child_env')} (expected {expected}) "
+            f"| {record.get('key_value_in_child_env')} (expected {expected}) "
+            f"| {verdict} "
+            f"| {watch.get('samples')} / {watch.get('processes_scanned_max')} "
+            f"| {observed_flag} "
+            f"| **{'PASS' if ok else 'FAIL'}** — {detail} |"
+        )
+    print()
+    print(
+        "The by-NAME column is the driver's check, not the launcher's `pass` predicate: "
+        "the launcher asserts the VALUE only, and tightening it would mean changing the "
+        "image the accepted runs were made with."
+    )
+    return None
+
+
+def _read_selftest(run_dir: Path) -> dict[str, Any] | None:
+    """The launcher's self-test record for a self-test directory, or None.
+
+    The launcher's stdout is redirected into this file ahead of its JSON line
+    (``lop-launch: …``), so the record is the LAST line that parses and carries the
+    fields: anything before it is a log line.
+    """
+    path = _find(run_dir, "selftest_child.json")
+    if path is None:
+        return None
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            record = json.loads(stripped)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and "expected_key_in_child_env" in record:
+            return record
+    return None
+
+
+def selftest_verdict(record: dict[str, Any]) -> tuple[bool, str]:
+    """Did a self-test child inherit what its mode predicts — by NAME and by VALUE?
+
+    WHY THIS LIVES IN THE DRIVER AND NOT IN THE LAUNCHER. The launcher's own ``pass``
+    predicate asserts the VALUE only (``key_value_in_child_env == expected``); the
+    round-3 version also required the provider variable NAME to be absent, and that
+    term was lost when the predicate was generalised over two modes. Tightening it
+    again means editing ``image/lop_launch.py``, and the image is what the accepted runs
+    were made with — the repository has to keep matching digest ``d70840cf…``. So the
+    stricter check lives where it can be tightened without touching what ran: a filtered
+    child that inherited the variable NAME is a regression the launcher reports as a
+    pass and this fails.
+    """
+    expected = record.get("expected_key_in_child_env")
+    if not isinstance(expected, bool):
+        return False, "no expected_key_in_child_env in the record: cannot judge the mode"
+    problems: list[str] = []
+    for field, label in (
+        ("provider_var_in_child_env", "provider variable NAME"),
+        ("key_value_in_child_env", "key VALUE"),
+    ):
+        recorded = record.get(field)
+        if recorded is not expected:
+            problems.append(f"{label}: {field}={recorded!r}, expected {expected!r}")
+    if record.get("child_exit") != 0:
+        problems.append(f"child_exit={record.get('child_exit')}")
+    if problems:
+        return False, "; ".join(problems)
+    return True, (
+        f"mode={record.get('mode')}: the variable name and the value are both "
+        f"{'present, as this mode expects' if expected else 'absent, as this mode expects'}"
+    )
+
+
+def _verify_selftest(verifier: Verifier, run_dir: Path, record: dict[str, Any]) -> None:
+    """The self-test's own acceptance: inheritance, the watcher's agreement, coverage.
+
+    Three checks rather than one, because they answer three different questions: did the
+    child inherit what the mode predicts (the launcher's record), did the watcher
+    independently agree (its verdict), and was the child in the set the watcher actually
+    read (the coverage claim). The third is the one round 3 found was asserted rather
+    than measured.
+    """
+    ok, detail = selftest_verdict(record)
+    verifier.check("selftest.child_env_matches_mode", ok, detail)
+    watch = read_environ_watch(run_dir)
+    expects_red = record.get("expected_key_in_child_env") is True
+    verifier.check(
+        "selftest.watcher_agrees_with_mode",
+        watch.get("pass") is (not expects_red),
+        f"{watch.get('note')} (this mode expects {'RED' if expects_red else 'GREEN'})",
+    )
+    observed = list(watch.get("observed_processes") or [])
+    child_pid = record.get("child_pid")
+    verifier.check(
+        "selftest.child_was_observed",
+        any(entry.get("pid") == child_pid for entry in observed),
+        f"child_pid={child_pid} in observed_processes={observed}",
+    )
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
     import tempfile
 
     run_dir = Path(args.run_dir)
+    verifier = Verifier()
+    selftest = _read_selftest(run_dir)
+    if selftest is not None:
+        # A self-test directory is not a run: it has no session, no bundle and no
+        # run.json, so the acceptance checks below would report FAILs about artifacts it
+        # was never meant to produce. Its own three checks ARE the acceptance for it, and
+        # this path needs no --fixture-sha.
+        _verify_selftest(verifier, run_dir, selftest)
+        return verifier.report()
     fixture_sha = args.fixture_sha
     if not fixture_sha:
         _log("FAIL  --fixture-sha is required: acceptance 2 checks the parent commit")
         return 2
-    verifier = Verifier()
     git_info = read_git(run_dir)
     bundle = _find(run_dir, "repo.bundle")
     if not git_info.get("commit"):
