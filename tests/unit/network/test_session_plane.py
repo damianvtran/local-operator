@@ -3070,6 +3070,26 @@ def test_a_stored_rows_needs_claim_is_never_a_claim() -> None:
     )
     assert live.pending == "approval"
 
+    # AND THE DICT-LEVEL APPLICATION (agent review round 2, N1): the helper the
+    # machine payloads route through returns the ORIGINAL object when a row is
+    # already clean (no copy on the common path) and rewrites a legacy spelling
+    # on a copy when it is not — never mutating the row it was handed.
+    from local_operator.network.types import row_without_stored_claims
+
+    clean = {"session_id": "s", "state": "live", "pending": "approval"}
+    assert row_without_stored_claims(clean) is clean
+    blank = {"session_id": "s", "state": "live", "pending": None}
+    assert row_without_stored_claims(blank) is blank
+    legacy_row = {"session_id": "s", "state": "stored", "pending": "ask"}
+    fixed = row_without_stored_claims(legacy_row)
+    assert fixed is not legacy_row and fixed["pending"] is None
+    assert legacy_row["pending"] == "ask", "the helper mutated its input"
+    case_row = {"session_id": "s", "state": "live", "pending": " ASK "}
+    # ``normalise_pending`` strips surrounding whitespace and preserves the
+    # token's own case (the producers ship lowercase; the pin records the
+    # contract rather than an aspiration).
+    assert row_without_stored_claims(case_row)["pending"] == "ASK"
+
 
 # ---------------------------------------------------------------------------
 # QA round 1 (the desktop round that drove a REAL backend): the backend's half

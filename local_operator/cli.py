@@ -5752,7 +5752,12 @@ def sessions_command(args: argparse.Namespace) -> int:
         ]
 
     if args.json:
-        print(_json.dumps(rows, indent=2))
+        # THE MACHINE PAYLOAD GETS THE SAME RULE AS THE TABLE (agent review
+        # round 2, F4): a pre-correction peer's stored row must not carry its
+        # legacy claim into `--json` when the text beside it refuses it.
+        from local_operator.network.types import row_without_stored_claims
+
+        print(_json.dumps([row_without_stored_claims(row) for row in rows], indent=2))
         return 0
 
     if not rows:
