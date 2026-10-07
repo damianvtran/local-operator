@@ -670,19 +670,40 @@ def _fixture_test_command(clone: Path) -> list[str]:
 
 
 class Verifier:
-    """Collects (name, ok, detail) rows and prints them as a PASS/FAIL table."""
+    """Collects (name, ok, detail) rows and prints them as a PASS/FAIL table.
+
+    BLOCKED is a third outcome and not a soft FAIL: acceptance 2 needs a commit, and
+    a mock-provider run makes none by design, so reporting it as a failure would make
+    the mock runs look broken when they are the ones that prove everything else. A
+    blocked check names what would unblock it.
+    """
 
     def __init__(self) -> None:
         self.rows: list[tuple[str, bool, str]] = []
+        self.blocked_rows: list[tuple[str, str]] = []
 
     def check(self, name: str, ok: bool, detail: str) -> bool:
         self.rows.append((name, ok, detail))
         _log(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
         return ok
 
+    def blocked(self, name: str, detail: str) -> None:
+        self.blocked_rows.append((name, detail))
+        _log(f"BLOCKED  {name}: {detail}")
+
     def report(self) -> int:
         failed = [name for name, ok, _ in self.rows if not ok]
-        print(json.dumps({"checks": self.rows, "failed": failed}, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    "checks": self.rows,
+                    "failed": failed,
+                    "blocked": self.blocked_rows,
+                },
+                indent=2,
+                default=str,
+            )
+        )
         return 1 if failed else 0
 
 
@@ -774,7 +795,11 @@ def _verify_session(verifier: Verifier, run_dir: Path, lop: str, session_id: str
             "PATH": os.environ.get("PATH", ""),
             "TERM": "dumb",
         }
-        listed = _run([lop, "sessions", "--json"], env=env)
+        # `--all` is load-bearing: a bare `lop sessions` lists only ACTIVE (running)
+        # sessions, so a transplanted session — which is stored, never running — comes
+        # back as an empty list and looks like a failed transplant. It is not: the
+        # stored rows are what this check is for.
+        listed = _run([lop, "sessions", "--all", "--json"], env=env)
         listed_ok = listed.returncode == 0 and session_id in listed.stdout
         verifier.check(
             "acceptance3.lop_sessions_lists_id",
@@ -802,10 +827,10 @@ def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> 
         return
     listing = _run(["lop", "secret", "list"])
     if "LOP_POC_MODEL_KEY" not in listing.stdout:
-        verifier.check(
+        verifier.blocked(
             "acceptance4.key_scan",
-            True,
-            "skipped: LOP_POC_MODEL_KEY is not in the secret store, so no key exists in this run",
+            "LOP_POC_MODEL_KEY is not in the secret store, so no real key exists to scan for; "
+            "the container's own 4c/4c-env probes still ran, against the injected placeholder",
         )
         return
     getter = subprocess.Popen(
@@ -813,8 +838,19 @@ def _verify_key_scan(verifier: Verifier, run_dir: Path, probes: Path | None) -> 
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    # The same needles the container used: the exact value, and its first 8
+    # characters, so "the local scan passed" means what "probe 4c passed" means.
     scanner = subprocess.run(
-        [sys.executable, str(probes), "--scan-dir", str(run_dir), "--key-fd", "0"],
+        [
+            sys.executable,
+            str(probes),
+            "--scan-dir",
+            str(run_dir),
+            "--key-fd",
+            "0",
+            "--key-prefix-chars",
+            "8",
+        ],
         stdin=getter.stdout,
         capture_output=True,
         text=True,
@@ -836,26 +872,37 @@ def cmd_verify(args: argparse.Namespace) -> int:
         _log("FAIL  --fixture-sha is required: acceptance 2 checks the parent commit")
         return 2
     verifier = Verifier()
+    git_info = read_git(run_dir)
     bundle = _find(run_dir, "repo.bundle")
-    if bundle is None:
+    if not git_info.get("commit"):
+        # A mock-provider run makes no edits, so there is no branch and no bundle to
+        # verify: acceptance 2 is BLOCKED, not failed, and it names what would unblock
+        # it. Everything else still runs — a mock run produces a real session
+        # directory and real probe verdicts, which is most of the acceptance.
+        verifier.blocked(
+            "acceptance2.bundle_and_branch",
+            "no commit on this run (git.json has commit=null), so there is no lop/<id> "
+            "branch to verify: acceptance 2 needs a run whose model actually edited the "
+            "fixture, i.e. a real-key run",
+        )
+    elif bundle is None:
         verifier.check(
             "acceptance2.bundle_present", False, f"repo.bundle not found under {run_dir}"
         )
-        return verifier.report()
-    verifier.check("acceptance2.bundle_present", True, str(bundle))
+    else:
+        verifier.check("acceptance2.bundle_present", True, str(bundle))
+        with tempfile.TemporaryDirectory(prefix="lop-poc-fixture-") as tmp:
+            clone = Path(tmp) / "fixture"
+            cloned = _run(["git", "clone", "--quiet", args.fixture_url, str(clone)])
+            if verifier.check(
+                "acceptance2.clone_fixture",
+                cloned.returncode == 0,
+                (cloned.stdout + cloned.stderr).strip()[:300],
+            ):
+                branch = _verify_bundle(verifier, clone, bundle, fixture_sha)
+                if branch is not None:
+                    _verify_fixture_tests(verifier, clone, fixture_sha, branch)
     probes = Path(__file__).resolve().parents[1] / "infra/remote-agents-poc/image/probes.py"
-    with tempfile.TemporaryDirectory(prefix="lop-poc-fixture-") as tmp:
-        clone = Path(tmp) / "fixture"
-        cloned = _run(["git", "clone", "--quiet", args.fixture_url, str(clone)])
-        if not verifier.check(
-            "acceptance2.clone_fixture",
-            cloned.returncode == 0,
-            (cloned.stdout + cloned.stderr).strip()[:300],
-        ):
-            return verifier.report()
-        branch = _verify_bundle(verifier, clone, bundle, fixture_sha)
-        if branch is not None:
-            _verify_fixture_tests(verifier, clone, fixture_sha, branch)
     status = read_status(run_dir)
     session_id = str(status.get("session_id") or "")
     verifier.check("acceptance3.session_id_known", bool(session_id), session_id or "<none>")
