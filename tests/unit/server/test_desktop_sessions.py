@@ -236,7 +236,7 @@ async def test_the_pre_open_drop_is_exactly_the_watermark(tmp_path, monkeypatch)
         original = bridge.history
         during: list[int] = []
 
-        async def history_and_publish():
+        async def history_and_publish(**_kwargs):
             bridge.publish("event", {"during": "the read"})
             during.append(bridge.sequence)
             return await original()
@@ -283,7 +283,7 @@ async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(tmp_p
         original = bridge.history
         published: list[int] = []
 
-        async def history_and_publish():
+        async def history_and_publish(**_kwargs):
             bridge.publish("event", {"during": "the read"})
             published.append(bridge.sequence)
             return await original()
@@ -316,7 +316,7 @@ async def test_the_delivery_boundary_is_strictly_above_the_watermark(tmp_path, m
     async with pool.session(sid) as bridge:
         original = bridge.snapshot
 
-        async def snapshot_and_place():
+        async def snapshot_and_place(**_kwargs):
             snapshot = await original()
             for offset, marker in ((0, "at-the-watermark"), (1, "above-the-watermark")):
                 frame = {
@@ -8435,6 +8435,10 @@ async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) 
             is_cold=False,
             history=lambda: list(wire_window),
             history_before_token=None,
+            # The owner shipped no entry times here (an older owner, or a facade
+            # whose attach did not negotiate), which is the case this cell is
+            # about: every surviving row keeps the serve-stamp.
+            history_entry_times=lambda: {},
         ),
     )
 
@@ -8733,3 +8737,174 @@ def test_visible_transcript_rows_drops_an_ask_gate_divert_row() -> None:
 
     kept = visible_transcript_rows([marker_row, patience_row, ordinary_ask_row])
     assert kept == [ordinary_ask_row]
+
+
+# ---------------------------------------------------------------------------
+# /history — the ENTRY-TIME vocabulary (design docs/design/mesh-wire-honesty.md
+# §S1). A wire row is a MESSAGE, and a message has no entry time of its own, so
+# the bridge either stamps it with the instant the OWNER shipped (``entry``),
+# admits it has none (``unstated``, and only to a renderer that asked), or keeps
+# the legacy serve-stamp (``served``). The three values are the whole contract;
+# a renderer's sort must not mix them.
+# ---------------------------------------------------------------------------
+
+
+def _remote_bridge_with(tmp_path: Path, rows: list[Any], entry_times: dict[str, float]):
+    """A bridge on the WIRE branch with the rows and join the test hands it."""
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+    bridge.remote = cast(
+        Any,
+        SimpleNamespace(
+            is_cold=False,
+            history=lambda: list(rows),
+            history_before_token=None,
+            history_entry_times=lambda: dict(entry_times),
+        ),
+    )
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_stamps_the_owners_entry_time_when_it_is_shipped(tmp_path) -> None:
+    """``entry``: the join wins over this device's clock, for either renderer.
+
+    A row whose true time the owner shipped is truthful for everyone — the
+    vocabulary ADDS information, so it is not gated on the renderer's flag.
+    """
+    row = Message.user("morning")
+    owner_ts = 1_700_000_000.0
+    bridge = _remote_bridge_with(tmp_path, [row], {row.id: owner_ts})
+
+    # Both renderers, because the value is a fact rather than a negotiation.
+    for asked in (True, False):
+        page = await bridge.history(limit=50, entry_times=asked)
+        entry = next(e for e in page["entries"] if e["id"] == row.id)
+        assert entry["ts"] == owner_ts, "the serve clock replaced the owner's instant"
+        assert entry["ts_source"] == "entry"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_answers_unstated_for_a_renderer_that_asked(tmp_path) -> None:
+    """``unstated``: no instant, and the wire says so instead of inventing one.
+
+    PER ROW rather than per page — the shipped and unshipped rows are in ONE
+    page here, which is the real shape (a live suffix alongside a durable tail).
+    """
+    shipped, unshipped = Message.user("durable"), Message.user("live suffix")
+    owner_ts = 1_700_000_000.0
+    bridge = _remote_bridge_with(tmp_path, [shipped, unshipped], {shipped.id: owner_ts})
+
+    page = await bridge.history(limit=50, entry_times=True)
+    by_id = {entry["id"]: entry for entry in page["entries"]}
+    assert by_id[shipped.id]["ts"] == owner_ts
+    assert by_id[shipped.id]["ts_source"] == "entry"
+    assert by_id[unshipped.id]["ts"] is None, "an unprovable instant was fabricated"
+    assert by_id[unshipped.id]["ts_source"] == "unstated"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_branch_keeps_the_serve_stamp_for_a_renderer_that_did_not_ask(
+    tmp_path,
+) -> None:
+    """``served``: byte-for-byte today's behaviour for every existing client.
+
+    The only addition is the sibling ``ts_source``, which an older reader drops
+    (the entry model is ``extra="ignore"``) and a current one branches on.
+    """
+    row = Message.user("morning")
+    bridge = _remote_bridge_with(tmp_path, [row], {})
+
+    before = time.time()
+    page = await bridge.history(limit=50)
+    after = time.time()
+    entry = next(e for e in page["entries"] if e["id"] == row.id)
+    assert entry["ts_source"] == "served"
+    assert isinstance(entry["ts"], float)
+    assert before <= entry["ts"] <= after, "the serve-stamp is not this device's clock"
+
+
+@pytest.mark.asyncio
+async def test_the_mid_turn_join_puts_the_user_row_on_the_owners_clock(tmp_path) -> None:
+    """THE DEFECT §S1 EXISTS FOR: two clocks in one turn, and only one order.
+
+    A tool row is seeded from the OWNER's ``started_at_epoch`` (the live event's
+    stamp — ``harness/loop.py``), while a wire user row used to carry THIS
+    device's serve time. Ordered together, the user's own message lands after the
+    tool call it prompted. With the join shipped, the user row carries the
+    owner's journal instant, so the two are the same clock and the same order.
+
+    The negative half is what makes this discriminating rather than arithmetic:
+    the fixture's owner clock is far from ``time.time()``, so a serve-stamp
+    cannot satisfy the comparison.
+    """
+    from local_operator.harness.types import TextContent, ToolResult
+
+    user_row = Message.user("run the tests")
+    tool_row = Message.tool_result(
+        ToolResult(tool_call_id="t1", tool_name="bash", content=[TextContent(text="ok")])
+    )
+    owner_entry_ts = 1_700_000_000.0
+    # The owner's own stamp for the call this turn started — the value the UI's
+    # tool row is seeded from. A fraction after the user row, same turn.
+    tool_started_at_epoch = owner_entry_ts + 0.4
+    bridge = _remote_bridge_with(tmp_path, [user_row, tool_row], {user_row.id: owner_entry_ts})
+
+    page = await bridge.history(limit=50, entry_times=True)
+    by_id = {entry["id"]: entry for entry in page["entries"]}
+    served_user_ts = by_id[user_row.id]["ts"]
+
+    assert by_id[user_row.id]["ts_source"] == "entry"
+    # COMPARABLE, which is the whole requirement: one clock, and the order the
+    # turn actually happened in.
+    assert abs(served_user_ts - tool_started_at_epoch) < 1.0
+    assert served_user_ts < tool_started_at_epoch
+    # And it is genuinely the owner's clock, not this machine's: the serve
+    # instant is 70 million seconds away from it.
+    assert abs(time.time() - served_user_ts) > 1_000_000
+
+    # The tool row itself has no entry time of its own — its instant rides its
+    # payload's own vocabulary, and the bridge must not invent one here.
+    assert by_id[tool_row.id]["ts_source"] == "unstated"
+    assert by_id[tool_row.id]["ts"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_stored_peer_page_marks_its_journal_rows_as_entry(tmp_path, monkeypatch) -> None:
+    """The cold peer page is journal rows, so its ``ts`` IS the entry time.
+
+    Stamped at the DOOR (``_peer_stored_history``), which is why this drives that
+    method and not the cut: both answers the door returns — the plain page and
+    the ``through_id``-cut one — must carry the vocabulary, or a reader that
+    paged back would see the same rows change their ``ts_source``.
+    """
+    from local_operator.network import projection as projection_module
+
+    rows = [
+        {"id": "a", "ts": 1.0, "type": "message", "payload": {}},
+        {"id": "b", "ts": 2.0, "type": "message", "payload": {}},
+    ]
+    monkeypatch.setattr(
+        projection_module,
+        "peer_stored_history_page",
+        lambda *_args, **_kwargs: {
+            "entries": [dict(row) for row in rows],
+            "has_more": False,
+            "cursor_missing": False,
+            "has_newer": None,
+        },
+    )
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+
+    page = await bridge._peer_stored_history(  # noqa: SLF001 — the door under test
+        before_id=None, through_id=None, limit=50
+    )
+    assert [row["ts_source"] for row in page["entries"]] == ["entry", "entry"]
+    assert [row["ts"] for row in page["entries"]] == [1.0, 2.0]
+
+    cut = await bridge._peer_stored_history(  # noqa: SLF001
+        before_id=None, through_id="a", limit=50
+    )
+    assert [row["id"] for row in cut["entries"]] == ["a"]
+    assert cut["entries"][0]["ts_source"] == "entry"

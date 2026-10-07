@@ -584,11 +584,14 @@ async def test_the_transcript_is_read_off_the_wire_not_off_this_disk(
     assert [entry["id"] for entry in page["entries"]] == [row.id for row in rows]
     assert [entry["payload"]["kind"] for entry in page["entries"]] == ["message", "message"]
     assert "hello from the peer" in json.dumps(page["entries"])
-    # ONE STAMP PER PAGE, and it is THIS device's clock: the wire carries no entry
-    # time (see the method), so a page is dated when it is served rather than
-    # pretending to know when the user sent it.
+    # ONE STAMP PER PAGE, and it is THIS device's clock: this request did NOT
+    # negotiate ``entry_ts``, so the wire carries no entry time for these rows and
+    # a page is dated when it is served rather than pretending to know when the
+    # user sent it. The vocabulary says so on every row (see the method and
+    # ``docs/DESKTOP_API.md``) instead of leaving the reader to infer it.
     assert len({entry["ts"] for entry in page["entries"]}) == 1
     assert page["entries"][0]["ts"] > 0
+    assert {entry["ts_source"] for entry in page["entries"]} == {"served"}
 
 
 @pytest.mark.asyncio

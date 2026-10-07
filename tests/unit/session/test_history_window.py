@@ -1471,3 +1471,73 @@ async def test_diverted_ask_rows_are_stripped_from_audit_pages_too(tmp_path: Pat
     ids = {str(getattr(m, "id", "")) for m in rows}
     assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
     assert ask_call.id not in ids and ask_result.id not in ids, "the divert's rows painted"
+
+
+@pytest.mark.asyncio
+async def test_the_entry_time_join_is_total_over_carried_rows_only(tmp_path: Path) -> None:
+    """The join covers exactly what the page carries, and no more.
+
+    TWO RULES IN ONE ASSERTION. Total over the carried rows: a wire row's true
+    entry time must resolve wherever the page carries it, or the desktop bridge
+    has nothing to stamp it with. ABSENT for a SUBTRACTED row: the display
+    replay drops hidden wake deliveries, and a dropped row must appear in
+    NEITHER the message list NOR the join — a joinless id would invite a reader
+    to invent an instant for a row it never received.
+    """
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_messages([Message.user("ask"), Message.assistant("answer")])
+    hidden = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": "hidden patience fire",
+            "kind": "patience",
+            "hidden": True,
+            "wake_id": "patience-1",
+            "occurrence": 1,
+        },
+    )
+    visible = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "visible wake fire", "wake_id": "w1", "occurrence": 3},
+    )
+    await transcript.append_messages([hidden, visible])
+
+    page = window(transcript)
+    carried = {str(getattr(message, "id", "")) for message in page.messages}
+    assert carried, "the fixture served no rows, so totality would be vacuous"
+    assert visible.id in carried
+    assert hidden.id not in carried
+    assert set(page.entry_times) == carried
+
+    # The values are the JOURNAL's own times, not a clock read here: that is the
+    # whole point of shipping the join rather than letting a reader stamp a row.
+    journal = {entry.id: entry.ts for entry in transcript.entries()}
+    for row_id in carried:
+        assert page.entry_times[row_id] == journal[row_id]
+    assert hidden.id not in page.entry_times, "a subtracted row was given an instant"
+
+
+@pytest.mark.asyncio
+async def test_wire_payload_honours_the_entry_time_negotiation(tmp_path: Path) -> None:
+    """``wire_payload`` is the shared serializer, so its strip is pinned here.
+
+    The three server routes call the strip directly or through this helper; the
+    helper is the one place a future route is most likely to be wired to, and
+    the failed-attach hazard applies to it exactly as to the audit fields.
+    """
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_messages([Message.user("row")])
+    page = window(transcript)
+
+    kept = wire_payload(page, audit_capable=True, entry_times_capable=True)
+    assert kept["entry_times"], "the join must ride for a viewer that negotiated"
+
+    stripped = wire_payload(page, audit_capable=True, entry_times_capable=False)
+    assert "entry_times" not in stripped
+    # The default matters: a caller that has not been taught the new argument
+    # (an out-of-tree caller, a stale test helper) must produce the SAFE bytes.
+    assert "entry_times" not in wire_payload(page, audit_capable=True)

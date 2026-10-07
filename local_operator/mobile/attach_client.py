@@ -1194,6 +1194,14 @@ class AttachClient:
             # the owner's strip decision a negotiation rather than a guess.
             if "display-history-audit-v1" in record.capabilities:
                 auth["display_history_audit"] = True
+            # Declared separately AGAIN: this build can READ the ``{entry id: ts}``
+            # join that a display page may carry, and an owner that does not
+            # advertise the capability simply never sends it. Announcing it is what
+            # makes the owner's strip decision a negotiation rather than a guess —
+            # an owner that sent the field unasked would fail an older viewer's
+            # page model (it forbids extras).
+            if "display-history-entry-times-v1" in record.capabilities:
+                auth["display_history_entry_times"] = True
         if self._operator_nonce:
             auth["operator_nonce"] = self._operator_nonce
         if self._slash_consumers is not None:
