@@ -204,6 +204,59 @@ def _seed(root: Path, session_id: str) -> None:
     (directory / "transcript.jsonl").write_text("", encoding="utf-8")
 
 
+def _seed_journal(root: Path, session_id: str, texts: list[str]) -> list[str]:
+    """Write a REAL journal on ``root`` and answer the entry ids it holds, in order.
+
+    Real ``TranscriptEntry`` rows through the product's own encoder, rather than
+    hand-written JSON, because the ids are the claim under test: the entry id IS
+    the message id (``transcript.encode_message_payload`` excludes ``id``), which
+    is what makes a stored page and a later wire window merge under one key. A
+    hand-built line would assert that claim about a shape nothing writes.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    ids: list[str] = []
+    for index, text in enumerate(texts):
+        message = Message.user(text)
+        # A DISTINCT, INCREASING ts per row: real timestamps are half of what this
+        # source adds over the wire (which can only date a page by its serve time),
+        # so a fixture that stamped them all alike would not pin the difference.
+        entry = TranscriptEntry(
+            message.id, 1_700_000_000.0 + index, ENTRY_MESSAGE, encode_message_payload(message)
+        )
+        lines.append(entry.to_json())
+        ids.append(message.id)
+    (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return ids
+
+
+def _append_hidden_row(root: Path, session_id: str) -> str:
+    """Append one row a human transcript must never serve, and answer its id.
+
+    A ``patience`` tool RESULT row: the ledger row UX round 1 (U2) found painting
+    a timer the user was promised they would never see. The owner's relay must drop
+    it exactly as the local ``/history`` does — that filter is the reason this
+    predicate moved into ``harness/rows.py`` rather than being copied.
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    directory = root / "sessions" / session_id
+    entry = TranscriptEntry(
+        "hidden000001", 1_700_000_500.0, ENTRY_MESSAGE, {"role": "tool", "tool_name": "patience"}
+    )
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(entry.to_json() + "\n")
+    return entry.id
+
+
 def _warm(root: Path, session_id: str) -> None:
     """Start the owning runtime for a seeded session, the relay's own way."""
     from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -229,6 +282,60 @@ def _dial(server: relay.RelayServer, record: Any, host: str, port: int) -> relay
 def _stop_all(served: dict[str, _Served]) -> None:
     for entry in served.values():
         entry.stop()
+
+
+def _third_device(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    root_c: Path,
+    record: Any,
+    host_a: str,
+    port_a: int,
+) -> relay.RelayServer:
+    """Pair a THIRD device into the mesh, so TWO links can terminate on the owner.
+
+    Two reader threads on ONE owner is the shape the page-cache rule is about
+    (agent review round 1, R1-2), and one viewer cannot make it: a device dials a
+    peer once, so a second reader thread needs a second device. The ceremony is
+    the shared ``_pair`` one, repeated for the third identity — real invite, real
+    handshake, real admission.
+    """
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import invite as invite_mod
+    from tests.unit.network.test_relay_e2e import (
+        _answer_confirmation,
+        _join,
+        _type_the_code,
+        serve_shaped_relay,
+    )
+
+    server_a, _server_b, _host, _port = peer_pair
+    server_c = serve_shaped_relay(
+        root_c,
+        monkeypatch,
+        identity=identity_mod.mint(root_c, name="device-c"),
+        audit=audit_mod.AuditLog(root_c),
+    )
+    state = store.load_secrets(record.network_id, server_a.root)
+    minted = invite_mod.mint(record, state.secret, role="drive", ttl_s=600.0)
+    record.invites.append(minted.record)
+    store.save(record, server_a.root)
+    store.save_invite_token(minted.record.invite_id, minted.token, server_a.root)
+    _type_the_code(monkeypatch)
+    # The inviter's human answers CONCURRENTLY with the joiner's wait, exactly as
+    # ``_pair`` does: answering after the join would deadlock on the ceremony.
+    thread = threading.Thread(
+        target=lambda: _answer_confirmation(server_a, admit=True), daemon=True
+    )
+    thread.start()
+    try:
+        joined = _join(
+            server_c, host=host_a, port=port_a, token=minted.token, envelope=minted.envelope
+        )
+    finally:
+        thread.join(10)
+    assert joined is not None
+    return server_c
 
 
 # ---------------------------------------------------------------------------
@@ -1253,6 +1360,428 @@ def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
         _stop_all(served)
 
 
+def test_a_peer_reads_a_cold_sessions_stored_journal(peer_pair: Devices, monkeypatch) -> None:
+    """D5-core: a session no runtime holds is READ, not answered as empty.
+
+    The defect this pins (design ``docs/design/mesh-cold-read-stored-history.md``):
+    a cold read of a peer session served ``{entries: [], has_more: false}`` — the
+    same envelope a conversation with no rows produces — while the rows sat on the
+    owner's disk, on the very path the owner's own ``/history`` reads. Four facts,
+    each a requirement:
+
+    * the OWNER's journal is the source: the ids and timestamps are the entries'
+      own, not a page dated when it was served;
+    * NOTHING IS STARTED on the owner: the session is still ``stored`` afterwards,
+      which is the whole point for a deliberately stopped conversation that no
+      engage may warm;
+    * the SERVE-TIME ``ts`` compromise the wire path documents does not apply here;
+    * the page is the local page's contract (``has_more``/``cursor_missing``).
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["the first question", "the second"])
+    # A row a human surface must never serve rides the same journal: filtering is
+    # part of the contract, not a property of the transport.
+    hidden = _append_hidden_row(server_b.root, SESSION)
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        assert reply.get("op") == "ack", reply
+        page = reply["detail"]
+        assert [entry["id"] for entry in page["entries"]] == ids, page
+        assert [entry["ts"] for entry in page["entries"]] == [1_700_000_000.0, 1_700_000_001.0]
+        assert hidden not in json.dumps(page["entries"]), "a hidden tool row reached the wire"
+        assert all(entry["type"] == "message" for entry in page["entries"])
+        assert page["has_more"] is False
+        assert page["cursor_missing"] is False
+        # THE READ STARTED NOTHING: the owner still has no runtime for the id, so
+        # the row it lists is the stored one. A read that engaged would have flipped
+        # this to a live state -- and would be the exact failure this op exists to
+        # avoid for a session that was DELIBERATELY stopped.
+        states = [
+            row.get("state")
+            for row in server_b.local_session_rows()
+            if row.get("session_id") == SESSION
+        ]
+        assert states == ["stored"], f"a cold read left the owner at {states}"
+    finally:
+        link.close("test")
+
+
+def test_the_stored_page_paginates_and_refuses_what_it_cannot_serve(
+    peer_pair: Devices, monkeypatch
+) -> None:
+    """The page contract, the bound, and the refusal that must not read as empty.
+
+    Three answers the wire cannot give today, in one cell because they are one
+    contract: a bounded page with a working cursor, an OWNED session with no rows
+    (an empty page), and an id this device does not hold (a REFUSAL). The last two
+    are the distinction the design states as the point of the change — "empty"
+    now means the owner has no rows.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, [f"question {index}" for index in range(4)])
+    _seed(server_b.root, "aaaabbbb0001")
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        first = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=2,
+        )["detail"]
+        assert [entry["id"] for entry in first["entries"]] == ids[-2:], first
+        assert first["has_more"] is True, "a page with older rows behind it claimed the end"
+
+        # THE CURSOR IS THE OLDEST ROW SERVED, and the next page continues BELOW it.
+        older = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            before_id=ids[-2],
+            limit=2,
+        )["detail"]
+        assert [entry["id"] for entry in older["entries"]] == ids[:2], older
+        assert older["has_more"] is False
+
+        # OWNED, NO ROWS: an empty page that does NOT claim reconciliation.
+        empty = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id="aaaabbbb0001",
+        )["detail"]
+        assert empty["entries"] == [] and empty["cursor_missing"] is False, empty
+
+        # NOT OWNED: a refusal by name, never an empty page. The SENTENCE is what
+        # is asserted, not the code: an authoriser refusal crosses the wire codeless
+        # by design (``wire.refusal_frame`` — which guard fired is not something a
+        # remote peer is told), so the local control layer reports its own
+        # ``peer_refused`` and the peer's words are the whole answer.
+        unowned = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id="ffffffffffff",
+        )
+        assert unowned.get("op") == "error", unowned
+        assert "does not live on this device" in str(unowned.get("message")), unowned
+
+        # A BOUND THE ROUTE WOULD REFUSE IS REFUSED HERE TOO, rather than clamped:
+        # a clamped answer is a different page than the one asked for.
+        over = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=5000,
+        )
+        assert over.get("op") == "error", over
+        assert "between 1 and 500" in str(over.get("message")), over
+    finally:
+        link.close("test")
+
+
+def test_an_oversized_stored_page_is_bounded_and_never_tears_the_link_down(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1 (agent review round 1): a page too big for one frame is SERVED in part.
+
+    THE DEFECT THIS PINS, and it was far worse than "too large": the reply travels
+    as ONE link record, and ``wire.LinkCrypto.seal`` refuses a record over 8 MiB by
+    RAISING — which ``PeerLink._write_loop`` answers by closing the WHOLE link. So
+    one long conversation read closed the mesh to that peer: every other op,
+    stream and session on the link died with it, and the reader was told nothing
+    (the hop expired and the page came back ``cursor_missing``, byte-identical to
+    an unreachable relay). Reachable at the DEFAULT limit: 12 rows of ~900 KB is
+    an ordinary conversation with a large paste in it.
+
+    Bounded, the answer is honest instead: the newest rows that fit the frame,
+    ``has_more: true`` for the ones left behind (a reader pages back for them with
+    the same ``before_id`` cursor), and the link ALIVE for every other op. The
+    companion ping is the assertion the tear-down failed.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["x" * 900_000 for _ in range(12)])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+        )
+        assert reply.get("op") == "ack", reply
+        page = reply["detail"]
+        # A PARTIAL PAGE -- not an empty one, and not a link teardown.
+        assert page["entries"], "an oversized page was answered with nothing at all"
+        assert len(page["entries"]) < len(ids), "the whole oversized page was sent"
+        # THE NEWEST ROWS SURVIVE: the page is the TAIL of the window, so dropping
+        # its OLDEST rows leaves a cursor that pages back into exactly the rows
+        # dropped (``read_transcript_page`` pages backward from it).
+        assert [entry["id"] for entry in page["entries"]] == ids[-len(page["entries"]) :]
+        assert page["has_more"] is True, "dropped rows must be reported, never hidden"
+        # THE LINK SURVIVED, and still carries other ops: the tear-down failed both.
+        assert link.alive, "an oversized page closed the peer link"
+        pong = link.request({"op": "ping", "req": 99_001, "locality": "remote"}, timeout=10.0)
+        assert pong is not None and pong.get("op") == "ack", pong
+
+        # NOTHING SERVABLE AT ALL is a NAMED refusal over the same live link: one
+        # row larger than the frame cannot be served "in part", and the reader is
+        # told which page it was rather than left with a dead link.
+        huge = "9f3ac1e0b7d3"
+        _seed_journal(server_b.root, huge, ["y" * 9_000_000])
+        refused = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=huge,
+        )
+        assert refused.get("op") == "error", refused
+        assert refused.get("code") == "page_too_large", refused
+        assert link.alive, "a row too large to serve closed the peer link"
+    finally:
+        link.close("test")
+
+
+def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R1-2 (agent review round 1): the page façade is driven from ONE thread.
+
+    THE DEFECT THIS PINS. The handler ran on the LINK'S reader thread — one per
+    link — and drove the façade with ``asyncio.run``, so a relay serving two
+    viewers (the operator's desktop and phone, the canonical mesh case) had two
+    loops against the SAME module-level ``_PAGE_CACHE``/``_FLIGHTS``: the second
+    concurrent read for one key became a NEW LEADER (single-flight lost, the whole
+    point of the module) and both mutated the cache from different threads, which
+    ``page_cache``'s docstring names as the shape of the freeze #401 was.
+
+    Both halves are asserted, because either alone is satisfiable the wrong way:
+    the ONE loop is read off ``asyncio.get_running_loop()`` inside the façade, and
+    the single read is counted at the reader the flight wraps.
+
+    WAIT ON THE EVENT, NEVER ON THE CLOCK (agent review round 2, F2). The leader
+    used to sleep 0.3 s to hold its decode open for the second reader, which made
+    the cell's meaning depend on how fast that reader got there: under load it
+    could arrive after the window and the two requests would decode in SEQUENCE,
+    redding a cell about concurrency while the code was correct. The barrier is
+    now an event counted at the façade itself — the second ENTRY into
+    ``load_transcript_page`` releases the leader — so the state under test (one
+    decode while a second caller is inside the façade) is guaranteed rather than
+    scheduled. Nothing needs the leader to be slow, only to be the leader.
+    """
+    from local_operator.session import page_cache
+
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, host_a, port_a = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link_a = _dial_to(server_a, record, host_b, port_b)
+    server_c = _third_device(peer_pair, monkeypatch, tmp_path / "c", record, host_a, port_a)
+    # B LEARNS THE NEW MEMBER BY PULLING THE TABLE, and the pull is DUE-GATED (15 s):
+    # this drops the clock so the real pull happens now, rather than adding fifteen
+    # seconds of wait to every run of a cell whose subject is neither of those.
+    for _link in list(server_b.links.values()):
+        _link.member_pulled_at = 0.0
+    server_b.refresh_membership()
+    _viewer(server_c)
+    link_c = _dial_to(server_c, store.load(record.network_id, server_c.root), host_b, port_b)
+
+    loops: list[Any] = []
+    reads: list[int] = []
+    #: Set by the SECOND caller to stand on the façade, so the leader's read is
+    #: held open by an event rather than by a sleep (see the docstring).
+    both_inside = threading.Event()
+    inside = 0
+    real_load = page_cache.load_transcript_page
+    real_read = page_cache.read_transcript_page
+
+    async def recording_load(*args: Any, **kwargs: Any) -> Any:
+        """The façade entry point, counted: this is where both callers stand.
+
+        It runs on the page loop (the leader registers its flight before it ever
+        awaits, so the second caller cannot overtake it), and the follower reaches
+        it too — one loop, two entries, one decode.
+        """
+        nonlocal inside
+        loops.append(asyncio.get_running_loop())
+        inside += 1
+        if inside >= 2:
+            both_inside.set()
+        return await real_load(*args, **kwargs)
+
+    def slow_read(*args: Any, **kwargs: Any) -> Any:
+        # Held open until the SECOND reader is inside the façade -- which is the
+        # state under test, not a race the scheduler could avoid. The timeout is a
+        # failure signal (the second caller never arrived), never the window.
+        reads.append(1)
+        assert both_inside.wait(timeout=30), "the second reader never reached the façade"
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(page_cache, "load_transcript_page", recording_load)
+    monkeypatch.setattr(page_cache, "read_transcript_page", slow_read)
+
+    barrier = threading.Barrier(2)
+    results: list[dict[str, Any]] = []
+
+    def read_a_page(root: Path) -> None:
+        barrier.wait(timeout=10)
+        results.append(
+            _call(
+                root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+            )
+        )
+
+    threads = [
+        threading.Thread(target=read_a_page, args=(server_a.root,)),
+        threading.Thread(target=read_a_page, args=(server_c.root,)),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert len(results) == 2, "both links did not answer"
+        assert all(reply.get("op") == "ack" for reply in results), results
+        assert len(reads) == 1, "the same page was decoded twice: single-flight was lost"
+        assert (
+            len({id(loop) for loop in loops}) == 1
+        ), "the page façade was driven on more than one loop across two links"
+    finally:
+        link_a.close("test")
+        link_c.close("test")
+        server_c.stop()
+
+
+def test_stopping_the_relay_closes_the_page_loop_it_shelved(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1/Q2-1 (agent review & QA round 2): ``stop()`` CLOSES the loop it shelves.
+
+    THE DEFECT THIS PINS. ``stop()`` ended the page loop with ``loop.stop`` and
+    dropped the reference, but nothing ever closed it — unlike the sibling
+    ``_slow_pool.shutdown`` a few lines above it. ``loop.stop`` only ends
+    ``run_forever``: the loop's selector, its self-pipe and its default executor
+    stay open until ``loop.close()``, so every read+stop generation leaked a fixed
+    set of descriptors (QA measured fds 8 → 11 → 14 → 17 → 20 → 23 over six
+    cycles, ``is_closed()`` false on every sample). Bounded in production, because
+    this is the shutdown path — but a long-lived process that starts and stops
+    relays accumulates them, and the thread this runs on was write-only state: the
+    loop was never closed AND never joined.
+
+    The close now happens on the loop's OWN thread (a ``finally`` around
+    ``run_forever``, so it cannot race a read still being submitted to the loop)
+    and ``stop()`` joins that thread, which is what makes the assertions below
+    true by the time it returns. The loop is captured BEFORE the stop because
+    ``stop`` clears the attribute.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+        )
+        assert reply.get("op") == "ack", reply
+        assert reply["detail"]["entries"], reply
+        # The OWNER is the device that read the page, so the owner is the device
+        # whose loop this cell is about.
+        loop = server_b._page_loop
+        thread = server_b._page_loop_thread
+        assert loop is not None, "the stored-page read built no page loop to shelve"
+        assert not loop.is_closed(), "the page loop was already closed before the stop"
+
+        server_b.stop()
+
+        assert loop.is_closed(), "stop() shelved the page loop without closing it"
+        assert (
+            thread is not None and not thread.is_alive()
+        ), "stop() returned while the page-loop thread was still running"
+    finally:
+        link.close("test")
+
+
+def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5/Q2 (agent review & QA round 1): ONE spelling for a bad ``limit``.
+
+    The two halves of one read used to disagree. The OWNER refused a non-integer
+    and an out-of-range value outright; the LOCAL control layer instead substituted
+    the default — so ``"2"`` was silently answered with a 100-row page, and a JSON
+    ``true`` (``isinstance(True, int)``) became a one-row page. Both now call
+    ``relay.validate_history_limit``, so a non-integer (bools included), an
+    out-of-range value and a float are refused with the same code on either
+    boundary, and ``None`` is the only value that takes the default.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        # THE LOCAL HALF: the limit on this device's own control frame.
+        for bad in ("abc", "2", True, 2.5, 0, 501):
+            reply = _call(
+                server_a.root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+                limit=bad,
+            )
+            assert reply.get("op") == "error", (bad, reply)
+            assert reply.get("code") == "protocol_error", (bad, reply)
+        # THE PEER HALF: the same validator, on the link's own frame.
+        for bad in (True, 2.5, "2"):
+            refused = link.request(
+                {
+                    "op": "net_session_history",
+                    "req": 99_100,
+                    "locality": "remote",
+                    "session_id": SESSION,
+                    "limit": bad,
+                },
+                timeout=10.0,
+            )
+            assert refused is not None and refused.get("op") == "error", (bad, refused)
+            assert refused.get("code") == "protocol_error", (bad, refused)
+        # AND A VALID LIMIT STILL PAGES, so the refusals are not a blanket no.
+        ok = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=2,
+        )
+        assert ok.get("op") == "ack", ok
+        assert len(ok["detail"]["entries"]) == 2, ok
+        assert link.alive
+    finally:
+        link.close("test")
+
+
 def test_a_stored_session_refuses_a_peek_and_stays_cold(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1635,6 +2164,68 @@ def test_the_engage_hop_and_its_client_bound_cannot_drift() -> None:
     # client follows it rather than staying at the default's arithmetic.
     assert relay.engage_hop_bound_s(120.0) == 120.0
     assert relay.engage_client_bound_s(120.0) > 120.0
+
+
+def test_the_stored_page_hop_and_its_client_bound_cannot_drift() -> None:
+    """The same structural rule for the read-sized page bound.
+
+    A page read is not a spawn, so it must NOT inherit the engage hop's 60 s — and
+    the client that waits for it must outlast whatever hop is sent. Both halves
+    are derived from ``session_history_hop_bound_s()``, so an edit to either one
+    either moves both or fails here.
+    """
+    assert relay.session_history_hop_bound_s() == relay.SESSION_HISTORY_HOP_S
+    assert (
+        relay.session_history_hop_bound_s() < relay.engage_hop_bound_s()
+    ), "a stored page read must not wait out a runtime spawn's budget"
+    assert relay.session_history_client_bound_s() > relay.session_history_hop_bound_s()
+
+
+def test_the_stored_page_hop_is_sent_as_a_read_sized_budget(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the CLI-facing op actually issues: one short hop, and the peer named.
+
+    The LINK is the only thing stubbed (the ``_ctl_peer_stop`` precedent), so the
+    request asserted is the frame this code really sends — including the fact that
+    a page request carries NO default engage budget, which is the difference
+    between a reader that answers in milliseconds and one that can hold a desktop
+    read envelope open for a minute.
+    """
+    server_a, _server_b, _host, _port = peer_pair
+    seen: list[tuple[str, float | None, dict[str, Any]]] = []
+    detail = {"entries": [{"id": "e1"}], "has_more": False, "cursor_missing": False}
+
+    class _RecordingLink:
+        def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            seen.append((str(frame.get("op")), timeout, dict(frame)))
+            return {"op": "ack", "req": frame.get("req"), "detail": dict(detail)}
+
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: _RecordingLink())
+
+    reply = server_a.control_dispatch(
+        "peer_session_history",
+        {
+            "peer": "d_" + "c" * 32,
+            "session_id": SESSION,
+            "before_id": "e9",
+            "limit": 25,
+            "req": 1,
+        },
+    )
+    assert reply["op"] == "ack", reply
+    assert reply["detail"] == detail
+    op, timeout, frame = seen[0]
+    assert op == "net_session_history"
+    assert (
+        timeout == relay.session_history_hop_bound_s()
+    ), "the page hop inherited a budget built for a spawn"
+    assert frame["session_id"] == SESSION and frame["before_id"] == "e9"
+    assert frame["limit"] == 25
+    # ``locality: remote`` is declared by ``_local_peer_call``, never taken from the
+    # frame that arrived (the chokepoint refuses a claimed ``local``).
+    assert frame["locality"] == "remote"
 
 
 def test_a_remote_owner_refuses_closed_when_there_is_no_relay(tmp_path: Path) -> None:

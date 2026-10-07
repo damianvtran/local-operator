@@ -10,7 +10,12 @@ than an implementation detail:
 * the transcript is read OFF THE WIRE, never out of ``<root>/sessions/<id>`` —
   the local read ``mesh-session-mobility.md`` §3.4 forbids by name, which for a
   peer's id is at best absent and at worst a different conversation wearing the
-  same id;
+  same id. Since D5-core that includes the COLD page, which is served from the
+  OWNER's stored journal by the OWNER's own relay
+  (``docs/design/mesh-cold-read-stored-history.md``) rather than from this disk;
+* an UNSERVABLE cold page says so (``cursor_missing``) instead of answering the
+  empty triple a conversation with no rows produces — the wire envelope no longer
+  conflates "no rows" with "nobody could tell us";
 * an UNREACHABLE peer still refuses, with the SAME sentence the TUI refuses the
   same state with (``remote_open.unreachable_peer_sentence`` — the shared
   composer exists so two surfaces cannot describe one situation two ways);
@@ -312,6 +317,43 @@ async def test_the_transcript_is_read_off_the_wire_not_off_this_disk(
     # pretending to know when the user sent it.
     assert len({entry["ts"] for entry in page["entries"]}) == 1
     assert page["entries"][0]["ts"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_cold_peer_history_is_never_published_as_an_empty_conversation(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5-core's failure state: an unservable page must not read as "no messages".
+
+    The defect this pins was precisely that conflation: a cold peer read answered
+    ``{entries: [], has_more: false, cursor_missing: false}`` — the same envelope a
+    conversation with no rows produces — so the renderer could not tell "there is
+    nothing here" from "we could not fetch it". The stored-page fallback closes it
+    from both sides: when the owner's journal CAN be reached the page carries its
+    rows (``tests/unit/network/test_remote_viewer.py``, over two real relays), and
+    when it cannot, the empty answer is marked untrustworthy with the contract's
+    existing word for it rather than being published as an empty conversation.
+
+    Here there is no relay on this device at all — the facade is cold, its window
+    raised, and the relay dial answers nothing — which is the ordinary shape of a
+    viewer whose own ``lop`` relay is down. Nothing is written on this disk either
+    way: the fallback reads the OWNER's journal over the wire, never
+    ``<root>/sessions/<id>`` (§3.4).
+    """
+    client, root = remote_api
+    _answer_rows(monkeypatch, _peer_row())
+    _remote_facade(monkeypatch, root)
+
+    response = await client.get(f"/v1/desktop/sessions/{OTHER}/history")
+    assert response.status_code == 200, response.text
+    page = response.json()["result"]
+    assert page == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": True,
+        "has_newer": None,
+    }
+    assert not (root / "sessions" / OTHER).exists()
 
 
 @pytest.mark.asyncio
