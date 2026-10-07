@@ -2477,6 +2477,23 @@ that makes that test type-check landed 3m24s later in the peer's own commit
 `06ee21d9e`. The PR's head was red for a defect its own intended change did
 not contain.
 
+**The stash list is repo-global, and `apply` lands whatever it resolves.** The
+before-frame note above is about MAKING a stash in a shared checkout; this is
+about USING one. `refs/stash` lives in the shared `.git`, so every worktree of
+this repository has ONE list — two worktrees answer `git stash list` with the
+same entries — and bare `git stash apply`/`pop` resolves `stash@{0}`: the
+newest stash of the WHOLE repository, made by anyone, on any branch. Each
+entry's subject names its origin (`On <branch>: <message>`), so read it
+against your own HEAD first; prefer a stash you just made in THIS worktree, or
+the entry by its stash-commit id, and `git stash show -p` reads one without
+landing it. A foreign entry that conflicts lands as stage 1/2/3 index entries
+with `AUTO_MERGE` set and NO `MERGE_HEAD` — no merge is happening, and that
+combination is the tell (reproduced in a scratch repo, 2026-10-07; the same
+day, an apply in one feature worktree staged five files from another branch's
+stashed work — the patch was banked elsewhere so nothing was lost, but the
+tree was wrong). On that signature, stop and restore rather than resolving:
+the foreign entry stays in the list until whoever made it drops it.
+
 **The undo for a mistaken edit is a reverse edit of your own hunk, never a
 whole-file operation.** Everything above is written against a deliberate act —
 clearing the tree to get a before-frame — so none of it intercepts the reflex
