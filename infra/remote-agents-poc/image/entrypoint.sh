@@ -12,6 +12,29 @@
 # so the agent process gets it only through the explicit subshell export below.
 set -euo pipefail
 
+# --- phase 0: the ROOT phase, and the ONLY code in this container that ever runs
+# as root. A Fargate task volume is mounted root-owned, so a container started as
+# uid 10001 cannot create its own workspace — measured, the first attempt died on
+# `mkdir: cannot create directory '/workspace/out': Permission denied` before it
+# reached its second step, and the task definition's `user` field cannot fix it.
+# So the process starts as root, this block hands the volume to 10001, and the
+# script RE-EXECUTES ITSELF as 10001, so nothing that follows — not the probes,
+# not the agent, not anything the agent spawns — is privileged. The alternative
+# (a non-root container with a writable root filesystem) would have traded the
+# read-only rootfs for the same result.
+if [ "$(id -u)" = "0" ]; then
+    chown -R 10001:10001 /workspace
+    echo "phase 0: chowned /workspace to 10001:10001, dropping privileges" >&2
+    # python, not setpriv: no dependency on which util-linux the base ships, and
+    # setgid before setuid is the one order that cannot fail.
+    exec python3 -c '
+import os, sys
+os.setgid(10001)
+os.setuid(10001)
+os.execv(sys.argv[1], sys.argv[1:])
+' "$0" "$@"
+fi
+
 readonly OUT=/workspace/out
 readonly WORKSPACE=/workspace
 readonly FIFO=/workspace/tmp/stream.fifo

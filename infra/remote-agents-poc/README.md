@@ -42,7 +42,11 @@ leave AWS, so no human holds push credentials. The build also smokes the image
 immediately, so `pulumi destroy` would leave a pending-deletion key that still
 carries the `lop-poc` tag — and the teardown check ("zero tagged resources") could
 then never pass. `aws/s3` gives the same SSE-KMS property with nothing to leak
-after teardown.
+after teardown. Note what "the aws/s3 key" means in the resource: `sseAlgorithm:
+aws:kms` with **no `kmsMasterKeyId`**. Writing `kmsMasterKeyId: aws/s3` previews
+clean and then fails every `PutObject` with `KMS.NotFoundException: Invalid keyId
+'aws/s3'` — the managed key is what omitting the key id expresses. (That failure was
+measured, on the first context upload.)
 
 **Why its own VPC (10.77.0.0/24) instead of the existing `sbx-vpc`.** This account
 is shared with Pergamon's sandbox, and the POC's whole point is a security group
@@ -57,11 +61,16 @@ without a UDP/53 rule. Probe 4b's positive control (a 443 connect to github.com)
 is what proves it at run time; `1.1.1.1:53` failing is what proves the exception is
 scoped to the VPC resolver and not to port 53 in general.
 
-**Why the task volume mount point is created AND chowned in the image.** An empty
-volume is populated from the image directory it is mounted over, ownership
-included. That is what lets the root filesystem stay read-only while `/workspace`
-is writable by uid 10001. It is not taken on trust: probe 4d's
-`workspace_is_writable` checks it every run.
+**Why the entrypoint has a root phase.** A Fargate task volume is mounted
+root-owned, and a container started as uid 10001 cannot write it or chown it. The
+first run measured exactly that: `mkdir: cannot create directory '/workspace/out':
+Permission denied`, before the entrypoint's second step. So the process starts as
+root, chowns `/workspace`, and **re-execs itself as 10001** — every phase that
+touches untrusted input (probes, agent, anything the agent spawns) is
+unprivileged, and probe 4d's `uid_is_10001` proves it on every run. The image still
+creates and chowns `/workspace` (so the CodeBuild smoke test, which runs the image
+with no volume, behaves the same). Do not "simplify" this by putting
+`USER 10001:10001` back: that is the configuration that cannot run.
 
 ## State
 
@@ -268,5 +277,46 @@ otherwise.
     `pulumi stack output`, so nothing is lost by keeping the file local. This is
     stricter than the spec's "if a stack config file is needed it holds only
     non-secret values".
+16. **The container runs as root for its first few milliseconds, then drops to
+    uid 10001 — the task definition has no `user` key.** §9.2 asks for a non-root
+    user, and that is the requirement the platform makes impossible: a Fargate task
+    volume is mounted root-owned, so a container started as 10001 can neither create
+    `/workspace` nor chown it, and the task dies on its first `mkdir` (measured on
+    the first real run). The alternative was a writable root filesystem, which
+    trades away the read-only-rootfs claim — a worse trade than a root phase that
+    only chowns a volume the image ships owned by 10001. `phase 0` in the entrypoint
+    is that block, it re-execs the entrypoint as 10001, and probe 4d asserts uid
+    10001 afterwards, on every run.
+17. **`executionRoleArn` and `taskRoleArn` are set on the task definition; the
+    spec's resource list (item 10) names neither field.** ECS refuses the
+    registration without them: "When you are specifying container secrets, you must
+    also specify a value for 'executionRoleArn'". Without `taskRoleArn` the task
+    credentials endpoint has no role to serve, which is the subject of probe 4a — so
+    the design's "an execution role and an empty task role" (step 1) only works if
+    both are wired here.
+18. **The account comes from `fn::invoke` of `getCallerIdentity`, not from a config
+    value.** A string config default holding a 12-digit account id reaches an
+    interpolation as a FLOAT: `325492156725` became `3.25492156725e+11`, which made
+    an illegal S3 bucket name and an "Invalid principal in policy" on the IAM trust
+    policy — and `preview` accepted both, because neither is validated until create
+    time. The live call cannot be mis-typed, and both the deploy and the driver
+    assert `sts get-caller-identity` == 325492156725 immediately before they act.
+19. **The buildspec single-quotes every command that contains `": "`, a brace or a
+    quote.** CodeBuild's YAML loader reads an unquoted `echo "a: b"` as a MAPPING,
+    not a string, and fails the whole phase with `Expected Commands[N] to be of
+    string type: found subkeys instead` — measured on the first build. This is a
+    trap that a local `yaml.safe_load` gate does not catch unless it asserts every
+    command is a `str`; that assertion is worth adding to the repo's buildspec
+    checks (not done here: it is outside this slice).
+20. **The bucket's SSE configuration is `aws:kms` with NO `kmsMasterKeyId`.** Writing
+    `kmsMasterKeyId: aws/s3` previews clean and then fails every `PutObject` with
+    `KMS.NotFoundException: Invalid keyId 'aws/s3'` — the AWS-managed key is what
+    omitting the key id means. Two further hard-won details are in the commit that
+    fixed it: the provider's READ of this resource normalised the bogus key id and
+    reported "no diff", so Pulumi could not repair it; and `pulumi up --replace` on
+    this singleton sub-resource creates the new config and then DELETES the old one,
+    which deletes the bucket's encryption configuration entirely. The fix that
+    converged stack and reality was `aws s3api put-bucket-encryption` with the
+    intended rule, after which `pulumi preview` reports the resource unchanged.
 
 

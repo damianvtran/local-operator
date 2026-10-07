@@ -49,16 +49,21 @@ RUN groupadd --gid 10001 lop \
  && useradd --uid 10001 --gid 10001 --no-create-home \
       --home-dir /workspace/home --shell /bin/bash lop
 
-# /workspace is the task volume's mount point, and it is created AND CHOWNED here
-# on purpose: an empty volume is populated from the image directory it is
-# mounted over, OWNERSHIP INCLUDED, which is what lets the root filesystem stay
-# read-only while /workspace is writable by 10001. That mechanism is not taken
-# on trust — probes.py's "workspace is writable" probe checks it at run time and
-# the run FAILS on a probe that fails.
+# /workspace is the task volume's mount point, and it is created AND chowned here
+# so the image is right on its own (the CodeBuild smoke test runs against this
+# image with no volume attached). At RUN time the volume shadows it and is mounted
+# root-owned, which is why the entrypoint has a root phase that re-chowns it and
+# then drops to uid 10001 — see the `phase 0` block there and README.md,
+# "Divergences" #16.
 RUN mkdir -p /workspace/home /workspace/tmp /workspace/out /workspace/config \
  && chown -R 10001:10001 /workspace
 
-USER 10001:10001
+# NO `USER 10001:10001`, deliberately. It looks like the stricter choice and it is
+# the one that cannot work: the task volume is root-owned, and a container that
+# starts as 10001 can neither write it nor chown it. The entrypoint starts as
+# root, chowns the volume, and re-execs itself as 10001, so every phase that
+# touches untrusted input — probes, agent, everything the agent spawns — runs
+# unprivileged. Probe 4d asserts uid 10001 at that point, on every run.
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

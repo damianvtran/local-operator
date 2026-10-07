@@ -263,7 +263,14 @@ def _load_timings(results_dir: Path) -> dict[str, int]:
 
 
 def download_artifacts(s3: Any, bucket: str, run_id: str, run_dir: Path) -> dict[str, Any]:
-    """Pull both presigned objects and unpack the results tarball."""
+    """Pull both presigned objects and unpack the results tarball.
+
+    A missing object surfaces as HTTP 403, not 404: the controller policy grants
+    `s3:GetObject` on `runs/*` and deliberately NOT `s3:ListBucket`, and S3 answers
+    403 for an object the caller may not even list. So a 403 here means "the
+    container never uploaded it" — which is a fact worth naming, because it reads
+    like a permissions bug and sent the first diagnosis after the wrong thing.
+    """
     import tarfile
 
     downloaded: dict[str, Any] = {}
@@ -273,7 +280,10 @@ def download_artifacts(s3: Any, bucket: str, run_id: str, run_dir: Path) -> dict
             s3.download_file(bucket, f"runs/{run_id}/{name}", str(target))
             downloaded[name] = target.stat().st_size
         except (ClientError, OSError) as error:
-            downloaded[name] = f"FAILED: {type(error).__name__}: {error}"
+            detail = f"FAILED: {type(error).__name__}: {error}"
+            if "403" in str(error):
+                detail += " (403 without s3:ListBucket means the object is absent)"
+            downloaded[name] = detail
     tarball = run_dir / "results.tar.gz"
     results_dir = run_dir / "results"
     if tarball.exists():
@@ -359,10 +369,27 @@ def run_once(
     downloads = download_artifacts(s3, bucket, run_id, run_dir)
     timings = _load_timings(run_dir / "results")
     containers = described.get("containers") or [{}]
+    # DescribeTasks does NOT return `runtimePlatform` for Fargate — measured, the
+    # first recorded run read None from here — so the architecture is read from the
+    # TASK DEFINITION, which is where it is actually declared. The describe-tasks
+    # reading is kept beside it so the divergence is visible rather than explained
+    # away in prose.
+    definition = ecs.describe_task_definition(taskDefinition=str(outputs["taskDefinitionArn"]))[
+        "taskDefinition"
+    ]
     record = {
         "run_id": run_id,
         "task_arn": task_arn,
-        "cpu_architecture": (described.get("runtimePlatform") or {}).get("cpuArchitecture"),
+        "cpu_architecture": (definition.get("runtimePlatform") or {}).get("cpuArchitecture"),
+        "cpu_architecture_from_describe_tasks": (described.get("runtimePlatform") or {}).get(
+            "cpuArchitecture"
+        ),
+        "task_definition": {
+            "family": definition.get("family"),
+            "revision": definition.get("revision"),
+            "executionRoleArn": definition.get("executionRoleArn"),
+            "taskRoleArn": definition.get("taskRoleArn"),
+        },
         "last_status": described.get("lastStatus"),
         "stop_code": described.get("stopCode"),
         "stopped_reason": described.get("stoppedReason"),

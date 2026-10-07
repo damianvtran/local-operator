@@ -10,6 +10,12 @@
 # zip alone, and two builds of the same context cannot disagree about the tag.
 # Callers pin the pushed image BY DIGEST (printed below as PUSHED_DIGEST), never
 # by this tag — the tag is for humans reading CloudWatch.
+#
+# EVERY command that contains a colon-space, a brace or a quote is SINGLE-QUOTED.
+# That is not style: CodeBuild's YAML loader reads an unquoted `echo "a: b"` as a
+# MAPPING rather than a string and fails the phase with `Expected Commands[N] to
+# be of string type: found subkeys instead` — measured on the first build that
+# used this file (`: ` inside a plain scalar is a mapping indicator).
 version: 0.2
 
 env:
@@ -24,19 +30,19 @@ phases:
       - docker version
   pre_build:
     commands:
-      - REGISTRY="${ECR_REPO_URL%%/*}"
-      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
-      - CTX_SHA=$(find "$CODEBUILD_SRC_DIR" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
-      - IMAGE_TAG="$LOP_VERSION-$CTX_SHA"
-      - echo "context sha: $CTX_SHA -> tag $IMAGE_TAG"
+      - 'REGISTRY="${ECR_REPO_URL%%/*}"'
+      - 'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"'
+      - 'CTX_SHA=$(find "$CODEBUILD_SRC_DIR" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)'
+      - 'IMAGE_TAG="$LOP_VERSION-$CTX_SHA"'
+      - 'echo "context sha=$CTX_SHA tag=$IMAGE_TAG"'
   build:
     commands:
-      - docker build --platform linux/arm64 -t "$ECR_REPO_URL:$IMAGE_TAG" "$CODEBUILD_SRC_DIR"
+      - 'docker build --platform linux/arm64 -t "$ECR_REPO_URL:$IMAGE_TAG" "$CODEBUILD_SRC_DIR"'
   post_build:
     commands:
       # Smoke the image BEFORE pushing: a `lop` that cannot print its own version
       # is not a build anyone should pull, and finding that out after the push
       # means the task definition can pin a broken digest.
-      - docker run --rm --entrypoint lop "$ECR_REPO_URL:$IMAGE_TAG" --version
-      - docker push "$ECR_REPO_URL:$IMAGE_TAG"
-      - echo "PUSHED_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$ECR_REPO_URL:$IMAGE_TAG")"
+      - 'docker run --rm --entrypoint lop "$ECR_REPO_URL:$IMAGE_TAG" --version'
+      - 'docker push "$ECR_REPO_URL:$IMAGE_TAG"'
+      - 'echo "PUSHED_DIGEST=$(docker inspect --format="{{index .RepoDigests 0}}" "$ECR_REPO_URL:$IMAGE_TAG")"'

@@ -17,12 +17,6 @@ runtime: yaml
 description: Slice-0 POC for remote cloud agents (lop-poc) in ca-central-1
 
 config:
-  # The account is a config value rather than an interpolation of a live call so
-  # that a plan diff shows the intended account: this stack creates IAM roles
-  # whose trust policies name it, and a wrong account there is a silent failure.
-  accountId:
-    type: string
-    default: "325492156725"
   # Filled in by the SECOND phase of the deploy (after CodeBuild has pushed the
   # image). Optional rather than required so phase 1 can create everything else;
   # see README.md, "Deploy order". Phase 2 pins it by digest and runs a full
@@ -30,6 +24,20 @@ config:
   imageDigest:
     type: string
     default: ""
+
+# The account comes from a LIVE CALL, never from config. A string config default
+# holding a 12-digit account id reaches an interpolation as a FLOAT
+# (325492156725 -> 3.25492156725e+11), which produced an illegal bucket name and
+# an "Invalid principal in policy" on the first `up` — and `preview` accepted
+# both, because neither is validated until create time.
+variables:
+  # Resolved once, at preview, from the credentials in the environment. Deploy and
+  # driver both assert `sts get-caller-identity` == 325492156725 immediately before
+  # they act, so this cannot silently follow a stray AWS_PROFILE.
+  callerIdentity:
+    fn::invoke:
+      function: aws:index/getCallerIdentity:getCallerIdentity
+      arguments: {}
 
 resources:
   # One provider for the whole stack, so the tags the budget filters on cannot be
@@ -190,7 +198,7 @@ resources:
   resultsBucket:
     type: aws:s3/bucketV2:BucketV2
     properties:
-      bucket: lop-poc-results-${accountId}
+      bucket: lop-poc-results-${callerIdentity.accountId}
       forceDestroy: true
     options:
       provider: ${aws}
@@ -230,8 +238,12 @@ resources:
       bucket: ${resultsBucket.id}
       rules:
         - applyServerSideEncryptionByDefault:
+            # NO `kmsMasterKeyId`. Naming the managed key as `aws/s3` reads
+            # correctly and previews clean, but every PutObject then fails with
+            # `KMS.NotFoundException: Invalid keyId 'aws/s3'` — the AWS-managed
+            # key is what OMITTING the key id means. (Measured: the first context
+            # upload to this bucket died on exactly that.)
             sseAlgorithm: aws:kms
-            kmsMasterKeyId: aws/s3
           bucketKeyEnabled: true
     options:
       provider: ${aws}
@@ -272,8 +284,8 @@ resources:
               "Principal": "*",
               "Action": "s3:*",
               "Resource": [
-                "arn:aws:s3:::lop-poc-results-${accountId}",
-                "arn:aws:s3:::lop-poc-results-${accountId}/*"
+                "arn:aws:s3:::lop-poc-results-${callerIdentity.accountId}",
+                "arn:aws:s3:::lop-poc-results-${callerIdentity.accountId}/*"
               ],
               "Condition": {"Bool": {"aws:SecureTransport": "false"}}
             }
@@ -323,7 +335,7 @@ resources:
               "Effect": "Allow",
               "Principal": {"Service": "ecs-tasks.amazonaws.com"},
               "Action": "sts:AssumeRole",
-              "Condition": {"StringEquals": {"aws:SourceAccount": "${accountId}"}}
+              "Condition": {"StringEquals": {"aws:SourceAccount": "${callerIdentity.accountId}"}}
             }
           ]
         }
@@ -388,7 +400,7 @@ resources:
               "Effect": "Allow",
               "Principal": {"Service": "ecs-tasks.amazonaws.com"},
               "Action": "sts:AssumeRole",
-              "Condition": {"StringEquals": {"aws:SourceAccount": "${accountId}"}}
+              "Condition": {"StringEquals": {"aws:SourceAccount": "${callerIdentity.accountId}"}}
             }
           ]
         }
@@ -407,6 +419,14 @@ resources:
       cpu: "2048"
       memory: "4096"
       networkMode: awsvpc
+      # BOTH roles are named here, and the spec's resource list names neither
+      # field: ECS refuses the registration without them. `executionRoleArn` is
+      # REQUIRED the moment a container secret is declared ("When you are
+      # specifying container secrets, you must also specify a value for
+      # 'executionRoleArn'"), and without `taskRoleArn` the task-credentials
+      # endpoint has no role to serve — which is the whole subject of probe 4a.
+      executionRoleArn: ${executionRole.arn}
+      taskRoleArn: ${taskRole.arn}
       requiresCompatibilities:
         - FARGATE
       runtimePlatform:
@@ -422,6 +442,14 @@ resources:
       # as a string (it is `container_definitions` in the upstream provider, which
       # takes JSON). Written as a block scalar so the `${...}` references below are
       # still resolved by the YAML runtime before the string reaches the provider.
+      #
+      # NO `user` KEY, deliberately, and this is the one place the task definition
+      # knowingly departs from §9.2's "non-root user". A Fargate task volume is
+      # mounted root-owned, so a container started as uid 10001 cannot create its
+      # own workspace and cannot chown it either: the measured result is a task
+      # that dies on its first `mkdir`. The entrypoint therefore starts as root,
+      # chowns the volume, and re-execs itself as 10001 before anything touches
+      # untrusted input — probe 4d asserts uid 10001 from that point on, every run.
       containerDefinitions: |
         [
           {
@@ -429,7 +457,6 @@ resources:
             "image": "${repo.repositoryUrl}@${imageDigest}",
             "essential": true,
             "readonlyRootFilesystem": true,
-            "user": "10001:10001",
             "stopTimeout": 30,
             "linuxParameters": {"initProcessEnabled": true},
             "mountPoints": [
@@ -478,7 +505,7 @@ resources:
           "Statement": [
             {
               "Effect": "Allow",
-              "Principal": {"AWS": "arn:aws:iam::${accountId}:user/ofagbemi"},
+              "Principal": {"AWS": "arn:aws:iam::${callerIdentity.accountId}:user/ofagbemi"},
               "Action": "sts:AssumeRole"
             }
           ]
@@ -499,10 +526,10 @@ resources:
               "Sid": "RunThisTaskFamilyOnly",
               "Effect": "Allow",
               "Action": "ecs:RunTask",
-              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task-definition/lop-poc-agent:*",
+              "Resource": "arn:aws:ecs:ca-central-1:${callerIdentity.accountId}:task-definition/lop-poc-agent:*",
               "Condition": {
                 "ArnEquals": {
-                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${accountId}:cluster/lop-poc"
+                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${callerIdentity.accountId}:cluster/lop-poc"
                 }
               }
             },
@@ -510,7 +537,7 @@ resources:
               "Sid": "ObserveAndStopOwnTasks",
               "Effect": "Allow",
               "Action": ["ecs:StopTask", "ecs:DescribeTasks"],
-              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task/lop-poc/*"
+              "Resource": "arn:aws:ecs:ca-central-1:${callerIdentity.accountId}:task/lop-poc/*"
             },
             {
               "Sid": "ListOwnClustersTasks",
@@ -519,7 +546,7 @@ resources:
               "Resource": "*",
               "Condition": {
                 "ArnEquals": {
-                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${accountId}:cluster/lop-poc"
+                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${callerIdentity.accountId}:cluster/lop-poc"
                 }
               }
             },
@@ -527,7 +554,7 @@ resources:
               "Sid": "TagOnlyWhatRunTaskCreates",
               "Effect": "Allow",
               "Action": "ecs:TagResource",
-              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task/lop-poc/*",
+              "Resource": "arn:aws:ecs:ca-central-1:${callerIdentity.accountId}:task/lop-poc/*",
               "Condition": {
                 "StringEquals": {"ecs:CreateAction": "RunTask"}
               }
@@ -726,7 +753,7 @@ resources:
 # --- 14. Outputs: everything the driver and the verify step need ------------
 outputs:
   region: ca-central-1
-  accountId: ${accountId}
+  accountId: ${callerIdentity.accountId}
   vpcId: ${vpc.id}
   subnetIds:
     - ${subnetA.id}
