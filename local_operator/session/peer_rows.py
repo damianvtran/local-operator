@@ -467,6 +467,30 @@ def _read_all(
     return rows, unanswered
 
 
+def _started_epoch(peer_row: object) -> float:
+    """The peer's ``started`` claim as an epoch — or ``0.0``, NO claim, for anything else.
+
+    ONE READING FOR BOTH consumers in ``_read`` (the row's ``mtime`` and its
+    ``created_at``), because the two must not disagree about when the peer says
+    the row began.
+
+    WHY A BOOL IS REFUSED RATHER THAN COERCED (operator report).
+    The live half of a federated listing published ``SessionRecord.started`` —
+    the "has run a real turn" BOOL — under this key, and ``float(True)`` is
+    ``1.0``: an epoch second into 1970, rendered by the desktop sidebar as
+    "56y" and filed under "Older". ``bool`` is excluded explicitly because
+    ``isinstance(True, int)`` is True: a claim that is not a number is NO
+    claim, and it lands where a missing key lands — ``0.0``, "an unknown start
+    sorts last" — never minted into an epoch. The type check is also what
+    keeps this reader's "nothing here raises" contract for a string claim,
+    where a bare ``float()`` would have raised into the sidebar's poll.
+    """
+    value = getattr(peer_row, "started", 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value or 0.0)
+
+
 def _read(
     root: Path | None, catalog: object | None
 ) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
@@ -529,7 +553,7 @@ def _read(
         rows.append(
             SessionRow(
                 session_id,
-                float(getattr(peer_row, "started", 0.0) or 0.0),
+                _started_epoch(peer_row),
                 # ONE NAME FOR ONE CONDITION, shared with the local half
                 # (design round 2, D14). This fell back to the session's own
                 # 12-hex id while a nameless row THIS device holds paints
@@ -554,9 +578,10 @@ def _read(
                 # a soft form of the per-device segregation the merged bins
                 # exist to remove. ``started`` is the only per-row time the
                 # wire has, it is already this row's ``mtime`` (its age
-                # column), and an unknown start sorts last — the honest
+                # column), and an unknown start — missing, or a claim that is
+                # not a number (``_started_epoch``) — sorts last, the honest
                 # direction. See ``resume.SessionRow.created_at``.
-                created_at=float(getattr(peer_row, "started", 0.0) or 0.0),
+                created_at=_started_epoch(peer_row),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

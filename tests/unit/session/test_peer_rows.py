@@ -21,6 +21,7 @@ What these pin, in the order the design cares about:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -68,7 +69,10 @@ class _Row:
         busy: bool = False,
         detached: bool = False,
         pending: str | None = None,
-        started: float = 1000.0,
+        # ``Any`` rather than ``float``: this double stands in for a PEER's wire
+        # value, and a non-number under ``started`` (the bool the live half used
+        # to publish) is exactly the hazard the reader's own cells exercise.
+        started: Any = 1000.0,
     ) -> None:
         self.session_id = session_id
         self.device_id = device_id
@@ -233,6 +237,61 @@ def test_a_remote_row_orders_by_the_peers_started_claim() -> None:
     row = peer_session_rows(catalog=catalog)[0]
     assert row.created_at == 4242.0
     assert row.mtime == 4242.0
+
+
+@pytest.mark.parametrize("claim", [True, False, None, "1700000000.0"])
+def test_a_started_claim_that_is_not_a_number_is_no_claim(claim: object) -> None:
+    """A non-numeric ``started`` must not be minted into an epoch — ``True`` least of all.
+
+    OPERATOR REPORT: the live half of the federated listing
+    published ``SessionRecord.started`` — a BOOL — under this key, and this
+    reader's bare ``float(...)`` turned ``True`` into ``1.0``: an epoch second
+    into 1970, rendered by the desktop sidebar as "56y" and filed under
+    "Older". A claim that is not a number is NO claim: it lands where a
+    missing key lands (``0.0`` — "an unknown start sorts last") and never at
+    ``1.0``. The string case rides along because this reader's contract is
+    "nothing raises": a bare ``float("…")`` would have escaped into the
+    sidebar's poll.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", started=claim)],
+    )
+    row = peer_session_rows(catalog=catalog)[0]
+    assert row.mtime == 0.0
+    assert row.mtime != 1.0, "a bool is an int subclass: float(True) is the 1970+1s epoch"
+    assert row.created_at == 0.0
+
+
+def test_a_real_epoch_earns_today_while_a_missing_claim_sorts_last() -> None:
+    """The sidebar's calendar rule over the row time: Today needs a real epoch.
+
+    ``chat-list-sections.ts`` — the desktop sidebar's rule — derives its
+    section from the row's time and reads a non-finite value as "no time", so
+    the value this producer stamps is what decides the bin: a real epoch lands
+    at or after the local day's start (Today), and a genuinely missing claim
+    is the no-claim ``0.0`` — it cannot earn Today, and it is not a minted
+    tiny epoch a renderer would date as "56y". The last mile — refusing
+    ``<= 0`` on the sidebar's ACTIVE basis so the no-claim side prints no year
+    at all — lives in that UI module (it already refuses zero on the Created
+    basis) and is routed in the PR rather than testable from here.
+    """
+    import time as time_mod
+
+    t = time_mod.localtime()
+    local_midnight = time_mod.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+    now = time_mod.time()
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [
+            _Row("s_1", "d_aa", started=now),
+            _Row("s_2", "d_aa", started=None),
+        ],
+    )
+    by_id = {row.id: row for row in peer_session_rows(catalog=catalog)}
+    assert by_id["s_1"].mtime >= local_midnight, "a real epoch earns Today"
+    assert by_id["s_2"].mtime == 0.0, "a missing claim is no claim — sorted last"
+    assert by_id["s_2"].mtime < local_midnight
 
 
 def test_the_membership_name_rides_the_row_for_the_tooltips_device_clause(

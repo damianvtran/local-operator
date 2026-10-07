@@ -2452,7 +2452,18 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     record = reply.get("record")
     record = record if isinstance(record, Mapping) else {}
     started_raw = record.get("started")
-    started = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    # A bool is an int subclass and ``float(True)`` is 1.0 — an epoch second
+    # into 1970, the value the desktop sidebar dates "56y". A claim that is
+    # not a number is NO claim and lands where a missing one lands (0.0) — the
+    # same reading ``session/peer_rows._started_epoch`` applies to the
+    # federated row that carries this claim on the next poll: the seed and the
+    # poll must not disagree about the same claim, and an OLD peer's create
+    # reply is exactly the case that still sends the bool.
+    started = (
+        0.0
+        if isinstance(started_raw, bool) or not isinstance(started_raw, (int, float))
+        else float(started_raw)
+    )
     name_raw = record.get("conversation_name")
     name = name_raw if isinstance(name_raw, str) and name_raw else UNTITLED_CONVERSATION
     matches = resolve_peer(peer, root)

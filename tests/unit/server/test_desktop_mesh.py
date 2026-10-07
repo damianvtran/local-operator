@@ -1174,6 +1174,53 @@ async def test_a_create_on_a_peer_seeds_the_id_every_route_resolves(
 
 
 @pytest.mark.asyncio
+async def test_a_bool_created_row_is_no_claim_never_a_1970_epoch(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OLD peer's bool must not become ``1.0`` through the seed either.
+
+    Operator report: the create reply's ``record`` is a
+    ``local_session_rows``-shaped row, and a peer that has not updated yet
+    still answers with the BOOL this side used to publish under ``started``.
+    ``float(True)`` is ``1.0`` — the epoch second into 1970 the sidebar dates
+    "56y" — so a bool is read as NO claim (``0.0``), the same reading
+    ``session/peer_rows`` applies to the federated row that carries this claim
+    on the next poll: the seed and the poll must not disagree about the same
+    claim.
+    """
+    client, root = mesh_api
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=MINE, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(device_id=PEER, name="build-box", role="drive")
+    )
+    network_store.save(record, root)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": OTHER,
+                "admitted": False,
+                "record": {"started": True, "conversation_name": "from an old peer"},
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    from local_operator.session.peer_rows import clear_cache, peer_session_row
+
+    clear_cache()
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    row = peer_session_row(OTHER, root)
+    assert row is not None, "the seeded id must still resolve"
+    assert row.created_at == 0.0, "a bool is no claim — never minted into 1.0"
+    assert row.mtime == 0.0
+
+
+@pytest.mark.asyncio
 async def test_a_name_shaped_peer_still_seeds_the_membership_id(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
