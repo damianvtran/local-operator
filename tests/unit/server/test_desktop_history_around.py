@@ -204,10 +204,16 @@ async def test_history_around_on_a_peer_session_is_an_unsupported_empty_page(
     """V1 cannot anchor a peer's wire window; the answer is the empty reconciled page.
 
     Pinned at the facade rather than the route because a real peer bridge needs
-    the mesh: the branch under test is the facade's ``remote_row`` switch, and
-    the plain remote read beside it must stay what it was — an empty page that
-    does NOT claim reconciliation, because there the empty page is the
-    renderer's own reconcile signal.
+    the mesh: the branch under test is the facade's ``remote_row`` switch. The
+    plain remote read beside it is the one that CHANGED with D5-core (design
+    ``docs/design/mesh-cold-read-stored-history.md``): a cold peer page is now
+    read from the OWNER's stored journal, and this bridge has no relay and no
+    owner at all, so the page is UNSERVABLE -- and an unservable page says so
+    (``cursor_missing: True``) rather than answering the empty triple a
+    conversation with no rows produces. That distinction is the point of the
+    change: an empty page on a peer now means the owner has no rows. What a
+    served cold page looks like is pinned over two real relays in
+    ``tests/unit/network/test_remote_viewer.py``.
     """
     row = SessionRow(
         id="ffffffffffff",
@@ -234,7 +240,10 @@ async def test_history_around_on_a_peer_session_is_an_unsupported_empty_page(
     assert plain == {
         "entries": [],
         "has_more": False,
-        "cursor_missing": False,
+        # CHANGED BY DESIGN (D5-core): the reader could not fetch the owner's
+        # stored page (no relay on this device at all), so the page is marked
+        # untrustworthy rather than published as "this conversation is empty".
+        "cursor_missing": True,
         "has_newer": None,
     }
 

@@ -8360,6 +8360,137 @@ async def test_desktop_history_hides_patience_rows_through_the_real_bridge(tmp_p
     assert "file body" in body
 
 
+@pytest.mark.asyncio
+async def test_the_wire_half_of_a_peer_page_drops_the_hidden_rows_too(tmp_path) -> None:
+    """R1-4 (agent review round 1): one method, two sources, ONE visibility rule.
+
+    ``_remote_history`` answers from the WIRE when a runtime is warm and from the
+    owner's stored journal when it is not, and ``harness/rows.py`` is explicit that
+    filtering belongs at the SOURCE "because the desktop client reducer has no
+    filter of its own". The stored half applied it; the wire half did not — so the
+    same conversation painted a ``patience`` ledger row over the mesh that the
+    owner's own ``/history``, and the cold read of that same session, both hide.
+
+    The bridge is the real one and the read takes the real wire branch (``is_cold``
+    False keeps it on the window); only the facade that would hold a live runtime
+    is stood in for.
+
+    ALL THREE CLASSES, not just the patience pair (agent review round 2, F4). The
+    filter is one predicate set over three markers, and a wire half that dropped
+    only the rows its round-1 cell happened to build would pass here while leaking
+    a hidden wake delivery and a diverted ask's RESULT over the mesh — the exact
+    asymmetry this cell exists to catch. Each row is asserted by its own id, so a
+    rename of the marker cannot make the cell pass by dropping nothing.
+    """
+    from local_operator.harness.types import (
+        CustomMessage,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    # A hidden wake delivery: the ``wake_prompt`` custom row ``fire_details``
+    # stamps with ``hidden`` (``wakes/patience.py``), which stays in the model's
+    # context and on no human surface.
+    wake_row = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        details={"kind": "patience", "hidden": True, "episode_id": "w1", "attempt": 1},
+    )
+    # A diverted ask's RESULT: the gate's marker rides ``provider_payload.details``
+    # (``session/session.py``), which is where the stored-row predicate reads it.
+    gate_row = Message.tool_result(
+        ToolResult(
+            tool_call_id="a1",
+            tool_name="ask",
+            content=[TextContent(text="gate: diverted")],
+            details={"ask_gate": {"hidden": True, "verdict": "diverted", "reason": "queued"}},
+        )
+    )
+
+    wire_window = [
+        Message.user("morning"),
+        wake_row,
+        Message.assistant("", tool_calls=[ToolCall(id="p1", name="patience", arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="p1",
+                tool_name="patience",
+                content=[TextContent(text="armed 5m")],
+            )
+        ),
+        gate_row,
+        Message.tool_result(
+            ToolResult(tool_call_id="r1", tool_name="read", content=[TextContent(text="file body")])
+        ),
+    ]
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    # The row is what makes this bridge REMOTE (and so picks the wire reader); the
+    # facade is what answers the window on the wire path.
+    bridge.remote_row = cast(Any, SimpleNamespace(owner_device="d_" + "a" * 32))
+    bridge.remote = cast(
+        Any,
+        SimpleNamespace(
+            is_cold=False,
+            history=lambda: list(wire_window),
+            history_before_token=None,
+        ),
+    )
+
+    page = await bridge.history(limit=50)
+    body = json.dumps(page["entries"])
+    served = {entry["id"] for entry in page["entries"]}
+
+    assert "armed 5m" not in body and '"patience"' not in body
+    assert wake_row.id not in served, "a hidden wake delivery reached the wire"
+    assert gate_row.id not in served, "a diverted ask's result reached the wire"
+    assert "gate: diverted" not in body
+    assert "morning" in body, "the filter ate a visible row"
+    assert "file body" in body, "the filter ate an ordinary tool row"
+    assert page["cursor_missing"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_stored_pages_through_id_cut_is_exercised_directly(tmp_path) -> None:
+    """Q3 (QA round 1): the stored page's ``through_id`` cut, pinned not dead.
+
+    No HTTP surface passes ``through_id`` any more (``history``'s own docstring says
+    so), which left this branch reachable only by a DIRECT bridge call — which is
+    what this cell is. It is kept because the two sources must answer one request
+    the same way: the wire path cuts at ``through_id`` inclusive, and a stored page
+    that ignored the same bound would silently serve rows a caller had excluded.
+    """
+    page = {
+        "entries": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        "has_more": False,
+        "cursor_missing": False,
+        "has_newer": None,
+    }
+
+    cut = module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001 — the branch under test
+        page, before_id=None, through_id="b"
+    )
+    assert [row["id"] for row in cut["entries"]] == ["a", "b"]
+    # The cut is a BOUND, not a reconciliation: the other fields ride unchanged.
+    assert cut["has_more"] is False and cut["cursor_missing"] is False
+
+    # NO CURSOR NAMED IS THE SAME PAGE, and a cursor this page does not hold leaves
+    # it alone rather than emptying it -- the page is the OWNER's, already cut.
+    assert (
+        module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001
+            page, before_id=None, through_id=None
+        )["entries"]
+        == page["entries"]
+    )
+    assert (
+        module.DesktopSessionBridge._cut_stored_page(  # noqa: SLF001
+            page, before_id=None, through_id="zz"
+        )["entries"]
+        == page["entries"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST .../answers — the QUEUED-ASK body (design §4; review/QA round 1)
 # ---------------------------------------------------------------------------

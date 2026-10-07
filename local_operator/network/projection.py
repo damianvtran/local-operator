@@ -92,6 +92,12 @@ OP_PEER_FACTS = "peer_session_facts"
 OP_PEER_CREATE = "peer_session_create"
 OP_PEER_ENGAGE = "peer_session_engage"
 OP_PEER_STOP = "peer_session_stop"
+#: The stored-journal read (design ``docs/design/mesh-cold-read-stored-history.md``):
+#: the page a peer serves off its OWN disk, which is what a cold read renders now
+#: that "no runtime" no longer means "no rows". The local name is this device's
+#: own relay being told to ask outward — the same boundary the four above sit on —
+#: and the peer-scope half is ``net_session_history``.
+OP_PEER_HISTORY = "peer_session_history"
 OP_STREAM_OPEN = "stream_open"
 OP_STREAM_SEND = "stream_send"
 OP_STREAM_CLOSE = "stream_close"
@@ -1242,6 +1248,62 @@ class RemoteSessionClient(AttachClient):
         self._connected = True
         self._reader_task = asyncio.get_running_loop().create_task(self._pump())
         self._on_projection(projection)
+
+
+def peer_stored_history_page(
+    root: Path | None,
+    *,
+    device_id: str,
+    session_id: str,
+    before_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any] | None:
+    """One page of a PEER's stored journal, or ``None`` when it cannot be served.
+
+    THE COLD READ'S SOURCE. A session another device owns has no wire window until
+    its owner has a runtime, and a deliberately STOPPED one never will — so the
+    page comes from the owner's own durable journal, served by the owner's
+    relay through the same reader the owner's local ``/history`` uses. Nothing is
+    started on the peer and nothing is written here: the ask is one local op on
+    this device's relay, which forwards it (see ``network/relay.py``).
+
+    ``None`` HAS ONE MEANING: THIS PAGE CANNOT BE SERVED — there is no relay on
+    this device, the peer refused, the hop expired, or the answer was not a page.
+    It is deliberately NOT collapsed into an empty page, because "no rows" and
+    "no answer" are different facts about a conversation and the caller has to be
+    able to say so (``cursor_missing``). A refusal and a silent relay are one
+    answer here for the same reason: from a reader's seat both mean the stored
+    page did not arrive, and the peer's refusal sentence is not a sentence about
+    this device's history.
+
+    BLOCKING — it dials this device's relay's control socket. Callers on a loop
+    must hand it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # READ-SIZED, derived from the hop it has to outlast rather than guessed:
+        # a client that gives up first reports no answer about a relay still
+        # working, and the reader would then mark a servable page unservable.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        before_id=before_id or None,
+        limit=int(limit),
+    )
+    if not reply or reply.get("refused"):
+        return None
+    entries = reply.get("entries")
+    if not isinstance(entries, list):
+        return None
+    return {
+        "entries": entries,
+        "has_more": bool(reply.get("has_more")),
+        "cursor_missing": bool(reply.get("cursor_missing")),
+        "has_newer": reply.get("has_newer"),
+    }
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:
