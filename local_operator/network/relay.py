@@ -305,6 +305,19 @@ STOP_BYE_SETTLE_S = 0.05
 #: done by the time ``stop`` returns, which is what a caller tearing a relay down
 #: and immediately counting fds is entitled to assume. Generous on purpose, since
 #: a page read is milliseconds unless the loop is already wedged.
+#:
+#: IT NOW ALSO BOUNDS THE TEARDOWN'S OWN WORK, by ordering rather than by
+#: arithmetic (M-R-3, agent review round 1). ``_page_loop_main`` cancels the
+#: pending tasks and drains the ready queue BEFORE it closes, so if that work did
+#: not settle then the close has not happened either, and this join is what gives
+#: up: the determinism above is conditional on the collect settling, exactly as it
+#: was already conditional on ``run_forever`` returning. The collect is a cancel
+#: plus one drained iteration, which settles in microseconds for the only two
+#: tasks this loop ever carries (a stored-page decode and its shield); a
+#: cancellation handler that blocked would instead cost a lingering loop and its
+#: descriptors for that generation — the fd leak F1/Q2-1 closed — but never a
+#: ``stop`` that fails to return, which is why this is stated rather than given a
+#: second bound of its own.
 PAGE_LOOP_STOP_JOIN_S = 5.0
 
 # ---------------------------------------------------------------------------
@@ -4259,11 +4272,15 @@ class RelayServer:
         # ``asyncio.to_thread`` never resolves once the loop carrying it has
         # stopped — ``run_forever`` returns with the task still pending and the
         # callback that would deliver the decode never runs. What ends it is the
-        # loop's OWN teardown: ``_page_loop_main`` cancels the tasks still pending
-        # before it closes (M-2), so a reader parked in ``future.result`` is
-        # released with a cancellation as soon as the bounded join below lands,
-        # rather than after a minute. The bound is still the belt for the case
-        # that teardown cannot reach — a reader whose loop never closes — and
+        # loop's OWN teardown, and it ends it in BOTH of the states a submitted
+        # read can be in when the stop lands: ``_page_loop_main`` cancels the
+        # tasks still pending and drains the ready queue before it closes (M-2,
+        # M-R-1), so a reader parked in ``future.result`` is released as soon as
+        # the bounded join below lands — with its PAGE if its task had already
+        # completed and only the completion notification was still queued, with a
+        # cancellation if the task was still pending — rather than after a
+        # minute. The bound is still the belt for a read the teardown never
+        # reaches at all, one whose loop has not closed by the time it gives up;
         # there it is the answer it always was: ``TimeoutError`` after
         # ``SESSION_HISTORY_PAGE_READ_BOUND_S``, an honest wait with an end rather
         # than a promise that the read completes.
@@ -7174,12 +7191,25 @@ class RelayServer:
             # awaits ``asyncio.shield(task)``, so the decode is a SECOND task
             # that survives its waiter's cancellation and would itself be the one
             # destroyed pending.
+            #
+            # AND THE DRAIN IS UNCONDITIONAL (M-R-1, agent review round 1). A read
+            # whose task COMPLETED before the stop landed has nothing left to
+            # cancel — it is not on the pending list — but its completion
+            # notification is a callback still sitting in the loop's ready queue
+            # (``_chain_future``'s ``_call_set_state``, the one that resolves the
+            # ``concurrent.futures.Future`` ``run_coroutine_threadsafe`` returned).
+            # ``close()`` clears that queue, so guarding the drain behind
+            # ``if pending:`` skipped it in exactly that case: the reader parked
+            # out the bound and was told the read failed, with its page already
+            # decoded and thrown away. One drained iteration is the whole
+            # difference, so it runs whether or not anything was pending.
             try:
                 pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
                 for task in pending:
                     task.cancel()
                 if pending:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(asyncio.sleep(0))
             finally:
                 loop.close()
 
