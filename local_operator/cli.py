@@ -14735,14 +14735,28 @@ def main() -> int:
                     # directory or runs no relay, so the local path below pays
                     # nothing for this check — the same zero-peer property the
                     # TUI's guard and the desktop pool rely on.
+                    #
+                    # AND THE LOCAL FALL-THROUGH BELOW IS NOW ONLY FOR A MISS
+                    # EVERY DEVICE ANSWERED (agent review round 1, R-2). A miss
+                    # WITH a silent device used to land here too and boot the
+                    # LOCAL cold viewer for a conversation this device does not
+                    # hold — the INV-1 two-writer case this very block exists to
+                    # make unreachable, left open on the one path the design note
+                    # calls CLI scope. The silence is read from the SAME listing
+                    # read that missed (``remote_row_and_silence``), so the
+                    # refusal costs no second fan-out, and the sentence is the
+                    # shared one, composed once in ``remote_open``.
                     from local_operator.resume import UNNAMED_DEVICE
                     from local_operator.session.remote_open import (
                         open_remote_viewer,
-                        remote_row_for,
+                        remote_row_and_silence,
                         unreachable_peer_sentence,
+                        unresolved_peer_sentence,
                     )
 
-                    peer_row = await asyncio.to_thread(remote_row_for, session_id, config_directory)
+                    peer_row, silent = await asyncio.to_thread(
+                        remote_row_and_silence, session_id, config_directory
+                    )
                     if peer_row is not None:
                         if not peer_row.reachable:
                             raise ValueError(unreachable_peer_sentence(session_id, peer_row))
@@ -14760,6 +14774,14 @@ def main() -> int:
                             ) from error
                         if peer_viewer is not None:
                             return peer_viewer
+                    elif silent:
+                        # A silent device is not the absence of the conversation,
+                        # and this is the surface where saying otherwise is worst:
+                        # the shell would open a viewer for an id this device does
+                        # not hold. Same shape as the unreachable refusal above —
+                        # the sentence says what the devices did, not what the id
+                        # is not.
+                        raise ValueError(unresolved_peer_sentence(session_id, silent))
 
                 record = None
                 if resume_id:

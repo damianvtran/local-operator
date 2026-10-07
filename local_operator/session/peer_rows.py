@@ -92,6 +92,41 @@ class UnansweredPeer(NamedTuple):
     reason: str
 
 
+def read_listing(
+    root: Path | None = None,
+    *,
+    now: float | None = None,
+    ttl_s: float = _TTL_S,
+    catalog: object | None = None,
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
+    """ONE listing read, handing back BOTH halves: the rows and the silence.
+
+    WHY THIS IS A FUNCTION RATHER THAN TWO CALLS (agent review round 1, R-1).
+    The two halves are one relay answer, and a caller that needs both used to
+    ask twice — ``peer_session_rows`` then ``unanswered_peers`` — which is only
+    the same read while the first one completes inside the TTL: the cache entry
+    carries the moment the read STARTED (``_read_all``), and a listing that
+    spends its own documented budget (``relay.LISTING_CLIENT_TIMEOUT_S``, which
+    equals ``_TTL_S``) is exactly the case this exists for — a member that
+    black-holes, i.e. the silence a resolution miss must consult. The second
+    call then re-dialled, and the re-dial's ROWS were discarded by
+    ``unanswered_peers``, so an id the listing had just been seen to hold could
+    answer "not a peer's". Both failures are impossible here by construction:
+    one call, one read, one answer.
+
+    ``ttl_s=0`` on a resolution miss is the ONE FORCED READ those seams pay, so
+    both halves describe the same fan-out. Callers that want one half keep
+    :func:`peer_session_rows` and :func:`unanswered_peers`, which are now this
+    function's two projections.
+    """
+    key = "" if root is None else str(root)
+    moment = time.monotonic() if now is None else now
+    cached = _CACHE.get(key)
+    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
+        return cached[1], cached[2]
+    return _read_all(root, catalog, moment, key)
+
+
 def peer_session_rows(
     root: Path | None = None,
     *,
@@ -122,12 +157,7 @@ def peer_session_rows(
     catalogue (``network/projection.PeerCatalog``); production passes nothing and
     gets this device's own relay.
     """
-    key = "" if root is None else str(root)
-    moment = time.monotonic() if now is None else now
-    cached = _CACHE.get(key)
-    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
-        return cached[1]
-    return _read_all(root, catalog, moment, key)[0]
+    return read_listing(root, now=now, ttl_s=ttl_s, catalog=catalog)[0]
 
 
 def unanswered_peers(
@@ -155,12 +185,7 @@ def unanswered_peers(
     from an absent section, which would report every peer with no sessions as
     gone.
     """
-    key = "" if root is None else str(root)
-    moment = time.monotonic() if now is None else now
-    cached = _CACHE.get(key)
-    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
-        return cached[2]
-    return _read_all(root, catalog, moment, key)[1]
+    return read_listing(root, now=now, ttl_s=ttl_s, catalog=catalog)[1]
 
 
 def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | None:

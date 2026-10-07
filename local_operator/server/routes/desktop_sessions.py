@@ -113,6 +113,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -1814,6 +1815,22 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # pick refuses with, so the two surfaces cannot describe one situation two
         # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
         # the shared composer).
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+    except PeerSessionUnresolved as error:
+        # A PEER WAS SILENT, SO THIS DEVICE CANNOT SAY THE CONVERSATION IS NOT
+        # ITS OWN — the other half of mesh slice DB2 (design note §S2). The
+        # resolution read missed AND the relay reported devices that did not
+        # answer, which is not evidence of absence: 404 is what the renderer
+        # turns into ``missing`` ("This conversation is no longer on this
+        # machine" with the composer refused), and that is a deletion claim this
+        # device cannot support. 409 with its OWN code, in the same family as
+        # ``session_is_remote`` above and for the same reason — the conversation
+        # is not known to be gone, only unknown — but with a DIFFERENT REMEDY:
+        # there is no device to name, only a link to wait for, so the sentence
+        # names the devices that stayed SILENT and never pins one as the holder.
+        #
+        # The sentence is composed in ``remote_open`` beside the unreachable
+        # one, so the two refusals cannot drift apart on different surfaces.
         raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
