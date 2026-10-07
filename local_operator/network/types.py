@@ -226,10 +226,17 @@ def capabilities_for_role(role: str) -> frozenset[str]:
 #: ``None``; see ``session/runtime/types.py``): ``lop sessions`` prints the value
 #: raw in its NEEDS column and the sidebar maps it to "Approval needed"/"Answer
 #: needed", so a second spelling for one fact shows up as a column nobody can
-#: read. The federated row carries the SAME strings (§9.2), and the stored half
-#: of a catalogue derives its claim from the attention store's ``unseen`` flag —
-#: an unread completion IS the operator being awaited, and it is not an
-#: approval, so that half publishes :data:`NEEDS_ASK`.
+#: read. The federated row carries the SAME strings (§9.2) — and from LIVE
+#: records only, the same source the local row reads. The stored half of a
+#: catalogue carries NO claim: a stored session has no runtime and no gate to
+#: answer, and an earlier cut that synthesised ``NEEDS_ASK`` from the owner's
+#: ``unseen`` flag painted a permanent "needs you" into every sidebar that no
+#: surface could clear (the row carries no completion token, so no receipt can
+#: name the completion — the 2026-10-07 correction). The unread fact lives in
+#: the OWNER's attention store, where its own surfaces — and any viewer that
+#: opens the conversation — can see and clear it. :func:`row_needs_claim` is
+#: the one reader that enforces the stored half's no-claim rule on the
+#: consuming side, so rows from pre-correction producers read identically.
 NEEDS_APPROVAL = "approval"
 NEEDS_ASK = "ask"
 
@@ -256,6 +263,31 @@ def normalise_pending(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     return value.strip() or None
+
+
+def row_needs_claim(*, state: object, pending: object) -> str | None:
+    """The ONE reader of a ROW's needs claim: never a claim on a STORED row.
+
+    ``pending`` answers "what is a person being waited on" — a parked gate on a
+    runtime that can be answered (``approval``/``ask``) — and a stored session
+    has NO runtime, so a claim on its row names a waiting that cannot be
+    answered and a mark nothing can clear: the row carries no completion token,
+    so no receipt can name the completion behind it, and it is delivered by
+    every federated listing to every sidebar. A producer that predates the
+    2026-10-07 correction still mints such claims (an ``"ask"`` synthesised
+    from the owner's ``unseen`` flag, or the legacy bool that preceded it);
+    they are dropped HERE, at the row boundary, so a mixed-version fleet paints
+    one row one way — the rule is the reader's, not each renderer's.
+
+    ``state`` is the row's own state word, compared against the catalogue's
+    ``stored`` token — the same token ``session_state_words`` renders as "not
+    running" — rather than inferred from an absent field: a live row's state
+    is a runtime word (``live``/``wedged``/...), and a row that carries
+    neither state nor pending is "no claim" either way.
+    """
+    if str(state or "").strip() == "stored":
+        return None
+    return normalise_pending(pending)
 
 
 # ---------------------------------------------------------------------------
