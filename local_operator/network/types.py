@@ -290,6 +290,26 @@ def row_needs_claim(*, state: object, pending: object) -> str | None:
     return normalise_pending(pending)
 
 
+def row_without_stored_claims(row: dict[str, Any]) -> dict[str, Any]:
+    """The row a MACHINE payload may carry: ``row_needs_claim`` applied to a dict.
+
+    The text renderers refuse a stored row's claim per render; a consumer
+    reading a payload dict verbatim would not, so the sessions tool's
+    ``details`` and the network CLI's ``--json`` route their rows through here
+    rather than each re-deriving the rule (agent review round 1, F1). The
+    original dict is returned unchanged when its claim is already clean — the
+    common path allocates nothing — and a legacy spelling is REWRITTEN to the
+    canonical one, so a consumer never has to normalise a claim it reads.
+    """
+    raw = row.get("pending")
+    needs = row_needs_claim(state=row.get("state"), pending=raw)
+    if raw == needs:
+        return row
+    fixed = dict(row)
+    fixed["pending"] = needs
+    return fixed
+
+
 # ---------------------------------------------------------------------------
 # Op vocabularies
 # ---------------------------------------------------------------------------
