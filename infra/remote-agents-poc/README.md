@@ -168,6 +168,14 @@ the secret, and its `verify` adds the acceptance-3 session transplant. `--mock`
 uses lop's own `test` provider (wire `mock`, `allows_missing_api_key`), so it proves
 lifecycle, probes and cold start and never produces a fix — that is expected.
 
+`verify` reports three outcomes, and only a FAIL makes it exit non-zero. **BLOCKED**
+is for the checks a mock run cannot answer: acceptance 2 needs a branch, and a run
+whose model made no edit has none, while the local key scan needs the real key in the
+secret store. On a recorded mock run that leaves 6 PASS — acceptance 3 in full (the
+session transplants into a fresh config root and `lop sessions --all --json` lists it
+as `state: stored` with its transcript) plus all five container probes — and 2
+BLOCKED, both of which say they need the real key.
+
 The pinned fixture is **https://github.com/olafagbemi/lop-poc-fixture.git at
 `69db7e55fc14f918cccdf2fea62894fc37f1f642`** (public, so the container can clone it
 with no credential): `calc.add` returns `a - b`, and the prompt is "make the failing
