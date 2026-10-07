@@ -136,6 +136,32 @@ pair (mid-turn join) and diff entry `ts` against the owner's journal for the sam
 render the values through the contract table. Docs: `DESKTOP_API.md` (history entry row +
 the vocabulary), mobility §3.4's ts note updated to point here.
 
+### Implementation notes (S1, as landed)
+
+The decisions above hold as written. Four places the landing had to say something the
+note left open, recorded so the next reader does not have to re-derive them:
+
+* **The join rides AUDIT pages too** (`_capture_audit_window` as well as
+  `_capture_display_window`). The audit phase serves stored journal rows verbatim, and
+  the desktop reader pages back INTO them; a page without the join would make rows the
+  owner CAN stamp read as `unstated`.
+* **`ts_source` is stamped on every entry the daemon serves**, not only on the wire
+  branch: the LOCAL page and the cold stored peer page carry it as `"entry"` (they are
+  journal rows by construction). A closed vocabulary is only usable if a consumer never
+  has to ask "absent because legacy, or absent because this path forgot?" — so every
+  producer in this codebase sets it, and absence means exactly "an older daemon". The
+  model widens `HistoryEntry.ts` to `float | None` for the same reason (an `unstated`
+  row is `null`).
+* **`entry_ts` also rides `GET .../{id}/events`**, so the snapshot embedded in the SSE
+  open frame answers exactly like `GET .../{id}`. The note named "the snapshot request
+  path"; the open frame carries the same `DesktopSnapshot`, and leaving it out would
+  give one renderer two vocabularies for the same rows in one session.
+* **Names as settled**: capability `display-history-entry-times-v1`; owner-side strip
+  `strip_entry_time_fields` / `ENTRY_TIME_WIRE_FIELDS` (the `strip_audit_fields` shape,
+  applied on all three serialization routes); request flag `entry_ts=1` with the feature
+  key `entry_ts`; daemon-side vocabulary `HistoryTsSource`; the viewer seam is
+  `AttachedSession.history_entry_times()` beside `history()`.
+
 ---
 
 ## S2 — unreachable is not missing (U2)

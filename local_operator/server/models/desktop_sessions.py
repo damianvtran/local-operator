@@ -545,11 +545,38 @@ class DraftReceipt(BaseModel):
     replayed: bool = False
 
 
+#: The closed vocabulary a desktop history row uses to say WHERE its ``ts`` came
+#: from — the wire's own honesty about a stamp it may not have.
+#:
+#: ``entry``     the row's true entry time (seconds); safe to order by and display.
+#: ``unstated``  no instant exists for the row (``ts`` is ``null``): order by
+#:               position/arrival and display no time. Never default it to zero.
+#: ``served``    a transport arrival approximation, NOT a stated instant: never
+#:               order it as a clock and never display it as the message's time.
+#:               This is the value an UNNEGOTIATED renderer keeps receiving.
+#:
+#: An ABSENT ``ts_source`` means a legacy daemon: keep today's behaviour. Written
+#: down as a consumer contract in ``docs/DESKTOP_API.md``.
+HistoryTsSource = Literal["entry", "unstated", "served"]
+
+
 class HistoryEntry(BaseModel):
     id: str
-    ts: float
+    #: WIDENED to ``None`` for the ``unstated`` case below. A row whose entry time
+    #: the owner cannot prove carries ``null`` rather than a fabricated instant —
+    #: but only to a renderer that asked for it (``entry_ts=1``); a renderer that
+    #: did not keeps today's serve-stamp, so this widening changes no existing
+    #: client's bytes. The desktop renderer already reads ``entry.ts ?? 0``.
+    ts: float | None
     type: str
     payload: dict[str, Any]
+    #: ADDITIVE and always present on a daemon that has this feature; pydantic's
+    #: default ``extra`` policy on this model is ``ignore``, so an older renderer
+    #: drops the key and keeps today's behaviour. The default exists so a producer
+    #: that does not set it cannot 500 the response model (this model is a
+    #: ``response_model`` on the history and snapshot routes); every producer in
+    #: this codebase sets it explicitly. See ``HistoryTsSource``.
+    ts_source: HistoryTsSource = "entry"
 
 
 class HistoryPage(BaseModel):

@@ -3113,7 +3113,7 @@ class DesktopSessionBridge:
         self.attention_refresh = task
         return task
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def snapshot(self, *, entry_times: bool = False) -> dict[str, Any]:
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -3209,7 +3209,7 @@ class DesktopSessionBridge:
             # and reads stay bounded by their OWN source's cut: see
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
-            history = await self.history()
+            history = await self.history(entry_times=entry_times)
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3247,6 +3247,7 @@ class DesktopSessionBridge:
         before: int | None = None,
         after: int | None = None,
         limit: int = 100,
+        entry_times: bool = False,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3293,6 +3294,13 @@ class DesktopSessionBridge:
         ``load_transcript_page``; that duplicate is deliberate, because the
         façade is a door other callers reach directly and its own contract must
         not depend on this method having run first.
+
+        ``entry_times`` IS THE RENDERER'S DECLARATION that it can consume the
+        per-row ``ts_source`` vocabulary (``docs/DESKTOP_API.md``), threaded from
+        the ``entry_ts`` request flag. It changes the WIRE reader's answer only:
+        a LOCAL page is journal rows, whose ``ts`` is the entry time by
+        construction, so it always reads ``entry``. False — an older renderer —
+        leaves the wire reader exactly as it was, serve-stamp included.
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
         if self.remote_row is not None:
@@ -3315,7 +3323,10 @@ class DesktopSessionBridge:
                     "has_newer": None,
                 }
             return await self._remote_history(
-                before_id=before_id, through_id=through_id, limit=limit
+                before_id=before_id,
+                through_id=through_id,
+                limit=limit,
+                entry_times=entry_times,
             )
         try:
             page = await load_transcript_page(
@@ -3334,14 +3345,26 @@ class DesktopSessionBridge:
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
         return {
-            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
+            # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
+            # construction — the ``entry`` value of the closed vocabulary, and the
+            # reason a LOCAL page needs no negotiation to be honest. Stamped here
+            # rather than left to a model default so the wire says so on every row
+            # a consumer might branch on.
+            "entries": visible_transcript_rows(
+                [{**json.loads(row.to_json()), "ts_source": "entry"} for row in page.entries]
+            ),
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
 
     async def _remote_history(
-        self, *, before_id: str | None, through_id: str | None, limit: int
+        self,
+        *,
+        before_id: str | None,
+        through_id: str | None,
+        limit: int,
+        entry_times: bool = False,
     ) -> dict[str, Any]:
         """One page of a PEER's transcript: the wire when it can answer, the
         owner's stored journal when it cannot.
@@ -3386,21 +3409,32 @@ class DesktopSessionBridge:
         runtime answering with no rows keeps the wire: that is a real answer about a
         conversation that has none.
 
-        ``ts`` IS THE SERVE TIME FOR WIRE ROWS, AND THAT IS A STATED LIMIT RATHER
-        THAN A CLAIM. The wire carries MESSAGES, not journal rows, and a message
-        has no entry time of its own: decorating one here with the moment this
-        device happened to read it dates the user's own message to whenever they
-        opened the window, and stamping zero paints 1970. The desktop renderer's own
-        ``history_delta`` producer already makes this choice for wire-sourced rows
-        (one arrival stamp per frame, with the follow-up written down in
-        ``transcript-reducer.ts``), so this matches the neighbouring surface
-        instead of inventing a third rule. The fix is an entry ``ts`` on the
-        window DTO, which cannot ride this change: that DTO is ``extra="forbid"``,
-        so a new key breaks every older viewer's validation.
+        ``ts`` IS THE OWNER'S TRUE ENTRY TIME WHERE IT SHIPPED ONE, AND THE SERVE
+        TIME ONLY AS THE LEGACY FALLBACK. The wire carries MESSAGES, not journal
+        rows, and a message has no entry time of its own: decorating one here with
+        the moment this device happened to read it dates the user's own message to
+        whenever they opened the window, and stamping zero paints 1970. The owner
+        now ships the true time as a ``{entry id: ts}`` join on the display window,
+        behind the negotiated ``display-history-entry-times-v1`` capability — that
+        DTO is ``extra="forbid"``, so the field may not ride to a viewer that has
+        not negotiated it; ``AttachedSession.history_entry_times`` is that join as
+        this bridge reads it. Every row says which case it is in ``ts_source``
+        (the closed vocabulary in ``server/models/desktop_sessions``; the consumer
+        contract is in ``docs/DESKTOP_API.md``):
+
+        * the owner shipped this row's entry time — ``ts`` is that instant,
+          ``ts_source: "entry"``;
+        * it did not, and THIS renderer declared it reads the vocabulary
+          (``entry_ts=1``) — ``ts: null``, ``ts_source: "unstated"``: a row with no
+          provable instant, which a consumer orders by position/arrival and
+          displays with no time rather than defaulting to zero;
+        * it did not, and the renderer did NOT declare it (every older client) —
+          the serve-stamp it has always received, ``ts_source: "served"``.
 
         STORED ROWS CARRY THEIR OWN TIMESTAMPS, and that asymmetry is the point:
         the stored page is journal rows, so ``ts`` is the time the entry was
-        written rather than the time it was served. It is richer than the wire
+        written rather than the time it was served — ``ts_source: "entry"`` by
+        construction. It is richer than the wire
         projection (``_wire_row_payload``) because it does not have to be poorer:
         the reader merges the two sources by ``id``, and the ids match because the
         wire's message id IS the entry id (``transcript.encode_message_payload``).
@@ -3461,15 +3495,36 @@ class DesktopSessionBridge:
                     page, has_more = _remote_page(older, limit=limit)
                     has_more = has_more or remote.history_before_token is not None
         stamp = time.time()
-        entries = [
-            {
-                "id": str(getattr(row, "id", "") or ""),
-                "ts": stamp,
-                "type": "message",
-                "payload": _wire_row_payload(row),
-            }
-            for row in page
-        ]
+        # THE OWNER'S OWN CLOCK WHERE IT SHIPPED IT, this device's clock only as a
+        # legacy fallback. ``history_entry_times`` is the ``{entry id: ts}`` join
+        # the OWNER put on its display page when THIS bridge's attach negotiated
+        # ``display-history-entry-times-v1``. Per-row, so the vocabulary is the
+        # truth about THAT row rather than a claim about the page: a row absent
+        # from the join has no provable entry time (it was subtracted from the
+        # owner's display replay, or it arrived live after the page).
+        true_entry_times = remote.history_entry_times()
+        entries: list[dict[str, Any]] = []
+        for row in page:
+            row_id = str(getattr(row, "id", "") or "")
+            shipped_ts = true_entry_times.get(row_id) if row_id else None
+            if shipped_ts is not None:
+                ts: float | None = shipped_ts
+                ts_source = "entry"
+            elif entry_times:
+                ts = None
+                ts_source = "unstated"
+            else:
+                ts = stamp
+                ts_source = "served"
+            entries.append(
+                {
+                    "id": row_id,
+                    "ts": ts,
+                    "ts_source": ts_source,
+                    "type": "message",
+                    "payload": _wire_row_payload(row),
+                }
+            )
         return {
             # THE SAME FILTER AS THE STORED SOURCE (agent review round 1, R1-4). A
             # hidden wake delivery, a patience ledger row and a diverted ask's result
@@ -3555,7 +3610,21 @@ class DesktopSessionBridge:
                 limit=limit,
             )
             if page is not None:
-                return self._cut_stored_page(page, before_id=before_id, through_id=through_id)
+                cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
+                # ``ts_source: "entry"`` IS THIS SOURCE'S OWN FACT, and it is
+                # stamped at the door rather than inside the cut so the cut stays
+                # a pure bound (its own contract, and its own tests, are about
+                # ``through_id``). These are JOURNAL ROWS: ``ts`` is the time the
+                # entry was written, never the time it was served. Both answers
+                # this door returns carry it, so a reader that pages back does not
+                # see the same rows change vocabulary.
+                return {
+                    **cut,
+                    "entries": [
+                        {**row, "ts_source": "entry"} if isinstance(row, dict) else row
+                        for row in cut.get("entries") or []
+                    ],
+                }
         return {
             "entries": [],
             "has_more": False,
@@ -4440,7 +4509,12 @@ class DesktopSessionBridge:
         return sub
 
     async def events(
-        self, sub: DesktopSubscription, *, epoch: str | None, after_seq: int
+        self,
+        sub: DesktopSubscription,
+        *,
+        epoch: str | None,
+        after_seq: int,
+        entry_times: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         try:
             cutoff = self.sequence
@@ -4449,7 +4523,7 @@ class DesktopSessionBridge:
             replay = (
                 [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
             )
-            snapshot = await self.snapshot()
+            snapshot = await self.snapshot(entry_times=entry_times)
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after

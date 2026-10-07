@@ -1186,6 +1186,13 @@ class RemoteSessionClient(AttachClient):
             auth["display_window"] = True
             if "display-history-audit-v1" in capabilities:
                 auth["display_history_audit"] = True
+            # The entry-time twin of the audit declaration above, on the same
+            # fail-closed reading: this viewer can read the ``{entry id: ts}``
+            # join, and an owner that does not advertise the string never sends
+            # it, so an older viewer's page model is never handed a field it
+            # forbids.
+            if "display-history-entry-times-v1" in capabilities:
+                auth["display_history_entry_times"] = True
         if self._slash_consumers is not None:
             auth["slash_consumers"] = list(self._slash_consumers)
         if self._surface == "desktop":
