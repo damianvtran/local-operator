@@ -61,3 +61,21 @@ scratch/
 # the numbers that were committed are one `git show` away at `ba225070`, the
 # `main` this sweep branched from, where the whole store is still present.
 bench/
+
+# Slice-0 POC (infra/remote-agents-poc): the CodeBuild context zip's staging
+# directory and the driver's downloaded run artifacts. Both are regenerable
+# output — the context is built from `image/`, and a run's evidence belongs in
+# the POC report, not in the tree (AGENTS.md, "Evidence goes on the PR, never
+# into the repository"). The Pulumi state is NOT here: it lives outside the repo
+# entirely, at $HOME/.lop-poc-pulumi-state (file backend). See
+# infra/remote-agents-poc/README.md, "State".
+infra/remote-agents-poc/build/
+poc-runs/
+
+# The POC stack's own config file. It carries the passphrase backend's
+# secret-encryption SALT (`encryptionsalt:`) before it carries anything else, and
+# a salt is not something to commit even though it is not itself a credential —
+# the file is per-deployment state, not source. Read the pinned digest from
+# `pulumi stack output` / the POC report instead. See
+# infra/remote-agents-poc/README.md, "Divergences" #15.
+infra/remote-agents-poc/Pulumi.*.yaml

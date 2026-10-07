@@ -1,0 +1,749 @@
+# Slice-0 POC infrastructure for remote cloud agents.
+# Design: docs/design/remote-cloud-agents.md §9.2 (the resource list) and
+# /tmp-free notes in README.md beside this file (deploy order, divergence list).
+#
+# WHY Pulumi YAML and not Python/TypeScript: the whole stack is a flat list of
+# resources with no control flow, so a typed program would add a second language
+# and a build step to the POC for nothing. The one thing a real language would
+# buy — conditionals — is exactly what the two-phase deploy below does NOT need.
+#
+# WHICH ACCOUNT AND REGION: neither is in this file. The provider takes both from
+# the environment (`AWS_PROFILE=minerva_sandbox`, `AWS_REGION=ca-central-1`), so a
+# preview or update can never silently target a different account; the driver
+# additionally asserts `sts get-caller-identity` == 325492156725 before anything
+# else runs.
+name: remote-agents-poc
+runtime: yaml
+description: Slice-0 POC for remote cloud agents (lop-poc) in ca-central-1
+
+config:
+  # The account is a config value rather than an interpolation of a live call so
+  # that a plan diff shows the intended account: this stack creates IAM roles
+  # whose trust policies name it, and a wrong account there is a silent failure.
+  accountId:
+    type: string
+    default: "325492156725"
+  # Filled in by the SECOND phase of the deploy (after CodeBuild has pushed the
+  # image). Optional rather than required so phase 1 can create everything else;
+  # see README.md, "Deploy order". Phase 2 pins it by digest and runs a full
+  # `pulumi up`, which is the only thing the task definition ever needs.
+  imageDigest:
+    type: string
+    default: ""
+
+resources:
+  # One provider for the whole stack, so the tags the budget filters on cannot be
+  # forgotten on a single resource. `lop-poc=true` is also what
+  # `aws resourcegroupstaggingapi get-resources` uses to prove teardown is complete.
+  aws:
+    type: pulumi:providers:aws
+    properties:
+      region: ca-central-1
+      defaultTags:
+        tags:
+          lop-poc: "true"
+          owner: lopdev
+
+  # --- 1. Its own VPC, so nothing here touches sbx-vpc (10.10.0.0/16) --------
+  vpc:
+    type: aws:ec2/vpc:Vpc
+    properties:
+      cidrBlock: 10.77.0.0/24
+      enableDnsSupport: true
+      enableDnsHostnames: true
+      tags:
+        Name: lop-poc-vpc
+    options:
+      provider: ${aws}
+
+  igw:
+    type: aws:ec2/internetGateway:InternetGateway
+    properties:
+      vpcId: ${vpc.id}
+      tags:
+        Name: lop-poc-igw
+    options:
+      provider: ${aws}
+
+  # Public subnets with a default route to the IGW and no NAT: the task needs an
+  # outbound 443 path (git, the provider API) and NOTHING inbound, which the
+  # security group below enforces. DNS still resolves without a UDP/53 rule
+  # because AWS exempts the VPC resolver from security-group filtering.
+  subnetA:
+    type: aws:ec2/subnet:Subnet
+    properties:
+      vpcId: ${vpc.id}
+      cidrBlock: 10.77.0.0/26
+      availabilityZone: ca-central-1a
+      mapPublicIpOnLaunch: true
+      tags:
+        Name: lop-poc-public-a
+    options:
+      provider: ${aws}
+
+  subnetB:
+    type: aws:ec2/subnet:Subnet
+    properties:
+      vpcId: ${vpc.id}
+      cidrBlock: 10.77.0.64/26
+      availabilityZone: ca-central-1b
+      mapPublicIpOnLaunch: true
+      tags:
+        Name: lop-poc-public-b
+    options:
+      provider: ${aws}
+
+  routeTable:
+    type: aws:ec2/routeTable:RouteTable
+    properties:
+      vpcId: ${vpc.id}
+      tags:
+        Name: lop-poc-rt
+    options:
+      provider: ${aws}
+
+  defaultRoute:
+    type: aws:ec2/route:Route
+    properties:
+      routeTableId: ${routeTable.id}
+      destinationCidrBlock: 0.0.0.0/0
+      gatewayId: ${igw.id}
+    options:
+      provider: ${aws}
+
+  routeAssocA:
+    type: aws:ec2/routeTableAssociation:RouteTableAssociation
+    properties:
+      subnetId: ${subnetA.id}
+      routeTableId: ${routeTable.id}
+    options:
+      provider: ${aws}
+
+  routeAssocB:
+    type: aws:ec2/routeTableAssociation:RouteTableAssociation
+    properties:
+      subnetId: ${subnetB.id}
+      routeTableId: ${routeTable.id}
+    options:
+      provider: ${aws}
+
+  # --- 2. The task security group: no ingress, egress tcp/443 only ----------
+  # An explicit `egress` list REPLACES the provider's default allow-all egress
+  # rule, which is the whole point: leaving it in place would make every probe
+  # pass vacuously and the POC's isolation claim meaningless.
+  taskSecurityGroup:
+    type: aws:ec2/securityGroup:SecurityGroup
+    properties:
+      name: lop-poc-task
+      description: Slice-0 POC task; egress 443 only, no ingress
+      vpcId: ${vpc.id}
+      egress:
+        - protocol: tcp
+          fromPort: 443
+          toPort: 443
+          cidrBlocks:
+            - 0.0.0.0/0
+          description: outbound tcp/443 only (closes the default allow-all egress)
+      tags:
+        Name: lop-poc-task
+    options:
+      provider: ${aws}
+
+  # --- 3. ECR ---------------------------------------------------------------
+  # IMMUTABLE tags: a tag may be pushed once, so the digest a task definition
+  # names can never be re-pointed at different bytes.
+  repo:
+    type: aws:ecr/repository:Repository
+    properties:
+      name: lop-poc-agent
+      imageTagMutability: IMMUTABLE
+      imageScanningConfiguration:
+        scanOnPush: true
+      forceDelete: true
+    options:
+      provider: ${aws}
+
+  # --- 4. Log groups --------------------------------------------------------
+  # 14 days: long enough for the POC's whole lifetime, short enough that a
+  # forgotten stack cannot accumulate logs.
+  agentLogGroup:
+    type: aws:cloudwatch/logGroup:LogGroup
+    properties:
+      name: /lop-poc/agent
+      retentionInDays: 14
+    options:
+      provider: ${aws}
+
+  codeBuildLogGroup:
+    type: aws:cloudwatch/logGroup:LogGroup
+    properties:
+      name: /lop-poc/codebuild
+      retentionInDays: 14
+    options:
+      provider: ${aws}
+
+  # --- 5. Results bucket ----------------------------------------------------
+  # SSE with the AWS-MANAGED aws/s3 key, deliberately not a CMK: a CMK cannot be
+  # deleted immediately, so `pulumi destroy` would leave a pending-deletion
+  # KMS key behind still carrying the lop-poc tag, and the teardown check
+  # ("no tagged resource remains") could never pass.
+  resultsBucket:
+    type: aws:s3/bucketV2:BucketV2
+    properties:
+      bucket: lop-poc-results-${accountId}
+      forceDestroy: true
+    options:
+      provider: ${aws}
+
+  resultsBucketPublicAccessBlock:
+    type: aws:s3/bucketPublicAccessBlock:BucketPublicAccessBlock
+    properties:
+      bucket: ${resultsBucket.id}
+      blockPublicAcls: true
+      blockPublicPolicy: true
+      ignorePublicAcls: true
+      restrictPublicBuckets: true
+    options:
+      provider: ${aws}
+
+  resultsBucketOwnership:
+    type: aws:s3/bucketOwnershipControls:BucketOwnershipControls
+    properties:
+      bucket: ${resultsBucket.id}
+      rule:
+        objectOwnership: BucketOwnerEnforced
+    options:
+      provider: ${aws}
+
+  resultsBucketVersioning:
+    type: aws:s3/bucketVersioningV2:BucketVersioningV2
+    properties:
+      bucket: ${resultsBucket.id}
+      versioningConfiguration:
+        status: Enabled
+    options:
+      provider: ${aws}
+
+  resultsBucketEncryption:
+    type: aws:s3/bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2
+    properties:
+      bucket: ${resultsBucket.id}
+      rules:
+        - applyServerSideEncryptionByDefault:
+            sseAlgorithm: aws:kms
+            kmsMasterKeyId: aws/s3
+          bucketKeyEnabled: true
+    options:
+      provider: ${aws}
+
+  # 7 days current / 1 day noncurrent: the run artifacts are evidence for a
+  # review, not a system of record, and the POC must not accumulate storage. The
+  # build/ prefix (the CodeBuild context zip) rides the same rule.
+  resultsBucketLifecycle:
+    type: aws:s3/bucketLifecycleConfigurationV2:BucketLifecycleConfigurationV2
+    properties:
+      bucket: ${resultsBucket.id}
+      rules:
+        - id: expire-poc-artifacts
+          status: Enabled
+          filter: {}
+          expiration:
+            days: 7
+          noncurrentVersionExpiration:
+            noncurrentDays: 1
+          abortIncompleteMultipartUpload:
+            daysAfterInitiation: 1
+    options:
+      provider: ${aws}
+
+  # Deny anything that is not TLS. The presigned PUTs the driver mints are https,
+  # so this costs the POC nothing and closes plaintext access to the evidence.
+  resultsBucketPolicy:
+    type: aws:s3/bucketPolicy:BucketPolicy
+    properties:
+      bucket: ${resultsBucket.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                "arn:aws:s3:::lop-poc-results-${accountId}",
+                "arn:aws:s3:::lop-poc-results-${accountId}/*"
+              ],
+              "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  # --- 6. The POC model key's secret ---------------------------------------
+  # NO VALUE IS CREATED HERE. recoveryWindowInDays 0 so `pulumi destroy` can
+  # delete it immediately; the value is written later with
+  #   lop secret get LOP_POC_MODEL_KEY | aws secretsmanager put-secret-value \
+  #     --secret-id lop-poc/model-key --secret-string file:///dev/stdin
+  # (see README.md). Until then the entrypoint refuses to run a non-mock task.
+  modelKeySecret:
+    type: aws:secretsmanager/secret:Secret
+    properties:
+      name: lop-poc/model-key
+      recoveryWindowInDays: 0
+    options:
+      provider: ${aws}
+
+  # --- 7. ECS cluster -------------------------------------------------------
+  # containerInsights disabled: it is billed per metric and the POC reads nothing
+  # from it.
+  cluster:
+    type: aws:ecs/cluster:Cluster
+    properties:
+      name: lop-poc
+      settings:
+        - name: containerInsights
+          value: disabled
+    options:
+      provider: ${aws}
+
+  # --- 8. Execution role: image pull, logs, the one secret. Nothing else ---
+  executionRole:
+    type: aws:iam/role:Role
+    properties:
+      name: lop-poc-exec
+      description: Slice-0 POC task execution role (image pull, logs, model-key secret)
+      assumeRolePolicy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+              "Action": "sts:AssumeRole",
+              "Condition": {"StringEquals": {"aws:SourceAccount": "${accountId}"}}
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  executionRolePolicy:
+    type: aws:iam/rolePolicy:RolePolicy
+    properties:
+      name: lop-poc-exec
+      role: ${executionRole.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "ecr:GetAuthorizationToken",
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchCheckLayerAvailability"
+              ],
+              "Resource": "${repo.arn}"
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+              "Resource": "${agentLogGroup.arn}:*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": "secretsmanager:GetSecretValue",
+              "Resource": "${modelKeySecret.arn}"
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  # --- 9. The EMPTY task role ---------------------------------------------
+  # No policies at all: not inline, not attached, no permissions boundary. This
+  # is the §7.1 claim that a compromised pod cannot pivot into AWS, and probe 4a
+  # checks it from inside the container rather than trusting the diff.
+  #
+  # Defined BEFORE the task definition and the controller role because both
+  # name it: `${taskRole.arn}` has to resolve to a resource that already exists.
+  taskRole:
+    type: aws:iam/role:Role
+    properties:
+      name: lop-poc-task
+      description: Slice-0 POC task role - deliberately has ZERO policies
+      assumeRolePolicy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+              "Action": "sts:AssumeRole",
+              "Condition": {"StringEquals": {"aws:SourceAccount": "${accountId}"}}
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  # --- 10. The task definition --------------------------------------------
+  # ARM64 (cheaper per vCPU and the image is built natively on Graviton),
+  # 2 vCPU / 4 GiB (§8.1's shape), read-only root filesystem with /workspace the
+  # single writable mount, non-root uid, and a 30 s stop timeout so the entrypoint
+  # has room to finish an upload on a StopTask.
+  taskDefinition:
+    type: aws:ecs/taskDefinition:TaskDefinition
+    properties:
+      family: lop-poc-agent
+      cpu: "2048"
+      memory: "4096"
+      networkMode: awsvpc
+      requiresCompatibilities:
+        - FARGATE
+      runtimePlatform:
+        cpuArchitecture: ARM64
+        operatingSystemFamily: LINUX
+      # NO ephemeralStorage block, and that IS the spec's "default (20 GiB)":
+      # Fargate gives every task 20 GiB free and the provider rejects a declaration
+      # of exactly 20 (the range is 21-200), so declaring 21 would ADD a billed
+      # gigabyte rather than express the default. Omitted = 20 GiB, unbilled.
+      volumes:
+        - name: workspace
+      # A JSON STRING, not a YAML list: the provider types `containerDefinitions`
+      # as a string (it is `container_definitions` in the upstream provider, which
+      # takes JSON). Written as a block scalar so the `${...}` references below are
+      # still resolved by the YAML runtime before the string reaches the provider.
+      containerDefinitions: |
+        [
+          {
+            "name": "agent",
+            "image": "${repo.repositoryUrl}@${imageDigest}",
+            "essential": true,
+            "readonlyRootFilesystem": true,
+            "user": "10001:10001",
+            "stopTimeout": 30,
+            "linuxParameters": {"initProcessEnabled": true},
+            "mountPoints": [
+              {"sourceVolume": "workspace", "containerPath": "/workspace"}
+            ],
+            "secrets": [
+              {"name": "LOP_POC_MODEL_KEY", "valueFrom": "${modelKeySecret.arn}"}
+            ],
+            "environment": [
+              {"name": "HOME", "value": "/workspace/home"},
+              {"name": "TMPDIR", "value": "/workspace/tmp"},
+              {"name": "LOCAL_OPERATOR_CONFIG_DIR", "value": "/workspace/config/local-operator"},
+              {"name": "XDG_CONFIG_HOME", "value": "/workspace/config"},
+              {"name": "XDG_CACHE_HOME", "value": "/workspace/cache"},
+              {"name": "XDG_DATA_HOME", "value": "/workspace/data"},
+              {"name": "XDG_STATE_HOME", "value": "/workspace/state"},
+              {"name": "UV_CACHE_DIR", "value": "/workspace/cache/uv"},
+              {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"}
+            ],
+            "logConfiguration": {
+              "logDriver": "awslogs",
+              "options": {
+                "awslogs-group": "/lop-poc/agent",
+                "awslogs-region": "ca-central-1",
+                "awslogs-stream-prefix": "lop-poc"
+              }
+            }
+          }
+        ]
+    options:
+      provider: ${aws}
+
+  # --- 11. Controller role: exactly what the driver does, and no more ------
+  # Trust names ONE IAM user with no wildcard principal: this role is assumable
+  # only from the operator's own identity, so a leaked task credential cannot
+  # reach it. 4 h because the driver assumes it for up to 3 h per run.
+  controllerRole:
+    type: aws:iam/role:Role
+    properties:
+      name: lop-poc-controller
+      description: Slice-0 POC driver role - RunTask/StopTask/DescribeTasks on lop-poc only
+      maxSessionDuration: 14400
+      assumeRolePolicy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"AWS": "arn:aws:iam::${accountId}:user/ofagbemi"},
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  controllerRolePolicy:
+    type: aws:iam/rolePolicy:RolePolicy
+    properties:
+      name: lop-poc-controller
+      role: ${controllerRole.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "RunThisTaskFamilyOnly",
+              "Effect": "Allow",
+              "Action": "ecs:RunTask",
+              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task-definition/lop-poc-agent:*",
+              "Condition": {
+                "ArnEquals": {
+                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${accountId}:cluster/lop-poc"
+                }
+              }
+            },
+            {
+              "Sid": "ObserveAndStopOwnTasks",
+              "Effect": "Allow",
+              "Action": ["ecs:StopTask", "ecs:DescribeTasks"],
+              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task/lop-poc/*"
+            },
+            {
+              "Sid": "ListOwnClustersTasks",
+              "Effect": "Allow",
+              "Action": "ecs:ListTasks",
+              "Resource": "*",
+              "Condition": {
+                "ArnEquals": {
+                  "ecs:cluster": "arn:aws:ecs:ca-central-1:${accountId}:cluster/lop-poc"
+                }
+              }
+            },
+            {
+              "Sid": "TagOnlyWhatRunTaskCreates",
+              "Effect": "Allow",
+              "Action": "ecs:TagResource",
+              "Resource": "arn:aws:ecs:ca-central-1:${accountId}:task/lop-poc/*",
+              "Condition": {
+                "StringEquals": {"ecs:CreateAction": "RunTask"}
+              }
+            },
+            {
+              "Sid": "PassOnlyTheTwoTaskRoles",
+              "Effect": "Allow",
+              "Action": "iam:PassRole",
+              "Resource": ["${executionRole.arn}", "${taskRole.arn}"],
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                }
+              }
+            },
+            {
+              "Sid": "PresignAndReadRunObjectsOnly",
+              "Effect": "Allow",
+              "Action": ["s3:PutObject", "s3:GetObject"],
+              "Resource": "${resultsBucket.arn}/runs/*"
+            },
+            {
+              "Sid": "ReadOwnAgentLogs",
+              "Effect": "Allow",
+              "Action": ["logs:GetLogEvents", "logs:FilterLogEvents"],
+              "Resource": "${agentLogGroup.arn}:*"
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  # --- 12. The image build -------------------------------------------------
+  # CodeBuild rather than a laptop build because the image must be arm64 and the
+  # registry is private: ARM_CONTAINER on a Graviton host builds natively, and
+  # the service role's ECR permissions never leave AWS. It is also the only
+  # supported way to get bytes into an IMMUTABLE-tag repository without a human
+  # holding push credentials.
+  codeBuildRole:
+    type: aws:iam/role:Role
+    properties:
+      name: lop-poc-codebuild
+      description: Slice-0 POC CodeBuild service role - logs, the context zip, one repo
+      assumeRolePolicy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "codebuild.amazonaws.com"},
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  codeBuildRolePolicy:
+    type: aws:iam/rolePolicy:RolePolicy
+    properties:
+      name: lop-poc-codebuild
+      role: ${codeBuildRole.id}
+      policy: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+              "Resource": "${codeBuildLogGroup.arn}:*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+              "Resource": "${resultsBucket.arn}/build/*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": "ecr:GetAuthorizationToken",
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage"
+              ],
+              "Resource": "${repo.arn}"
+            }
+          ]
+        }
+    options:
+      provider: ${aws}
+
+  imageBuildProject:
+    type: aws:codebuild/project:Project
+    properties:
+      name: lop-poc-image-build
+      description: Slice-0 POC image build - arm64, native, pushed to lop-poc-agent
+      serviceRole: ${codeBuildRole.arn}
+      # `buildTimeout`, not `timeoutInMinutes`: the provider's name for
+      # build_timeout. 30 min is 6x the observed build, so it bounds a hung build
+      # without bounding a slow one by accident.
+      buildTimeout: 30
+      source:
+        type: S3
+        location: ${resultsBucket.id}/build/context.zip
+      artifacts:
+        type: NO_ARTIFACTS
+      environment:
+        type: ARM_CONTAINER
+        # The aarch64 standard image, so `docker build --platform linux/arm64`
+        # is native rather than qemu-emulated.
+        image: aws/codebuild/amazonlinux-aarch64-standard:3.0
+        computeType: BUILD_GENERAL1_SMALL
+        privilegedMode: true
+        environmentVariables:
+          - name: ECR_REPO_URL
+            value: ${repo.repositoryUrl}
+      logsConfig:
+        cloudwatchLogs:
+          groupName: /lop-poc/codebuild
+          status: ENABLED
+    options:
+      provider: ${aws}
+
+  # --- 13. Budgets ---------------------------------------------------------
+  # TWO budgets, because the tag-filtered one cannot work yet: this account is a
+  # LINKED account in o-rxz2wexmo9 and `ListCostAllocationTags` answers
+  # AccessDenied ("Linked account doesn't have access"), so `lop-poc` is not an
+  # activated cost-allocation tag and a tag filter tracks nothing until the
+  # management account activates it. The second budget filters on the SERVICE
+  # instead, which needs no activation, and is a working backstop because no
+  # other Fargate task runs in this account (§9.1).
+  budgetTagged:
+    type: aws:budgets/budget:Budget
+    properties:
+      name: lop-poc
+      budgetType: COST
+      limitAmount: "25"
+      limitUnit: USD
+      timeUnit: MONTHLY
+      costFilters:
+        - name: TagKeyValue
+          values:
+            - "user:lop-poc$true"
+      notifications:
+        - comparisonOperator: GREATER_THAN
+          threshold: 80
+          thresholdType: PERCENTAGE
+          notificationType: ACTUAL
+          subscriberEmailAddresses:
+            - ola.fagbemi@gominerva.com
+        - comparisonOperator: GREATER_THAN
+          threshold: 100
+          thresholdType: PERCENTAGE
+          notificationType: FORECASTED
+          subscriberEmailAddresses:
+            - ola.fagbemi@gominerva.com
+    options:
+      provider: ${aws}
+
+  budgetFargate:
+    type: aws:budgets/budget:Budget
+    properties:
+      name: lop-poc-fargate
+      budgetType: COST
+      limitAmount: "25"
+      limitUnit: USD
+      timeUnit: MONTHLY
+      costFilters:
+        - name: Service
+          values:
+            - Amazon Elastic Container Service
+      notifications:
+        - comparisonOperator: GREATER_THAN
+          threshold: 80
+          thresholdType: PERCENTAGE
+          notificationType: ACTUAL
+          subscriberEmailAddresses:
+            - ola.fagbemi@gominerva.com
+        - comparisonOperator: GREATER_THAN
+          threshold: 100
+          thresholdType: PERCENTAGE
+          notificationType: FORECASTED
+          subscriberEmailAddresses:
+            - ola.fagbemi@gominerva.com
+    options:
+      provider: ${aws}
+
+# --- 14. Outputs: everything the driver and the verify step need ------------
+outputs:
+  region: ca-central-1
+  accountId: ${accountId}
+  vpcId: ${vpc.id}
+  subnetIds:
+    - ${subnetA.id}
+    - ${subnetB.id}
+  securityGroupId: ${taskSecurityGroup.id}
+  clusterArn: ${cluster.arn}
+  clusterName: ${cluster.name}
+  taskDefinitionArn: ${taskDefinition.arn}
+  repoUrl: ${repo.repositoryUrl}
+  repoArn: ${repo.arn}
+  bucket: ${resultsBucket.id}
+  secretArn: ${modelKeySecret.arn}
+  controllerRoleArn: ${controllerRole.arn}
+  executionRoleArn: ${executionRole.arn}
+  taskRoleArn: ${taskRole.arn}
+  codeBuildProject: ${imageBuildProject.name}
+  agentLogGroup: ${agentLogGroup.name}
+  codeBuildLogGroup: ${codeBuildLogGroup.name}
+
+
