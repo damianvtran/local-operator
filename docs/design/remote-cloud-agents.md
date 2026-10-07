@@ -276,7 +276,7 @@ available).
 | | (a) EKS, namespace per task | (b) ECS Fargate task per agent | (c) Firecracker microVMs | (d) EC2 instance per task |
 |---|---|---|---|---|
 | Isolation | Namespace + NetworkPolicy + ResourceQuota: **shared kernel** unless gVisor (syscall interposition) or Kata (VM per pod) is added. A namespace is a policy boundary, not a security boundary | "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface" [F1]. Fargate runs on Firecracker [F3] | A VM per sandbox on KVM [F4]. Strongest at the highest density | Full VM per task (Nitro) |
-| Cold start (estimate; POC must measure) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | Unmeasured here; image pull dominates container start (76% in the study AWS cites) [F2]; SOCI lazy loading cuts image-pull-dominated starts 40–60% [F2] | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
+| Cold start ((b) measured 2026-10-07; the rest are estimates) | Warm node: seconds. **Cold Karpenter node: ~2–4 min** [K1] | **Measured, 5 runs**: RunTask → first `RUNNING` **21.6 s median** (21.1–24.5 s), of which image pull 12.4 s and container start 8.5 s; RunTask → a first model event **44.1 s median** raw, **22.6 s median** once the 21.5 s whole-filesystem probe scan is subtracted. Image pull is 12.4 s of a 21.6 s start (~57%); SOCI was **not** tested. Evidence: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) | <125 ms VMM boot [F4]; seconds with a snapshot. Lambda MicroVMs: snapshot launch | ~30–90 s boot plus pull |
 | Compute $/task-hour (Price List API) | m7g.xlarge $0.1819/h ÷ 2 = **$0.091** + CP $0.10/h amortised (≈$0.101 at 10 concurrent, ≈$0.092 at 100) | 2×$0.03565 + 4×$0.00389 = **$0.0869**; Fargate Spot up to 70% off (ECS only, interruptible) | c6g.metal $2.3808/h ÷ 24 ≈ **$0.099** (÷32 ≈ $0.074); nested-virt c8i.xlarge $0.2051/h ÷ 2 ≈ **$0.103** | m7g.large (8 GiB) **$0.091**, per-second billing, 60 s minimum |
 | Fixed monthly floor | EKS CP **$73** + NAT/endpoints; +$133 per idle warm m7g.xlarge | **$0** compute at idle; NAT/endpoints only | +$1,738 for an always-on metal host (or scale-to-zero hosts with slower starts) | $0 compute at idle |
 | Ops burden | Highest: cluster upgrades, Karpenter, CNI policy, admission control, runtime classes | Lowest: task definition, IAM, security groups | High: own scheduler, image/snapshot pipeline, host fleet, jailer. **Or** managed Lambda MicroVMs (see below) | Medium: AMI pipeline, boot scripts, instance reaping |
@@ -484,7 +484,7 @@ margin (the tunnel doc states an 80% gross margin). For a cloud task:
 
 ---
 
-## 9. POC plan (requires separate approval; nothing here has been run)
+## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); teardown still needs approval)
 
 ### 9.1 Account, first
 
@@ -524,13 +524,26 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 1. IaC (one stack, D7) creates:
    - an ECR repo;
    - a task definition: ARM64, 2 vCPU / 4 GiB, read-only root filesystem except the
-     workspace, non-root user;
+     workspace, non-root user — and the two ARNs this list omitted, which ECS requires:
+     `executionRoleArn` (mandatory the moment a container secret is declared) and
+     `taskRoleArn` (without it the credentials endpoint has no role to serve, which is
+     probe 4a's subject). **ARM64 is read from the task definition, not from
+     `describe-tasks`: Fargate returns no `runtimePlatform` for a task.** The non-root
+     user takes one more thing, measured: the image must declare
+     `VOLUME ["/workspace"]` over a `/workspace` it already chowns to 10001, because
+     when the VOLUME path equals the volume's `containerPath` the ECS agent copies the
+     image's data and ownership into the mount; without it the container cannot write its
+     own workspace and dies on its first `mkdir`;
    - an execution role (ECR pull, Logs) and an **empty task role**;
    - a log group with 14-day retention;
    - a security group: egress 443 only, no inbound. The ECS container-credentials
      endpoint (169.254.170.2) is link-local and served by the Fargate agent, so this rule
-     does not block it; probe 4a below checks it;
-   - an S3 bucket for results: private, KMS, versioned, 7-day lifecycle;
+     does not block it; probe 4a below checks it. Name resolution still works without a
+     UDP/53 rule because AWS exempts the VPC resolver from security-group filtering;
+   - an S3 bucket for results: private, versioned, 7-day lifecycle, and SSE-KMS with the
+     **AWS-managed** `aws/s3` key — expressed as `sseAlgorithm: aws:kms` with **no
+     `kmsMasterKeyId`**. Naming `aws/s3` as the key id passes `preview` and then fails
+     every `PutObject` with `KMS.NotFoundException: Invalid keyId 'aws/s3'`;
    - a controller IAM role allowing only `ecs:RunTask`/`StopTask`/`DescribeTasks` on
      this one task definition, `iam:PassRole` for those two roles, and `s3:PutObject`
      presign. Everything is tagged `lop-poc=true`.
@@ -639,8 +652,21 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 ## 12. Open questions (answerable by the POC or a spike, not by the operator)
 
 1. Measured Fargate cold start for a ~1.5 GB lop image, with and without SOCI.
+   **Answered for the image as built, without SOCI** (5 runs on the final digest,
+   2026-10-07): RunTask → first `RUNNING` 21.6 s median (21.1–24.5 s; image pull 12.4 s,
+   container start 8.5 s); RunTask → first model event 44.1 s median raw and 22.6 s
+   median with the 21.5 s whole-filesystem probe scan subtracted; the agent's own first
+   token lands 1.3–1.9 s after the probes finish. **With SOCI: not tested.** Numbers and
+   per-run records: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md).
 2. Can `lop exec` run usefully with a read-only root filesystem and only the workspace
    writable? (Config root, uv cache and scratch locations need checking.)
+   **Answered for the filesystem layout, on 5 runs**: with `readonlyRootFilesystem: true`
+   and `/workspace` the only writable mount, the container wrote its config root, session
+   store, uv cache, scratch and results under `/workspace` (via `HOME`, `TMPDIR`,
+   `LOCAL_OPERATOR_CONFIG_DIR`, the `XDG_*` variables and `UV_CACHE_DIR` pointed there)
+   and probe 4d confirmed the root and `/usr` are read-only while `/workspace` is
+   writable. "Usefully" in the sense of a real model turn that edits the cloned repo is
+   still **PENDING** `LOP_POC_MODEL_KEY`; the mock provider produces a turn and no edits.
 3. Slice 1 (direct path): the pod's relay with `network.listen_address = 0.0.0.0`
    behind a public IPv4. Does the duplicate-link dedupe (transport §6) behave when both
    sides dial? For the blind relay: what framing does the forwarder need so that the

@@ -49,21 +49,26 @@ RUN groupadd --gid 10001 lop \
  && useradd --uid 10001 --gid 10001 --no-create-home \
       --home-dir /workspace/home --shell /bin/bash lop
 
-# /workspace is the task volume's mount point, and it is created AND chowned here
-# so the image is right on its own (the CodeBuild smoke test runs against this
-# image with no volume attached). At RUN time the volume shadows it and is mounted
-# root-owned, which is why the entrypoint has a root phase that re-chowns it and
-# then drops to uid 10001 — see the `phase 0` block there and README.md,
-# "Divergences" #16.
+# /workspace is the task volume's mount point. It is created and chowned to 10001
+# HERE, in an image layer, and then declared as a VOLUME — that pair is the whole
+# mechanism: when a Dockerfile VOLUME path EQUALS the task definition's
+# containerPath, the ECS agent copies the image's data AND ITS OWNERSHIP into the
+# bind mount, so the container can start as uid 10001 and still write there
+# (docs.aws.amazon.com/AmazonECS/latest/developerguide/bind-mounts.html;
+# aws/containers-roadmap#938).
+#
+# ORDER MATTERS: `chown` must run BEFORE `VOLUME`, because changes to a VOLUME path
+# made after the declaration are discarded at run time — the copy happens from the
+# image layer as it stood when VOLUME was declared.
+#
+# Verified in the account, not taken on the agent's word: probe 4d reads uid 10001
+# and writes /workspace on every run, and the task definition sets
+# `user: "10001:10001"` with no privilege drop anywhere in the entrypoint.
 RUN mkdir -p /workspace/home /workspace/tmp /workspace/out /workspace/config \
  && chown -R 10001:10001 /workspace
+VOLUME ["/workspace"]
 
-# NO `USER 10001:10001`, deliberately. It looks like the stricter choice and it is
-# the one that cannot work: the task volume is root-owned, and a container that
-# starts as 10001 can neither write it nor chown it. The entrypoint starts as
-# root, chowns the volume, and re-execs itself as 10001, so every phase that
-# touches untrusted input — probes, agent, everything the agent spawns — runs
-# unprivileged. Probe 4d asserts uid 10001 at that point, on every run.
+USER 10001:10001
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

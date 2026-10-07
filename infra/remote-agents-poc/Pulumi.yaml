@@ -443,13 +443,12 @@ resources:
       # takes JSON). Written as a block scalar so the `${...}` references below are
       # still resolved by the YAML runtime before the string reaches the provider.
       #
-      # NO `user` KEY, deliberately, and this is the one place the task definition
-      # knowingly departs from §9.2's "non-root user". A Fargate task volume is
-      # mounted root-owned, so a container started as uid 10001 cannot create its
-      # own workspace and cannot chown it either: the measured result is a task
-      # that dies on its first `mkdir`. The entrypoint therefore starts as root,
-      # chowns the volume, and re-execs itself as 10001 before anything touches
-      # untrusted input — probe 4d asserts uid 10001 from that point on, every run.
+      # `user: "10001:10001"` pairs with the image's `VOLUME ["/workspace"]` over a
+      # /workspace the image already owns: when the VOLUME path equals this volume's
+      # containerPath, ECS copies the image's data AND ownership into the task
+      # volume, so a container that starts as 10001 can write its own workspace.
+      # Without the VOLUME declaration the same task dies on its first `mkdir`
+      # (measured), which is why the two lines are a pair and not two choices.
       containerDefinitions: |
         [
           {
@@ -457,6 +456,7 @@ resources:
             "image": "${repo.repositoryUrl}@${imageDigest}",
             "essential": true,
             "readonlyRootFilesystem": true,
+            "user": "10001:10001",
             "stopTimeout": 30,
             "linuxParameters": {"initProcessEnabled": true},
             "mountPoints": [

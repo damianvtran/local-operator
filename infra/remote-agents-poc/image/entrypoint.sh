@@ -12,27 +12,17 @@
 # so the agent process gets it only through the explicit subshell export below.
 set -euo pipefail
 
-# --- phase 0: the ROOT phase, and the ONLY code in this container that ever runs
-# as root. A Fargate task volume is mounted root-owned, so a container started as
-# uid 10001 cannot create its own workspace — measured, the first attempt died on
-# `mkdir: cannot create directory '/workspace/out': Permission denied` before it
-# reached its second step, and the task definition's `user` field cannot fix it.
-# So the process starts as root, this block hands the volume to 10001, and the
-# script RE-EXECUTES ITSELF as 10001, so nothing that follows — not the probes,
-# not the agent, not anything the agent spawns — is privileged. The alternative
-# (a non-root container with a writable root filesystem) would have traded the
-# read-only rootfs for the same result.
-if [ "$(id -u)" = "0" ]; then
-    chown -R 10001:10001 /workspace
-    echo "phase 0: chowned /workspace to 10001:10001, dropping privileges" >&2
-    # python, not setpriv: no dependency on which util-linux the base ships, and
-    # setgid before setuid is the one order that cannot fail.
-    exec python3 -c '
-import os, sys
-os.setgid(10001)
-os.setuid(10001)
-os.execv(sys.argv[1], sys.argv[1:])
-' "$0" "$@"
+# NO privilege drop here, and that is the point: the task definition runs this as
+# uid 10001 from the first instruction, because the image declares
+# `VOLUME ["/workspace"]` over a /workspace it already owns — which makes the ECS
+# agent copy that ownership into the task volume (see the Dockerfile). An earlier
+# revision ran a root `phase 0` that chowned the volume and re-exec'd itself; it
+# worked, and it is gone because it should not have been necessary. Probe 4d
+# asserts uid 10001 on every run, so a regression here fails the run rather than
+# the isolation claim.
+if [ "$(id -u)" != "10001" ]; then
+    echo "FATAL: expected uid 10001, got $(id -u): the non-root contract is broken" >&2
+    exit 1
 fi
 
 readonly OUT=/workspace/out

@@ -226,48 +226,65 @@ def _timestamp_ms(value: Any) -> int | None:
     return None if value is None else int(value.timestamp() * 1000)
 
 
+def _delta(later: int | None, earlier: int | None) -> int | None:
+    return None if later is None or earlier is None else later - earlier
+
+
 def cold_start_numbers(
     t_runtask_ms: int,
     first_running_wall_ms: int | None,
     described: dict[str, Any],
     timings: dict[str, int],
 ) -> dict[str, Any]:
-    """The two cold-start measurements §9.3 item 5 asks for, plus the ECS phases.
+    """Cold start, DECOMPOSED, because the headline number is not one cost.
 
-    Two independent readings of the same span on purpose: ECS's own timestamps
-    (`createdAt` → `startedAt`) and the driver's wall clock (RunTask call →
-    first RUNNING observation). They are taken from different clocks and different
-    observers, and a run where they disagree by more than a second is a measurement
-    worth distrusting rather than averaging.
+    Two independent readings of the arrival on purpose: ECS's own timestamps
+    (`createdAt` → `startedAt`) and the driver's wall clock (RunTask call → first
+    RUNNING observation). They come from different clocks and different observers,
+    and a run where they disagree by more than a second is a measurement worth
+    distrusting rather than averaging.
+
+    The RunTask→first-model-event span is then split, because most of it is not the
+    agent at all: measured on the first five runs, the whole-filesystem key scan
+    (probe 4c) was 21 s of a 45 s span, so a single number would report the
+    instrument's cost as the platform's. `*_minus_probes_ms` is the honest answer to
+    "how long until a model could start working", and `probes_duration_ms` says what
+    was subtracted.
     """
     created = _timestamp_ms(described.get("createdAt"))
     pull_started = _timestamp_ms(described.get("pullStartedAt"))
     started = _timestamp_ms(described.get("startedAt"))
+    container_start = timings.get("t_container_start")
+    probes_start = timings.get("t_probes_start")
+    probes_done = timings.get("t_probes_done")
     first_model_event = timings.get("t_first_model_event")
+    probes_ms = _delta(probes_done, probes_start)
+    runtask_to_model = _delta(first_model_event, t_runtask_ms)
+    container_to_model = _delta(first_model_event, container_start)
     numbers: dict[str, Any] = {
         "runtask_to_running_wall_ms": (
             None if first_running_wall_ms is None else first_running_wall_ms - t_runtask_ms
         ),
-        "ecs_created_to_pull_started_ms": (
-            None if created is None or pull_started is None else pull_started - created
-        ),
-        "ecs_pull_started_to_started_ms": (
-            None if pull_started is None or started is None else started - pull_started
-        ),
-        "ecs_created_to_started_ms": (
-            None if created is None or started is None else started - created
-        ),
-        "container_start_to_first_model_event_ms": (
+        "ecs_created_to_pull_started_ms": _delta(pull_started, created),
+        "ecs_pull_started_to_started_ms": _delta(started, pull_started),
+        "ecs_created_to_started_ms": _delta(started, created),
+        # RUNNING -> the entrypoint's first instruction, i.e. what the platform costs
+        # AFTER the container is up (the payload is already resident at that point).
+        "ecs_started_to_container_start_ms": _delta(container_start, started),
+        "container_start_to_probes_start_ms": _delta(probes_start, container_start),
+        "probes_duration_ms": probes_ms,
+        "probes_done_to_first_model_event_ms": _delta(first_model_event, probes_done),
+        "container_start_to_first_model_event_ms": container_to_model,
+        "runtask_to_first_model_event_ms": runtask_to_model,
+        "container_start_to_first_model_event_minus_probes_ms": (
             None
-            if first_model_event is None or "t_container_start" not in timings
-            else first_model_event - timings["t_container_start"]
+            if container_to_model is None or probes_ms is None
+            else container_to_model - probes_ms
         ),
-        "runtask_to_first_model_event_ms": (
-            None if first_model_event is None else first_model_event - t_runtask_ms
+        "runtask_to_first_model_event_minus_probes_ms": (
+            None if runtask_to_model is None or probes_ms is None else runtask_to_model - probes_ms
         ),
-        "ecs_started_to_first_model_event_ms": (
-            None if first_model_event is None or started is None else first_model_event - started
-        ),
+        "ecs_started_to_first_model_event_ms": _delta(first_model_event, started),
     }
     return numbers
 

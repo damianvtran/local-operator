@@ -8,7 +8,9 @@ and what does a cold start cost" — not to ship a product feature.
 
 Nothing here is imported by the product. `scripts/remote_agents_poc.py` is a POC
 driver, `infra/remote-agents-poc/` is a standalone Pulumi project, and the image is
-built in CodeBuild, never on a laptop.
+built in CodeBuild, never on a laptop. **What it measured** — the §9.3 acceptance
+table, the cold-start decomposition and the cost so far: `docs/design/
+remote-cloud-agents-poc-results.md`.
 
 ## Layout
 
@@ -61,16 +63,20 @@ without a UDP/53 rule. Probe 4b's positive control (a 443 connect to github.com)
 is what proves it at run time; `1.1.1.1:53` failing is what proves the exception is
 scoped to the VPC resolver and not to port 53 in general.
 
-**Why the entrypoint has a root phase.** A Fargate task volume is mounted
-root-owned, and a container started as uid 10001 cannot write it or chown it. The
-first run measured exactly that: `mkdir: cannot create directory '/workspace/out':
-Permission denied`, before the entrypoint's second step. So the process starts as
-root, chowns `/workspace`, and **re-execs itself as 10001** — every phase that
-touches untrusted input (probes, agent, anything the agent spawns) is
-unprivileged, and probe 4d's `uid_is_10001` proves it on every run. The image still
-creates and chowns `/workspace` (so the CodeBuild smoke test, which runs the image
-with no volume, behaves the same). Do not "simplify" this by putting
-`USER 10001:10001` back: that is the configuration that cannot run.
+**Why the image declares `VOLUME ["/workspace"]`.** A Fargate task volume arrives
+mounted root-owned, and a container started as uid 10001 can neither write it nor
+chown it — measured, the first real run died on `mkdir: cannot create directory
+'/workspace/out': Permission denied` before the entrypoint's second step. The fix is
+the documented pairing of a Dockerfile `VOLUME` with a matching task-definition
+`containerPath`: when they are equal, the ECS agent copies the image's data **and its
+ownership** into the mount, so the `/workspace` the image chowns to 10001 arrives
+writable by 10001. The `chown` must run BEFORE the `VOLUME` declaration — changes to
+a VOLUME path after it are discarded at run time. That is why the image ends
+`chown … && VOLUME ["/workspace"]` and then `USER 10001:10001`, and why the
+task definition's `user: "10001:10001"` is possible at all. An earlier revision ran
+a root phase-0 that chowned the volume and re-exec'd the entrypoint as 10001; it
+worked, and it is gone because it should not have been necessary. Probe 4d asserts
+uid 10001 on every run, so a regression fails the run rather than the claim.
 
 ## State
 
@@ -285,16 +291,20 @@ otherwise.
     `pulumi stack output`, so nothing is lost by keeping the file local. This is
     stricter than the spec's "if a stack config file is needed it holds only
     non-secret values".
-16. **The container runs as root for its first few milliseconds, then drops to
-    uid 10001 — the task definition has no `user` key.** §9.2 asks for a non-root
-    user, and that is the requirement the platform makes impossible: a Fargate task
-    volume is mounted root-owned, so a container started as 10001 can neither create
-    `/workspace` nor chown it, and the task dies on its first `mkdir` (measured on
-    the first real run). The alternative was a writable root filesystem, which
-    trades away the read-only-rootfs claim — a worse trade than a root phase that
-    only chowns a volume the image ships owned by 10001. `phase 0` in the entrypoint
-    is that block, it re-execs the entrypoint as 10001, and probe 4d asserts uid
-    10001 afterwards, on every run.
+16. **A non-root container needed the image to declare `VOLUME ["/workspace"]`.**
+    §9.2 asks for a non-root user, and the platform makes the naive version
+    impossible: a Fargate task volume arrives mounted root-owned, so a container
+    started as 10001 can neither create `/workspace` nor chown it, and the task dies
+    on its first `mkdir` (measured). The image now chowns `/workspace` to 10001 and
+    then declares `VOLUME ["/workspace"]`, and the task definition sets
+    `user: "10001:10001"`: when the VOLUME path equals the volume's `containerPath`,
+    ECS copies the image's data AND OWNERSHIP into the mount
+    (docs.aws.amazon.com/AmazonECS/latest/developerguide/bind-mounts.html;
+    aws/containers-roadmap#938). Verified in the account — probe 4d reads uid 10001
+    and writes `/workspace` on all five recorded runs, with no privilege drop
+    anywhere in the entrypoint. A first revision instead ran a root phase-0 that
+    chowned the volume and re-exec'd itself as 10001; that also worked, and it was
+    replaced because the VOLUME pairing is the mechanism the platform documents.
 17. **`executionRoleArn` and `taskRoleArn` are set on the task definition; the
     spec's resource list (item 10) names neither field.** ECS refuses the
     registration without them: "When you are specifying container secrets, you must
