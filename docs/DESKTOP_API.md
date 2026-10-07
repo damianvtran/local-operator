@@ -1241,9 +1241,15 @@ reason, and the two reasons are not the same fact:
   (`"Requested session, profile, team or subscription not found"`). Unchanged.
 * **a device did not answer the read that missed** — this device does not know
   whether the conversation exists. The answer is `409` with `code`
-  `"session_unresolved"` and a sentence naming the devices that stayed **silent**
-  (`"… did not answer, so this conversation may be on one of them. That is not
-  the same as gone …"`).
+  `"session_unresolved"` and a sentence naming the devices that stayed **silent**:
+
+  ```
+  a1b2c3d4e5f6: build-box did not answer, so this conversation may be on that
+  device. Retry once the connection is back; /network doctor diagnoses the link.
+  ```
+
+  (One line on the wire; wrapped here. With two silent devices the list is
+  coordinated — `build-box and radiant-m4` — and the clause reads `one of them`.)
 
 The distinction is the point: a renderer maps the `404` to `missing` and paints
 "This conversation is no longer on this machine" with the composer refused — a
@@ -1251,29 +1257,54 @@ deletion claim this device cannot support about a conversation the user is
 looking at. `session_unresolved` is deliberately **in the same 409 family as
 `session_is_remote`** (the conversation is not known to be gone) and just as
 deliberately a **different code**, because the remedy differs: there is no device
-to name, only a link to wait for.
+to name, only a connection to wait for.
 
 What a client may rely on:
 
+* **the sentence headlines what the devices DID, not what the id is not.** It
+  opens on the silence (`<id>: <names> did not answer`), never on the resolution
+  miss: "could not be resolved" is this product's own wording for NOT FOUND
+  (the UI's `mini-copy.ts` captions its *missing* state that way), so opening with
+  it would state the reading this whole code exists to prevent.
 * **the sentence never claims ownership, and never pins one device as the
   holder.** Silence is not evidence about WHERE the conversation is — with more
   than one silent device the sentence says "one of them", and a silent device is
   named only as a device that did not answer. A device the membership never named
   still appears, as the app's own `"unnamed device"` (`resume.UNNAMED_DEVICE`).
+* **absence is never stated.** The sentence says where the conversation may be
+  and stops; it does not report it deleted, and it does not raise the deletion
+  word in order to deny it either (design round 1, D2).
 * **the state carries no transcript, no row and no seed** — it is a resolution
   answer, not a session. Nothing is created or written on this device for it.
-* **it is not a retry loop's answer.** One resolution, one answer: the consult
-  reads the silence recorded by the SAME listing read that missed, so the refusal
-  costs no second fan-out (`unanswered_peers` and `peer_session_rows` are two
-  halves of one cached relay answer).
+* **it is not a retry loop's answer.** One resolution, one answer: the silence
+  and the rows come back from ONE call (`peer_rows.read_listing`), which is the
+  one listing read a miss pays, so the refusal cannot cost a second fan-out and
+  cannot report a silence older than the read that missed.
+* **`/network doctor` is named bare, deliberately.** It is the only spelling
+  valid on both surfaces: `/network doctor <device>` is rejected by the CLI's
+  parser (`doctor` declares only `--peer`) and `/network doctor --peer <device>`
+  is mangled by the TUI's own translation of the command. A refusal that names a
+  device in the pointer must use `--peer` and is CLI-only.
 * **it inherits through the door**: `sessions.get` (snapshot), `/history` and
   `/events` all reach it through the same error ladder, so a client sees one code
-  for one situation whichever read it made.
+  for one situation whichever read it made. The same miss refuses the same way on
+  the shell (`lop --resume <id>`) and on `lop network <verb>`, which reach the
+  shared composer rather than a surface-local copy.
 
 **The surface contract (the UI lane's half, `mesh-wire-honesty.md` §S2):** an
 unresolved id must not be presented as a deletion and must not close the
 composer; a Retry/reconnect affordance replaces "Start a new chat" as the only
 action offered. A `404` keeps today's behaviour exactly.
+
+**The boundary, stated** (QA round 1, Q2): the state covers silence *reported by
+this device's own relay* — "a device the relay named as not answering" — because
+that is the only silence signal the listing read carries. If this device's **own
+relay** is stopped or unreachable while the peer is up, every peer is unreachable
+from here, no row arrives, and the answer is still the shared `404`. That is the
+documented residual `peer_rows.park_edges` also records (a whole-relay failure
+has no answered/not-answered signal to read); it is not a regression, and no peer
+row is on the user's screen to contradict it. Do not read this code as covering a
+relay-wide outage.
 
 One limit is stated rather than hidden: the genuinely-unknown `404` copy ("no
 longer on this machine") is the UI lane's to refine — this route does not change

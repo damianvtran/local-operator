@@ -1474,22 +1474,27 @@ async def test_an_unreachable_peers_conversation_refuses_in_the_tuis_own_words(
     (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
     _join(monkeypatch)
     monkeypatch.setattr(
-        # THE SEAM THE LOOKUP ITSELF USES (``remote_open.remote_row_for``), not the
-        # rows producer: the decision "is this id a peer's row" is that function's,
-        # and a stub one layer down would leave the cache unfilled and the answer
-        # come from the ordinary miss path instead.
-        "local_operator.session.remote_open.remote_row_for",
+        # THE SEAM THE LOOKUP ITSELF USES (``remote_open.remote_row_and_silence``),
+        # not the rows producer: the decision "is this id a peer's row" is that
+        # function's, and a stub one layer down would leave the cache unfilled and
+        # the answer come from the ordinary miss path instead. It is the ONE-READ
+        # seam (agent review round 1, R-1) — the row and the read's silence come
+        # back together — so the stub answers both halves here.
+        "local_operator.session.remote_open.remote_row_and_silence",
         # ONLY the peer's id is a peer's row, and it is the UNREACHABLE shape: the
         # second half of this test asserts that an id nobody holds is still the
         # ordinary 404.
         lambda session_id, root=None: (
-            _peer_row(
-                id=session_id,
-                reachable=False,
-                unreachable_reason="connect_failed:ConnectionRefusedError",
-            )
-            if session_id == OTHER
-            else None
+            (
+                _peer_row(
+                    id=session_id,
+                    reachable=False,
+                    unreachable_reason="connect_failed:ConnectionRefusedError",
+                )
+                if session_id == OTHER
+                else None
+            ),
+            (),
         ),
     )
     response = await client.get(f"/v1/desktop/sessions/{OTHER}")

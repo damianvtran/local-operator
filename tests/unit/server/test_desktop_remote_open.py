@@ -54,9 +54,10 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
 from local_operator.harness.types import Message
-from local_operator.resume import SessionRow
+from local_operator.resume import ORIGIN_NAME, SessionRow
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.session import peer_rows as peer_rows_mod
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.owner import SessionSeed
@@ -144,16 +145,27 @@ def _peer_row(**overrides: Any) -> SessionRow:
 
 
 def _answer_rows(monkeypatch: pytest.MonkeyPatch, row: SessionRow | None) -> list[str]:
-    """Point the pool's ONE remote question at ``row``, recording every ask."""
+    """Point the pool's ONE remote question at ``row``, recording every ask.
+
+    ON ``remote_row_and_silence``, THE SEAM THE POOL ACTUALLY CALLS (agent review
+    round 1, R-1): the row and the silence come back from one call, so a stub on
+    ``remote_row_for`` — now the row-only projection of that function — would
+    leave the pool's own call unanswered. The empty silence half is the honest
+    default for these cells: they are about the row path, and a peer that did not
+    answer is what ``row.reachable`` carries.
+    """
     from local_operator.session import remote_open
 
     asked: list[str] = []
 
-    def fake_row(session_id: str, root: Any = None) -> SessionRow | None:
+    def fake_resolution(
+        session_id: str, root: Any = None
+    ) -> tuple[SessionRow | None, tuple[Any, ...]]:
         asked.append(session_id)
-        return row if row is not None and row.id == session_id else None
+        resolved = row if row is not None and row.id == session_id else None
+        return resolved, ()
 
-    monkeypatch.setattr(remote_open, "remote_row_for", fake_row)
+    monkeypatch.setattr(remote_open, "remote_row_and_silence", fake_resolution)
     return asked
 
 
@@ -211,6 +223,28 @@ def _fresh_peer_listing() -> Iterator[None]:
     peer_rows.clear_cache()
     yield
     peer_rows.clear_cache()
+
+
+class _JumpingClock:
+    """A monotonic clock that jumps PAST the listing TTL on every reading (R-1).
+
+    The injected clock the round-1 reviewer reproduced ``calls=2`` with. The
+    "no second dial" property was an argument about durations — the consult's
+    freshness test compares against the moment the FIRST read started, and a
+    listing that spends its documented budget sits on the edge — so a real clock
+    cannot discriminate: the injected catalogue answers instantly. Jumping 100 s
+    per reading makes a two-call shape re-dial deterministically.
+
+    Patched onto the ``peer_rows`` module (its only use of ``time``), never the
+    shared ``time`` module.
+    """
+
+    def __init__(self) -> None:
+        self.readings = 0
+
+    def monotonic(self) -> float:
+        self.readings += 1
+        return 1_000.0 + 100.0 * self.readings
 
 
 def _relay(
@@ -317,8 +351,102 @@ async def test_a_silent_device_makes_an_unknown_id_unresolved_not_missing(
     assert "did not answer" in detail["message"], "silence was not named as silence"
     assert "connect_failed:ConnectionRefusedError" not in detail["message"]
     assert " is on " not in detail["message"], "silence was turned into an ownership claim"
+    assert "may be on that device" in detail["message"]
     assert "no longer" not in detail["message"], "an unprovable absence was stated as a deletion"
+    assert "could not be resolved" not in detail["message"], "the miss was the headline"
     assert catalog.calls == 1, "the consult paid a SECOND listing read"
+
+
+@pytest.mark.asyncio
+async def test_the_plural_route_answer_says_one_of_them(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6/Q1: the plural copy, on the wire, asserted where it is produced.
+
+    Neutering the branch to ``subject = "that device"`` for every count left the
+    whole suite green before this cell, and both branches are reachable: the relay
+    reports every device it could not reach.
+    """
+    client, _root = remote_api
+    _relay(
+        monkeypatch,
+        silent=[("d_1", "build-box"), ("d_2", "radiant-m4")],
+        live=[("d_live", "pixel-8")],
+    )
+
+    response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
+
+    assert response.status_code == 409, response.text
+    message = response.json()["detail"]["message"]
+    assert "build-box and radiant-m4 did not answer" in message
+    assert "one of them" in message
+    assert "that device" not in message
+    assert " is on " not in message
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_silent_device_still_appears(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6: ``peer_rows`` builds ``name=str(facts.name or "")``, so this is a real input."""
+    client, _root = remote_api
+    _relay(monkeypatch, silent=[("d_1", "build-box"), ("d_2", "")])
+
+    response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
+
+    assert response.status_code == 409, response.text
+    message = response.json()["detail"]["message"]
+    assert "build-box and unnamed device did not answer" in message
+    assert "  " not in message
+
+
+@pytest.mark.asyncio
+async def test_a_miss_whose_own_read_outlasts_the_ttl_still_issues_no_second_dial(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-1, at the route: ONE READ, BOTH HALVES — by construction, not by duration.
+
+    Reproduces the reviewer's ``the consult issued a SECOND fan-out: calls=2`` with
+    an injected clock, and asserts ``1`` on the one-read shape. The rows and the
+    silence come back from the same call, so the re-dial (and the row loss it
+    caused: an id the listing HELD answering "not a peer's") cannot happen at all.
+    """
+    client, _root = remote_api
+    monkeypatch.setattr(peer_rows_mod, "time", _JumpingClock())
+    catalog = _relay(
+        monkeypatch, silent=[("d_silent", "build-box")], live=[("d_live", "radiant-m4")]
+    )
+
+    response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "session_unresolved"
+    assert catalog.calls == 1, "the consult issued a SECOND fan-out"
+
+
+@pytest.mark.asyncio
+async def test_a_door_closed_residue_directory_answers_the_shared_404(
+    remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-3: no read means no silence, so the residue corner is the 404 the note claims.
+
+    A local ``sessions/<id>/`` the door will not open (``origin: subagent``) makes
+    the miss perform NO listing read, and a device's silence may only be reported
+    from a read this device actually made. The two-call shape answered 409 here
+    from whatever the cache happened to hold — cold AND warm, measured by the
+    reviewer — which is a silence about a fan-out that never asked about this id.
+    """
+    client, root = remote_api
+    residue = root / "sessions" / "a1b2c3d4e5f6"
+    residue.mkdir(parents=True, exist_ok=True)
+    (residue / ORIGIN_NAME).write_text(json.dumps({"origin": "subagent"}))
+    monkeypatch.setattr(peer_rows_mod, "time", _JumpingClock())
+    catalog = _relay(monkeypatch, silent=[("d_silent", "build-box")])
+
+    for attempt in ("cold", "warm"):
+        response = await client.get("/v1/desktop/sessions/a1b2c3d4e5f6")
+        assert response.status_code == 404, f"{attempt}: {response.text}"
+    assert catalog.calls == 0, "a directory this device holds is not a peer question"
 
 
 @pytest.mark.asyncio
