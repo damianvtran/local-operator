@@ -402,10 +402,10 @@ def render_repair_notice(peer_name: str, key: str) -> str:
 
 
 #: THE ONE SENTENCE THE DESIGN COMMITS TO (§2.3), on every surface that ends a
-#: copy: share receipt, guide, and `credential revoke` output. It is not a
-#: disclaimer — it states the actual limit of a wipe (reachable copies end; an
-#: exfiltrated one does not) and the only effective ending (rotation at the
-#: source).
+#: copy: `credential revoke` output, the `member rm` receipt, and the network
+#: guide's credentials section. It is not a disclaimer — it states the actual
+#: limit of a wipe (reachable copies end; an exfiltrated one does not) and the
+#: only effective ending (rotation at the source).
 COPY_CEILING_SENTENCE = (
     "This removed the copies it could reach. A copy that already left that device "
     "can only be ended by rotating the secret at its source."
@@ -430,6 +430,28 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
         f"a wipe notice for '{key}' is queued for {peer_name}: the copy is deleted on "
         "its next contact"
     )
+
+
+def render_removal_endings(peer_name: str, *, copies: int, wiped: int) -> list[str]:
+    """What a ``member rm`` receipt says about the copies that member holds.
+
+    §2.3's discipline, applied to the removal path (review round 1, Q1): an
+    ending that cannot complete must SAY SO rather than read as done. A removed
+    member is never contacted again, so there is no "next contact" to defer to —
+    whatever the removal exchange confirmed is final, and every unconfirmed copy
+    is the operator's to end by rotation. The counts come from the same ledger
+    the listing reads, so receipt and ledger cannot disagree.
+    """
+    if copies <= 0:
+        return []
+    unconfirmed = max(0, copies - wiped)
+    if unconfirmed == 0:
+        return [f"{copies} copied secret(s) on {peer_name} were deleted (the ending is confirmed)"]
+    return [
+        f"{unconfirmed} of {copies} copied secret(s) on {peer_name} could NOT be confirmed "
+        "deleted; a removed member is never contacted again",
+        COPY_CEILING_SENTENCE,
+    ]
 
 
 #: The head every account-change notice carries. The '[session …]' form is this

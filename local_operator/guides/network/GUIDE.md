@@ -539,12 +539,28 @@ for work that follows the person, not for work that follows the machine.
 
 ## Credentials on a peer
 
-Credentials are brokered, never mirrored (decision A5). Operationally: never
-copy a token or a key from one device to another, never run a login on a peer,
-and never "fix" an expiry by re-authenticating for someone else. A refresh is
-requested from the device that owns the credential, which lends a short-lived
-access token and never its refresh token (`lop network credential share|revoke`,
-`lop network credentials`).
+Credentials are brokered by default, and TWO CLASSES ARE COPIED (the provisioning
+design, `mesh-consent-provisioning.md` §2.1): static keys (a GitHub PAT, an
+api-key-static credential) and the `lop secret` store's secrets reach an approved
+device as COPIES — re-sealed into that device's own encrypted store, never
+plaintext, never the owner's key. For everything else the old rule stands: never
+copy a token or a key by hand, never run a login on a peer, and never "fix" an
+expiry by re-authenticating for someone else — a refresh is requested from the
+device that owns the credential, which lends a short-lived access token and never
+its refresh token (`lop network credential share|revoke`, `lop network credentials`).
+
+WHICH store secrets are copied is a standing selection, not a per-share decision:
+`lop network credential mark <NAME> sync` sends a secret to approved devices by
+default; `... mark <NAME> local-only` keeps it here (and ends copies that already
+left); `... mark <NAME> default` clears the mark. An UNMARKED secret is only copied
+when the pushed bundles declare it (`ref:<NAME>`) — offered otherwise, never copied
+by default. Un-approving a device (`lop network member rm`) and `credential revoke`
+each END the copies they can reach: a reachable device deletes its copy and
+confirms, and the receipt says so; a device that is unreachable at that instant
+keeps its copy — and the receipt says THAT too, because a removed member is never
+contacted again. And the ceiling holds regardless: this removed the copies it could
+reach. A copy that already left that device can only be ended by rotating the
+secret at its source.
 
 Provider logins are shareable by name (except device-bound ones such as kimi),
 and the ledger lists them beside the MCP servers: `lop network credentials`

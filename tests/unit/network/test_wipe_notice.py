@@ -6,11 +6,20 @@ WHAT THIS FILE PINS (design §4.3, §5.5c):
   and confirms, and the owner's row reads ``wiped``;
 - an OFFLINE member is not exempt: nothing is queued at the member, and the
   same notice completes on its NEXT contact (catch-up, never invalidate);
-- the ending reaches a REMOVED member, where the confirmation rides the REPLY
-  to the owner's dialled announce — an un-approved member cannot open a frame
-  (its ``broker_credential`` capability left with the grant; measured, the
-  transport refuses ``net_broker`` from a deactivated row), so a fresh-request
-  ack would be refused at the owner's door;
+- MEMBER REMOVAL carries the ending itself, through the real verb: the relay's
+  ``member rm`` runs the bounded ending exchange BEFORE the tombstone (after it
+  the dial is refused by design — an inactive member is never contacted again),
+  so the copies are deleted while the member is still contactable and the
+  receipt says so; unreachable at that instant, the ledger row stays OPEN and
+  the receipt names the count plus the ceiling sentence (§2.3's discipline:
+  an ending that cannot complete says so);
+- the confirmation rides the REPLY to the owner's dialled announce — an
+  un-approved member cannot open a frame (its ``broker_credential`` capability
+  left with the grant; measured, the transport refuses ``net_broker`` from a
+  deactivated row), so a fresh-request ack would be refused at the owner's door;
+- a wipe that cannot confirm blocks ITS OWN key only: a member that answers
+  receipt-only (a pre-S4 build) still receives every OTHER key's updates on
+  the same pass (review round 1, M2 — the old wipes-only return starved them);
 - a ``local-only`` mark ends existing copies the same way;
 - a wipe spares rows another owner or another key wrote — deletion is bounded
   by the provenance marker, not by the notice;
@@ -42,7 +51,9 @@ from tests.unit.network.test_secret_copies import (  # noqa: F401 — fixtures b
     KEY,
     SECRET_NAME,
     VALUE_1,
+    VALUE_2,
     _member_has,
+    _member_value,
     _secret_store,
     secret_mesh,
 )
@@ -116,32 +127,120 @@ def test_an_offline_member_is_wiped_on_reconnect(copied_mesh: Any) -> None:
     assert net_fixtures.wait_for(lambda: _ledger_wiped(mesh))
 
 
-def test_the_ending_reaches_a_removed_member(request: pytest.FixtureRequest) -> None:
-    """Un-approve: the copy is withheld AND the ending still lands, reply-confirmed.
+def test_member_rm_delivers_the_ending_while_the_member_is_contactable(
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Un-approve through the REAL verb: the removal path carries the ending.
 
-    B is deactivated outright, so its capability is gone and a frame it opened
-    would be refused at A's door. The wipe still reaches it (A dialled), and the
-    confirmation rides the REPLY — which is why the ledger closes at all.
+    Q1 of review round 1: the definitions tick only visits ACTIVE members, so
+    the old cell — deactivate, then drive ``credentials_sync_step`` directly —
+    proved a path no product call ever takes, and the product's ``member rm``
+    left every copy usable on the removed device with no wipe attempt and no
+    sentence. This drives the verb: the relay's handler runs the bounded ending
+    exchange BEFORE the tombstone, the member deletes and the ledger closes,
+    and the receipt says the ending was confirmed.
     """
-    mesh = request.getfixturevalue("secret_mesh")
-    code = sync.credentials_sync_step(mesh.a, mesh.member)
-    assert code in ("scheduled", "in_sync"), code
-    assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME))
-
-    with store.mutate(mesh.network_id, mesh.a.root) as copy:
-        member_row = copy.member(mesh.member)
-        assert member_row is not None
-        member_row.lifecycle = "expired"
-        store.save(copy, mesh.a.root)
-
-    code = sync.credentials_sync_step(mesh.a, mesh.member)
-    assert code in ("scheduled", "in_sync"), code
+    mesh = copied_mesh
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    out = capsys.readouterr().out
     assert net_fixtures.wait_for(
         lambda: not _member_has(mesh.b.root, SECRET_NAME)
-    ), "the removed member's copy was not wiped"
+    ), "the removal did not deliver the ending"
     assert net_fixtures.wait_for(
         lambda: _ledger_wiped(mesh)
     ), "the wipe was not confirmed to the owner"
+    assert "were deleted (the ending is confirmed)" in out, out
+    # The tombstone is still the verb's observable side effect, and the removed
+    # member is never ticked again — no later contact can re-deliver anything.
+    removed = store.load(mesh.network_id, mesh.a.root).member(mesh.member)
+    assert removed is not None and not removed.active
+
+
+def test_member_rm_without_contact_records_the_open_ending(
+    copied_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unreachable at removal: the receipt and the ledger carry the OPEN ending.
+
+    A removed member is never contacted again — an inactive row is refused the
+    dial by design — so there is no next-contact catch-up to defer to. §2.3's
+    discipline applies instead: the exchange runs, fails, and SAYS SO, so a
+    removal with live copies never reads as a clean sweep.
+
+    The copy exchange leaves a live link (``LINK_IDLE_S`` is 120 s, far past a
+    cell), and a live link would carry the ending however dead the endpoint
+    reads — measured while writing this cell. A genuinely unreachable peer has
+    none, so the cell closes what the idle reaper eventually would.
+    """
+    from local_operator.network.credentials.messages import COPY_CEILING_SENTENCE
+
+    mesh = copied_mesh
+    for link in list(mesh.a.links.values()):
+        if getattr(link, "device_id", "") == mesh.member:
+            link.close("test: the member becomes unreachable")
+    with store.mutate(mesh.network_id, mesh.a.root) as record:
+        member_row = record.member(mesh.member)
+        assert member_row is not None
+        member_row.endpoints = ["127.0.0.1:1"]  # a dead endpoint: unreachable now
+        store.save(record, mesh.a.root)
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    out = capsys.readouterr().out
+    assert _member_has(mesh.b.root, SECRET_NAME), "no contact, no wipe"
+    assert not _ledger_wiped(mesh), "nothing confirmed it, so it must stay open"
+    assert "could NOT be confirmed deleted" in out, out
+    assert COPY_CEILING_SENTENCE in out, out
+
+
+def test_an_unconfirmable_wipe_does_not_starve_other_keys(
+    copied_mesh: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2 (review round 1): a wipe that never confirms blocks ITS key only.
+
+    A pre-S4 member answers receipt-only, so the owner's ledger row for the
+    revoked key stays un-``wiped`` forever. The old ``_pending_announces``
+    returned wipes-ONLY whenever any wipe was owed, so every other key's future
+    value updates were withheld from that member silently and unboundedly.
+    The fix gates per key: the ending rides every exchange AND the positives
+    flow in the same pass, each kind under its own cap. Both arms are pinned:
+    the unconfirmable wipe's key stays withheld (the copy is gone and the row
+    is open), and the other key's update reaches the member anyway.
+    """
+    mesh = copied_mesh
+    second_name = "STORE_COPY_TOKEN_TWO"
+    second_key = f"secret:{second_name}"
+    mesh.store_a.set(second_name, VALUE_1, description="M2's second key")
+    assert _lop_network("credential", "share", second_key, "--with", mesh.b.identity.name) == 0
+    pulled = _pull(SimpleNamespace(b=mesh.b, borrower=mesh.member))
+    assert second_key in pulled.get("changed", []), pulled
+    code = sync.credentials_sync_step(mesh.a, mesh.member)
+    assert code in ("scheduled", "in_sync"), code
+    assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, second_name))
+
+    # The member becomes one that CANNOT confirm a wipe: the reply is answered
+    # (the copy is deleted) but the owner never records it — the pre-S4 shape.
+    assert sync.sync_for_relay(mesh.a) is mesh.engine_a
+    monkeypatch.setattr(mesh.engine_a, "_record_wipe_reply", lambda *a, **k: None)
+    assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
+    code = sync.credentials_sync_step(mesh.a, mesh.member)
+    assert code in ("scheduled", "in_sync"), code
+    assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
+    assert not _ledger_wiped(mesh), "the unconfirmable wipe must stay open"
+
+    # The OTHER key changes at the source: the same pass must still carry it.
+    mesh.store_a.update(second_name, VALUE_2)
+    _net, frames = mesh.engine_a._pending_announces(mesh.member)
+    kinds = [(f.get("key"), f.get("value_state")) for f in frames]
+    assert (KEY, sync.VALUE_STATE_ABSENT) in kinds, kinds
+    assert (second_key, sync.VALUE_STATE_PRESENT) in kinds, kinds
+    assert kinds[0][0] == KEY, f"the ending must lead the frames, got {kinds}"
+
+    code = sync.credentials_sync_step(mesh.a, mesh.member)
+    assert code in ("scheduled", "in_sync"), code
+    assert net_fixtures.wait_for(
+        lambda: _member_value(mesh.b.root, second_name) == VALUE_2
+    ), "the other key's update was starved behind the unconfirmable wipe"
+    assert not _ledger_wiped(mesh), "and the open row is still tracked, not dropped"
 
 
 def test_marking_local_only_ends_existing_copies(copied_mesh: Any) -> None:

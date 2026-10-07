@@ -133,6 +133,77 @@ def test_the_taxonomy_is_closed_and_self_consistent() -> None:
     )
 
 
+def test_every_literal_event_a_call_site_names_is_registered() -> None:
+    """The taxonomy's teeth, derived from the EMITTERS' source (review round 1, M1).
+
+    The drift guard above asserts ``DETAIL_KEYS <= EVENT_KINDS``, which says nothing
+    about a call site naming an event nobody registered — and that is the shape two
+    new events shipped in: ``_sanitize_detail`` whitelists by ``DETAIL_KEYS.get(event)``,
+    so an unregistered name renders the row with NO ``detail`` at all, silently
+    (measured: ``credential.copy_wiped`` and ``credential_marked`` both dropped their
+    whole detail). This walk collects every LITERAL event name the network audit's
+    call sites pass — ``AuditEvent(event=...)`` and the ``_audit``/``_audit_row``
+    helpers' first argument, the two spellings in this package — and asserts each is
+    in ``EVENT_KINDS``. It found three more of the same class while being written
+    (``definitions_applied``, ``mcp_defs_applied``, ``session.create.warm_failed``),
+    which is the evidence it discriminates rather than describes.
+
+    Computed names (f-strings, variables) are COUNTED and reported, never asserted:
+    they are the helper passthroughs whose values are literals at their own callers
+    (asserted there), and a guard that silently mis-derived them would be the same
+    dead-instrument defect it exists to prevent. ``AuditEvent`` is used nowhere
+    outside ``local_operator/network`` (asserted below), so this scope is total for
+    this log — a new emitter elsewhere would need the scope widened, and the
+    assertion says so instead of passing quietly.
+    """
+    emitters = sorted(
+        str(path)
+        for path in Path(audit_mod.__file__).resolve().parent.parent.rglob("*.py")
+        if "AuditEvent(" in path.read_text(encoding="utf-8")
+    )
+    assert all("/network/" in path for path in emitters), (
+        "a module outside local_operator/network now emits AuditEvent rows: widen this "
+        f"guard's scope (found {emitters})"
+    )
+    package = Path(audit_mod.__file__).resolve().parent
+    literals: set[str] = set()
+    computed = 0
+    for source_path in sorted(package.rglob("*.py")):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else (func.id if isinstance(func, ast.Name) else "")
+            )
+            candidate: ast.expr | None = None
+            if name == "AuditEvent":
+                for kw in node.keywords:
+                    if kw.arg == "event":
+                        candidate = kw.value
+            elif name in ("_audit", "_audit_row") and node.args:
+                candidate = node.args[0]
+            if candidate is None:
+                continue
+            if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
+                literals.add(candidate.value)
+            else:
+                computed += 1
+    # The walk's own instrument check: it must be reading real call sites, or the
+    # empty-set pass below would be vacuous.
+    assert {"member_removed", "credential.copy", "credential.copy_wiped"} <= literals
+    assert computed > 0, "no computed event names found; the walk is not looking where it thinks"
+    unknown = sorted(name for name in literals if name not in audit_mod.EVENT_KINDS)
+    assert unknown == [], (
+        f"unregistered network audit events emitted by call sites: {unknown}; register "
+        "the name in EVENT_KINDS and its detail in DETAIL_KEYS (an unregistered event "
+        "renders with no detail at all, silently)"
+    )
+
+
 def test_a_stream_close_renders_a_machine_cause_from_the_enum(root: Path) -> None:
     """Every close word in the table renders as a COUNTABLE cause, not ``internal``.
 

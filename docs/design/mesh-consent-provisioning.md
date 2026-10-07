@@ -254,7 +254,7 @@ What follows from it, for copies specifically:
 | Mechanism | un-share / un-approve does | Ceiling (what cannot be undone) |
 |---|---|---|
 | Broker (classes 3/5/6b, forge default) | Stops new grants immediately; drops the borrower from `holders`; the broker refuses on the next frame. **Measured (PR #1513 QA): new borrows refused 2.3 s after `credential revoke`; a lent grant stops at the borrower's next re-ask.** | A bearer already picked up lives until its own expiry at the provider (grant TTL ≤ 900 s bounds only a well-behaved borrower; a copy of the bearer stops at the token's expiry — three latency statements, `mesh-credentials.md` §3.7). |
-| Copy (classes 2/4, forge opt-in) | Sends a **wipe notice** for every copied key with this owner's provenance; the node deletes and acks. Reachable: immediate. Unreachable: queued to the next contact (§5.5). | A copy already exfiltrated from the node cannot be recalled. **Rotate at the source** — that is the only ending, and every surface that ends a copy says so (share receipt, guide, `credential revoke` output). |
+| Copy (classes 2/4, forge opt-in) | Sends a **wipe notice** for every copied key with this owner's provenance; the node deletes and acks. Reachable: immediate. Unreachable: queued to the next contact (§5.5). | A copy already exfiltrated from the node cannot be recalled. **Rotate at the source** — that is the only ending, and every surface that ends a copy says so (the `member rm` receipt, the network guide, `credential revoke` output). |
 | Refuse (1/6) | Nothing to do. | — |
 
 The one sentence the design commits to, on every surface that ends a copy: *"This
@@ -464,6 +464,15 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
   member therefore deletes inline on its slow-op worker (local, bounded — no dial, no
   transfer) and answers `wiped`; the owner records the ledger row from that reply. The
   member-side delete is bound by the marker it scans, not by the grant it outlives.
+  **As built (S4, review round 1 Q1), the NO-NEXT-CONTACT case:** the definitions tick
+  only visits ACTIVE members, so `member rm` — the un-approve path — is the last
+  moment a contact is possible at all. The removal handler therefore runs the ending
+  exchange ITSELF, bounded (one probe-capped dial, at most a cap of frames), BEFORE the
+  tombstone is written — after it the dial is refused by design, and measured the
+  copies survived silently. A member unreachable at that instant keeps its copy with
+  the ledger row left OPEN and the receipt naming the count plus the ceiling sentence:
+  deleted-and-confirmed / open-and-named is the whole receipt vocabulary, so a removal
+  with live copies never reads as a clean sweep.
 - **Rotate.** The only ending for a copy that may have left the node. The design's
   guidance: rotate at the provider (API keys), `gh auth logout`/token revocation (forge),
   `lop secret` update on the owner then sync (store secrets — though for a suspected
@@ -626,7 +635,10 @@ operator can act before the failure, and the repair path catches it after.
 Un-approve / unshare runs: (1) broker refusal is immediate for new grants (measured
 2.3 s) and the link-level membership rules are unchanged; (2) one wipe notice per copied
 key with this owner's provenance — reachable members delete and ack, unreachable ones
-get it on next contact (same catch-up as (a)); **as built (S4), the ack for a wipe is
+get it on next contact (same catch-up as (a)) — UNLESS the member is being REMOVED,
+where no next contact exists: the removal path delivers the ending while the member is
+still contactable and, unreachable at that instant, records the OPEN ending on the
+ledger and the receipt (as built, S4 review round 1 Q1); **as built (S4), the ack for a wipe is
 the reply to the notice itself — an un-approved member can no longer open a frame —
 see §4.3's as-built note**; (3) the receipt states the ceiling and
 the rotate guidance (§2.3). In-flight sessions on that node are **not** killed: they are

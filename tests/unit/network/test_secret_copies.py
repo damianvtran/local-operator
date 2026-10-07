@@ -297,3 +297,32 @@ def test_the_needs_list_and_sync_marks_select_the_default_set(
     assert by_key["secret:PLAIN_TOKEN"]["share"] is False  # offered, not copied
     assert by_key["secret:PLAIN_TOKEN"]["kind"] == "store-secret"
     assert "secret:PRIVATE_TOKEN" not in by_key
+
+
+def test_the_bare_secret_name_resolves_for_share_and_revoke(secret_mesh: Any) -> None:
+    """Q2 (review round 1): ``share``/``revoke`` take the name ``lop secret list`` prints.
+
+    Both verbs used to read a bare name as a PROVIDER, so a store secret answered
+    a login-flavored remedy (share) or ``no placement`` while the placement existed
+    under ``secret:<NAME>`` (revoke). The bare spelling now canonicalises to the
+    secret key — and ONLY when no provider of that name is held, which is why this
+    rig (no provider logins) exercises exactly the fallback reading. The assertion
+    is on the document the relays actually read, not on the receipt wording.
+    """
+    from local_operator.network.credentials import placement as placement_mod
+
+    mesh = secret_mesh
+
+    def _holder() -> bool:
+        doc = placement_mod.PlacementDocument.resolve(
+            mesh.a.root, self_device=mesh.owner, network_id=mesh.network_id
+        )
+        assert doc is not None
+        entry = doc.entry(KEY)
+        return entry is not None and any(h.device == mesh.member for h in entry.holders)
+
+    assert _holder(), "the fixture's share must be present to start from"
+    assert _lop_network("credential", "revoke", SECRET_NAME, "--from", mesh.b.identity.name) == 0
+    assert not _holder(), "the bare name did not revoke the store secret"
+    assert _lop_network("credential", "share", SECRET_NAME, "--with", mesh.b.identity.name) == 0
+    assert _holder(), "the bare name did not share the store secret"

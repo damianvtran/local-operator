@@ -144,6 +144,15 @@ ANNOUNCE_CAP = 8
 ANNOUNCE_TIMEOUT_S = 10.0
 COPY_TIMEOUT_S = 30.0
 
+#: The member-removal ending exchange's bounds (review round 1, Q1). The whole
+#: delivery must finish inside the 5 s ``_relay_call`` gives the relay's
+#: ``net_member_rm`` answer before the CLI falls back to the local write, and a
+#: dead endpoint has to answer within its own probe cap rather than hang the
+#: removal: one bounded dial, then short per-frame bounds, and any failure stops
+#: the run with the count reported.
+REMOVAL_PROBE_TIMEOUT_S = 3.0
+REMOVAL_FRAME_TIMEOUT_S = 3.0
+
 #: ``value_state`` on an announce/copy: whether the owner holds a value for the
 #: key. ``absent`` is the WIPE NOTICE (§5.5c, §4.3): the member deletes its
 #: copy by provenance and acks the deletion — the one ending the copy path has
@@ -1063,17 +1072,22 @@ class SyncEngine:
     def _pending_announces(self, device_id: str) -> tuple[str, list[dict[str, Any]]]:
         """The frames this member is owed, computed under the lock.
 
-        TWO KINDS, AND THE ENDINGS GO FIRST. A WIPE notice (``value_state``
-        ``absent``) is owed for every ledger row that is not already ``wiped``
-        and whose key this owner will no longer serve that member — unshared,
-        value deleted, marked ``local-only``, or the member stopped being
-        active (§5.5c: the ending reaches a removed member, where a copy would
-        be withheld; a wipe is bounded by the marker it deletes, never by the
-        grant it outlives). While an ending is owed, positive announces wait —
-        one revoked key must not be buried under a page of refreshes. Then,
-        when no ending is owed: owned here, copy-eligible, held by this member,
-        value readable, not ``local-only``, and the member's ack does not
-        already name this generation+digest.
+        TWO KINDS, AND THE ENDINGS GO FIRST — BUT ONLY THEIR OWN KEY'S FLOW.
+        A WIPE notice (``value_state`` ``absent``) is owed for every ledger row
+        that is not already ``wiped`` and whose key this owner will no longer
+        serve that member — unshared, value deleted, marked ``local-only``, or
+        the member stopped being active (§5.5c: the ending reaches a removed
+        member, where a copy would be withheld; a wipe is bounded by the marker
+        it deletes, never by the grant it outlives). Positive announces ride
+        the SAME pass for every other key — owned here, copy-eligible, held by
+        this member, value readable, not ``local-only``, and the member's ack
+        does not already name this generation+digest — because one shared cap
+        with a wipes-only return starved every other key's updates indefinitely
+        for any member that cannot confirm a wipe (a pre-S4 build answers
+        receipt-only; review round 1, M2). Each kind carries its OWN cap, so a
+        member owing more wipes than one exchange carries still gets its
+        positives on the same tick, and a wipe is never buried: the wipes lead
+        the frame list.
         """
         document = self._placement()
         if document is None:
@@ -1082,10 +1096,14 @@ class SyncEngine:
         active = _member_is_active(self._root, network_id, device_id)
         with mutate(network_id, self._root) as state:
             wipes = self._pending_wipes(document, state, device_id, active=active)
-            if wipes or not active:
+            if not active:
                 return network_id, wipes
-            announces: list[dict[str, Any]] = []
+            announces: list[dict[str, Any]] = list(wipes)
+            wiped_keys = {str(frame.get("key") or "") for frame in wipes}
+            positives = 0
             for key in document.keys_owned_by(self._self_device):
+                if key in wiped_keys:
+                    continue
                 entry = document.entry(key)
                 if not copies_by_class(str(entry.kind)) or not entry.is_holder(device_id):
                     continue
@@ -1109,7 +1127,8 @@ class SyncEngine:
                         "value_state": VALUE_STATE_PRESENT,
                     }
                 )
-                if len(announces) >= ANNOUNCE_CAP:
+                positives += 1
+                if positives >= ANNOUNCE_CAP:
                     break
             return network_id, announces
 
@@ -1171,6 +1190,99 @@ class SyncEngine:
             if isinstance(row, dict) and not row.get("wiped"):
                 return True
         return False
+
+    def deliver_removal_endings(self, device_id: str) -> dict[str, int]:
+        """The endings a MEMBER REMOVAL owes, delivered while it is still contactable.
+
+        WHY THIS EXISTS (review round 1, Q1). The definitions tick never runs for
+        a member that stopped being ``active`` — that is the whole point of the
+        tombstone — so ``member rm`` is the LAST moment an owner exchange with
+        this device is possible at all, and the measured removal path left every
+        copied store secret usable on the removed device with no wipe attempt and
+        no sentence. This is that path's own bounded exchange, run by
+        ``_ctl_member_rm`` BEFORE the tombstone is written (afterwards
+        ``_ensure_link_with_reason`` refuses the dial BY DESIGN — a tombstoned
+        member is never contacted again).
+
+        EVERY un-``wiped`` ledger row is an ending here, whatever the key's
+        serveability: the member's whole membership ends, so the generic
+        ``_pending_wipes`` serveability check — which excludes keys still served —
+        would wrongly skip exactly the copies a removal must end. The frames are
+        the same per-key ``absent`` announces the tick carries, sent once, now.
+
+        Bounded: one dial (probe-bounded), then at most ``ANNOUNCE_CAP`` frames
+        with a short per-frame timeout; any failure stops the run and is
+        REPORTED. A row left unconfirmed stays open on the ledger, and the caller
+        turns ``copies``/``wiped`` into the removal receipt's ending sentence —
+        the open state is visible rather than silent (§2.3's discipline: a
+        revocation that cannot complete says so).
+        """
+        document = self._placement()
+        if document is None or not device_id:
+            return {"copies": 0, "wiped": 0}
+        network_id = str(document.network_id)
+        try:
+            state = SyncState.load(network_id, root=self._root)
+        except Exception:  # noqa: BLE001 — unreadable state: nothing derivable
+            return {"copies": 0, "wiped": 0}
+        rows = state.acks.get(device_id) or {}
+        pending: list[dict[str, Any]] = []
+        for key in sorted(rows):
+            row = rows[key]
+            if not isinstance(row, dict) or row.get("wiped"):
+                continue
+            gen = int(row.get("gen") or 0)
+            digest = str(row.get("digest") or "")
+            if gen > 0 and digest:
+                pending.append(
+                    {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
+                )
+        if not pending:
+            return {"copies": 0, "wiped": 0}
+        link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam
+            device_id, probe_timeout_s=REMOVAL_PROBE_TIMEOUT_S
+        )
+        if link is None:
+            return {"copies": len(pending), "wiped": 0}
+        confirmed = 0
+        for item in pending[:ANNOUNCE_CAP]:
+            frame = {
+                "op": "net_broker",
+                "kind": "announce",
+                "network_id": network_id,
+                "from_device": self._self_device,
+                "from_device_name": self._self_device_name,
+                "req": self._server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
+                **item,
+            }
+            try:
+                reply = link.request(frame, timeout=REMOVAL_FRAME_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — stop the run; the count stays honest
+                logger.debug(
+                    "credentials sync: removal ending for %s failed",
+                    item.get("key"),
+                    exc_info=True,
+                )
+                break
+            detail = reply.get("detail") if isinstance(reply, dict) else None
+            if not isinstance(detail, dict) or str(detail.get("kind") or "") == "error":
+                continue
+            if str(detail.get("action") or "") == "wiped":
+                self._record_wipe_reply(network_id, device_id, item, detail)
+                confirmed += 1
+        # THE LEDGER IS THE COUNT, not the replies: ``_record_wipe_reply`` swallows
+        # a lost write, and the receipt must say what the ledger will show a reader.
+        try:
+            after = SyncState.load(network_id, root=self._root)
+            open_now = sum(
+                1
+                for row in (after.acks.get(device_id) or {}).values()
+                if isinstance(row, dict) and not row.get("wiped")
+            )
+            wiped = max(0, len(pending) - open_now)
+        except Exception:  # noqa: BLE001 — the reply count is the best datum left
+            wiped = confirmed
+        return {"copies": len(pending), "wiped": wiped}
 
     def _read_value(self, key: str, entry: Any) -> dict[str, Any] | None:
         """Read the owner's value for a copy, via the owner's own store.

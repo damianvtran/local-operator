@@ -208,6 +208,26 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # `act` is the borrowing device, `sub` the owner they came from.
         "credential.narrowing_applied",
         "credential.narrowing_refused",
+        # THE COPY'S ENDINGS (S4, review round 1 M1): a wipe the owner performed
+        # or confirmed (`copy_wiped`, with the row count a reader uses to see a
+        # batch from a single key), and the operator's selection mark on a store
+        # secret (`marked` — the standing policy word that decides whether the
+        # next device copies it at all). Both were emitted unregistered, which
+        # the sanitizer answers by dropping the WHOLE detail silently; the guard
+        # in test_audit.py now derives emitter literals from source so a third
+        # one cannot ship the same way.
+        "credential.copy_wiped",
+        "credential.marked",
+        # THE APPLY ROWS the taxonomy drifted on (M1's guard, deriving emitters
+        # from source, found these three the same way it found the two above):
+        # all three were emitted unregistered, so the sanitizer dropped their
+        # whole detail — which definitions applied and which conflicted, and why
+        # a background warm failed — since they landed. Registered so the
+        # guard's answer and the taxonomy agree; the detail keys below are the
+        # ones the emitters pass, read from them, not invented.
+        "definitions_applied",
+        "mcp_defs_applied",
+        "session.create.warm_failed",
         # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). The lifecycle
         # events for ONE durable record: the operator's single gesture that lets an
         # agent install this product and the operator anchor on a remote device (or
@@ -426,6 +446,15 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # carries the machine reason instead.
     "credential.narrowing_applied": frozenset({"credential_key", "act", "sub", "repositories"}),
     "credential.narrowing_refused": frozenset({"credential_key", "act", "sub", "reason"}),
+    # `rows` is the deleted-row count on the member's own store — never the rows
+    # themselves — so an incident review can tell a confirmed wipe from a notice
+    # that matched nothing (`rows: 0`).
+    "credential.copy_wiped": frozenset({"credential_key", "act", "sub", "rows"}),
+    "credential.marked": frozenset({"credential_key", "mark"}),
+    "definitions_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
+    "mcp_defs_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
+    # `detail` here is the warm failure's own sentence (a string), not a nested map.
+    "session.create.warm_failed": frozenset({"peer", "detail"}),
     # -- the remote onboarding approval -------------------------------------------
     #
     # `kind` is the record's own enum (device_onboard / local_authority);

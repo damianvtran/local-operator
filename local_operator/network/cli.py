@@ -736,7 +736,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
             "onboarding anymore: approving a device already shares this device's logins"
         ),
     )
-    cred_share.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_share.add_argument(
+        "key", help="A provider name, mcp:<server-url>, or a stored secret's name"
+    )
     cred_share.add_argument(
         "--with",
         required=True,
@@ -769,7 +771,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     cred_revoke = credential_actions.add_parser(
         "revoke", help="Stop letting a device borrow a credential"
     )
-    cred_revoke.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_revoke.add_argument(
+        "key", help="A provider name, mcp:<server-url>, or a stored secret's name"
+    )
     cred_revoke.add_argument(
         "--from",
         required=True,
@@ -2029,6 +2033,12 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # not per holder, so it returns before the device resolution the other
         # verbs need.
         return _credential_mark(args, record, identity)
+    # THE BARE-NAME SPELLING (QA round 1, Q2): `mark` takes the name `lop
+    # secret list` prints; `share`/`revoke` used to read a bare name as a
+    # provider and hand a store-secret operator a login-flavored remedy. One
+    # resolution, ahead of every downstream read, so the refusal sentences
+    # downstream are only ever about a key this device truly does not hold.
+    key = _canonical_credential_key(key)
     device = _resolve_device(record, args.device)
     if device is None:
         raise MeshRefusal(
@@ -2241,6 +2251,57 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     return True, bool(row.get("wiped"))
 
 
+def _unconfirmed_copies(network_id: str, device: str) -> int:
+    """How many ledger rows for ``device`` are still NOT ``wiped``.
+
+    The removal receipt's count when there is no relay to run the ending
+    exchange (review round 1, Q1): every open row is a copy nothing confirmed
+    deleted, so the receipt names the open state instead of a clean sweep. The
+    same read ``_copy_ledger_state`` makes, summed over the member instead of
+    one key; an unreadable ledger counts zero rows and the receipt stays as it
+    was rather than inventing copies.
+    """
+    from local_operator.network.credentials.sync import SyncState
+
+    try:
+        state = SyncState.load(network_id)
+    except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
+        return 0
+    rows = state.acks.get(device) or {}
+    return sum(1 for row in rows.values() if isinstance(row, dict) and not row.get("wiped"))
+
+
+def _canonical_credential_key(raw: str) -> str:
+    """A bare name that IS a stored secret resolves to its ``secret:<NAME>`` key.
+
+    WHY (QA round 1, Q2). ``credential mark`` teaches the bare spelling — the
+    name ``lop secret list`` prints — and accepts it, but ``share``/``revoke``
+    read a bare name as a PROVIDER: on a store secret they refused with a
+    provider-flavored remedy ("run 'lop login …' here first") and, for revoke,
+    "no placement for '…'" while the placement existed under ``secret:<NAME>``.
+    The provider reading keeps precedence where BOTH exist — sharing a provider
+    login by its provider name is the older, documented form — so a bare name
+    canonicalises to the secret form only when no provider/MCP login of that
+    name is held here: the store is the fallback reading, never a shadow.
+    """
+    from local_operator.network.credentials import offers
+    from local_operator.network.credentials.types import (
+        credential_key_for_secret,
+        is_secret_key,
+    )
+
+    text = str(raw or "").strip()
+    if not text or is_secret_key(text):
+        return text
+    config_dir = _config_dir()
+    if offers.credential_here(text, config_dir):
+        return text
+    candidate = credential_key_for_secret(text)
+    if offers.credential_here(candidate, config_dir):
+        return candidate
+    return text
+
+
 def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> int:
     """The §4.2 selection marks: ``sync`` / ``local-only`` / ``default``.
 
@@ -2298,7 +2359,7 @@ def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> in
             "needs call for it"
         ]
     _audit(
-        "credential_marked",
+        "credential.marked",
         actor=identity.device_id,
         subject=record.network_id,
         network_id=record.network_id,
@@ -2518,10 +2579,21 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
     # epoch rotation and the queue write all happen here (below), and the payload
     # says the rotation is queued rather than fanning out.
+    from local_operator.network.credentials import messages as messages_mod
+
     live = _relay_call(
         "net_member_rm", network=args.network, device_id=device_id, allow_no_answer=True
     )
     if live is not None:
+        # THE REMOVAL'S COPY SENTENCE (review round 1, Q1): the relay ran the
+        # final ending exchange before the tombstone and these counts are what
+        # it confirmed; rendering them here keeps receipt and ledger in one
+        # place (messages_mod owns both sentences' shapes).
+        endings = messages_mod.render_removal_endings(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            copies=int(live.get("copies") or 0),
+            wiped=int(live.get("wiped") or 0),
+        )
         return _emit(
             args,
             {"ok": True, **live},
@@ -2529,6 +2601,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 f"removed {live.get('removed')} from {args.network}; "
                 f"epoch is now {live.get('epoch')}",
                 f"queued for {live.get('queued', 0)} offline peer(s)",
+                *endings,
             ],
         )
     imported = _import_relay()
@@ -2536,6 +2609,10 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # of this command and the local write needs nothing the resolution did not already
     # read (review round 2, NIT-2).
     state = store.require_secrets(record.network_id)
+    # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
+    # is no link, so nothing is confirmed deleted — but the receipt must still say
+    # what the ledger shows, or a removal with live copies reads as a clean sweep.
+    copies = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
@@ -2569,10 +2646,15 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "removed": args.device,
             "epoch": outcome.epoch,
             "relay": "not running — applied locally and queued",
+            "copies": copies,
+            "wiped": 0,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
+            *messages_mod.render_removal_endings(
+                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+            ),
         ],
     )
 

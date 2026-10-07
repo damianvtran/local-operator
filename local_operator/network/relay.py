@@ -9458,6 +9458,20 @@ class RelayServer:
         resolved = self._require_network(str(frame.get("network") or ""))
         state = store.require_secrets(resolved.network_id, self.root)
         device_id = str(frame.get("device_id") or "")
+        # THE LAST CONTACT THE COPIES GET (review round 1, Q1): the ending exchange
+        # runs BEFORE the tombstone, because afterwards this device's own dial is
+        # refused by design (``_ensure_link_with_reason`` skips inactive members) and
+        # every copy on the removed member would end silently. Bounded inside the
+        # engine (probe + cap); the counts ride the receipt so an unreachable
+        # member's copies read as OPEN — rotate at the source — rather than gone.
+        from local_operator.network.credentials.sync import sync_for_relay
+
+        engine = sync_for_relay(self)
+        endings = (
+            engine.deliver_removal_endings(device_id)
+            if engine is not None
+            else {"copies": 0, "wiped": 0}
+        )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
                 record, state, device_id=device_id, by=record.self_device_id, root=self.root
@@ -9483,6 +9497,8 @@ class RelayServer:
             "removed": device_id,
             "epoch": outcome.epoch,
             "queued": len(store.queued_frames(device_id, self.root)),
+            "copies": int(endings.get("copies") or 0),
+            "wiped": int(endings.get("wiped") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
