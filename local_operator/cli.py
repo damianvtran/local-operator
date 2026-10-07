@@ -13713,12 +13713,36 @@ def main() -> int:
                 # deliberately left AS TYPED rather than resolved: it names a
                 # conversation this device does not hold, and the viewer factory
                 # below is what opens it.
+                #
+                # THE MISS AND THE SILENCE COME FROM ONE READ
+                # (``remote_row_and_silence``, mesh-wire-honesty S2 follow-up
+                # R2-2). The row-only lookup discarded the silence, so an id that
+                # did not resolve BECAUSE a device stayed silent printed the
+                # generic "no session to resume" sentence below — the claim of
+                # absence the refusal family exists to avoid — while the
+                # mid-session ``viewer_factory`` arm and the desktop routes said
+                # "did not answer". This pre-check answers the ``--resume`` FLAG
+                # (it is a sibling of the subprocess-subcommand branch, so it
+                # runs for the TUI launch too and returns before ``use_tui`` is
+                # computed); the ``viewer_factory`` arm further down guards the
+                # mid-session ``/resume`` path, which never passes through here.
                 from local_operator.session.remote_open import (
-                    remote_row_for,
+                    remote_row_and_silence,
                     unreachable_peer_sentence,
+                    unresolved_peer_sentence,
                 )
 
-                remote_row = remote_row_for(str(args.resume), config_dir())
+                remote_row, silent = remote_row_and_silence(str(args.resume), config_dir())
+                if remote_row is None and silent:
+                    # Same refusal family as the unreachable arm below: nothing
+                    # boots locally for an id a silent device may be holding
+                    # (INV-1), and no recent-sessions listing — this machine's
+                    # list is not the help for an id that may live elsewhere.
+                    print(
+                        f"\033[31m{unresolved_peer_sentence(str(args.resume), silent)}\033[0m",
+                        file=sys.stderr,
+                    )
+                    return 1
                 if remote_row is None:
                     print(f"\033[31m{error}\033[0m", file=sys.stderr)
                     # With the age: a column of bare 12-hex ids gives the reader

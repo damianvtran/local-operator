@@ -44,6 +44,7 @@ from local_operator.session.remote_open import (
     open_remote_viewer,
     remote_row_and_silence,
     remote_row_for,
+    unreachable_peer_sentence,
     unresolved_peer_sentence,
 )
 from tests.unit.session.test_peer_rows import _Catalog, _Facts, _Row
@@ -483,3 +484,30 @@ def test_the_unresolved_state_rides_the_refusal_family() -> None:
     assert error.code == "session_unresolved"
     assert error.sentence == str(error)
     assert "build-box did not answer" in error.sentence
+
+
+def test_the_unreachable_sentence_names_an_unnamed_device_in_both_places() -> None:
+    """R2-3 (design D6): a row carrying neither name nor id still reads as one sentence.
+
+    The named form is asserted at the routes; this is the neither-named form,
+    which only the composer's own fallback (``owner_device_name or owner_device or
+    UNNAMED_DEVICE``) keeps from rendering ``/network doctor  diagnoses the link.``
+    — two spaces and no device to go with the one the first half just supplied.
+    """
+    from local_operator.resume import SessionRow
+
+    row = SessionRow(
+        "a1b2c3d4e5f6",
+        1789400000.0,
+        "build box chat",
+        locality="remote",
+        reachable=False,
+        unreachable_reason="connect_failed:ConnectionRefusedError",
+    )
+    assert row.owner_device == "" and row.owner_device_name == ""
+
+    sentence = unreachable_peer_sentence("a1b2c3d4e5f6", row)
+
+    assert f"is on {UNNAMED_DEVICE}, which is unreachable" in sentence, sentence
+    assert f"/network doctor {UNNAMED_DEVICE} diagnoses the link." in sentence, sentence
+    assert "  " not in sentence, sentence
