@@ -4068,13 +4068,16 @@ class RelayServer:
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
         #: The ONE event loop every stored-page read runs on, and the lock that
-        #: builds it once (see ``_page_read_loop``). Lazy for the same reason the
-        #: slow pool is: most relays never serve ``net_session_history``.
+        #: builds it once (see ``_page_loop_locked``). Lazy for the same reason the
+        #: slow pool is: most relays never serve ``net_session_history``. The lock
+        #: is ALSO what serialises a read against a ``stop``: it is held across
+        #: both the loop's selection and the submit onto it (M-1), and ``stop``
+        #: shelves the loop in a critical section of the same lock.
         self._page_loop: asyncio.AbstractEventLoop | None = None
         self._page_loop_thread: threading.Thread | None = None
         self._page_loop_lock = threading.Lock()
         #: Set by ``stop``: the next read builds a fresh loop rather than queueing
-        #: work onto one whose thread has finished (see ``_page_read_loop``).
+        #: work onto one whose thread has finished (see ``_page_loop_locked``).
         self._page_loop_shelved = False
         self._install_slices()
         self.started_at = time.time()
@@ -4251,14 +4254,19 @@ class RelayServer:
         # method returns. A read that arrives after all this builds a FRESH loop
         # rather than hand one to a thread that has finished.
         #
-        # A READ ALREADY SUBMITTED IS NOT RECLAIMED BY THE QUEUE ORDER, only by the
-        # bound, and the earlier comment here claimed the opposite. A coroutine
-        # awaiting ``asyncio.to_thread`` never resolves once the loop carrying it
-        # has stopped — ``run_forever`` returns with the task still pending and
-        # discards it — so a reader parked in ``future.result`` waits out
-        # ``SESSION_HISTORY_PAGE_READ_BOUND_S`` and then sees ``TimeoutError``.
-        # That is the contract the bound exists for: an honest wait with an end,
-        # not a promise that the read completes.
+        # A READ ALREADY SUBMITTED IS NOT RECLAIMED BY THE QUEUE ORDER, and the
+        # earlier comment here claimed it was. A coroutine awaiting
+        # ``asyncio.to_thread`` never resolves once the loop carrying it has
+        # stopped — ``run_forever`` returns with the task still pending and the
+        # callback that would deliver the decode never runs. What ends it is the
+        # loop's OWN teardown: ``_page_loop_main`` cancels the tasks still pending
+        # before it closes (M-2), so a reader parked in ``future.result`` is
+        # released with a cancellation as soon as the bounded join below lands,
+        # rather than after a minute. The bound is still the belt for the case
+        # that teardown cannot reach — a reader whose loop never closes — and
+        # there it is the answer it always was: ``TimeoutError`` after
+        # ``SESSION_HISTORY_PAGE_READ_BOUND_S``, an honest wait with an end rather
+        # than a promise that the read completes.
         with self._page_loop_lock:
             loop = self._page_loop
             thread = self._page_loop_thread
@@ -7075,17 +7083,34 @@ class RelayServer:
         and the two also mutate the module-level cache from two threads. One loop
         for every stored-page read in this process is what keeps the façade on one
         thread however many viewer links ask at once.
+
+        THE SUBMIT IS TAKEN INSIDE ``_page_loop_lock`` (M-1, agent review & QA
+        round 2 residual). Choosing the loop and submitting to it used to be two
+        statements with the lock RELEASED in between, so a ``stop()`` landing in
+        that gap closed the loop under this read and
+        ``asyncio.run_coroutine_threadsafe`` raised ``RuntimeError: Event loop is
+        closed`` — not the bounded wait this read promises. ``stop`` stops and
+        shelves the loop in ONE critical section of the SAME lock, so a submit
+        taken under it either lands on the loop while it is still the relay's live
+        loop, or reads ``_page_loop_shelved`` and is handed a fresh one. The
+        release-to-submit gap was the whole window; there is no gap left.
         """
         from local_operator.session.page_cache import load_transcript_page
 
-        loop = self._page_read_loop()
-        future = asyncio.run_coroutine_threadsafe(
-            load_transcript_page(str(directory), before_id=before_id, limit=limit), loop
-        )
+        with self._page_loop_lock:
+            loop = self._page_loop_locked()
+            future = asyncio.run_coroutine_threadsafe(
+                load_transcript_page(str(directory), before_id=before_id, limit=limit), loop
+            )
         return future.result(timeout=SESSION_HISTORY_PAGE_READ_BOUND_S)
 
-    def _page_read_loop(self) -> asyncio.AbstractEventLoop:
+    def _page_loop_locked(self) -> asyncio.AbstractEventLoop:
         """The relay's single page loop, started on first use and kept for its life.
+
+        THE CALLER MUST HOLD ``_page_loop_lock``, and the caller that matters is
+        :meth:`_stored_page_read`: it needs the loop it chooses and the submit
+        onto it to be one critical section, which a lock-taking accessor could
+        not give it (this is a plain ``Lock``, not a re-entrant one).
 
         LAZY, like the slow-op pool: most relays never serve this op, and a thread
         per relay that never reads a page would be paid for nothing. A DAEMON
@@ -7097,19 +7122,18 @@ class RelayServer:
         a loop whose thread has not reached ``run_forever`` yet, so reading it here
         would race the first caller into building a second loop.
         """
-        with self._page_loop_lock:
-            if self._page_loop is None or self._page_loop_shelved:
-                loop = asyncio.new_event_loop()
-                self._page_loop_thread = threading.Thread(
-                    target=self._page_loop_main,
-                    args=(loop,),
-                    name="mesh-page-loop",
-                    daemon=True,
-                )
-                self._page_loop_thread.start()
-                self._page_loop = loop
-                self._page_loop_shelved = False
-            return self._page_loop
+        if self._page_loop is None or self._page_loop_shelved:
+            loop = asyncio.new_event_loop()
+            self._page_loop_thread = threading.Thread(
+                target=self._page_loop_main,
+                args=(loop,),
+                name="mesh-page-loop",
+                daemon=True,
+            )
+            self._page_loop_thread.start()
+            self._page_loop = loop
+            self._page_loop_shelved = False
+        return self._page_loop
 
     @staticmethod
     def _page_loop_main(loop: asyncio.AbstractEventLoop) -> None:
@@ -7133,7 +7157,31 @@ class RelayServer:
         try:
             loop.run_forever()
         finally:
-            loop.close()
+            # THE TASKS STILL PENDING ARE CANCELLED BEFORE THE CLOSE (M-2, agent
+            # review & QA round 2 residual). ``loop.stop`` ends ``run_forever``
+            # with the read's task still PENDING — it is awaiting ``to_thread``,
+            # and the callback that would deliver the decode is one the stopped
+            # loop never runs — so ``loop.close()`` used to destroy a pending
+            # task, which asyncio reports as ``Task was destroyed but it is
+            # pending!`` through asyncio's logger, once per parked read.
+            # Cancelling and collecting them is the standard library's OWN
+            # teardown, the first of the steps ``asyncio.run`` takes before it
+            # closes, and what it buys is that the doomed read ENDS: its waiter is
+            # released at once instead of parking out
+            # ``SESSION_HISTORY_PAGE_READ_BOUND_S``.
+            #
+            # EVERY task on the loop, not only the reader's: ``load_transcript_page``
+            # awaits ``asyncio.shield(task)``, so the decode is a SECOND task
+            # that survives its waiter's cancellation and would itself be the one
+            # destroyed pending.
+            try:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            finally:
+                loop.close()
 
     def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).
