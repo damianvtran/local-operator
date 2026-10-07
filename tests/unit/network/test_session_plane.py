@@ -1851,6 +1851,62 @@ def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
     assert loop.is_closed(), "stop() shelved the page loop without closing it"
 
 
+def test_the_page_loop_teardown_delivers_a_completion_still_queued_behind_the_stop() -> None:
+    """M-R2-1: the deterministic sibling of the racing-stop cell's page-or-cancel ending.
+
+    THE RACING CELL ABOVE CANNOT PIN THE DRAIN, and the reviewer measured why: it
+    asserts "the page, or a cancellation" about a read racing a real stop, so which
+    ending lands depends on which side of the submit/stop batch the loop was on —
+    with the drain reverted it failed 2 of 5 runs (3 of 5 for the author). A guard
+    that reds intermittently when the code regresses is a flaky pin, and a green run
+    of it proves little.
+
+    THIS CELL REMOVES THE RACE BY BUILDING THE ONE ORDERING THE DRAIN EXISTS FOR,
+    directly on ``RelayServer._page_loop_main``: inside a single loop callback a task
+    is created and its completion is chained to a ``concurrent.futures.Future`` (what
+    ``run_coroutine_threadsafe`` hands a reader), and ``loop.stop`` is queued BEHIND
+    it. The task's step and the stop share one iteration; the task finishes in it, so
+    the callback that resolves the reader's future is scheduled — and is still in the
+    ready queue when ``run_forever`` returns, because the loop only runs what the
+    iteration started with. Nothing is pending (the cancel list is empty, which is
+    the shape ``if pending:`` used to skip the drain for), and ``close()`` clears the
+    queue. So the future resolves with its page if and only if the teardown runs one
+    drain after ``run_forever``, whatever the scheduler does.
+
+    Reverting only the ``run_until_complete(asyncio.sleep(0))`` line leaves ``done``
+    False here on every run.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(
+        target=relay.RelayServer._page_loop_main, args=(loop,), name="page-loop-teardown"
+    )
+    thread.start()
+    reader: concurrent.futures.Future[str] = concurrent.futures.Future()
+
+    async def decode() -> str:
+        # No await: the task completes in the first iteration that steps it.
+        return "PAGE"
+
+    def submit_then_stop() -> None:
+        task = loop.create_task(decode())
+        # The completion notification the reader's future waits on, scheduled by the
+        # task's done callbacks one ready-queue hop AFTER the iteration the stop is
+        # queued in.
+        task.add_done_callback(lambda finished: reader.set_result(finished.result()))
+        loop.call_soon(loop.stop)
+
+    loop.call_soon_threadsafe(submit_then_stop)
+    thread.join(timeout=30)
+
+    assert not thread.is_alive(), "the page loop's teardown never returned"
+    assert loop.is_closed(), "the teardown did not close the loop it stopped"
+    assert reader.done(), (
+        "the loop was closed with the reader's completion notification still queued: "
+        "the read decoded its page and the teardown threw it away"
+    )
+    assert reader.result(timeout=0) == "PAGE"
+
+
 def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
     peer_pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
