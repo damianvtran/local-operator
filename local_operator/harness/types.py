@@ -1545,6 +1545,25 @@ ToolExecuteFn = Callable[
 ApprovalDescribeFn = Callable[[dict[str, Any], str], str]
 
 
+#: The JSON-Schema marker :func:`local_operator.tools.registry.collapse_optional_nulls`
+#: stamps on a property it rewrote from ``anyOf: [T, null]`` to `T`.
+#:
+#: WHY IT EXISTS, and it is a CORRECTNESS contract rather than bookkeeping.
+#: ``validate_tool_arguments`` skips any property with no top-level ``type``,
+#: which is exactly the shape every optional field used to have — so the loop
+#: performed no type check on them and the TOOL's own pydantic model decided,
+#: including the coercers several tools ship deliberately (``hub``'s ``to``
+#: accepts a bare job id or its JSON; ``jobs``' ``job_id`` accepts a number).
+#: Collapsing the union puts a ``type`` at the top level, so without the marker
+#: the loop would enforce a type the tool itself is happy to coerce and refuse
+#: the call before the tool ran. A marked property is therefore UNCHECKED at
+#: the loop, which restores the base semantics union-shaping implied.
+#:
+#: It is an ``x-`` key so a strict-schema provider ignores it; live MCP schemas
+#: never carry it, because the collapse runs only on builtins (``create_tools``).
+COLLAPSED_OPTIONAL_NULL_KEY = "x-collapsed-optional-null"
+
+
 class AgentTool(BaseModel):
     """A tool the model can call.
 

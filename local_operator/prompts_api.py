@@ -459,6 +459,13 @@ def _render_tool_inventory(tools: Sequence[AgentTool], deferred: Collection[str]
     ``ask`` run to several hundred tokens each — which is why duplicating them
     was expensive rather than merely redundant.
 
+    ``deferred`` tools are the ONE sanctioned exception to the names-only rule,
+    and the reason is the rule's own premise: a name earns its line because the
+    ``tools`` array already carries the description beside it, which is NOT true
+    of a deferred tool — its schema is absent, so a bare name would give the
+    model no reason to reach for it. They therefore get a purpose PHRASE on the
+    single "schema on demand" line (``tools/deferral.py``), never a description.
+
     Filtered on ``hidden`` ALONE. While a line was ``- {name}: {description}``
     a description-less tool was rightly skipped, since its line would have
     trailed a bare colon; now that the line is just the name there is nothing

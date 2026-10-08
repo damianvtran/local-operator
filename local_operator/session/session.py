@@ -52,6 +52,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Mapping,
     Sequence,
@@ -287,11 +288,7 @@ from local_operator.tools.builtin import (
     todo_fingerprint,
     todo_snapshot,
 )
-from local_operator.tools.deferral import (
-    DeferralKind,
-    deferred_tool_names,
-    tool_deferral_enabled,
-)
+from local_operator.tools.deferral import deferred_tool_names, tool_deferral_enabled
 from local_operator.tools.tool_docs import chain_tool_docs
 
 if TYPE_CHECKING:
@@ -3066,17 +3063,30 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
-        #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_kind`` picks the
-        #: set — a subagent's build sets ``"child"`` — and ``_deferral_pins``
-        #: are names a role/profile ``tools:`` list asked for, which stay
-        #: published. ``_activated_tools`` is STICKY for the session's life:
-        #: every activation reprices the whole cached prefix once (the array is
-        #: position 0), so un-deferring again later would pay that twice. It is
-        #: deliberately not persisted across resume: a resumed session starts
-        #: on a cold cache anyway and every deferred tool stays callable.
-        #: ``_tool_deferral`` is the ``tools.defer`` kill switch, read once at
-        #: construction and followed live by :meth:`_apply_config_change`.
-        self._deferral_kind: DeferralKind = "top"
+        #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_pins`` are names
+        #: a role's ``tools:`` list, a team manager's or a host declaration asked
+        #: for, which stay published. ``_activated_tools`` is STICKY for the
+        #: session's life: every activation reprices the whole cached prefix once
+        #: (the array is position 0), so un-deferring again later would pay that
+        #: twice. ``_tool_deferral`` is the ``tools.defer`` kill switch, read
+        #: once at construction and followed live by
+        #: :meth:`_apply_config_change`.
+        #:
+        #: ACTIVATIONS ARE NOT PERSISTED, and this is stated as a DECISION
+        #: rather than as a measured fact, because it is not measured: what a
+        #: resume inside the provider cache TTL does to the cache read is OPEN
+        #: (review round 1, MINOR-3, which could not measure it under the host
+        #: resource hold and neither could this round). What is known is the
+        #: SHAPE of the exposure and it is bounded: the tools array is position
+        #: 0, so a resumed session that had activated a tool republishes the
+        #: smaller array and re-processes ONE turn at write price — the same
+        #: one-time rewrite activation itself already paid, and only for a
+        #: session that both activated a tool and resumed warm. Against that,
+        #: persisting them is a new mechanism with a migration and a freshness
+        #: question (a stale activation would have to be reconciled against a
+        #: changed deferral set or kill switch). Revisit if the rollout watch's
+        #: ``cache_read``/``cache_write`` on activation turns shows the resumed
+        #: case paying more than that single turn.
         self._deferral_pins: frozenset[str] = frozenset()
         self._activated_tools: set[str] = set()
         self._tool_deferral = tool_deferral_enabled()
@@ -9917,7 +9927,7 @@ class Session:
         """
         if not self._tool_deferral:
             return frozenset()
-        return deferred_tool_names(self._deferral_kind, self._deferral_pins) - self._activated_tools
+        return deferred_tool_names(self._deferral_pins) - self._activated_tools
 
     def _publishable(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
         """``tools`` minus the deferred schemas — the array a provider is sent.
@@ -9946,19 +9956,16 @@ class Session:
         if not self._tool_deferral:
             return frozenset()
         held = {tool.name for tool in self._tools}
-        return deferred_tool_names(self._deferral_kind, self._deferral_pins) & held
+        return deferred_tool_names(self._deferral_pins) & held
 
-    def set_tool_deferral(
-        self, kind: DeferralKind | None = None, *, pins: Sequence[str] | None = None
-    ) -> None:
-        """Set which deferral set applies (``kind``) and which names a role pins.
+    def set_tool_deferral(self, *, pins: Collection[str] | None = None) -> None:
+        """Pin names whose schema must stay published.
 
-        Called by the subagent build (``kind="child"``, pins = the role's
-        ``tools:`` list) and by ``attach_agent_profile``/``attach_team`` (pins
-        only). Takes effect at the next publish, like any inventory change.
+        Called by the subagent build (the role's ``tools:`` list), by
+        ``attach_agent_profile``/``attach_team`` (the profile's or manager's
+        list) and by :meth:`set_tool_inventory` (a host's own declaration).
+        Takes effect at the next publish, like any inventory change.
         """
-        if kind is not None:
-            self._deferral_kind = kind
         if pins is not None:
             # ADDITIVE, for the reason activations are sticky: dropping a pin
             # (an ``/agent clear``, a role switch) would re-defer a schema the
@@ -10257,6 +10264,18 @@ class Session:
                     f"session: refusing to widen {widened_ops}"
                 )
         self._declared_tools = incoming
+        if incoming:
+            # A DECLARATION PINS TOO, exactly as a role's ``tools:`` list does
+            # (``set_tool_deferral``). A host that named this run's tools —
+            # ``lop exec --tools console,bash``, ``AGENTS_CONFIG_TOOLS``, a
+            # child's inherited declaration — asked for them as part of what the
+            # run IS, so withholding a named tool's schema would make the run
+            # discover the very tools it declared. Reachability is unaffected
+            # either way (a deferred tool is callable and named on the
+            # inventory's line); this is about not spending the model's first
+            # calls guessing the shape of a tool the host already chose
+            # (review round 1, MINOR-2).
+            self.set_tool_deferral(pins=incoming)
         if incoming_ops is not None:
             self._declared_tool_ops = incoming_ops
         # ``unattended`` is one-way in the direction that matters, for the same

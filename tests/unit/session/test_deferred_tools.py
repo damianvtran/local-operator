@@ -10,13 +10,14 @@ those are the two halves the contract is made of.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
 
 from local_operator.harness.loop import validate_tool_arguments
 from local_operator.harness.types import (
+    COLLAPSED_OPTIONAL_NULL_KEY,
     AbortSignal,
     AgentTool,
     ChatRequest,
@@ -27,6 +28,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolContext,
     ToolResult,
 )
 from local_operator.prompts_api import build_system_blocks, render_tool_inventory_block
@@ -133,20 +135,23 @@ def _results(session: Session) -> dict[str, str]:
 
 
 def test_every_deferred_name_is_a_real_tool_with_a_purpose() -> None:
-    """A typo in a deferral set defers nothing, silently; a missing purpose
+    """A typo in the deferral set defers nothing, silently; a missing purpose
     phrase leaves a tool on the inventory line with no reason to reach for it."""
-    for kind, names in DEFERRED_TOOLS.items():
-        assert names <= set(DEFAULT_TOOL_NAMES), (kind, names - set(DEFAULT_TOOL_NAMES))
-        assert names <= set(DEFERRED_TOOL_PURPOSES), (kind, names - set(DEFERRED_TOOL_PURPOSES))
-    assert DEFERRED_TOOLS["top"] < DEFERRED_TOOLS["child"]
+    assert DEFERRED_TOOLS <= set(DEFAULT_TOOL_NAMES), DEFERRED_TOOLS - set(DEFAULT_TOOL_NAMES)
+    assert DEFERRED_TOOLS <= set(DEFERRED_TOOL_PURPOSES), DEFERRED_TOOLS - set(
+        DEFERRED_TOOL_PURPOSES
+    )
     # ``ask`` is named by the <interactivity> bodies as the channel to the
-    # operator, so a top-level session must never have to discover it.
-    assert "ask" not in DEFERRED_TOOLS["top"]
+    # operator, so a session must never have to discover it.
+    assert "ask" not in DEFERRED_TOOLS
+    # The child-only extras were measured and DROPPED (adoption collapse); this
+    # pins the finding so a later "cheap win" does not quietly re-add them.
+    assert not ({"project", "sessions", "send", "agent", "secret", "network"} & DEFERRED_TOOLS)
 
 
-def test_a_role_pin_keeps_a_named_tool_published() -> None:
-    assert "project" in deferred_tool_names("child")
-    assert "project" not in deferred_tool_names("child", pinned=("project", "read"))
+def test_a_pin_keeps_a_named_tool_published() -> None:
+    assert "team" in deferred_tool_names()
+    assert "team" not in deferred_tool_names(pinned=("team", "read"))
 
 
 def test_the_kill_switch_reads_only_an_explicit_false() -> None:
@@ -356,7 +361,72 @@ async def test_an_invalid_call_to_a_published_tool_gets_no_tool_doc_hint(tmp_pat
     await session.dispose()
 
 
-# -- plan item 6: allowlists and profile pins -------------------------------
+# -- plan item 6: allowlists and pins ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_declared_inventory_pins_what_the_host_named(tmp_path) -> None:
+    """``--tools console,bash`` (and ``AGENTS_CONFIG_TOOLS``) is a host saying
+    which tools this run IS, so the run must not have to discover them."""
+    executed: list[str] = []
+    stream = ScriptedStream([_text("hi")])
+    session = _session(
+        tmp_path,
+        stream,
+        [_tool("read", executed), _tool("console", executed), _tool("lsp", executed)],
+    )
+    session.set_tool_inventory(["read", "console"])
+    await session.prompt("go")
+    assert stream.names(0) == ["read", "console"]
+    assert session.deferred_tool_names() == frozenset()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_refuses_itself_gets_the_hint_too(tmp_path) -> None:
+    """QA round 1, Q2: a tool whose own pydantic model rejects the arguments
+    returns the refusal from its BODY, so the plan-time hint never runs and the
+    model got no pointer to a schema it was never sent."""
+    from local_operator.harness.types import FAULT_INVALID_ARGUMENTS, FAULT_KEY
+
+    async def refuse(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="console",
+            is_error=True,
+            content=[TextContent(text="invalid arguments:\n- method: Input should be 'list'")],
+            details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+        )
+
+    stream = ScriptedStream([_call("console"), _text("done")])
+    session = _session(tmp_path, stream, [_tool("read", []), _tool("console", [], execute=refuse)])
+    await session.prompt("go")
+
+    text = _results(session)["c1"]
+    assert text.endswith("read tool://console"), text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_published_tool_that_refuses_itself_gets_no_hint(tmp_path) -> None:
+    """The converse: the hint would be a lie for a schema the model was sent."""
+    from local_operator.harness.types import FAULT_INVALID_ARGUMENTS, FAULT_KEY
+
+    async def refuse(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="read",
+            is_error=True,
+            content=[TextContent(text="invalid arguments:\n- range: bad range")],
+            details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+        )
+
+    stream = ScriptedStream([_call("read"), _text("done")])
+    session = _session(tmp_path, stream, [_tool("read", [], execute=refuse), _tool("console", [])])
+    await session.prompt("go")
+
+    assert _results(session)["c1"] == "invalid arguments:\n- range: bad range"
+    await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -373,17 +443,33 @@ async def test_a_declared_inventory_still_excludes_a_deferred_tool(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_child_defers_its_set_and_a_role_pin_keeps_project(tmp_path) -> None:
+async def test_a_pin_keeps_the_role_tools_published(tmp_path) -> None:
+    """A role's ``tools:`` list is a request for those tools, so a sandboxed
+    session must not make its own player discover them."""
     executed: list[str] = []
     stream = ScriptedStream([_text("hi")])
     session = _session(
         tmp_path,
         stream,
-        [_tool("read", executed), _tool("send", executed), _tool("project", executed)],
+        [_tool("read", executed), _tool("team", executed), _tool("console", executed)],
     )
-    session.set_tool_deferral("child", pins=("read", "project"))
+    session.set_tool_deferral(pins=("read", "team"))
     await session.prompt("go")
-    assert stream.names(0) == ["read", "project"]
+    assert stream.names(0) == ["read", "team"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declared_inventory_pins_its_own_names(tmp_path) -> None:
+    """A host that declares the run's tools asked for them (review round 1,
+    MINOR-2): ``lop exec --tools console,bash`` must not make the model
+    discover ``console``'s shape."""
+    executed: list[str] = []
+    stream = ScriptedStream([_text("hi")])
+    session = _session(tmp_path, stream, [_tool("bash", executed), _tool("console", executed)])
+    session.set_tool_inventory(["bash", "console"])
+    await session.prompt("go")
+    assert stream.names(0) == ["bash", "console"]
     await session.dispose()
 
 
@@ -415,7 +501,7 @@ async def test_the_inventory_block_is_identical_before_and_after_activation(tmp_
 def test_ask_and_its_interactivity_body_are_unchanged() -> None:
     from local_operator.prompts_api import CHANNEL_ASK
 
-    assert "ask" not in deferred_tool_names("top")
+    assert "ask" not in deferred_tool_names()
     ask = _tool("ask", [])
     with_deferral = build_system_blocks(
         [ask], "", "", "2026-01-01", interactive=True, channel=CHANNEL_ASK, deferred_tools={"lsp"}
@@ -476,16 +562,26 @@ def test_optional_null_unions_collapse_and_required_ones_do_not() -> None:
         },
     }
     out = collapse_optional_nulls(schema)
-    assert out["properties"]["opt"] == {"type": "string", "description": "d"}
+    marked = {COLLAPSED_OPTIONAL_NULL_KEY: True}
+    # EVERY rewrite carries the marker: the loop skips a marked property, so an
+    # unmarked rewrite would restore the type enforcement that refused the
+    # string forms ``hub``/``jobs`` coerce (review round 1, MAJOR-1).
+    assert out["properties"]["opt"] == {"type": "string", "description": "d", **marked}
     assert out["properties"]["req"] == schema["properties"]["req"]
     assert out["properties"]["multi"] == schema["properties"]["multi"]
     assert out["properties"]["kept_default"] == schema["properties"]["kept_default"]
-    assert out["$defs"]["Item"]["properties"]["x"] == {"type": "integer"}
+    assert out["$defs"]["Item"]["properties"]["x"] == {"type": "integer", **marked}
     # The input is not mutated (schemas are shared by pydantic's cache).
     assert "anyOf" in schema["properties"]["opt"]
 
 
-def test_the_validator_accepts_null_for_an_optional_property_only() -> None:
+def test_the_loop_does_not_type_check_a_collapsed_property() -> None:
+    """A collapsed property keeps the BASE semantics: unchecked at the loop.
+
+    The union shape this loop has always read as "not mine to check" (no
+    top-level ``type``) is restored by the marker, so a tool's own coercer
+    still decides. A REQUIRED ``string`` is checked exactly as before.
+    """
     tool = _tool(
         "t",
         [],
@@ -501,19 +597,90 @@ def test_the_validator_accepts_null_for_an_optional_property_only() -> None:
         ),
     )
     assert validate_tool_arguments(tool, {"req": "a", "opt": None}) == []
-    assert validate_tool_arguments(tool, {"req": "a", "opt": 3}) == [
-        "argument 'opt' does not match type string"
-    ]
+    assert validate_tool_arguments(tool, {"req": "a", "opt": 3}) == []
     assert validate_tool_arguments(tool, {"req": None}) == [
         "argument 'req' does not match type string"
     ]
+
+
+def _walk_properties(node: Any):
+    """Yield ``(name, property_schema)`` for every property in a schema tree.
+
+    Recursive on purpose: the collapse reaches nested ``$defs`` (a pydantic
+    sub-model's fields), and those are exactly where a missed marker would sit
+    unnoticed because no probe names them.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from _walk_properties(item)
+        return
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if key == "properties" and isinstance(value, Mapping):
+            for name, prop in value.items():
+                yield name, prop
+                yield from _walk_properties(prop)
+        elif key in ("$defs", "definitions", "items", "anyOf", "oneOf", "allOf"):
+            yield from _walk_properties(value)
+
+
+def test_the_loop_checks_no_collapsed_property_and_still_checks_the_rest() -> None:
+    """THE structural invariant MAJOR-1 needs, over the FULL tool surface.
+
+    A collapsed property without the marker is a call the loop refuses before
+    the tool can coerce it — which is how ``hub``'s ``to`` and ``jobs``'
+    ``job_id`` lost their documented input forms. This walks every property of
+    every tool a fully-capable session advertises (nested ``$defs`` included)
+    and asserts the loop raises no complaint about any it finds marked, so it
+    fails on the NEXT such property rather than only on the two families a probe
+    happened to try.
+
+    The converse half is what gives it teeth: an unmarked REQUIRED property must
+    still be type-checked, so a validator that simply stopped checking cannot
+    pass this test.
+    """
+    from scripts.real_tool_surface import build_real_tools
+
+    tools = build_real_tools(".")
+    checked = 0
+    for tool in tools:
+        for name, prop in _walk_properties(tool.parameters or {}):
+            if not isinstance(prop, dict) or not prop.get(COLLAPSED_OPTIONAL_NULL_KEY):
+                continue
+            checked += 1
+            errors = validate_tool_arguments(tool, {name: {"wrong": "type"}})
+            assert not [error for error in errors if f"'{name}'" in error], (
+                f"{tool.name}.{name} is collapsed and marked, but the loop still "
+                "type-checks it — a coerced form would be refused before the tool ran"
+            )
+        properties = tool.parameters.get("properties") or {}
+        typed = next(
+            (
+                field
+                for field in tool.parameters.get("required") or []
+                if isinstance(properties.get(field), dict)
+                and isinstance(properties[field].get("type"), str)
+                and not properties[field].get(COLLAPSED_OPTIONAL_NULL_KEY)
+            ),
+            None,
+        )
+        if typed is None:
+            continue
+        errors = validate_tool_arguments(tool, {typed: {"wrong": "type"}})
+        assert [error for error in errors if f"'{typed}'" in error], (
+            f"{tool.name}.{typed} is a plain required property and the loop no "
+            "longer type-checks it — this test would pass on a validator that "
+            "checked nothing"
+        )
+    # The full surface carries ~123 of them; 0 means the walk moved.
+    assert checked > 100, f"walked {checked} collapsed properties — the marker moved?"
 
 
 @pytest.mark.asyncio
 async def test_a_builtin_still_accepts_an_explicit_null_for_a_collapsed_field(tmp_path) -> None:
     """End to end over a real builtin: ``read``'s optional ``range`` reaches the
     wire without a null branch, and a model that sends null is not refused."""
-    from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
     (read,) = create_tools(ToolContext(cwd=str(tmp_path)), enabled=["read"])
@@ -525,3 +692,86 @@ async def test_a_builtin_still_accepts_an_explicit_null_for_a_collapsed_field(tm
         "c1", {"path": str(target), "range": None}, None, None, ToolContext(cwd=str(tmp_path))
     )
     assert not result.is_error and "hello" in result.text
+
+
+# -- MAJOR-1: the collapse must not make the loop refuse a coerced form ------
+
+
+def test_the_loop_still_accepts_the_forms_the_tools_coerce() -> None:
+    """Over the REAL schemas, through the loop's own validator.
+
+    ``hub``'s ``to`` takes a bare job id or the JSON of the list and ``jobs``'
+    ``job_id`` takes a number — both via ``mode="before"`` coercers the tools
+    ship on purpose. At base those properties were ``anyOf: [T, null]``, so the
+    loop checked nothing and the coercer decided; collapsing the union put a
+    ``type`` at the top level and refused the call before the tool ran (review
+    round 1, MAJOR-1). The existing coverage could not catch it because it
+    called ``execute_hub`` directly and so never touched this validator.
+    """
+    from scripts.real_tool_surface import build_real_tools
+
+    by_name = {tool.name: tool for tool in build_real_tools(".")}
+    hub, jobs = by_name["hub"], by_name["jobs"]
+    # The documented string forms, and a third the union itself allowed.
+    assert validate_tool_arguments(hub, {"op": "list", "to": "job-1"}) == []
+    assert validate_tool_arguments(hub, {"op": "list", "to": '["job-1"]'}) == []
+    assert validate_tool_arguments(hub, {"op": "list", "to": ["job-1"]}) == []
+    assert validate_tool_arguments(hub, {"op": "list", "to": 5}) == []
+    # ``jobs``: the numeric form a model emits for an id it read as a number.
+    assert validate_tool_arguments(jobs, {"op": "peek", "job_id": 1}) == []
+    assert validate_tool_arguments(jobs, {"op": "peek", "job_id": "1"}) == []
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_job_id_survives_the_loop_and_reaches_the_tool(tmp_path) -> None:
+    """The same finding, driven end to end through ``_plan_call`` on a Session.
+
+    A validator-level assertion proves the schema is right; this proves the loop
+    actually carries the call through to execution, which is the half the
+    reviewer's repro measured going wrong.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.tools.registry import create_tools
+
+    stream = ScriptedStream([_call("jobs", '{"op": "peek", "job_id": 1}'), _text("done")])
+    (jobs_tool,) = create_tools(
+        ToolContext(cwd=str(tmp_path), jobs=AsyncJobManager()), enabled=["jobs"]
+    )
+    session = _session(tmp_path, stream, [jobs_tool])
+    await session.prompt("go")
+
+    text = _results(session)["c1"]
+    assert "does not match type string" not in text, text
+    # It reached the executor: an unknown id is the tool's OWN refusal.
+    assert "unknown job" in text, text
+    await session.dispose()
+
+
+def test_the_marker_is_what_the_loop_reads_not_an_absence_of_type() -> None:
+    """A marked property IS type-checked when the marker is removed.
+
+    The fail-proof direction for the invariant above: strip the marker from a
+    real schema and the loop refuses the coerced form again, so the test that
+    walks the surface would go red on a regression rather than passing because
+    the walk found nothing.
+    """
+    from scripts.real_tool_surface import build_real_tools
+
+    hub = next(tool for tool in build_real_tools(".") if tool.name == "hub")
+    parameters = {
+        **hub.parameters,
+        "properties": {
+            name: (
+                {key: value for key, value in prop.items() if key != COLLAPSED_OPTIONAL_NULL_KEY}
+                if isinstance(prop, dict)
+                else prop
+            )
+            for name, prop in hub.parameters["properties"].items()
+        },
+    }
+    markerless = hub.model_copy(update={"parameters": parameters})
+    errors = validate_tool_arguments(markerless, {"op": "list", "to": "job-1"})
+    assert [error for error in errors if "'to'" in error], (
+        "without the marker the loop must type-check 'to' again — if this passes, "
+        "the marker is not what makes the coerced forms work"
+    )

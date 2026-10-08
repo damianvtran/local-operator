@@ -64,10 +64,7 @@ from local_operator.prompts_api import (  # noqa: E402
     CHANNEL_HUB,
     build_system_blocks,
 )
-from local_operator.tools.deferral import (  # noqa: E402
-    DeferralKind,
-    deferred_tool_names,
-)
+from local_operator.tools.deferral import deferred_tool_names  # noqa: E402
 from local_operator.tools.registry import DEFAULT_TOOL_NAMES  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
@@ -1275,19 +1272,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: why): +360 chars = ~+129 billed, measured head 95,232 chars = ~34,256. The
 #: ceiling is NOT raised for it — the 554 tokens left (~1.6%) are the headroom.
 #:
-#: LOWERED 34,810 -> 25,348 by the context diet, slice A (deferred tool
-#: schemas, ``perf/deferred-tools``). Measured with THIS script, CLEAN arm via
-#: ``env -i``, both trees on the same machine (base re-measured after slice B
-#: merged, so this delta is slice A's alone):
+#: LOWERED 34,810 -> 27,901 by the context diet, slice A (deferred tool schemas,
+#: ``perf/deferred-tools``), RE-MEASURED after review round 1. Measured with THIS
+#: script, CLEAN arm via ``env -i``, both trees on the same machine (base
+#: re-measured after slice B merged, so the delta is slice A's alone):
 #:
 #:   base (origin/main 5e59e0cd0)    95,232 chars = ~34,256
-#:   head (this branch)              69,085 chars = ~24,851
-#:   delta                          -26,147 chars = ~-9,405
+#:   head (this branch)              76,044 chars = ~27,354
+#:   delta                          -19,188 chars = ~-6,902
 #:
 #: Instructions, environment and knowledge are byte-identical across the arms;
 #: the delta is the tools array and one inventory line:
 #:
-#:   -16,893 chars  ``tool_schemas``: 11 tools' schemas DEFERRED — still held,
+#:   -10,690 chars  ``tool_schemas``: 10 tools' schemas DEFERRED — still held,
 #:                  callable, approval-gated and documented, but published only
 #:                  once activated (``tools/deferral.py``). ``tool_schemas``
 #:                  counts only what is published, as ``Session._publishable``
@@ -1295,34 +1292,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   - 5,142 chars  ``tool_schemas``: optional ``anyOf: [T, null]`` +
 #:                  ``default: null`` collapsed to ``T`` (123 properties;
 #:                  ``tools.registry.collapse_optional_nulls``), measured alone
-#:   - 4,484 chars  ``tool_schemas``: description trims (``ask``, ``send``,
+#:   - 3,728 chars  ``tool_schemas``: description trims (``ask``, ``send``,
 #:                  ``sessions``, ``browser``, ``todo.op``, ``project``, the
 #:                  ``i`` intent) whose prose moved into ``read tool://<name>``
 #:                  (the remainder of 68,995 -> 59,369 after the collapse)
 #:   +   372 chars  ``tool_inventory``: the one "schema on demand" line naming
 #:                  the deferred tools with a purpose phrase each
-#:   = -26,147 chars = ~-9,405 billed
+#:   = -19,188 chars = ~-6,902 billed
 #:
-#: ``--no-defer`` (the ``tools.defer: false`` kill switch) measures ~30,794 —
+#: ``--no-defer`` (the ``tools.defer: false`` kill switch) measures ~32,317 —
 #: the two trims alone — the inverse canary that proves the deferral share is
-#: real. The ceiling is the measured head + ~2% (497), inside the 1,200 band.
-BUDGET_BILLED_TOKENS = 25_348
+#: real. The ceiling is the measured head + ~2% (547), inside the 1,200 band.
+#:
+#: RE-MEASURED DOWN from 27,634/28,187 (round 1's number) because ``network``
+#: and the five child-only extras were UN-DEFERRED: each was measured collapsing
+#: adoption on a live model when its schema was absent. Re-derive with
+#: ``--verbose`` after any change to the deferred set.
+BUDGET_BILLED_TOKENS = 27_901
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
-#: as ``BUDGET_BILLED_TOKENS`` above; a separate number because a child carries
-#: a different deferral set (it also defers ``project``/``sessions``/``send``/
-#: ``agent``/``secret``, which subagents almost never call) and never holds
-#: ``CHILD_NEVER_HOLDS``. ~93% of the 30-day ledger's sessions are children, so
-#: this is the number most requests actually pay. Measured with THIS script's
-#: child arm on both trees (base re-derived over an exported ``origin/main``
-#: 5e59e0cd0 with the same tool filter and channel):
+#: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
+#: INVENTORY is smaller (``CHILD_NEVER_HOLDS``: no ``ask``/``ask_withdraw``/
+#: ``wake``/``monitor``/``patience``) and its prompt carries the ``hub``
+#: channel, not because the deferred set differs — it does not, see
+#: ``tools/deferral.py`` for the measurement that dropped the child-only extras.
+#: ~93% of the 30-day ledger's sessions are children, so this is the number most
+#: requests actually pay. Measured with THIS script's child arm on both trees
+#: (base re-derived over an exported ``origin/main`` 5e59e0cd0 with the same
+#: tool filter and channel):
 #:
 #:   base (origin/main 5e59e0cd0)    83,243 chars = ~29,944
-#:   head (this branch)              49,472 chars = ~17,796
-#:   delta                          -33,771 chars = ~-12,148
+#:   head (this branch)              68,704 chars = ~24,714
+#:   delta                          -14,539 chars = ~-5,230
 #:
-#: ``--no-defer`` measures ~27,334. The ceiling is the measured head + ~2% (356).
-BUDGET_CHILD_BILLED_TOKENS = 18_152
+#: ``--no-defer`` measures ~28,568. The ceiling is the measured head + ~2% (494).
+BUDGET_CHILD_BILLED_TOKENS = 25_208
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -1373,7 +1377,7 @@ def measure_start_context(
     user_instructions: str = _SAMPLE_USER_INSTRUCTIONS,
     repo_guidance: str = _SAMPLE_REPO_GUIDANCE,
     inflate_schemas: int = 0,
-    kind: DeferralKind = "top",
+    kind: str = "top",
     defer: bool = True,
 ) -> dict[str, Any]:
     """Character cost of everything a fresh session puts on the wire.
@@ -1386,13 +1390,14 @@ def measure_start_context(
     tools = build_real_tools(str(REPO))
     if kind == "child":
         tools = [tool for tool in tools if tool.name not in CHILD_NEVER_HOLDS]
-    # What a session withholds from the wire (``tools/deferral.py``). The
-    # inventory block lists these on its "schema on demand" line instead, and
-    # ``tool_schemas`` below counts only what is published — exactly what
-    # ``Session._publishable`` sends. ``defer=False`` is the inverse canary:
-    # the pre-deferral surface, every schema published.
+    # What a session withholds from the wire (``tools/deferral.py``). ONE set
+    # for both kinds — the module records the measurement that dropped the
+    # child-only extras. The inventory block lists these on its "schema on
+    # demand" line instead, and ``tool_schemas`` below counts only what is
+    # published — exactly what ``Session._publishable`` sends. ``defer=False``
+    # is the inverse canary: the pre-deferral surface, every schema published.
     held = {tool.name for tool in tools}
-    deferred = (deferred_tool_names(kind) & held) if defer else frozenset()
+    deferred = (deferred_tool_names() & held) if defer else frozenset()
     if inflate_schemas:
         # A new property on the first tool: the shape a real schema regression
         # takes (a tool grows an argument), rather than opaque filler.

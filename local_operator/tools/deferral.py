@@ -28,24 +28,39 @@ renderer can read the purpose phrases without pulling the tool builders in.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import Literal
 
-#: The session kinds that defer different sets. A child is a subagent; every
-#: other session (TUI, desktop, exec, SDK) is ``top``.
-DeferralKind = Literal["top", "child"]
-
-#: Tools whose schema is withheld from a TOP-LEVEL session's tools array.
+#: Tools whose schema is withheld from the request's tools array.
+#:
+#: ONE SET FOR EVERY SESSION, and that is a measurement rather than a
+#: simplification. The design memo proposed a LARGER set for subagents — the
+#: session-management tools a top-level session lives in and a child almost
+#: never calls (``send`` 2.1% of children, ``secret`` 0.9%, ``agent`` 0.23%,
+#: ``project`` 0.17%, ``sessions`` 0.02%). Every one of those five was measured
+#: on a live model and EVERY one showed an adoption regression where its schema
+#: was absent: the child reached for an equivalent CLI plus a guide instead of
+#: the tool, at 2-4x the provider calls. A child-only set therefore bought
+#: schema tokens by making the tools the child was given harder to use, which is
+#: not a saving. The per-tool counts and the route each run took are on the PR.
 #:
 #: Chosen from per-kind usage, not the blended figure: 93% of the 30-day
 #: ledger's sessions are subagents, so a blended "share of sessions that called
 #: it" hides that ``send`` is called by ~50% of top-level sessions and ~2% of
-#: children. Every tool here is called by at most ~2% of top-level sessions;
-#: ``lsp`` and ``patience`` by roughly none. ``ask`` is deliberately NOT here:
-#: the ``<interactivity>`` bodies name it as the channel to the operator.
-_TOP_LEVEL_DEFERRED: frozenset[str] = frozenset(
+#: children. Every tool here is called by at most ~2% of sessions of EITHER
+#: kind; ``lsp`` and ``patience`` by roughly none. ``ask`` is deliberately NOT
+#: here: the ``<interactivity>`` bodies name it as the channel to the operator.
+DEFERRED_TOOLS: frozenset[str] = frozenset(
     {
         "console",
-        "network",
+        # ``network`` was deferred and was RE-ADMITTED after measurement: QA
+        # round 1 (Q1) ran the same prompt 3x on each arm and the deferred arm
+        # called it 0/2 whenever ``bash`` was available, reaching instead for
+        # ``read guide://network`` + ``lop network status --json`` (12 and 9
+        # provider calls against base's 3 and 7). The answers were right either
+        # way, so this was an ADOPTION regression rather than a capability
+        # loss — and a tool whose use collapses is not a saving worth having.
+        # Its schema is one of the largest, and external-surface correctness
+        # outweighs the tokens. Every other deferred tool with a CLI equivalent
+        # was measured the same way and kept: see the PR's adoption table.
         "team",
         "lsp",
         "patience",
@@ -58,20 +73,6 @@ _TOP_LEVEL_DEFERRED: frozenset[str] = frozenset(
     }
 )
 
-#: A child additionally defers the session-management tools a top-level
-#: session uses heavily and a subagent almost never does (``send`` 2.1%,
-#: ``secret`` 0.9%, ``agent`` 0.23%, ``project`` 0.17%, ``sessions`` 0.02% of
-#: children). A role that NAMES one of them in its ``tools:`` list keeps it
-#: published — see :func:`deferred_tool_names`.
-_CHILD_DEFERRED: frozenset[str] = _TOP_LEVEL_DEFERRED | frozenset(
-    {"project", "sessions", "send", "agent", "secret"}
-)
-
-DEFERRED_TOOLS: Mapping[DeferralKind, frozenset[str]] = {
-    "top": _TOP_LEVEL_DEFERRED,
-    "child": _CHILD_DEFERRED,
-}
-
 #: One short purpose phrase per deferrable tool, rendered in the inventory's
 #: "schema on demand" line. The phrase is what lets a model decide to reach for
 #: a tool whose description it has not been sent; keep each to a few words —
@@ -80,7 +81,6 @@ DEFERRED_TOOLS: Mapping[DeferralKind, frozenset[str]] = {
 #: than hiding a tool; ``test_every_deferred_tool_has_a_purpose`` pins the map.
 DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "console": "drive an interactive terminal",
-    "network": "lop mesh peers and their sessions",
     "team": "author or list teams",
     "lsp": "code intelligence",
     "patience": "proactive reply-wait timers",
@@ -90,11 +90,6 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "team_delete": "delete a team",
     "read_variable": "read one variable",
     "list_variables": "list variable names",
-    "project": "track multi-session workstreams",
-    "sessions": "list/spawn/resume/stop lop sessions",
-    "send": "message another lop session",
-    "agent": "agent profiles and roles",
-    "secret": "store and use credentials",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every
@@ -127,15 +122,16 @@ def tool_deferral_enabled(values: Mapping[str, object] | None = None) -> bool:
     return DEFAULT_TOOL_DEFERRAL
 
 
-def deferred_tool_names(kind: DeferralKind, pinned: Collection[str] = ()) -> frozenset[str]:
-    """The names ``kind`` defers, minus any a role/profile ``tools:`` list pins.
+def deferred_tool_names(pinned: Collection[str] = ()) -> frozenset[str]:
+    """The deferred names, minus any the session PINS.
 
-    A profile that NAMES a tool asked for it as part of what the role is, so
-    withholding its schema would make the role's own core tool the one it
-    has to discover. The lopdev ``manager`` seed names ``project``, for
-    example, and ``read_variable``/``list_variables``.
+    A caller that NAMES a tool — a role's ``tools:`` list, a team manager's, or
+    a host declaration (``lop exec --tools console,bash``) — asked for it as
+    part of what the run IS, so withholding its schema would make a tool the
+    caller already chose the one the model has to discover. The lopdev
+    ``manager`` seed names ``project`` and ``read_variable``/``list_variables``.
     """
-    return DEFERRED_TOOLS[kind] - frozenset(pinned)
+    return DEFERRED_TOOLS - frozenset(pinned)
 
 
 def render_deferred_tools_line(names: Collection[str]) -> str:
@@ -162,7 +158,6 @@ __all__ = [
     "DEFAULT_TOOL_DEFERRAL",
     "DEFERRED_TOOLS",
     "DEFERRED_TOOL_PURPOSES",
-    "DeferralKind",
     "TOOL_DEFERRAL_PATH",
     "deferred_tool_names",
     "render_deferred_tools_line",

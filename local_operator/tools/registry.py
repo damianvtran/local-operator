@@ -15,7 +15,11 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from local_operator.harness.intent import apply_intent_schema
-from local_operator.harness.types import AgentTool, ToolContext
+from local_operator.harness.types import (
+    COLLAPSED_OPTIONAL_NULL_KEY,
+    AgentTool,
+    ToolContext,
+)
 from local_operator.network.tool import build_network_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
@@ -165,10 +169,16 @@ def collapse_optional_nulls(schema: Any) -> Any:
 
     ONLY the optional, single-branch case: a REQUIRED nullable property (where
     ``null`` is a meaningful value the model must be able to send) and a
-    multi-branch union are left exactly as generated. The loop's validator
-    accepts ``None`` for an optional property (``validate_tool_arguments``), so
-    a model that still sends ``null`` for an omitted field is not refused, and
-    every builtin params model already accepts ``None`` for these fields.
+    multi-branch union are left exactly as generated.
+
+    EVERY REWRITE IS MARKED (``COLLAPSED_OPTIONAL_NULL_KEY``) and the loop's
+    validator SKIPS a marked property. That is what keeps the rewrite honest:
+    an optional ``T | None`` had no top-level ``type``, so the loop checked
+    nothing and the tool's own pydantic model decided — including coercers
+    tools ship on purpose (``hub``'s ``to`` takes a bare id or its JSON;
+    ``jobs``' ``job_id`` takes a number). Without the marker the collapsed
+    ``type`` would make the loop enforce a type the tool would have coerced,
+    refusing the call before the tool ran (review round 1, MAJOR-1).
 
     Builtins only: called from :func:`create_tools`, never on an MCP server's
     schema, which is the server's contract to state.
@@ -213,7 +223,7 @@ def _collapse_one(prop: Any) -> Any:
         # leave it rather than guess.
         return prop
     collapsed = {key: value for key, value in prop.items() if key not in ("anyOf", "default")}
-    return {**kept, **collapsed}
+    return {**kept, **collapsed, COLLAPSED_OPTIONAL_NULL_KEY: True}
 
 
 def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> list[AgentTool]:
