@@ -21,7 +21,7 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.wakes import store as wake_store
 from tests.e2e.harness import ScriptedStream, text_turn
-from tests.unit.aida.conftest import write_config
+from tests.unit.aida.conftest import mark_met, write_config
 
 MODEL = ModelSpec(provider="test", model_id="aida-model", context_window=100_000)
 
@@ -107,6 +107,7 @@ async def test_persist_reconcile_rearms_the_cadence_and_drops_while_paused(
 ) -> None:
     session_id = "cccc55556666"
     state.update_state(isolated_root, session_id=session_id)
+    mark_met(isolated_root)
     session = make_session(isolated_root, session_id)
     try:
         assert session._aida_duty is True
@@ -316,4 +317,72 @@ async def test_a_name_write_reaches_her_live_session(isolated_root: Path) -> Non
         assert session.conversation_name_state.user_set is True
     finally:
         unsubscribe()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
+    isolated_root: Path,
+) -> None:
+    """Her reply is the FIRST VISIBLE row; the trigger reaches only the model.
+
+    Drives the real delivery (``Session._deliver_wake``) over a real
+    transcript with a scripted provider, then reads the conversation back the
+    way each surface does: the model's request (must carry the trigger), the
+    desktop's history window, and the phone's fold (neither may show it). The
+    ledger moves to ``delivered`` at THIS fire, not at arm time (audit
+    A1/A3/A4).
+    """
+    from local_operator.aida import onboarding
+    from local_operator.harness.types import WakeDeliveredEvent
+    from local_operator.mobile.projection import fold_messages_to_entries
+    from local_operator.session.history_window import display_window
+
+    session_id = "eeee99990000"
+    state.update_state(isolated_root, session_id=session_id)
+    onboarding.request_greeting(isolated_root, "tui")
+    onboarding.mark_greeted(isolated_root, 1)
+    session = make_session(isolated_root, session_id)
+    stream = session._stream_fn
+    events: list[object] = []
+    session.subscribe(events.append)
+    try:
+        trigger = onboarding.greeting_message(isolated_root, surface="tui")
+        row = WakeSchedule(
+            id=onboarding.GREETING_WAKE_ID, message=trigger, next_due_at=1, hidden=True
+        )
+        await session._deliver_wake(DueWake(schedule=row, occurrence=1, final=True))
+        for _ in range(200):
+            if any(getattr(m, "role", "") == "assistant" for m in session.history()):
+                break
+            await asyncio.sleep(0.01)
+
+        # The model read the trigger.
+        assert stream.requests, "her greeting turn never reached the provider"
+        assert trigger in str(stream.requests[0])
+        # No receipt card was emitted for the live surfaces.
+        assert not [e for e in events if isinstance(e, WakeDeliveredEvent)]
+        # The ledger moved at the fire.
+        assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_DELIVERED
+        assert onboarding.greeted_at(isolated_root) is not None
+
+        # Desktop history window: her reply is the first (and only) row.
+        transcript = session._transcript
+        page = display_window(
+            transcript,
+            conversation_id=session_id,
+            owner_epoch="epoch",
+            through_id=transcript.entries()[-1].id,
+        )
+        visible = [m for m in page.messages if trigger in str(getattr(m, "details", "") or m)]
+        assert not visible, page.messages
+        roles = [getattr(m, "role", getattr(m, "custom_type", "")) for m in page.messages]
+        assert roles and roles[0] == "assistant", roles
+
+        # Phone fold: no wake notice, no user row; her text is first.
+        entries = fold_messages_to_entries(session.history())
+        kinds = [e.kind for e in entries]
+        assert "notice" not in kinds and "user" not in kinds, kinds
+        assert entries and entries[0].kind == "assistant"
+    finally:
         await session.dispose()

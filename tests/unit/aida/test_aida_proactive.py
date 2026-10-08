@@ -21,7 +21,7 @@ import pytest
 from local_operator.aida import proactive, state
 from local_operator.harness.wake_types import WakeSchedule
 from local_operator.wakes import store as wake_store
-from tests.unit.aida.conftest import write_config
+from tests.unit.aida.conftest import mark_met, write_config
 
 SESSION_ID = "0123456789ab"
 
@@ -53,6 +53,8 @@ def _root_with_session(root: Path) -> Path:
     session_dir.mkdir(parents=True)
     write_session_attachment(session_dir, team="", agent="aida", goal="")
     state.update_state(root, session_id=SESSION_ID)
+    # The steady state these cadence tests model: she has met the operator.
+    mark_met(root)
     return root
 
 

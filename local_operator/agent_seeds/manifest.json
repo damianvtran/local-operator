@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-30T15:39:00Z",
-  "generator_version": "0.64.9",
+  "generated_at": "2026-10-08T15:00:00Z",
+  "generator_version": "0.68.7",
   "source": "https://github.com/damianvtran/local-operator",
   "seeds": [
     {
@@ -9,9 +9,9 @@
       "label": "Aida",
       "description": "Your chief of staff: orchestrates agents and teams on your behalf, keeps an eye on everything in flight, and reports back.",
       "when_to_use": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
-      "version": "1.4.0",
-      "instructions_sha256": "8874cb4abbdac0b1f0784cda0249de3b2c599220cc74e6435f4913f0bf927439",
-      "instructions_chars": 7989,
+      "version": "1.5.0",
+      "instructions_sha256": "74a48c86b69618f115b1d2be478f4f77155ec27fdf2c573be9e211ef616ead69",
+      "instructions_chars": 7974,
       "tools": null,
       "effort": null,
       "delegate": true,

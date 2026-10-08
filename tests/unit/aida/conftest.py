@@ -62,3 +62,17 @@ def write_config(root: Path, values: dict[str, Any]) -> None:
     for key, value in values.items():
         merged[key] = value
     path.write_text(yaml.safe_dump(document))
+
+
+def mark_met(root: Path) -> None:
+    """Record that her greeting was DELIVERED: she has met the operator.
+
+    The daily cadence is withheld on a first-run install until the greeting
+    fires (``onboarding.cadence_allowed`` — no headless 08:30 check-in before
+    she has said hello in a window the user is looking at). A test about the
+    CADENCE models the steady state, so it says so explicitly rather than
+    relying on the old behaviour where a fresh root armed one at once.
+    """
+    from local_operator.aida import onboarding
+
+    onboarding.mark_delivered(root, 1_700_000_000_000)

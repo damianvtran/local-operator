@@ -15,11 +15,14 @@ import pytest
 
 from local_operator import aida
 from local_operator.aida import state
-from tests.unit.aida.conftest import tree, write_config
+from tests.unit.aida.conftest import mark_met, tree, write_config
 
 
 @pytest.mark.asyncio
 async def test_ensure_creates_her_session_once_and_returns_the_same_id(isolated_root: Path) -> None:
+    # An install she has already met: the cadence half below is armed by the
+    # ensure only once the greeting is delivered (onboarding.cadence_allowed).
+    mark_met(isolated_root)
     first = await aida.ensure_session(isolated_root)
     second = await aida.ensure_session(isolated_root)
 

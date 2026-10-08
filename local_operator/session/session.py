@@ -19736,7 +19736,19 @@ class Session:
         # grace path, and a stale one is retired by the delivery checks.
         from local_operator.wakes.store import is_internal_wake_row
 
-        missed = [entry for entry in missed if not is_internal_wake_row(entry["schedule"])]
+        # HIDDEN rows leave the fold for the same reason: folding one into the
+        # visible catch-up prompt would paint it. Aida's first-run greeting is
+        # the case that made this concrete — an install whose greeting came due
+        # while no runtime was up opened on ``catch-up — 1 missed wake (Aida's
+        # introduction)`` above her reply, the exact trigger row the hidden
+        # flag exists to keep off screen (audit A4). Left out, the row is
+        # re-armed to now + grace by load() and delivers hidden.
+        missed = [
+            entry
+            for entry in missed
+            if not is_internal_wake_row(entry["schedule"])
+            and not getattr(entry["schedule"], "hidden", False)
+        ]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -20794,6 +20806,26 @@ class Session:
         """Full-list update from the monitor tool: persists then re-arms."""
         await self._monitors.update(schedules)
 
+    def _stamp_aida_greeting_delivered(self, due: DueWake) -> None:
+        """Move Aida's greeting ledger to ``delivered`` at the actual fire.
+
+        The ledger used to stamp at ARM time, so a row armed and then lost (a
+        crash before the fire, a runtime that never came up) was reported as a
+        greeting the user had seen, and the cadence it now gates would have
+        started on the strength of it. Stamped HERE, after the hold guard has
+        let the fire through and before the turn is spawned, so the stamp
+        means "her greeting turn is running". Best-effort: the ledger is
+        observation, never the delivery's dependency.
+        """
+        try:
+            from local_operator.aida import onboarding
+            from local_operator.paths import config_dir
+
+            if due.schedule.id == onboarding.GREETING_WAKE_ID:
+                onboarding.mark_delivered(config_dir())
+        except Exception:  # noqa: BLE001 — the turn runs regardless
+            logger.debug("aida: could not stamp the greeting delivery", exc_info=True)
+
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
@@ -20851,18 +20883,29 @@ class Session:
             # CONTINUE that work. Idle-path deliveries stay clean — they open
             # their own turn, so there is no prior work to resume.
             text = self._append_busy_resume_note(text)
+        details: dict[str, Any] = {
+            "wake_id": due.schedule.id,
+            "occurrence": due.occurrence,
+            "text": text,
+            # §14.4: the delivery's control parameter, read by the trigger
+            # record at fold-in; never re-derived later.
+            "notify": bool(due.schedule.notify),
+        }
+        if due.schedule.hidden:
+            # The DISPLAY half of a hidden row: every replay surface (TUI
+            # replay, the desktop history window, the mobile fold) keys on
+            # ``details.hidden`` through ``harness.rows.is_hidden_wake_delivery``,
+            # and the receipt event below is skipped for the live half. Without
+            # this a hidden row's text vanished live and then reappeared as a
+            # wake line on the next resume.
+            details["hidden"] = True
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
-            details={
-                "wake_id": due.schedule.id,
-                "occurrence": due.occurrence,
-                "text": text,
-                # §14.4: the delivery's control parameter, read by the trigger
-                # record at fold-in; never re-derived later.
-                "notify": bool(due.schedule.notify),
-            },
+            details=details,
         )
+        if getattr(self, "_aida_duty", False):
+            self._stamp_aida_greeting_delivered(due)
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
