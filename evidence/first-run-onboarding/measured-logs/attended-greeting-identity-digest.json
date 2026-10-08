@@ -1,0 +1,69 @@
+{
+  "conversation_id": "0df443c8dece",
+  "her_session_id": "0df443c8dece",
+  "ledger_timeline": [
+    "327905.7s armed",
+    "327909.2s delivered"
+  ],
+  "ledger_final": "delivered",
+  "greeting_record": {
+    "state": "delivered",
+    "surface": "tui",
+    "requested_at": 1791492286804,
+    "armed_at": 1791492286804,
+    "delivered_at": 1791492291053
+  },
+  "wake_row": [
+    {
+      "id": "aida-cadence",
+      "hidden": false,
+      "message": "Daily proactive check-in. Review the operator's current state \u2014 active and stale sessions, projects and workstreams, scheduled wakes, usage signals, and anything you started earlier that is still in flight \u2014 and report ONLY what needs the operator's action, in a few short lines. If there is nothing actionable, give the one quiet-day tip below in a sentence when this message carries one, otherwise reply with exactly \"(no action needed)\" and nothing else. To schedule a follow-up check, write it to the escalation tray described in your instructions instead of arming wakes directly.\n\nIntegration nudge window: open. If ONE missing integration (an MCP server such as Google Workspace, Linear or Slack, or a similar set-up step) would be concretely useful to something in flight, you may suggest that single integration in this check-in and offer to set it up. Never more than one, and if nothing in flight needs one, do not bring integrations up.\n\nTip for a quiet day (use only if nothing needs action): Phone access is not set up. They are signed in with Radient, so the easiest route is the Radient relay \u2014 a private sign-in-protected URL for their phone, essentially free at the current price (USD 0/month; quote it with `lop tunnel billing`). Offer to set it up (guide: mobile)."
+    }
+  ],
+  "trigger_in_visible_transcript": false,
+  "trigger_rows_in_file": 4,
+  "trigger_row_hidden_flags": [
+    null,
+    true,
+    null,
+    null
+  ],
+  "raw_row_kinds": [
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "message",
+    "custom",
+    "message",
+    "custom",
+    "custom",
+    "custom"
+  ],
+  "raw_row_custom_types": [
+    "conversation_name",
+    "aida_session",
+    "wake_schedules",
+    "wake_schedules",
+    "attention_started",
+    "selected_model",
+    "wake_prompt",
+    "system_prefix",
+    null,
+    "session_spend.v1",
+    "frontend_state_checkpoint_v1",
+    "completion_attention"
+  ],
+  "visible_text_head": [
+    "  \u00b7 \u21c8 opening Aida, your chief of staff\u2026",
+    "\u258e Hi Jane \u2014 I'm Aida, your chief of staff here. Good to meet you. (I see you signed in as Jane  ",
+    "\u258e Doe with jane.doe@example.com \u2014 happy to use that for anything you'd like sent to you; just   ",
+    "\u258e say the word if you'd rather be called something else.)                                       ",
+    "\u258e                                                                                               ",
+    "\u258e A couple of things to start:                                                                  ",
+    "\u258e                                                                                               ",
+    "\u258e What do you want to use this for? It's completely fine to say \"not sure yet.\" Some things     "
+  ]
+}

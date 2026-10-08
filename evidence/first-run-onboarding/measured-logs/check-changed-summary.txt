@@ -1,0 +1,101 @@
+# make check-changed — summary (local, whole-tree escalation)
+
+## Scope report
+## Change classification
+
+- event: `local`
+- diff base: `cefb75a9d76a22bec7c3f6e8921c8f36efff1503` (`cefb75a9d76a22bec7c3f6e8921c8f36efff1503`)
+
+### Changed paths (42)
+
+- `AGENTS.md` → `docs`
+- `README.md` → `docs`
+### Flags
+
+- `lint` = **true** — at least one changed path outside the inert set (docs/**, web-only)
+- `types` = **true** — at least one changed path outside the inert set (docs/**, web-only)
+- `budget` = **true** — a path that can change the assembled start-of-session context
+- `unit` = **true** — at least one changed path outside the inert set (docs/**, web-only)
+- `tui` = **true** — same predicate as `unit`, deliberately (scripts/** is a tui input)
+- `windows` = **true** — a path the Windows job reads, or a manifest/CI/gate config
+- `xplat` = **true** — a path the probe battery reads: the package it walks and imports, its own scripts, or the test-suite app double it boots the TUI against
+- `audit` = **true** — a Python, manifest, lockfile, CI or unrecognised path
+- `cli` = **true** — a Python, manifest, lockfile, CI or unrecognised path, or the streaming-contract script cli-sanity executes
+- `server` = **true** — same predicate as `cli`
+- `release_bump` = **false** — this is not a version-only `pyproject.toml` diff, so the manifest keeps every gate a manifest change earns
+
+### Jobs
+
+- `changes`: **run** — always runs: it IS the classifier, and every gated job `needs:` it, so an event condition here would collaterally skip the whole workflow on push to main (D7)
+- `version-bump-guard`: **run** — gated on the EVENT (pull_request), not on a scope flag: it must not become able to be skipped by the classifier whose output a PR could influence, and one check name per fact is the honest checks list (D12)
+- `coverage-report`: **run** — no `if:` at all, `needs: test` only: GitHub's 'a skipped need skips the dependent' is the wanted behaviour — a docs-only PR must never combine zero shard artifacts, and an `always()` added for symmetry would go red on an empty combine (D6)
+- `lint`: **run** — lint=True
+- `type-check`: **run** — types=True
+- `context-budget`: **run** — budget=True
+- `filesystem-boundaries-windows`: **run** — windows=True
+- `xplat-probe-linux`: **run** — xplat=True
+- `xplat-probe-windows`: **run** — xplat=True
+- `test`: **run** — unit=True
+- `pip-audit`: **run** — audit=True
+- `tui-e2e`: **run** — tui=True
+- `cli-sanity`: **run** — cli=True
+- `server-sanity`: **run** — server=True
+
+A skipped job is a claim, not a pass: read the flag row above before treating this run as evidence.
+
+### Local scope (file-level; CI still runs the full gate)
+- `context-budget`: whole tree (armed out) — not a job this module narrows
+- `lint`: whole tree (armed out) — local_operator/agent_seeds/aida.md: outside the import graph, and not documentation — read by path, not by import; local_operator/agent_seeds/manifest.json: outside the import graph, and not documentation — read by path, not by import; local_operator/cli.py: an entry point — every test that boots the app inherits it; local_operator/tui/local_operator.tcss: outside the import graph, and not documentation — read by path, not by import; scripts/install.ps1: outside the import graph, and not documentation — read by path, not by import; scripts/install.sh: outside the import graph, and not documentation — read by path, not by import; tests/unit/aida/conftest.py: a conftest decides collection and fixtures for a subtree
+- `test`: whole tree (armed out) — local_operator/agent_seeds/aida.md: outside the import graph, and not documentation — read by path, not by import; local_operator/agent_seeds/manifest.json: outside the import graph, and not documentation — read by path, not by import; local_operator/cli.py: an entry point — every test that boots the app inherits it; local_operator/tui/local_operator.tcss: outside the import graph, and not documentation — read by path, not by import; scripts/install.ps1: outside the import graph, and not documentation — read by path, not by import; scripts/install.sh: outside the import graph, and not documentation — read by path, not by import; tests/unit/aida/conftest.py: a conftest decides collection and fixtures for a subtree
+- `tui-e2e`: whole tree (armed out) — local_operator/agent_seeds/aida.md: outside the import graph, and not documentation — read by path, not by import; local_operator/agent_seeds/manifest.json: outside the import graph, and not documentation — read by path, not by import; local_operator/cli.py: an entry point — every test that boots the app inherits it; local_operator/tui/local_operator.tcss: outside the import graph, and not documentation — read by path, not by import; scripts/install.ps1: outside the import graph, and not documentation — read by path, not by import; scripts/install.sh: outside the import graph, and not documentation — read by path, not by import; tests/unit/aida/conftest.py: a conftest decides collection and fixtures for a subtree
+- `type-check`: whole tree (armed out) — local_operator/agent_seeds/aida.md: outside the import graph, and not documentation — read by path, not by import; local_operator/agent_seeds/manifest.json: outside the import graph, and not documentation — read by path, not by import; local_operator/cli.py: an entry point — every test that boots the app inherits it; local_operator/tui/local_operator.tcss: outside the import graph, and not documentation — read by path, not by import; scripts/install.ps1: outside the import graph, and not documentation — read by path, not by import; scripts/install.sh: outside the import graph, and not documentation — read by path, not by import; tests/unit/aida/conftest.py: a conftest decides collection and fixtures for a subtree
+- `xplat-probe-linux`: whole tree (armed out) — not a job this module narrows
+- `xplat-probe-windows`: whole tree (armed out) — not a job this module narrows
+- every job here runs its whole-tree command (each line says why); a job the classifier did not select is not in this list at all
+skipped locally: cli-sanity — live-LLM job: needs OPENROUTER_API_KEY and spends real tokens, so it is never part of a default local run
+skipped locally: filesystem-boundaries-windows — native Windows drive/junction semantics; the job exists precisely because a POSIX test with os.name mocked is not evidence (ci.yml 'Canonical containment must use native Windows drive/junction semantics')
+
+## Job results
+138:!!! type-check failed (rc=1): .venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
+154:  PASS  host.facts              Darwin 27.0.0 arm64
+155:  PASS  os.attributes           19 present, absent: os.startfile, socket.SO_EXCLUSIVEADDRUSE
+156:  PASS  static.posix_imports    0 unguarded, 0 guarded
+157:  WARN  static.posix_attributes  0 fatal, 39 lead, 104 guarded, 1 in POSIX-gated modules
+158:  PASS  import.package          719/719 modules import
+159:  PASS  cli.version             v0.68.7
+160:  PASS  cli.help                110 lines of usage
+161:  PASS  cli.subcommands         24/24 render
+162:  PASS  paths.roots             16 roots resolved
+163:  PASS  config.roundtrip        create rc=0, 403 options, config.yml=yes
+164:  PASS  secret.roundtrip        sealed, reopened
+165:  PASS  login.list              first=radient, 27 rows
+166:  PASS  login.api_key           stored=True listed=True getpass_noise=False
+167:  PASS  sessions.list           []
+168:  WARN  wake.status             supervisor:  cannot be verified for this store
+169:  PASS  wake.install            supervisor: plist written; launchd not addressable from here; it
+170:  PASS  mobile.status           installed:    no
+171:  SKIP  mobile.install          not run on macOS: the installer writes to the login keychain, which an isolated HOME does not have (it would raise a keychain dialog). Use --allow-keychain to force
+172:  PASS  mobile.daemon_serve     /healthz -> 200 {"ok":true,"version":5,"sessions":0,"dist":false}
+173:  PASS  daemon.surfaces         mobile=renders, wake=renders, tunnel=renders, browser=renders
+174:  SKIP  tunnel.status           no tunnel configured on this host
+175:  SKIP  tunnel.install          no tunnel configured on this host
+176:  PASS  serve.health            /health -> 200 {"status":200,"message":"ok","result":{"version":"0.68.7","instance_id":"tqoQId1pYBVCRnXpqatPh1qPO4JdQ4iAXPvv3tCJDAI","p
+177:  PASS  serve.double_bind       second bind refused (rc=1): 2026-10-08 16:19:51,808 - INFO - this root's daemon standby slot is held by another console; engages here will spawn cold (/tmp/lop-xpla
+178:  PASS  tui.boot                settled frame written (48841 bytes SVG)
+179:  FAIL  tui.tty                 pty-driven boot did not return in 180s
+180:  PASS  exec.offline            rc=1, no traceback
+181:  PASS  lock.exclusive          second holder correctly refused
+183:Darwin arm64 py3.12.13: PASS=22 WARN=2 SKIP=3 FAIL=1
+184:!!! xplat-probe-linux failed (rc=1): .venv/bin/python scripts/xplat_probe.py
+4011:!!! test failed (rc=1): env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit -q
+19097:!!! tui-e2e failed (rc=1): env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+
+## Failures
+FAILED tests/unit/tools/test_builtin_tools.py::test_bash_refuses_legibly_when_windows_has_no_bash
+FAILED tests/unit/session/runtime/test_approval_authority_seam.py::test_the_routed_report_speaks_for_the_connection_that_asks
+FAILED tests/unit/session/runtime/test_approval_authority_seam.py::test_the_report_offers_loosening_to_a_local_connection_that_can_sign
+FAILED tests/unit/test_herdr_reporter.py::test_a_second_adopt_for_the_same_pane_does_not_probe_again
+FAILED tests/e2e/test_ask_queue_e2e.py::test_an_answer_racing_a_withdrawal_wins_in_both_orders
+
+4 failed, 44102 passed, 27 skipped, 1109 warnings in 1667.67s (0:27:47)
+1 failed, 14 passed, 32 warnings, 307 errors in 81.46s (0:01:21)

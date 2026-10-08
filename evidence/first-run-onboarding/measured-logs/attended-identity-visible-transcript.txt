@@ -1,0 +1,19 @@
+  · ⇈ opening Aida, your chief of staff…
+▎ Hi Jane — I'm Aida, your chief of staff here. Good to meet you. (I see you signed in as Jane  
+▎ Doe with jane.doe@example.com — happy to use that for anything you'd like sent to you; just   
+▎ say the word if you'd rather be called something else.)                                       
+▎                                                                                               
+▎ A couple of things to start:                                                                  
+▎                                                                                               
+▎ What do you want to use this for? It's completely fine to say "not sure yet." Some things     
+▎ people start with: having me draft or review code, research a topic and write it up, watch a  
+▎ site or inbox and tell them when something changes, or run a recurring task on a schedule.    
+▎ Give me one real thing on your plate and I'll take it.                                        
+▎                                                                                               
+▎ What this actually is: Local Operator runs agents on your own machine — not a chat window that
+▎ forgets you. You can point it at any model provider, spin up whole teams of specialists for a 
+▎ domain of work, and reach it from your phone. I sit at the front door: you tell me what you   
+▎ need, I route it to the right team or specialist and report back.                             
+▎                                                                                               
+▎ Want me to set up your first agent or a team as we talk? Tell me a bit about what you do and  
+▎ I'll suggest something concrete.                                                              

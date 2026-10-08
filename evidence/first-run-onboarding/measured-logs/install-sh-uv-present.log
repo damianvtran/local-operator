@@ -1,0 +1,19 @@
+Installing Local Operator
+Step 1/3 · Getting ready — uv is already installed (about 0 s · 0s elapsed)
+Step 2/3 · Installing Local Operator (uv brings Python 3.12+) (about 15 s · 0s elapsed)
+Step 3/3 · Checking it works (about 2 s · 15s elapsed)
+
+✓ Local Operator v0.68.7 installed in 20s
+
+/var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lopinst.Ah8i4sO3SH/bin is not on your PATH yet. Add it with:
+  /opt/homebrew/bin/uv tool update-shell
+then open a new terminal.
+
+Next:
+  lop                 start it
+  /login radient      inside it: one browser sign-in (recommended),
+                      or /login for any other provider or an API key
+
+real	0m19.777s
+user	0m2.091s
+sys	0m2.675s
