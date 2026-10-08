@@ -256,9 +256,7 @@ async def test_greet_says_held_when_another_window_owns_her(
     from local_operator.wakes.arm import WakeWriteError
 
     async def _owner(*args, **kwargs):
-        raise WakeWriteError(
-            "a live session owns her rows", status=503, code="wake_live_owner"
-        )
+        raise WakeWriteError("a live session owns her rows", status=503, code="wake_live_owner")
 
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
     monkeypatch.setattr("local_operator.wakes.arm.arm_wake", _owner)
