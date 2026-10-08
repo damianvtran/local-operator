@@ -1,0 +1,423 @@
+{
+ "build": "after",
+ "fixture": [
+  "Fixture serves tree: <worktrees>/asks-open-default-1007",
+  "Fixture mobile: http://127.0.0.1:63759"
+ ],
+ "viewport": [
+  390,
+  844
+ ],
+ "01-opened-after-ms": null,
+ "01-no-asks": {
+  "hash": "#/s/open-none",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": false,
+  "dockText": null,
+  "dockBox": null,
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 5,
+   "askSheet": false
+  },
+  "settledAfterMs": 211,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": false
+  },
+  "mismatch": {}
+ },
+ "03-opened-after-ms": null,
+ "03-all-addressed": {
+  "hash": "#/s/open-settled",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": false,
+  "dockText": null,
+  "dockBox": null,
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 7,
+   "askSheet": false
+  },
+  "settledAfterMs": 210,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": false
+  },
+  "mismatch": {}
+ },
+ "Two questions waiting-settled-after-ms": 525,
+ "02-opened-after-ms": 10,
+ "02-pending-on-open": {
+  "hash": "#/s/open-pending",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": true,
+  "title": "asks \u00b7 3 questions",
+  "panel": {
+   "top": 127,
+   "bottom": 844,
+   "left": 0,
+   "right": 390,
+   "h": 717
+  },
+  "cards": 4,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 4,
+  "siblings": 4,
+  "dock": true,
+  "dockText": "?3 questions waiting\u00b7 Which rollout order should I use?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "button",
+   "label": "close sheet"
+  },
+  "history": {
+   "length": 10,
+   "askSheet": true
+  },
+  "settledAfterMs": 210,
+  "historyBeforeOpen": 8,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": true,
+   "dock": true
+  },
+  "mismatch": {}
+ },
+ "04a-closed-by-the-user": {
+  "hash": "#/s/open-pending",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": true,
+  "dockText": "?3 questions waiting\u00b7 Which rollout order should I use?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 10,
+   "askSheet": false
+  },
+  "settledAfterMs": 205,
+  "closedByTap": true,
+  "openBefore": true,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": true
+  },
+  "mismatch": {}
+ },
+ "04b-after-a-re-render": {
+  "hash": "#/s/open-pending",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": true,
+  "dockText": "?3 questions waiting\u00b7 Which rollout order should I use?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 10,
+   "askSheet": false
+  },
+  "settledAfterMs": 208,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": true
+  },
+  "mismatch": {}
+ },
+ "04c-after-a-new-ask": {
+  "hash": "#/s/open-pending",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": true,
+  "dockText": "?4 questions waiting\u00b7 Which rollout order should I use?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 10,
+   "askSheet": false
+  },
+  "settledAfterMs": 205,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": true
+  },
+  "mismatch": {}
+ },
+ "04d-opened-after-ms": null,
+ "04d-after-away-and-back": {
+  "hash": "#/s/open-pending",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": true,
+  "dockText": "?4 questions waiting\u00b7 Which rollout order should I use?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "",
+   "focused": false,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "body",
+   "label": null
+  },
+  "history": {
+   "length": 11,
+   "askSheet": false
+  },
+  "settledAfterMs": 209,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": true
+  },
+  "mismatch": {}
+ },
+ "05-typing-then-asks-arrive": {
+  "hash": "#/s/open-typing",
+  "viewport": [
+   390,
+   844
+  ],
+  "dialog": false,
+  "title": null,
+  "panel": null,
+  "cards": 0,
+  "loading": false,
+  "animating": 0,
+  "inertSiblings": 0,
+  "siblings": 0,
+  "dock": true,
+  "dockText": "?2 questions waiting\u00b7 Which environment should the dry run target?\u25b8",
+  "dockBox": {
+   "top": 638,
+   "bottom": 682,
+   "left": 8,
+   "right": 382,
+   "h": 44
+  },
+  "composer": {
+   "value": "dry run on staging",
+   "focused": true,
+   "box": {
+    "top": 753,
+    "bottom": 777,
+    "left": 77,
+    "right": 313,
+    "h": 24
+   }
+  },
+  "active": {
+   "tag": "textarea",
+   "label": null
+  },
+  "history": {
+   "length": 13,
+   "askSheet": false
+  },
+  "settledAfterMs": 209,
+  "composerTapped": true,
+  "expected": {
+   "animating": 0,
+   "loading": false,
+   "dialog": false,
+   "dock": true,
+   "composer.focused": true
+  },
+  "mismatch": {}
+ }
+}
