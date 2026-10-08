@@ -88,6 +88,7 @@ from local_operator.agent_profiles import (
 )
 from local_operator.harness.subagent import (
     configured_effort_tiers,
+    depth_closed_the_tier_choice,
     describe_effort_tiers,
     model_may_choose_tier,
 )
@@ -1475,7 +1476,7 @@ def _effort_pin_description(
     there would be FALSE, which is why this takes the flag rather than reading
     ``configured_effort_tiers()`` for its zero-tier arm.
     """
-    if not model_choice and delegation_depth >= 1:
+    if not model_choice and depth_closed_the_tier_choice(delegation_depth):
         # A subagent is refused for who it is, not for the key, so the operator
         # copy below (which names ``subagents.model_choice=operator``) would be
         # false under ``model_choice=model`` — see ``model_may_choose_tier``.

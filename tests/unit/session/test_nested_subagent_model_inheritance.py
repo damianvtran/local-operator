@@ -25,6 +25,8 @@ through the real ``Session._launch_subagent``; nothing here stubs the resolver.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import yaml
 
@@ -351,3 +353,200 @@ async def test_a_grandchild_inherits_the_running_model_of_a_tier_pinned_parent(t
     assert job.model_label == HI
     await child.dispose()
     await root.dispose()
+
+
+# -- review round 1 (R1-3, R1-4, R1-5) ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_depth_two_tier_resumes_on_its_tier_through_comms(tmp_path, config):
+    """Resume is NOT gated: a recorded tier re-resolves at depth 2, end to end.
+
+    The launcher is called directly (the gate lives on the TOOL, so this is the
+    shape of a child recorded before the gate existed, or an operator-authored
+    launch). The point is the ROW of the resumed child: if resume ever routed
+    through the tool-argument gate it would lose its recorded tier and come
+    back on the session's model while the panel still said ``hi``.
+    """
+    root = make_root(tmp_path)
+    child = await make_child(root, "job-1")
+    first_id = child._launch_subagent(label="s", prompt="p", agent="scout", effort="hi")
+    record = child.subagent_comms._record(first_id)
+    assert record is not None and record.depth == 2
+
+    deadline = asyncio.get_running_loop().time() + 10
+    while (j := child.jobs.get(first_id)) is None or j.status != "completed":
+        assert asyncio.get_running_loop().time() < deadline, "first run never settled"
+        await asyncio.sleep(0.01)
+
+    new_id, error = child.subagent_comms.resume(first_id, "carry on")
+    assert error is None and new_id is not None
+    # The hand-built child has no comms row of its own, so the resume re-parents
+    # the JOB onto the comms-owning root (``_launch_parent``); the depth and the
+    # tier ride the recorded launch, which is what this pins.
+    resumed = root.jobs.get(new_id)
+    assert resumed is not None
+    assert resumed.model_label == HI and resumed.owns_model is True and resumed.effort == "hi"
+    await child.dispose()
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_cannot_update_a_role_pin_to_a_tier(tmp_path, config):
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.agent_tool import (
+        AgentParams,
+        build_agent_tool,
+        write_profile,
+    )
+
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(op="create", name="rev", description="d", instructions="i"),
+        creating=True,
+    )
+    root = make_root(tmp_path)
+    child = await make_child(root, "job-1")
+    child.agent_registry = registry
+    tool = build_agent_tool(child._build_tool_context())
+    assert tool is not None
+    result = await tool.execute(
+        "c1",
+        {"op": "update", "name": "rev", "effort": "hi"},
+        None,
+        None,
+        child._build_tool_context(),
+    )
+    assert result.is_error and "cannot pin a role" in text_of(result)
+    # ...and the stored profile did not move.
+    profile = registry.get_agent_by_name("rev") if hasattr(registry, "get_agent_by_name") else None
+    assert profile is None or not getattr(profile, "effort", None)
+    await child.dispose()
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_depth_zero_may_still_write_a_tier_pin_through_the_agent_tool(tmp_path, config):
+    """The other side of the gate: the top-level model under ``model`` can pin."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.agent_tool import build_agent_tool
+
+    root = make_root(tmp_path)
+    root.agent_registry = AgentRegistry(tmp_path / "agents")
+    tool = build_agent_tool(root._build_tool_context())
+    assert tool is not None
+    result = await tool.execute(
+        "c1",
+        {"op": "create", "name": "rev", "description": "d", "instructions": "i", "effort": "hi"},
+        None,
+        None,
+        root._build_tool_context(),
+    )
+    assert not result.is_error, text_of(result)
+    spec = root._resolve_subagent_model("rev", None, strict=True)
+    assert spec is not None and f"{spec.provider}/{spec.model_id}" == HI
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_team_launch_at_depth_is_refused_a_tier_and_keeps_the_managers_pin(
+    tmp_path, config
+):
+    """``task(agent='team:pod', effort=...)`` from a subagent: the tier is refused,
+    and the launch that does go through runs on the MANAGER role's operator pin
+    (teams carry no effort of their own)."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(
+            op="create",
+            name="pod-lead",
+            description="d",
+            instructions="i",
+            effort="lo",
+            delegate=True,
+        ),
+        creating=True,
+    )
+    teams = TeamRegistry(config)
+    teams.create_team(
+        TeamEditFields(
+            name="pod", manager="pod-lead", members=[TeamMember(role="coder")], instructions="x"
+        )
+    )
+    root = make_root(tmp_path)
+    root.agent_registry = registry
+    root.team_registry = teams
+    child = await make_child(root, "job-1")
+    child.agent_registry = registry
+    child.team_registry = teams
+
+    refused = await task_tool(child).execute(
+        "c1",
+        {"label": "pod", "prompt": "p", "agent": "team:pod", "effort": "hi"},
+        None,
+        None,
+        child._build_tool_context(),
+    )
+    assert refused.is_error and "inherit this session's model" in text_of(refused)
+
+    job_id = child._launch_subagent(label="pod", prompt="p", agent="team:pod")
+    job = child.jobs.get(job_id)
+    assert job is not None and job.model_label == "deepseek/deepseek-flash"
+    assert job.owns_model is True
+    await child.dispose()
+    await root.dispose()
+
+
+# -- R1-3: the copy tells the truth under BOTH values of the key ---------------
+
+
+@pytest.mark.asyncio
+async def test_under_operator_a_subagent_gets_the_operator_copy_not_the_nested_copy(
+    tmp_path, config
+):
+    """Under ``operator`` nobody on the model side may pick, so "only the
+    top-level session may pick a tier" would be false and the operator's route
+    (``subagents.model_choice``) must survive in the message."""
+    write_config(config, choice="operator")
+    root = make_root(tmp_path)
+    child = await make_child(root, "job-1")
+    assert "subagents.model_choice=operator" in task_tool(child).description
+    assert "top-level" not in task_tool(child).description
+
+    result = await task_tool(child).execute(
+        "c1",
+        {"label": "s", "prompt": "p", "agent": "scout", "effort": "hi"},
+        None,
+        None,
+        child._build_tool_context(),
+    )
+    text = text_of(result)
+    assert result.is_error
+    assert "subagents.model_choice" in text and "top-level" not in text
+    await child.dispose()
+    await root.dispose()
+
+
+# -- R1-5: a bool is not a depth -----------------------------------------------
+
+
+def test_a_bool_in_the_tool_context_is_not_a_delegation_depth():
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import (
+        ADVERTISED_DELEGATION_DEPTH_KEY,
+        effort_validation_context,
+    )
+
+    plain = ToolContext()
+    assert effort_validation_context(plain)[ADVERTISED_DELEGATION_DEPTH_KEY] == 0
+    flagged = ToolContext()
+    object.__setattr__(flagged, "delegation_depth", True)
+    assert effort_validation_context(flagged)[ADVERTISED_DELEGATION_DEPTH_KEY] == 0
+    flagged.delegation_depth = 2
+    assert effort_validation_context(flagged)[ADVERTISED_DELEGATION_DEPTH_KEY] == 2
