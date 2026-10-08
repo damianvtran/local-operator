@@ -100,6 +100,7 @@ from local_operator.harness.secret_sinks import refusal_text as _secret_sink_ref
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
+    depth_closed_the_tier_choice,
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
@@ -23790,6 +23791,12 @@ ADVERTISED_EFFORT_KEY = "advertised_effort"
 #: the members it advertises.
 ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
 
+#: Key carrying how many delegation hops sit above the session that is calling
+#: ``task``/``agent`` (0 = the top-level session). See
+#: :func:`~local_operator.harness.subagent.model_may_choose_tier` for why the
+#: depth, and not only ``subagents.model_choice``, decides who may pick a tier.
+ADVERTISED_DELEGATION_DEPTH_KEY = "advertised_delegation_depth"
+
 #: Key carrying the ``provider/model`` label of the SESSION that built the tool.
 #:
 #: The third piece of build-time provenance, published beside the two above and
@@ -23867,6 +23874,19 @@ _ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
 #: inventing a model.
 _ADVERTISED_SESSION_MODEL: ContextVar[str] = ContextVar("advertised_session_model", default="")
 
+#: The delegation depth of the session executing the tool, published by
+#: :func:`_with_advertised_effort` beside the records above.
+#:
+#: This is the BUILD-time half; :func:`effort_validation_context` takes the larger
+#: of it and the depth of the ``ToolContext`` the call arrives with (rebuilt
+#: every turn from the live session). A child's ``task`` tool is first built by
+#: the session constructor, BEFORE ``_build_child_session`` stamps the child's
+#: depth, so a tool object can briefly carry a depth-0 schema; reading the
+#: call's own context is what keeps the gate closed for that window, for any
+#: host that forgets to rebuild, and for a direct executor call that never went
+#: through the wrapper at all.
+_ADVERTISED_DELEGATION_DEPTH: ContextVar[int] = ContextVar("advertised_delegation_depth", default=0)
+
 
 def _with_advertised_effort(
     executor: ToolExecutor,
@@ -23874,6 +23894,7 @@ def _with_advertised_effort(
     *,
     model_choice: bool,
     session_model_label: str = "",
+    delegation_depth: int = 0,
 ) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
@@ -23890,6 +23911,9 @@ def _with_advertised_effort(
     reason — it is the label the schema description was rendered from, and the
     refusal copy must name the SAME model the enum promised, not whatever the
     session has become by the time a stale tool is invoked.
+
+    ``delegation_depth`` is the depth the tool was built at; the call's own
+    ``ToolContext`` can only RAISE it (see :func:`effort_validation_context`).
     """
     advertised = advertised_effort_members(parameters)
 
@@ -23903,24 +23927,39 @@ def _with_advertised_effort(
         token = _ADVERTISED_EFFORT.set(advertised)
         choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
         label_token = _ADVERTISED_SESSION_MODEL.set(session_model_label)
+        depth_token = _ADVERTISED_DELEGATION_DEPTH.set(delegation_depth)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
             _ADVERTISED_MODEL_CHOICE.reset(choice_token)
             _ADVERTISED_SESSION_MODEL.reset(label_token)
+            _ADVERTISED_DELEGATION_DEPTH.reset(depth_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
     return wrapper
 
 
-def effort_validation_context() -> dict[str, Any]:
-    """Validation context carrying the advertised ``effort`` members and policy."""
+def effort_validation_context(tool_context: ToolContext | None = None) -> dict[str, Any]:
+    """Validation context carrying the advertised ``effort`` members and policy.
+
+    ``tool_context`` is the context the executor was called with. Its
+    ``delegation_depth`` can only RAISE the published build-time depth, never
+    lower it: a depth recorded by either side is evidence the caller is a
+    subagent, and the gate is closed by the larger of the two.
+    """
+    call_depth = getattr(tool_context, "delegation_depth", 0) if tool_context is not None else 0
+    # ``type(...) is int``, not ``isinstance``: a bool is an int, and ``True``
+    # would count as depth 1. Harmless (the depth can only be raised) but it
+    # would make the gate's answer depend on a value that is not a depth.
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
         SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
+        ADVERTISED_DELEGATION_DEPTH_KEY: max(
+            _ADVERTISED_DELEGATION_DEPTH.get(), call_depth if type(call_depth) is int else 0
+        ),
     }
 
 
@@ -23949,6 +23988,13 @@ def _advertised_model_choice(info: ValidationInfo) -> bool | None:
         return None
     choice = context.get(ADVERTISED_MODEL_CHOICE_KEY)
     return choice if isinstance(choice, bool) else None
+
+
+def _delegation_depth(info: ValidationInfo) -> int:
+    """Hops above the calling session; ``0`` when unrecorded (an operator-side caller)."""
+    context = info.context if isinstance(info.context, dict) else None
+    depth = context.get(ADVERTISED_DELEGATION_DEPTH_KEY) if context else None
+    return depth if type(depth) is int and depth > 0 else 0
 
 
 def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
@@ -24092,6 +24138,38 @@ def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = 
     )
 
 
+def _nested_task_rejection(tier: str) -> str:
+    """The ``task`` refusal for a tier chosen by a session that is itself a subagent.
+
+    Wording is NOT the ``operator`` arm's: that one names ``subagents.model_choice``
+    as the remedy, and at depth >= 1 the key is not what refuses
+    (``model_choice=model`` is exactly the config the incident ran under), so
+    sending the delegating model to "the operator's setting" would be false and
+    would invite it to retry differently. The remedy is simply to omit the
+    field: a nested child inherits the model THIS session is running on.
+    Short and remedy-first for the same card-truncation reason the operator
+    arm documents.
+    """
+    return (
+        f"Relaunch without 'effort' (got '{tier}'): subagents of a subagent "
+        "inherit this session's model; only the top-level session may pick a tier."
+    )
+
+
+def _nested_pin_rejection(tier: str) -> str:
+    """The ``agent`` create/update refusal for a role pin written by a subagent.
+
+    A pin written below the top level would be picked up by every later launch
+    of that role, nested or not, so allowing it would re-open the leak through
+    the registry. Pins stay the operator's (profile editor) or the top-level
+    session's call.
+    """
+    return (
+        f"A subagent cannot pin a role to a model tier (got '{tier}'): only the "
+        "top-level session may. Omit 'effort', or pass 'inherit' to clear a pin."
+    )
+
+
 def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exception | None:
     """Refuse an ``effort`` the operator has not delegated to the model, or ``None``.
 
@@ -24113,18 +24191,44 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     ``AgentParams`` for an operator's own edit). That is an operator-side
     caller, so it is ALLOWED: the key gates a model's choice, never the
     operator's, and an absent context cannot be evidence of a model at all.
+
+    **Depth >= 1 follows the same split, on purpose.** A subagent's tool is built
+    with ``model_choice=False`` (``model_may_choose_tier(depth)``), so the field
+    was never offered and any tier it sends is invented: a ``ValueError``, the
+    model's fault, exactly as under ``model_choice=operator``. Refusing (rather
+    than silently dropping the tier and inheriting) is also the consistent
+    choice: a dropped ``effort`` would let the model believe its ``hi`` scouts
+    ran on ``hi`` and report them as such, which is the misattribution the
+    operator arm's refusal exists to prevent. The only departure is the copy
+    (:func:`_nested_task_rejection`), which cannot point at
+    ``subagents.model_choice`` because that key is not what refuses.
     """
-    if model_may_choose_tier():
+    depth = _delegation_depth(info)
+    if model_may_choose_tier(depth):
         return None
     advertised_choice = _advertised_model_choice(info)
-    if advertised_choice is None:
+    if advertised_choice is None and depth == 0:
         return None
     label = _advertised_session_model(info)
-    message = (
-        _operator_choice_pin_rejection(value, label)
-        if pin
-        else _operator_choice_task_rejection(value, label)
-    )
+    if depth_closed_the_tier_choice(depth):
+        # Below the top, under ``model_choice=model``, the refusal is about WHO
+        # is asking, not the key, so the operator-arm copy (which names
+        # ``subagents.model_choice`` as the remedy) would send the model to a
+        # setting that is not the cause. Under ``operator`` the key IS the cause
+        # at every depth, so the operator-arm copy below is the true one.
+        message = _nested_pin_rejection(value) if pin else _nested_task_rejection(value)
+    else:
+        message = (
+            _operator_choice_pin_rejection(value, label)
+            if pin
+            else _operator_choice_task_rejection(value, label)
+        )
+    if advertised_choice is None:
+        # Only reachable at depth >= 1 (above, an unrecorded build at depth 0 is
+        # an operator-side caller and returned). A real ToolContext says the
+        # caller is a subagent, so the refusal stands, but with no record of
+        # what the model was shown it is not billed to the model's accuracy.
+        return EnvironmentDependentRejectionError(message)
     if advertised_choice and value in (_advertised_effort(info) or frozenset()):
         return EnvironmentDependentRejectionError(message)
     return ValueError(message)
@@ -24344,8 +24448,18 @@ _OPERATOR_CHOICE_EFFORT_SENTENCE = (
     "children inherit this session's model — do not pass 'effort'."
 )
 
+#: The same sentence for a session that is itself a subagent. It cannot reuse the
+#: one above: that names ``subagents.model_choice=operator``, which is false at
+#: depth >= 1 under ``model_choice=model`` (the config the nested-tier incident
+#: ran under), and a description that blames a setting the operator never set
+#: sends the model hunting for a switch instead of omitting the field.
+_NESTED_EFFORT_SENTENCE = (
+    "No effort tiers are yours to choose (you are a subagent; only the top-level "
+    "session picks tiers): children inherit this session's model — do not pass 'effort'."
+)
 
-def _task_tool_description(model_choice: bool) -> str:
+
+def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str:
     """The ``task`` tool description, with the effort sentence matching the schema.
 
     A model told "effort picks a configured model tier" while no tier is
@@ -24353,13 +24467,21 @@ def _task_tool_description(model_choice: bool) -> str:
     say which state it is in. One sentence either way — prompt text is paid on
     every turn. ``model_choice`` is the flag the accompanying schema was
     rendered from, passed in rather than re-read so the description and the
-    schema cannot disagree about which arm they are in.
+    schema cannot disagree about which arm they are in. The one live read is
+    ``configured_effort_tiers()`` (the tier list) and, for a subagent,
+    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`
+    (which reads ``subagents.model_choice``): both are consulted only to pick
+    WORDING within the arm the flag already fixed, never to change the arm.
     """
     if not model_choice:
         # The whole field is gone from this schema, so the description is the
         # only place left to say so — and it must, or a model that remembers
         # `effort` from another session's prompt has nothing telling it no.
-        effort = _OPERATOR_CHOICE_EFFORT_SENTENCE
+        effort = (
+            _NESTED_EFFORT_SENTENCE
+            if depth_closed_the_tier_choice(delegation_depth)
+            else _OPERATOR_CHOICE_EFFORT_SENTENCE
+        )
     else:
         tiers = configured_effort_tiers()
         if tiers:
@@ -25122,7 +25244,7 @@ async def execute_task(
     between children.
     """
     try:
-        params = TaskParams.model_validate(args, context=effort_validation_context())
+        params = TaskParams.model_validate(args, context=effort_validation_context(context))
     except ValidationError as exc:
         return _validation_error(tool_call_id, "task", exc)
 
@@ -25216,7 +25338,11 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     # ONE read of the policy per build, handed to the schema renderer, the
     # description and the validator's wrapper, so the three cannot disagree
     # about which arm this tool instance is in.
-    model_choice = model_may_choose_tier()
+    # The depth is part of the policy, not an afterthought to it: a subagent's
+    # tool is built with the tier field REMOVED even under ``model_choice=model``
+    # (see ``model_may_choose_tier`` for the incident).
+    depth = context.delegation_depth
+    model_choice = model_may_choose_tier(depth)
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
         description=_effort_tier_field_description(context.session_model_label),
@@ -25226,7 +25352,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=_task_tool_description(model_choice),
+        description=_task_tool_description(model_choice, depth),
         parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
@@ -25238,6 +25364,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
             parameters,
             model_choice=model_choice,
             session_model_label=context.session_model_label,
+            delegation_depth=depth,
         ),
     )
 
