@@ -440,16 +440,51 @@ class _RealServed:
             time.sleep(0.05)
 
     def stop(self) -> None:
-        """Close the runtime, dispose the session, and reap the loop it ran on."""
+        """Close the runtime, stop the handle, and reap the loop it ran on."""
         try:
             self.on_session_loop(self.runtime.aclose(), timeout=20.0)
         finally:
             try:
-                self.on_session_loop(self.session.dispose(), timeout=20.0)
+                self.on_session_loop(self._stop_handle(), timeout=150.0)
             finally:
                 self._loop.call_soon_threadsafe(self._loop.stop)
                 self._thread.join(timeout=5.0)
                 self._loop.close()
+
+    async def _stop_handle(self) -> None:
+        """Run the product's own clean-exit teardown for the served handle.
+
+        WHY THE RIG OWES THIS (measured 2026-10-07): the old teardown disposed
+        only the SESSION, so the handle's prompt drain — parked mid-turn, the
+        image cells' prompt is still resolving when their bodies reach their
+        teardown — and the goal judge — mid-verdict after the ``/command``
+        door's ``goal`` admission — were left running when the loop was closed.
+        asyncio then destroyed them at a collection point inside whichever
+        LATER test forced one. The failure surfaced in
+        ``test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending``
+        — a cell with nothing to do with either prompt — as a complaint about
+        tasks it never created.
+
+        TWO STEPS, IN THIS ORDER, BOTH OF THEM EXISTING PRODUCT RUNGS:
+
+        1. ``settle_goal_judge_headless`` — what a headless run calls at its
+           end (``exec_session``). ``dispose`` does not own the judge's drive
+           task, so without it the judge is still in flight when the loop
+           closes. It also closes continuations, so the judge cannot admit a
+           fresh turn behind the teardown. Internally bounded
+           (``HEADLESS_JUDGE_SETTLE_S``, 120 s); the outer 150 s bound only
+           backstops a wedged loop.
+
+        2. ``dispose`` — the child's clean-exit rung (``process._clean_exit``).
+           The drain is NOT left deliberately live by this path: it CANCELS
+           the drain and awaits the cancellation before returning, which is
+           the honest shape here — the drain may hold an in-flight turn, and a
+           teardown cannot run it — and it ends by disposing the session, so
+           it replaces the direct ``session.dispose()`` rather than
+           duplicating it.
+        """
+        await self.handle.settle_goal_judge_headless()
+        await self.handle.dispose()
 
 
 def _start_real_session(root: Path, session_id: str, cwd: str) -> _RealServed:
