@@ -436,6 +436,11 @@ class TestTheRoutedCommands:
         outcome = await handle.run_slash_authoritative("team", "clear", [])
 
         assert outcome["kind"] == "notice"
+        # The EXACT routed literal, not a substring (agent review round 3,
+        # NIT-1): this sentence has two producers (here and the TUI-local
+        # ``notice``), and a drift in this half was invisible while only the TUI
+        # producer was pinned.
+        assert outcome["text"] == "no team active; this session uses its base instructions."
         assert session.active_team_name == ""
         assert session.active_agent == ""
         # And the slot is genuinely usable again through the same seam.
@@ -454,9 +459,31 @@ class TestTheRoutedCommands:
         outcome = await handle.run_slash_authoritative("team", "clear", [])
 
         assert outcome["kind"] == "notice"
-        assert "no team is attached" in outcome["text"]
-        assert "scout" in outcome["text"]
+        assert outcome["text"] == (
+            "no team is attached; scout is still this session's speaker, so nothing "
+            "was detached. Run /agent clear to drop it."
+        )
         assert session.active_agent == "scout"
+
+    @pytest.mark.asyncio
+    async def test_slash_agent_clear_receipt_is_pinned_on_the_routed_host(self, routed) -> None:
+        """The other two-producer mirror this change touches (agent review round 3,
+        NIT-1): the agent-clear sentence was pinned on neither host, so a drift
+        between the TUI-local ``notice`` and the routed ``SlashResult`` was
+        invisible.
+
+        Both copies live in different files (``tui/app.py``, ``serving.py``) and
+        say the same words; this cell owns the routed one so the two cannot
+        disagree silently.
+        """
+        handle, session = routed
+        assert session.attach_agent_profile("scout") == "scout"
+
+        outcome = await handle.run_slash_authoritative("agent", "clear", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["text"] == "no agent active; this session uses its base instructions"
+        assert session.active_agent == ""
 
     @pytest.mark.asyncio
     async def test_slash_team_switch_names_the_displaced_team(self, routed, registries) -> None:

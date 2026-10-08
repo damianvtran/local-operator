@@ -50216,24 +50216,14 @@ class OperatorApp(App[None]):
 
     def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
         registry = self._team_registry()
-        # The DETACH verb is answered before the availability guard, exactly as
-        # the local and routed seams do (agent review round 2, NIT-1): freeing
-        # the agent slot needs the SESSION, not the registry, so all three entry
-        # points must agree about what the verb requires.
-        head, _, tail = arg.partition(" ")
-        matched = head.strip()
-        # ONE leading `=` only, the grammar every other seam runs (agent review
-        # round 2, NIT-2).
-        if matched.startswith("="):
-            matched = matched[1:]
-        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
-            text, style = self._team_detach_receipt()
-            return SlashResult(
-                kind="notice",
-                text=text,
-                style=style,
-                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
-            )
+        if arg:
+            # EVERY argument-carrying form — including the detach verb, which
+            # needs the session and not the registry — is delegated ABOVE the
+            # availability guard, exactly as ``serving.py::_team_slash`` does
+            # (agent review round 3, NIT-3). The attach half applies that guard
+            # itself, for the lookup it actually needs, so the grammar lives in
+            # one place per seam instead of being re-matched here.
+            return self._team_attach_slash_result(arg, registry, SlashResult)
         if registry is None or not hasattr(registry, "list_teams"):
             return SlashResult(
                 kind="notice",
@@ -50332,13 +50322,28 @@ class OperatorApp(App[None]):
         # after the verb is a mistyped attach and falls through to the lookup.
         if name.lower() in ("clear", "none") and not request:
             # ONE implementation of the verb for this process (MINOR-1): it also
-            # syncs BOTH band segments, which this seam used to skip.
+            # syncs BOTH band segments, which this seam used to skip. The typed
+            # ``data`` rides only a SUCCESSFUL detach (agent review round 3,
+            # NIT-2): a refusal must not be published as a detach-of-no-team,
+            # or a client painting from it would clear a segment that is still
+            # attached.
             text, style = self._team_detach_receipt()
+            if style == "warning":
+                return SlashResult(kind="notice", text=text, style=style)
             return SlashResult(
                 kind="notice",
                 text=text,
                 style=style,
                 data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
+        if registry is None or not hasattr(registry, "get_team_by_name"):
+            # The ATTACH half is the one that needs the registry; refusing here
+            # keeps the "unavailable" answer to the form that requires it, now
+            # that the caller delegates before its own guard (NIT-3).
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
             )
         try:
             team = registry.get_team_by_name(name)
