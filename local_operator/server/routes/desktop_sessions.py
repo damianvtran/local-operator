@@ -4387,16 +4387,29 @@ def _work_is_running(remote: Any) -> bool:
     LIMIT, STATED RATHER THAN HIDDEN: the owner's ``_turn_lock`` flush window is
     not visible from a follower at all, so a prompt admitted but not yet started
     cannot be told from an idle session by reading canonical state. The activity
-    phase narrows that window to the admission-to-first-work gap, and the residue
-    is not reachable from the desktop: the button and Esc are both offered on the
-    same ``streaming`` flag this reads, so a press cannot exist in a window where
-    this predicate is false.
+    phase narrows that window to the admission-to-first-work gap, and a press CAN
+    land in the gap: the desktop's liveness rides the live-event feed, which can
+    outrun this predicate (the 2026-10-07 incident is that measurement), so this
+    paragraph's old closing claim — "the residue is not reachable from the
+    desktop" — is withdrawn rather than restated. The mitigation is the CALL
+    SITE's, not this predicate's: see the RACE paragraph below.
 
     RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
-    delta. Both directions are benign here. A stale ``False`` cannot swallow a
-    press the user could make, for the reason just given. A stale ``True`` at
-    worst reaches the abort a moment after the turn settled, which is the
-    pre-existing behaviour of a press racing a turn's end.
+    delta. A stale ``True`` at worst reaches the abort a moment after the turn
+    settled, which is the pre-existing behaviour of a press racing a turn's end.
+
+    A STALE ``False`` IS NOT BENIGN, and the sentence that said it was — "a press
+    cannot exist in a window where this predicate is false" — is REFUTED by the
+    2026-10-07 incident rather than merely doubted. The premise was that the UI
+    offers stop on the same ``streaming`` flag this reads, so the two cannot
+    disagree; in production they CAN, because the UI's liveness rides the
+    live-event feed while this predicate reads canonical state that a parked op
+    chain can freeze at the previous turn boundary (see the route's ``execute``
+    for the mechanism). The mitigation is NOT in this predicate — its terms stay
+    exactly "what would the abort stop" — it is at the CALL SITE: a False from
+    this function is presented as ``idle`` only while
+    ``AttachedSession.canonical_current`` vouches the mirror is complete and
+    current, and the unvouched case dials the owner instead.
     """
     if remote.is_streaming:
         return True
@@ -4474,16 +4487,32 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     outlives the turn that started it — and the receipt names them.
 
     ``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO
-    STOP. A cold session is NOT engaged to answer this (an interrupt is not a
-    reason to spend a process, which is what ``warm`` is for), and a warm one
-    that is merely sitting between turns is answered without dialling its owner
-    at all — see ``_work_is_running`` for the terms, and note that a parked gate
-    WITHOUT a live turn (the orphan card this release also taught ``abort`` to
-    settle) counts as work, because that press really does clear the screen. A
-    client putting an error in front of a press that had nothing to do would be
-    reporting the user's own success as a failure, and a client told
-    ``interrupted`` for a press that stopped nothing would be shown a success
-    that did not happen.
+    STOP — WHEN THE FOLLOWER CAN PROVE IT. A cold session is NOT engaged to
+    answer this (an interrupt is not a reason to spend a process, which is what
+    ``warm`` is for), and a warm one that is merely sitting between turns is
+    answered without dialling its owner at all — see ``_work_is_running`` for
+    the terms, and note that a parked gate WITHOUT a live turn (the orphan card
+    this release also taught ``abort`` to settle) counts as work, because that
+    press really does clear the screen. A client putting an error in front of a
+    press that had nothing to do would be reporting the user's own success as a
+    failure, and a client told ``interrupted`` for a press that stopped nothing
+    would be shown a success that did not happen.
+
+    BUT ONLY A VOUCHED ``False`` MAY BE PRESENTED AS ``idle`` — the rule the
+    2026-10-07 incident added. A slow head op parked the owner's op chain
+    (``session/runtime/server.py`` chains ops per connection); the follower's
+    canonical re-sync parked behind it; its store froze at the last turn
+    boundary while the live turn's deltas buffered; ``_work_is_running`` read
+    false on every term — and four stop presses (receipts 3891-3894) were
+    answered ``idle`` with no dial, while the UI painted the live turn and the
+    presses achieved nothing. So the shortcut now also requires
+    ``AttachedSession.canonical_current``: a mirror whose own flags say it is
+    mid-resync, owed a canonical re-sync, or recovering from a dropped socket
+    cannot speak for the owner, and the press DIALS instead — the owner's
+    receipt is the answer, and a dial that cannot complete is the ladder's 503,
+    never ``idle``. The recovering half is the same rule one layer out: a
+    dropped socket says nothing about the turn (the runtime is usually still
+    running it), so it must not fold into the cold no-op either.
 
     "NO OWNER" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is
     the whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a
@@ -4534,7 +4563,15 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
             # history page load: gating on it read a live streaming turn as `idle`
             # and stopped nothing, which is this PR's own defect class arriving
             # through its own new door (review round 1, MAJOR-1).
-            if not bridge.remote.owner_reachable:
+            #
+            # ``recovering`` IS NOT "NO OWNER", though it is not reachable either.
+            # A dropped socket says nothing about the turn — the runtime is
+            # usually still running it — so folding recovery into this no-op
+            # would answer the press ``idle`` while the OWNER may be mid-turn:
+            # the 2026-10-07 shape one layer out. The press falls through to the
+            # dial instead, and a dial that cannot be served is the ladder's 503,
+            # never a claim this viewer cannot prove.
+            if not bridge.remote.owner_reachable and not bridge.remote.recovering:
                 return {
                     "status": "idle",
                     "receipt": "",
@@ -4542,12 +4579,18 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
                     "background_jobs": 0,
                 }
             # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no owner to stop
-            # it with: ``idle``, on a 200, without dialling. That question is asked
-            # of the follower's published roster, which stays readable through a
-            # resync — the store is installed from the attach snapshot and
-            # maintained by deltas, so a mid-refresh viewer still knows whether
-            # work is running.
-            if not _work_is_running(bridge.remote):
+            # it with: ``idle``, on a 200, without dialling — BUT ONLY when the
+            # follower's own state says it can be trusted to speak for the owner
+            # (``canonical_current``), because the roster this reads is only as
+            # good as the feed that maintains it. The 2026-10-07 incident is that
+            # sentence's counterexample: a slow head op parked the runtime's op
+            # chain, the follower's canonical folds stalled behind it, the store
+            # was frozen at the last turn boundary — and stop presses were
+            # answered ``idle`` off a stale ``False``, which stopped nothing while
+            # the owner was mid-turn. A mirror that cannot vouch for itself gets
+            # DIALED: the owner's own receipt is the answer, and a dial that
+            # cannot complete is the ladder's 503 (NOT ``idle``).
+            if not _work_is_running(bridge.remote) and bridge.remote.canonical_current:
                 # Nothing was stopped, so "what survived" is simply what is
                 # running. ``children_running`` is zero by construction (a
                 # running ``task`` job is a term above), while backgrounded

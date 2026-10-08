@@ -1318,9 +1318,16 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # ``Session`` reads its own journal directly and needs no join — every ``ts``
     # it serves is already the entry time. Declared in
     # ``ViewerSessionProtocol`` in the same commit.
-    assert len(viewer_only) == 72, (
+    # 72 → 73 is the STALE-MIRROR rung (the 2026-10-07 interrupt incident):
+    # ``canonical_current`` is viewer-only because it describes a MIRROR and a
+    # dial — the facts a facade holds about an owner that executes turns
+    # elsewhere. An owner ``Session`` is the source of truth rather than a copy
+    # of it and has no dial, so the state does not exist for it. Declared in
+    # ``ViewerSessionProtocol`` in the same commit, which is what the
+    # undeclared-member check above requires.
+    assert len(viewer_only) == 73, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 72, and the aggregate floor is set at 40 against that number. A "
+        "says 73, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

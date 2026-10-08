@@ -2709,6 +2709,47 @@ class AttachedSession:
         return self._client is not None and self._client.connected
 
     @property
+    def canonical_current(self) -> bool:
+        """Whether the canonical mirror may speak for the OWNER right now.
+
+        THE TERM A ``False`` FROM CANONICAL STATE IS PRESENTED ON.
+        ``owner_reachable`` says a dial exists; this says the state a reader
+        gets from THIS follower is not KNOWN to be behind the owner. Every
+        disjunct is the facade's own record of that fact:
+
+        * ``not _ready_for_events`` — the canonical feed is not folding: a dial
+          or a re-sync is in flight and deltas are buffered until its snapshot
+          installs, so the store is frozen at the last pre-resync cut.
+        * ``_frontend_resync_pending`` — a delta was shed (``degraded``) and the
+          snapshot that cures it is owed; until it lands the store is missing
+          whatever fields that frame carried. The flag SURVIVES between retry
+          attempts, which is the window the 2026-10-07 incident sat in.
+        * ``_recovering`` — the socket dropped and the recovery loop owns the
+          dial. What the drop swallowed is unknowable (``_suspect_generation``
+          records the turn that was live), so nothing here may be called
+          current.
+
+        WHY THE STORE'S COMPLETENESS AND NOT A CLOCK. A time-based term
+        (``verified_at`` aged against a budget) would fail the wrong way: an
+        idle runtime publishes no frames, so a reader that dialled whenever the
+        stamp aged would turn the desktop's no-dial ``idle`` shortcut into a
+        round trip per press on a settled session. The incident's false
+        ``idle`` was not a mirror that was merely old — it was one whose own
+        flags said "do not trust me yet". The smallest honest term is therefore
+        the mirror's own completeness state.
+
+        THE RESIDUAL, STATED: a delta in flight between two folds is still
+        unknowable from here — the window ``_work_is_running``'s LIMIT
+        paragraph describes — and is bounded by the same reasoning the route
+        already carries (a press cannot be offered in a window this cannot
+        see).
+
+        NOT a liveness term: a killed owner narrows ``verified_at`` and the
+        socket's own state; this says nothing about the owner being there.
+        """
+        return self._ready_for_events and not self._frontend_resync_pending and not self._recovering
+
+    @property
     def attaching(self) -> bool:
         """An authenticated dial is retained, waiting for canonical state.
 
