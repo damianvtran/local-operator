@@ -85,11 +85,13 @@ async def test_open_creates_and_answers_the_frozen_shape(client, isolated_root: 
     assert response.status_code == 200
     result = response.json()["result"]
     # THE OP SHAPE EXACTLY (freeze §4): `enabled` is GET's field — a POST only
-    # reaches here when it is true. ``greeting_state`` is the one additive key
-    # (first-run onboarding): it tells the desktop whether she is about to
-    # speak, which ``greeted`` (now "delivered") cannot.
-    assert set(result) == {"session_id", "paused", "greeted", "greeting_state"}
+    # reaches here when it is true. Two additive keys (first-run onboarding):
+    # ``greeting_state`` tells the desktop whether she is about to speak (which
+    # ``greeted``, now "delivered", cannot), and ``held`` says a live session on
+    # this machine carries the effect out instead of this call.
+    assert set(result) == {"session_id", "paused", "greeted", "greeting_state", "held"}
     assert result["greeting_state"] == "owed"
+    assert result["held"] is False
     assert result["session_id"]
     assert result["paused"] is False
     assert (isolated_root / "sessions" / result["session_id"]).is_dir()
@@ -237,3 +239,35 @@ async def test_the_read_payload_carries_the_radient_identity(
     async with client as http:
         result = (await http.get("/v1/desktop/aida")).json()["result"]
     assert result["operator"] == {"name": "Jane Doe", "email": "jane@x.com", "source": "radient"}
+
+
+@pytest.mark.asyncio
+async def test_greet_says_held_when_another_window_owns_her(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The discriminator the desktop branches on instead of our prose.
+
+    A live session owns her rows, so ``arm_wake`` refuses with a 503 and the
+    greeting is armed by that owner moments later — still a 200, but with
+    ``held: true`` so the window knows to say "she will greet you in the other
+    window" rather than claiming she is about to speak here.
+    """
+    from local_operator.aida import onboarding
+    from local_operator.wakes.arm import WakeWriteError
+
+    async def _owner(*args, **kwargs):
+        raise WakeWriteError(
+            "a live session owns her rows", status=503, code="wake_live_owner"
+        )
+
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    monkeypatch.setattr("local_operator.wakes.arm.arm_wake", _owner)
+    async with client as http:
+        await http.post("/v1/desktop/aida", json={"op": "open"})
+        response = await http.post("/v1/desktop/aida", json={"op": "greet"})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["held"] is True
+    # The request SURVIVED: the owner (or a later resume) still arms it.
+    assert result["greeting_state"] == "requested"
+    assert "another window" in response.json()["message"]

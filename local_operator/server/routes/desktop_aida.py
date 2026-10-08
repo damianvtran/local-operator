@@ -131,6 +131,14 @@ class AidaOpState(BaseModel):
     #: she is about to speak, ``delivered``/``skipped`` when she never will
     #: again — what the desktop needs to decide whether to navigate to her.
     greeting_state: str = "owed"
+    #: Whether a LIVE session on this machine owns her rows, so this call\'s
+    #: effect is carried out by that owner rather than here: the greeting will
+    #: arrive in the other window, the pause lands on its next tick, the resume
+    #: arms there. ADDITIVE, and deliberately one field across all three ops —
+    #: a client that had to read this out of the message prose could only
+    #: branch on our wording. ``held`` is a fact about WHO acts next, not an
+    #: error: every answer carrying it is a 200 and the operation is in effect.
+    held: bool = False
 
 
 def _config_dir(request: Request):
@@ -187,7 +195,7 @@ def _reply(state: AidaState, message: str) -> CRUDResponse[AidaState]:
     return CRUDResponse(status=200, message=message, result=state)
 
 
-def _op_reply(state: AidaState, message: str) -> CRUDResponse[AidaOpState]:
+def _op_reply(state: AidaState, message: str, *, held: bool = False) -> CRUDResponse[AidaOpState]:
     """A POST's answer, in the frozen op shape (no ``enabled``; see `AidaOpState`)."""
     return CRUDResponse(
         status=200,
@@ -197,6 +205,7 @@ def _op_reply(state: AidaState, message: str) -> CRUDResponse[AidaOpState]:
             paused=state.paused,
             greeted=state.greeted,
             greeting_state=str(state.greeting.get("state") or "owed"),
+            held=held,
         ),
     )
 
@@ -278,6 +287,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
                 return _op_reply(
                     state,
                     f"{name} is open in another window; it will say hello there.",
+                    held=True,
                 )
             if outcome == "failed":
                 raise HTTPException(
@@ -299,7 +309,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         message = f"{name} is paused; she will not check in proactively."
         if outcome.owner_blocked:
             message += " Her open session applies the hold within a moment."
-        return _op_reply(state, message)
+        return _op_reply(state, message, held=bool(outcome.owner_blocked))
 
     # resume
     arm = await proactive.resume(root, session_id)
@@ -308,7 +318,9 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         # Correct and expected, not a failure: a live session owns its rows and
         # arms the next occurrence on its own watcher tick.
         return _op_reply(
-            state, f"{name} is active again; her open session will arm the next check-in."
+            state,
+            f"{name} is active again; her open session will arm the next check-in.",
+            held=True,
         )
     if arm == "no-session":
         return _op_reply(state, f"{name} is active again; her next conversation arms the check-in.")
