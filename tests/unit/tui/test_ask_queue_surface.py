@@ -29,7 +29,8 @@ from rich.color import Color
 from rich.style import Style
 
 from local_operator.asks import policy
-from local_operator.tui.app import ASK_ANSWER_PLACEHOLDER, OperatorApp
+from local_operator.tui import ask_open_policy
+from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.ask_queue import (
     ASK_BAR_CHEVRON_COLLAPSED,
@@ -42,6 +43,7 @@ from local_operator.tui.widgets.ask_queue import (
     ask_rows,
 )
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 # The whole module drives the real app through Textual's pilot, so every test
@@ -116,6 +118,14 @@ class _AskSession(FakeSession):
 def enabled(monkeypatch):
     """The queued-ask feature ON for this test, the way the env seam turns it on."""
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    # THE OPEN-BY-DEFAULT POLICY IS OFF FOR THIS FILE, deliberately. Every test here is
+    # about a surface a USER opens (the bar, f4, a list row) or an ask ARRIVING in a
+    # conversation that is already on screen, and its fixtures are dated 1970 — before
+    # the view they are fed into — which the policy rightly reads as "pending on open"
+    # and would open before the test touched anything. That behaviour is pinned where it
+    # belongs, against a view-relative clock, in ``test_ask_open_default.py``; turning
+    # it off here isolates the unit under test, it does not hide a defect.
+    monkeypatch.setattr(ask_open_policy, "AUTO_OPEN", False)
 
 
 def _app(session: FakeSession) -> OperatorApp:
@@ -257,20 +267,29 @@ def test_the_surface_takes_the_composer_row_only_when_it_has_something():
 # -- expand / collapse, and the composer routing (R7) ------------------------
 
 
-async def test_clicking_the_bar_expands_the_card_and_flips_the_placeholder(enabled):
+async def test_clicking_the_bar_expands_the_card_and_does_not_flip_the_placeholder(enabled):
+    """The composer is the conversation box in EVERY ask state, so its sentence never changes.
+
+    It used to flip to "Answer the question above… — Enter sends it to the ask"
+    while the card was up, because the composer doubled as the answer box. That
+    routing is gone (the card's explicit "Other" row is the one free-form door), so
+    a placeholder that said otherwise would promise a behaviour nothing performs.
+    """
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
+        editor = app._editor()
+        resting = editor.placeholder
+        assert resting == editor.resting_placeholder
         await pilot.click(AskBar)
         await _settle(pilot)
         assert app._ask_mode is True
         card = app.query_one(AskPickerScreen)
         assert card.is_attached
-        editor = app._editor()
-        assert editor.placeholder == ASK_ANSWER_PLACEHOLDER
+        assert editor.placeholder == resting, "expanding must not change the composer's sentence"
         # ...and the chevron now points the other way.
         assert app.query_one(AskBar).render().plain.rstrip().endswith(ASK_BAR_CHEVRON_EXPANDED)
 
@@ -285,8 +304,15 @@ async def test_clicking_the_bar_expands_the_card_and_flips_the_placeholder(enabl
         assert editor.placeholder == editor.resting_placeholder
 
 
-async def test_minimized_enter_sends_chat_and_expanded_enter_sends_the_answer(enabled):
-    """R7 (2) and (3) — the routing rule, driven through the real key path."""
+async def test_enter_in_the_composer_sends_chat_whether_the_card_is_up_or_not(enabled):
+    """The composer never answers an ask: its Enter is a conversation message, always.
+
+    The routing this replaces made the composer double as the answer box while the
+    card was expanded, which turned a sentence typed to the AGENT into an answer to
+    a question the user may not have been looking at (and, through a collapsed
+    paste, into the literal ``[Paste #1, N lines]`` token with the images dropped).
+    The explicit "Other" row on the card is the one free-form answer door now.
+    """
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
@@ -302,28 +328,68 @@ async def test_minimized_enter_sends_chat_and_expanded_enter_sends_the_answer(en
         assert session.prompts == ["hello there"]
         assert session.answered == []
 
-        # EXPANDED: the same key sends the ANSWER, and never chat.
+        # EXPANDED: the SAME key in the SAME composer is STILL a conversation
+        # message. This is the assertion the removed routing would fail: it sent
+        # the text to `answer_current` and recorded no prompt at all.
         session.prompts.clear()
         app._expand_asks()
         await _settle(pilot)
-        # The user put the caret in the composer and typed — the route R7 (3)
-        # is about. (The card takes focus on expand, so a bare `press` would
-        # hit the card instead; that path is the picker's own and is pinned by
-        # `test_ask_picker`.)
+        assert app._ask_mode is True and app.query(AskPickerScreen)
         composer = app._editor()
         composer.focus()
         composer.load_text("deploy to eu-west-1")
         await _settle(pilot, 2)
         await pilot.press("enter")
         await _settle(pilot)
-        assert session.prompts == []
-        assert session.answered == [("a1", {"q1": ["deploy to eu-west-1"]}, "terminal")]
-        # Answering collapses the surface and returns the composer.
-        assert app._ask_mode is False
+        assert session.prompts == ["deploy to eu-west-1"]
+        assert session.answered == [], "the composer answered an ask"
+        # The surface is untouched by a chat message: still up, ask still open.
+        assert app._ask_mode is True
+        assert app.query(AskPickerScreen)
+
+
+async def test_a_collapsed_paste_sent_with_the_card_up_reaches_the_conversation_whole(enabled):
+    """The bug the routing made possible, now structurally impossible.
+
+    With the composer routed to the card, a paste collapsed to ``[Paste #1, N
+    lines]`` was submitted as an ANSWER: the card received the literal token and
+    the payload (and any image beside it) was dropped, unrecoverably, because the
+    composer clears on submit. With no routing the submit takes the ordinary path,
+    which splices the payload back in before it is sent.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        composer = app._editor()
+        composer.focus()
+        payload = "\n".join(f"log line {index}" for index in range(60))
+        from textual import events
+
+        app.post_message(events.Paste(payload))
+        await _settle(pilot, 6)
+        assert "[Paste #1" in composer.text, "premise: a long paste collapses to a marker"
+        await pilot.press("enter")
+        await _settle(pilot, 6)
+        assert session.answered == [], "the composer answered an ask with a paste marker"
+        assert len(session.prompts) == 1
+        assert "[Paste #" not in session.prompts[0], session.prompts[0]
+        assert "log line 59" in session.prompts[0], "the pasted payload was dropped"
 
 
 async def test_collapsing_preserves_both_drafts_and_reexpanding_restores_the_ask_one(enabled):
-    """R7 (4). The chat draft is stashed, not swallowed or cross-sent."""
+    """R7 (4). The chat draft never leaves the composer; the ask draft belongs to the ask.
+
+    The chat draft used to be STASHED out of the buffer for the life of the
+    surface and restored on collapse. It now stays where the user put it, which is
+    what makes the two losses below impossible by construction rather than by a
+    merge rule: nothing is ever moved, so there is nothing to restore over text
+    typed since.
+    """
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
@@ -336,10 +402,7 @@ async def test_collapsing_preserves_both_drafts_and_reexpanding_restores_the_ask
 
         app._expand_asks()
         await _settle(pilot)
-        # The chat draft left the buffer — that is what makes "Enter is an
-        # answer" safe rather than a way to send a sentence to the ask.
-        assert editor.text == ""
-        assert app._ask_chat_draft == "a chat draft in progress"
+        assert editor.text == "a chat draft in progress", "expanding emptied the composer"
 
         # An answer draft, typed into the card's free-text row.
         card = app.query_one(AskPickerScreen)
@@ -349,21 +412,82 @@ async def test_collapsing_preserves_both_drafts_and_reexpanding_restores_the_ask
 
         app._collapse_asks()
         await _settle(pilot)
-        # The chat draft is back, and nothing was sent anywhere.
         assert editor.text == "a chat draft in progress"
         assert session.prompts == []
         assert session.answered == []
 
-        # Re-expanding restores the ASK draft.
+        # Re-expanding restores the ASK draft; the chat draft is still untouched.
         app._expand_asks()
         await _settle(pilot)
         card = app.query_one(AskPickerScreen)
         assert card.state.typed == "eu-west-1"
-        assert editor.text == ""
+        assert editor.text == "a chat draft in progress"
 
 
-async def test_an_ask_settling_while_expanded_collapses_and_restores_the_chat_draft(enabled):
-    """R7 (5). No auto-send, no discard: the surface leaves and the draft returns."""
+async def test_text_typed_while_the_card_is_up_never_costs_the_earlier_draft(enabled):
+    """R2, the exact scenario: type D / expand / type N / collapse loses nothing.
+
+    With the stash, expanding emptied the composer to put D aside, the user's N
+    landed in the now-live buffer, and the collapse (which restores only into an
+    EMPTY buffer and then clears the stash unconditionally) silently destroyed D.
+    The probe that found it ran the same sequence on the routing-removed tree:
+    composer ``'typed-N'``, stash ``''``. D is now never moved, so N is simply
+    appended to it, and both are present for the user to send or edit.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        editor = app._editor()
+        editor.load_text("DRAFT-D")
+        await _settle(pilot, 2)
+
+        app._expand_asks()
+        await _settle(pilot)
+        editor.focus()
+        editor.move_cursor(editor._end_of_buffer())
+        editor.insert(" typed-N")
+        await _settle(pilot, 2)
+
+        app._collapse_asks()
+        await _settle(pilot)
+        assert editor.text == "DRAFT-D typed-N", editor.text
+        assert session.prompts == [] and session.answered == []
+
+
+async def test_a_draft_survives_switching_conversation_while_the_card_is_up(enabled):
+    """The second loss the stash caused, found by the same probe: a switch dropped D.
+
+    Expanding emptied the composer, so the sidebar transition's "freeze the
+    outgoing draft" captured an EMPTY buffer into the outgoing conversation and the
+    draft was gone for good (composer ``''``, stash ``''`` after the swap). With the
+    buffer never emptied, the capture sees the draft and the outgoing conversation
+    keeps it.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        editor = app._editor()
+        editor.load_text("DRAFT-D")
+        await _settle(pilot, 2)
+        app._expand_asks()
+        await _settle(pilot)
+
+        outgoing = app._interaction
+        app._begin_sidebar_transition()
+        assert outgoing.draft.text == "DRAFT-D", (
+            "the outgoing draft was captured AFTER the surface emptied the composer: "
+            f"{outgoing.draft.text!r}"
+        )
+
+
+async def test_an_ask_settling_while_expanded_collapses_and_keeps_the_chat_draft(enabled):
+    """R7 (5). No auto-send, no discard: the surface leaves and the draft is still there."""
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
@@ -497,9 +621,151 @@ async def test_a_refused_answer_says_so_and_does_not_lose_the_ask(enabled):
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
-        app._submit_ask_answer("eu-west-1")
+        app.query_one(AskPickerScreen).answer_current(["eu-west-1"])
         await _settle(pilot)
         assert session.answered[0][0] == "a1"
+
+
+# -- credential safety (D9 parity): a secret-only ask refuses CHAT, not the card ----
+
+
+def _secret_row(ask_id: str = "s1", *, mixed: bool = False) -> dict[str, Any]:
+    """A queued ask whose question is a CREDENTIAL (``mixed`` adds an ordinary one)."""
+    questions = [
+        {
+            "id": "OPENAI_API_KEY",
+            "question": "Paste the OpenAI key",
+            "options": [],
+            "multi": False,
+            "recommended": None,
+            "secret": True,
+            "persist": False,
+        }
+    ]
+    if mixed:
+        questions.append(_question("region", "Which region?"))
+    return {**_row(ask_id, "unused"), "questions": questions}
+
+
+async def _submit_chat(app: OperatorApp, pilot: Any, text: str) -> None:
+    """Type ``text`` into the focused composer and press Enter, as a user would."""
+    composer = app._editor()
+    composer.focus()
+    composer.load_text(text)
+    await _settle(pilot, 2)
+    await pilot.press("enter")
+    await _settle(pilot, 4)
+
+
+def _refusal_rows(app: OperatorApp) -> list[Any]:
+    """The refusal sentences on screen. Read through the module so a tree that has
+    no such sentence yet reports "none" (a behavioural miss) rather than an
+    ImportError — the behavioural assertions come first in every test below."""
+    import local_operator.tui.app as app_module
+
+    sentence = getattr(app_module, "ASK_SECRET_REFUSAL", None)
+    if sentence is None:
+        return []
+    return [block for block in app.query(NoticeBlock) if (block.text() or "") == sentence]
+
+
+async def test_a_secret_only_ask_refuses_chat_and_keeps_the_text(enabled):
+    """D9 parity: the composer is a chat box, so a credential typed there would be SENT.
+
+    The desktop refuses composer input while the head answerable ask is all-secret.
+    The TUI's composer stopped being an answer box when the routing went, which
+    opened the same hole: the key goes to the model and into the transcript. The
+    refusal is on SUBMIT (the leak is the transcript), it keeps the text exactly as
+    typed, sends and records nothing, and names the card's hidden field.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row()]))
+        await _settle(pilot)
+        await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
+        composer = app._editor()
+
+        # BEHAVIOUR FIRST: the credential did not reach the conversation, the text
+        # is still the user's, and it never entered the prompt history.
+        assert session.prompts == [], "a credential reached the conversation"
+        assert session.answered == []
+        assert composer.text == "PASTED-CREDENTIAL-SENTINEL", "the user's text was lost"
+        assert "PASTED-CREDENTIAL-SENTINEL" not in composer.prompt_history()
+        # ...and the user was told where a credential goes.
+        from local_operator.tui.app import ASK_SECRET_REFUSAL
+
+        assert len(_refusal_rows(app)) == 1
+        assert "hidden field" in ASK_SECRET_REFUSAL and "f4" in ASK_SECRET_REFUSAL
+
+
+async def test_the_secret_refusal_is_one_row_however_many_times_enter_is_pressed(enabled):
+    """Enter is the user's response to silence: three presses must not stack three rows."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row()]))
+        await _settle(pilot)
+        for _ in range(3):
+            await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
+        assert session.prompts == [], "a credential reached the conversation"
+        assert len(_refusal_rows(app)) == 1, len(_refusal_rows(app))
+
+
+async def test_the_secret_refusal_comes_down_when_the_ask_is_answered(enabled):
+    """A sentence about "an ask wants a credential" may not outlive the ask."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row()]))
+        await _settle(pilot)
+        await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
+        assert session.prompts == [], "a credential reached the conversation"
+        assert len(_refusal_rows(app)) == 1, "premise: the refusal was shown"
+
+        app._sync_ask_surface([])  # answered elsewhere: the fold drops it
+        await _settle(pilot, 3)
+        assert _refusal_rows(app) == []
+
+
+async def test_the_secret_guard_is_bounded_to_all_secret_asks_and_to_chat(enabled):
+    """The guard is exactly "head ask is ALL secret" and exactly "chat".
+
+    A NEGATIVE CONTROL pair around a live premise: the same app state refuses a
+    plain sentence (so the guard is demonstrably on) while an ordinary ask, a MIXED
+    ask (one secret row among others) and a slash command all pass through. A
+    guard that fired on any secret row, or on `/new` because a question is waiting,
+    would be a trap, and a control that passed with the guard OFF would prove nothing.
+    """
+
+    async def reached_the_conversation(rows: list[dict[str, Any]], text: str) -> bool:
+        session = _AskSession()
+        app = _app(session)
+        async with app.run_test(size=(140, 30)) as pilot:
+            await _settle(pilot)
+            app._sync_ask_surface(ask_rows(rows))
+            await _settle(pilot)
+            await _submit_chat(app, pilot, text)
+            return bool(session.prompts)
+
+    # The premise: a secret-only head ask refuses a plain sentence...
+    assert await reached_the_conversation([_secret_row()], "hello there") is False
+    # ...and only that. Ordinary and mixed asks leave chat alone.
+    assert await reached_the_conversation([_row("a1", "Deploy now?")], "hello there") is True
+    assert await reached_the_conversation([_secret_row(mixed=True)], "hello there") is True
+
+    # A command is never chat to the transcript: it runs, and nothing is refused.
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row()]))
+        await _settle(pilot)
+        await _submit_chat(app, pilot, "/help")
+        assert _refusal_rows(app) == []
 
 
 # -- the sidebar mark --------------------------------------------------------
@@ -647,9 +913,10 @@ async def test_the_chat_draft_survives_picking_an_ask_out_of_the_list(enabled):
     """BLOCKER-1: the list→card swap used to destroy the conversation draft.
 
     The n>1 path is the one the list exists for, and it was the path that lost
-    the user's draft: ``_mount_ask_card`` collapsed with ``restore_draft=False``,
-    which CLEARS the stash rather than restoring it. The suite covered n=1 only,
-    so nothing caught it.
+    the user's draft while the draft was stashed: ``_mount_ask_card`` collapsed
+    with ``restore_draft=False``, which CLEARED the stash rather than restoring
+    it. There is no stash now; the same walk is kept because it is still the walk
+    a draft has to survive (expand the list, pick a row, collapse).
     """
     session = _AskSession()
     app = _app(session)
@@ -662,23 +929,23 @@ async def test_the_chat_draft_survives_picking_an_ask_out_of_the_list(enabled):
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
-        assert app._ask_chat_draft == "a chat draft in progress"
+        assert editor.text == "a chat draft in progress"
         app.on_ask_queue_list_picked(AskQueueList.Picked("a2"))
         await _settle(pilot)
-        # The draft is STILL stashed, not silently thrown away...
-        assert app._ask_chat_draft == "a chat draft in progress"
-        # ...and it comes back intact when the surface finally closes.
+        assert editor.text == "a chat draft in progress"
         app._collapse_asks()
         await _settle(pilot)
         assert editor.text == "a chat draft in progress"
 
 
-async def test_the_list_state_does_not_promise_the_ask_route(enabled):
-    """U1 / review MAJOR-2: the placeholder and the route read ONE condition.
+async def test_the_composer_says_and_does_the_same_thing_on_the_list_and_on_the_card(enabled):
+    """U1 / review MAJOR-2, in its end state: the placeholder and the route agree EVERYWHERE.
 
-    With the LIST up the composer used to say "Enter sends it to the ask" while
-    ``on_editor_submitted`` sent the text to the CONVERSATION — the copy
-    promised a routing the code did not perform.
+    The two used to read one condition that was true on the CARD and false on the
+    LIST, so the copy said "Enter sends it to the ask" over a list whose Enter sent
+    the text to the conversation. With no routing at all there is no condition left
+    to disagree about: the sentence is the resting one on the list AND on the card,
+    and Enter is a chat message on both.
     """
     session = _AskSession()
     app = _app(session)
@@ -690,8 +957,7 @@ async def test_the_list_state_does_not_promise_the_ask_route(enabled):
         app._expand_asks()
         await _settle(pilot)
         assert app.query(AskQueueList)
-        assert app._composer_placeholder_for(editor) != ASK_ANSWER_PLACEHOLDER
-        # ...and what Enter does matches what the placeholder said: chat.
+        assert app._composer_placeholder_for(editor) == editor.resting_placeholder
         editor.load_text("this is a chat message")
         editor.focus()
         await _settle(pilot)
@@ -700,15 +966,18 @@ async def test_the_list_state_does_not_promise_the_ask_route(enabled):
         assert session.aborts == []
         assert [p for p in session.prompts if "chat message" in str(p)]
         assert session.answered == []
-        # On a CARD the same two sites agree the other way.
+        # On a CARD the same two sites agree the same way.
         app.on_ask_queue_list_picked(AskQueueList.Picked("a1"))
         await _settle(pilot)
-        assert app._composer_placeholder_for(editor) == ASK_ANSWER_PLACEHOLDER
+        assert app._composer_placeholder_for(editor) == editor.resting_placeholder
+        session.prompts.clear()
         editor.load_text("eu-west-1")
+        editor.focus()
         await _settle(pilot)
         await pilot.press("enter")
         await _settle(pilot)
-        assert session.answered and session.answered[0][0] == "a1"
+        assert session.prompts == ["eu-west-1"]
+        assert session.answered == [], "the composer answered an ask"
 
 
 async def test_escape_from_the_composer_collapses_and_does_not_stop(enabled):
@@ -1296,7 +1565,7 @@ async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
         await _settle(pilot)
         app.on_ask_queue_list_picked(AskQueueList.Picked("a1"))
         await _settle(pilot)
-        app._submit_ask_answer("eu-west-1")
+        app.query_one(AskPickerScreen).answer_current(["eu-west-1"])
         await _drain(pilot)
         assert session.wire == [("respond", "a1", {"q1": ["eu-west-1"]}, "terminal")], session.wire
         # The surface STAYS UP and advances to the next ask (audit B): a1 was

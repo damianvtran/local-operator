@@ -29,6 +29,7 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.asks import policy, store
+from local_operator.tui import ask_open_policy
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.ask_queue import (
     DELIVERING_MARK,
@@ -115,6 +116,14 @@ async def _settle(pilot, turns: int = 3) -> None:
 @pytest.fixture
 def enabled(monkeypatch):
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    # THE OPEN-BY-DEFAULT POLICY IS OFF FOR THIS FILE, deliberately. Every test here is
+    # about a surface a USER opens (the bar, f4, a list row) or an ask ARRIVING in a
+    # conversation that is already on screen, and its fixtures are dated 1970 — before
+    # the view they are fed into — which the policy rightly reads as "pending on open"
+    # and would open before the test touched anything. That behaviour is pinned where it
+    # belongs, against a view-relative clock, in ``test_ask_open_default.py``; turning
+    # it off here isolates the unit under test, it does not hide a defect.
+    monkeypatch.setattr(ask_open_policy, "AUTO_OPEN", False)
 
 
 @pytest.fixture
