@@ -521,8 +521,10 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 }
 
 
-def own_launcher_path_injection(parent_path: str | None = None) -> dict[str, str]:
-    """``{"PATH": ...}`` with THIS build's script directory prepended when ``lop`` is absent.
+def own_launcher_path_injection(
+    shim_root: Path | str | None = None, parent_path: str | None = None
+) -> dict[str, str]:
+    """``{"PATH": ...}`` with a ``lop``-ONLY shim directory prepended when ``lop`` is absent.
 
     Agent instructions name ``lop`` commands (Aida's ``lop aida note``, the
     ``lop exec`` delegation fallback), and a desktop-managed backend runs from
@@ -531,19 +533,65 @@ def own_launcher_path_injection(parent_path: str | None = None) -> dict[str, str
     found`` and her first recording silently failed (audit A4's verification
     item). The fix is to make the instruction true rather than to teach every
     seed a ``python -m`` spelling: when ``lop`` does not resolve on the child's
-    PATH and the running interpreter's own script directory ships one, that
-    directory is prepended. It is the SAME build the session runs, never a
-    different install, and an operator whose PATH already resolves ``lop``
-    keeps it untouched — so a pinned global launcher still wins.
+    PATH and the running interpreter's own script directory ships one, this
+    puts that launcher on the child's PATH. It is the SAME build the session
+    runs, never a different install, and an operator whose PATH already
+    resolves ``lop`` keeps it untouched — so a pinned global launcher still
+    wins.
+
+    WHY A SHIM DIRECTORY AND NOT THE SCRIPT DIRECTORY (review round 1, R-1).
+    Prepending ``Path(sys.executable).parent`` prepends the app's whole venv
+    ``bin``, so the child also sees that venv's ``python``, ``python3``,
+    ``pip`` and every console script it carries — an agent running
+    ``python3 -m venv .venv`` or ``python build.py`` then silently uses the
+    app's interpreter instead of the user's, on precisely the install this
+    exists for. The shim directory holds ONE entry (a ``lop`` link to this
+    build's own launcher) and nothing else.
+
+    ``shim_root`` is the session's scratchpad root, the session's own removable
+    space and a directory that is guaranteed to exist by the time the bash tool
+    builds a child env (``ensure_scratchpad_dir`` runs on the same path). With
+    no root, nothing is injected: a hard-coded writable location would be a
+    second, undocumented side-effect directory, and the alternative — leaving
+    ``lop`` unresolved — is the pre-fix behaviour rather than a new failure.
     """
     path = os.environ.get("PATH", "") if parent_path is None else parent_path
     if shutil.which("lop", path=path) is not None:
         return {}
-    scripts = Path(sys.executable).parent
-    launcher = scripts / ("lop.exe" if os.name == "nt" else "lop")
-    if not launcher.exists():
+    launcher = Path(sys.executable).parent / ("lop.exe" if os.name == "nt" else "lop")
+    if not launcher.exists() or shim_root is None:
         return {}
-    return {"PATH": os.pathsep.join(part for part in (str(scripts), path) if part)}
+    shim = _launcher_shim_dir(Path(shim_root), launcher)
+    if shim is None:
+        return {}
+    return {"PATH": os.pathsep.join(part for part in (str(shim), path) if part)}
+
+
+def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
+    """``root/bin`` holding only a ``lop`` entry for ``launcher``, or ``None``.
+
+    Idempotent (an existing entry is left alone, so every bash call in a session
+    re-links nothing and the child's PATH text stays stable) and best-effort: a
+    root this session cannot write falls back to the pre-fix behaviour — no
+    injection — rather than failing the tool call. A symlink is preferred so the
+    shim tracks the install; where symlinks are unavailable (Windows without the
+    privilege) the launcher is copied, which is the same build's binary either
+    way.
+    """
+    bin_dir = root / "bin"
+    target = bin_dir / launcher.name
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            try:
+                target.symlink_to(launcher)
+            except OSError:
+                shutil.copyfile(launcher, target)
+                target.chmod(0o755)
+        return bin_dir
+    except OSError:
+        logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
+        return None
 
 
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:
@@ -3957,8 +4005,6 @@ async def execute_bash(
     # the session's own answer — does it hold ``task`` — has to travel with the
     # command, and a name that was never exported cannot be used as one.
     injections.update(may_delegate_env_injection(context))
-    # `lop` must resolve to THIS build in the child (see the helper's docstring).
-    injections.update(own_launcher_path_injection())
     # The session's scratchpad root rides the SAME three arms, from one helper, so
     # the two writers of an inherited-shaped variable cannot drift apart: set to
     # this session's root, cleared when the name is inherited and this session has
@@ -3969,7 +4015,13 @@ async def execute_bash(
     # ``ensure_scratchpad_dir`` runs HERE because this is where the path is handed
     # over: a shell cannot create a missing parent the way ``write``/``edit`` do,
     # so the advertised path has to exist by the time the child starts.
-    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
+    scratch_root = scratchpad_dir_of(context)
+    # `lop` must resolve to THIS build in the child, through a shim directory that
+    # carries nothing but `lop` (see the helper's docstring for why the venv's own
+    # ``bin`` must not be prepended). Ordered before the scratchpad export because
+    # the shim lives under that root; both are computed from the same value.
+    injections.update(own_launcher_path_injection(scratch_root))
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratch_root)))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
     if github_env:

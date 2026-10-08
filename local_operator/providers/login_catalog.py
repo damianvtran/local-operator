@@ -115,6 +115,140 @@ class LoginRow:
     recommended: bool = False
 
 
+#: The PICKER's description for a row: the same fact as :data:`DESCRIPTIONS`,
+#: said in the room a one-line list row actually has.
+#:
+#: WHY A SECOND MAP (design round 1, D3). The `/login` picker paints
+#: name | description | state on ONE line inside a column that is a fraction of
+#: the terminal, so the full sentences above ellipsized on 11 of the first 14
+#: rows at 120 columns and on every visible row at 80 — the cut landing on the
+#: distinguishing words (``one-ti…``, ``coding…``, ``Gemi…``) that are the only
+#: reason two near-twin rows (``zai``/``zai-oauth``, ``xai``/``xai-oauth``,
+#: ``alibaba-token-plan``/``alibaba-token-plan-oauth``) can be told apart.
+#: ``lop login`` prints one row per line over a whole terminal, so it keeps the
+#: long form: the two hosts answer the same question at different lengths
+#: rather than disagreeing about the answer. Every shipped row needs an entry —
+#: ``tests/unit/providers/test_login_catalog.py`` fails a row that would fall
+#: back, the same rule :data:`DESCRIPTIONS` is held to.
+#:
+#: Budget: ≤ 36 cells, so the widest of these still fits the picker's description
+#: column at an 80-column terminal alongside the widest name.
+PICKER_DESCRIPTIONS: dict[str, str] = {
+    "radient": "Browser sign-in; no key needed",
+    "radient-key": "Paste a Radient Pass key",
+    "openai": "ChatGPT plan sign-in",
+    "openai-device": "ChatGPT plan; code, no browser",
+    "openai-api-key": "Paste an OpenAI platform key",
+    "anthropic": "Claude Pro/Max sign-in",
+    "anthropic-key": "Paste an Anthropic Console key",
+    "kimi": "Moonshot Kimi sign-in",
+    "xai": "Paste an xAI (Grok) key",
+    "xai-oauth": "SuperGrok sign-in, one-time code",
+    "deepseek": "Paste a DeepSeek key",
+    "zai": "Paste a Z.AI (GLM) key",
+    "zai-oauth": "Z.AI coding plan, browser sign-in",
+    "google": "Paste a Google AI Studio key",
+    "mistral": "Paste a Mistral key",
+    "openrouter": "Paste an OpenRouter key",
+    "alibaba": "Paste an Alibaba DashScope key",
+    "alibaba-token-plan": "Paste a QwenCloud Token key",
+    "alibaba-token-plan-oauth": "QwenCloud plan key + sign-in",
+    "lmstudio": "A running LM Studio server",
+    "ollama": "A running Ollama server",
+    "vllm": "A running vLLM server",
+    "llamacpp": "A running llama.cpp server",
+    "openai-compatible": "Your own OpenAI-compatible endpoint",
+    "elevenlabs": "Speech only; not for chat",
+    "openai-key": "Speech only; not for chat",
+    "typesafe": "Classification only; not for chat",
+}
+
+#: The picker's NAME for a row: the short human label, where the registry's
+#: ``name`` is the full flavour ("Alibaba Cloud (QwenCloud Token Plan)") that a
+#: one-line list row cannot afford.
+#:
+#: WHY A THIRD FORM (design round 1, D3, second measurement). Painting the
+#: registry label fixed the jargon (`zai-oauth`) but spent the name column on
+#: the parenthetical, so at 120 columns the LABEL itself was the thing
+#: ellipsized ("OpenAI (ChatGPT Plus/Pro)" → "…n-in") and the descriptions went
+#: on being cut. The name column and the description column compete for one
+#: line, so both halves have to be short: the brand here, the flavour in
+#: PICKER_DESCRIPTIONS. `lop login` prints one row per line and keeps the full
+#: registry name — the same fact, at the length that surface can afford.
+#:
+#: Uniqueness matters as much as length: two rows for one brand ("OpenAI API
+#: key" against "OpenAI speech") must stay tellable apart, and the catalogue
+#: test enforces it.
+PICKER_LABELS: dict[str, str] = {
+    "radient": "Radient",
+    "radient-key": "Radient Pass",
+    "openai": "ChatGPT plan",
+    "openai-device": "ChatGPT code",
+    "openai-api-key": "OpenAI API key",
+    "anthropic": "Claude plan",
+    "anthropic-key": "Anthropic key",
+    "kimi": "Kimi",
+    "xai": "xAI key",
+    "xai-oauth": "SuperGrok",
+    "deepseek": "DeepSeek",
+    "zai": "Z.AI key",
+    "zai-oauth": "Z.AI plan",
+    "google": "Google AI",
+    "mistral": "Mistral",
+    "openrouter": "OpenRouter",
+    "alibaba": "DashScope",
+    "alibaba-token-plan": "QwenCloud key",
+    "alibaba-token-plan-oauth": "QwenCloud plan",
+    "lmstudio": "LM Studio",
+    "ollama": "Ollama",
+    "vllm": "vLLM",
+    "llamacpp": "llama.cpp",
+    "openai-compatible": "Your endpoint",
+    "elevenlabs": "ElevenLabs",
+    "openai-key": "OpenAI speech",
+    "typesafe": "Typesafe",
+}
+
+#: The widest a PICKER label may be, in cells (see :data:`PICKER_LABELS`). The
+#: longest shipped entry is 14; the budget leaves the arrow and gutter room.
+PICKER_LABEL_BUDGET = 16
+
+
+def picker_label(provider_id: str, fallback: str = "") -> str:
+    """The picker row's NAME for ``provider_id`` (``fallback`` for embedders).
+
+    Falls back to the registry's own name rather than a blank: an embedder's
+    provider has no catalogue entry and must still be choosable, and a name is
+    better than an id.
+    """
+    return PICKER_LABELS.get(provider_id) or fallback or provider_id
+
+
+#: The widest a PICKER description may be, in cells. MEASURED from the picker's
+#: own columns at 80 columns wide (the narrowest width the setup screen is
+#: designed for): the name column takes the longest label, the state column the
+#: longest state, and what is left is the description column. Enforced by the
+#: catalogue test, so a new row cannot land ellipsized.
+PICKER_DESCRIPTION_BUDGET = 36
+
+#: The single spelling of the recommendation tag, so the picker, `lop login`,
+#: the setup splash and the README cannot each say it their own way (design
+#: round 1, D10). One word, one meaning: this row is the one we suggest first.
+RECOMMENDED_TAG = "recommended"
+
+
+def picker_description(provider_id: str) -> str:
+    """The picker row's description for ``provider_id``.
+
+    Falls back to the LONG description rather than an empty string: a row whose
+    short form is missing should say too much, never nothing — a blank
+    description column is the defect the description field exists to fix
+    (first-run audit D3/U9/D13). The catalogue test is what keeps the fallback
+    from being the normal path.
+    """
+    return PICKER_DESCRIPTIONS.get(provider_id) or DESCRIPTIONS.get(provider_id, "")
+
+
 def is_non_chat(provider_id: str) -> bool:
     """A login that stores a credential no chat turn can use."""
     return is_speech_only(provider_id) or is_decision_only(provider_id)

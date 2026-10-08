@@ -282,18 +282,22 @@ def _launchd_is_addressable() -> bool:
     return launchd.is_own_plist(plist_path(), LABEL)
 
 
-def _config_lives_in_real_home(config_dir: Path) -> bool:
-    """Whether the supervised unit would point at a store that outlives us.
+def _shared_label_refusal(config_dir: Path) -> str | None:
+    """Why the SHARED supervised unit must not serve ``config_dir``, or ``None``.
 
-    A unit supervising a config dir under ``/tmp`` or a sandbox home watches
-    a store that is deleted when the sandbox ends — a live launchd unit with
-    a corpse for a config. Containment under the passwd home is the right
-    test HERE (not the identity test ``_launchd_is_addressable`` uses) because
-    the config dir is an ordinary path the user may legitimately place
-    anywhere under their home; only dirs OUTSIDE it are the sandbox shape.
+    ``launchd.shared_label_refusal`` plus this module's log line, wrapped in one
+    place because the log is the half that gets forgotten: the caller receives
+    an ``InstallOutcome`` reason nobody prints, so a skipped install is silent
+    and the operator is left wondering why her supervisor never came back. That
+    silence is how the 2026-10-08 incident ran for ~8 minutes (QA round 2: a
+    desktop-managed backend with a scratch store under the real home repointed
+    the operator's own ``com.local-operator.wakes`` plist and bootstrapped it
+    into the real ``gui/<uid>`` domain).
     """
-    # Shared with the other three installers; see :mod:`local_operator.launchd`.
-    return launchd.config_lives_in_real_home(config_dir)
+    refusal = launchd.shared_label_refusal(config_dir)
+    if refusal is not None:
+        logger.warning("wake supervisor: %s", refusal)
+    return refusal
 
 
 def render_plist(config_dir: Path) -> dict[str, object]:
@@ -454,7 +458,7 @@ def supervisor_state(config_dir: Path) -> SupervisorState:
         return _systemd_supervisor_state(config_dir)
     if kind == supervisors.SCHTASKS:
         return _task_supervisor_state(config_dir)
-    if not _launchd_is_addressable() or not _config_lives_in_real_home(config_dir):
+    if not _launchd_is_addressable() or _shared_label_refusal(config_dir) is not None:
         # Same two guards the installer uses to decide whether it may ACT;
         # asking is subject to them for the same reason, because the answer
         # would be about someone else's store.
@@ -462,7 +466,7 @@ def supervisor_state(config_dir: Path) -> SupervisorState:
             loaded=False,
             running=False,
             verifiable=False,
-            detail="this store is outside the real home; launchd cannot supervise it",
+            detail="this store is not the one the shared unit serves; launchd cannot supervise it",
         )
     result = _launchctl("print", f"{_domain()}/{LABEL}")
     if result.returncode != 0:
@@ -521,14 +525,17 @@ def _systemd_supervisor_state(config_dir: Path) -> SupervisorState:
     be verified for this store" and the second as "nothing is installed", and
     only one of those is actionable by installing something.
     """
-    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT) or not _config_lives_in_real_home(
+    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT) or _shared_label_refusal(
         config_dir
     ):
         return SupervisorState(
             loaded=False,
             running=False,
             verifiable=False,
-            detail="this store is outside the real home; the user manager cannot supervise it",
+            detail=(
+                "this store is not the one the shared unit serves; the user manager "
+                "cannot supervise it"
+            ),
         )
     shown = supervisors.systemctl_user(
         "show", "--property=LoadState,ActiveState,SubState,MainPID", SYSTEMD_UNIT
@@ -692,23 +699,13 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
             # reboot with the agent removed, a hand `bootout`). Falls through
             # to the write+bootstrap below, which is the correct repair.
 
-        if addressable and not _config_lives_in_real_home(config_dir):
-            # The guard used to cover the launchctl call but not the WRITE,
-            # and the write is the half that escapes: with the real HOME and
-            # a redirected config dir (a test, a sandbox, an agent's isolated
-            # store) `plist_path()` is the REAL `~/Library/LaunchAgents`, so
-            # a sandbox run planted a supervised unit in the operator's live
-            # launchd domain, pointed at a store that vanishes with the
-            # sandbox (round 2). The real domain supervises only setups whose
-            # config lives under the real home; anything else gets the same
-            # answer a redirected home gets — file half skipped, no address.
-            return InstallOutcome(
-                installed=False,
-                reason=(
-                    "config dir is outside the real home; " "not writing into the real LaunchAgents"
-                ),
-            )
-
+        refusal = _shared_label_refusal(config_dir)
+        if refusal is not None:
+            # ONE rule now, for both halves and both platforms: the shared unit
+            # serves the DEFAULT store only. Containment under the real home was
+            # the old rule and it let a scratch store INSIDE the home take the
+            # operator's unit (2026-10-08). See `_shared_label_refusal`.
+            return InstallOutcome(installed=False, reason=refusal)
         path.write_bytes(plistlib.dumps(wanted))
         if not addressable:
             # A redirected home (a test, a sandbox): the plist is written and
@@ -753,6 +750,13 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
     idle machine fire.
     """
     try:
+        refusal = _shared_label_refusal(config_dir)
+        if refusal is not None:
+            # THE SAME RULE AS THE PLIST ARM, and before anything is written:
+            # the shared unit serves the DEFAULT store only (2026-10-08). The
+            # containment test this replaced refused a store outside the real
+            # home but let a scratch store inside it take the operator's unit.
+            return InstallOutcome(installed=False, reason=refusal)
         wanted = render_systemd(config_dir)
         unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
         timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
@@ -773,9 +777,14 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
         # ``~/.config/systemd/user/local-operator-wakes.service`` with one whose
         # ``Environment=`` pointed at a sandbox store — silently, since the
         # outcome still read "unit written; the user manager is not addressable
-        # from here". A redirected HOME still writes only into its own
-        # ``$HOME/.config/systemd/user``, where ``addressable`` is False because
-        # the identity test fails, so the sandbox case stays covered.
+        # from here".
+        #
+        # The refusal that used to live here is now ``_shared_label_refusal``,
+        # asked ONCE at the top of this function and before anything is written:
+        # the shared unit serves the DEFAULT store only, which is a stricter rule
+        # than "inside the real home" (2026-10-08). ``addressable`` keeps its
+        # narrower job — whether the user manager may be ADDRESSED from here —
+        # and stays un-ANDed with the store test for the reason above.
         addressable = supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT)
         current = None
         if unit.exists():
@@ -812,19 +821,6 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
                     )
                 logger.info("wake supervisor was loaded but not running; started it")
                 return InstallOutcome(installed=True, reason="restarted a stopped supervisor")
-        if addressable and not _config_lives_in_real_home(config_dir):
-            # The write half is the one that escapes: with the real HOME and a
-            # redirected config dir, `systemd_unit_path()` is the REAL
-            # `~/.config/systemd/user`, so a sandbox run would plant a unit in
-            # the operator's live user manager pointed at a store that vanishes
-            # with the sandbox. Same refusal, same reason, as the plist half.
-            return InstallOutcome(
-                installed=False,
-                reason=(
-                    "config dir is outside the real home; "
-                    "not writing into the real systemd user directory"
-                ),
-            )
         unit.write_text(wanted, encoding="utf-8")
         timer.write_text(render_systemd_timer(), encoding="utf-8")
         if not addressable:
@@ -982,7 +978,7 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         # repair brings a unit up to date in place instead of migrating it. The
         # ambient dir is only the fallback for a plist that records none.
         store = launchd.config_dir_from_plist(launchd.load(path)) or ambient_config_dir()
-        if not _config_lives_in_real_home(store):
+        if _shared_label_refusal(store) is not None:
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
         if outcome.kind == "current":

@@ -110,6 +110,20 @@ class AidaState(BaseModel):
     #: Radient sign-in's ``id_token`` claims (``{"name", "email", "source":
     #: "radient"}``), else ``null`` — in which case she asks for it herself.
     operator: dict[str, str] | None = None
+    #: The greeting ledger's STATE WORD, mirrored onto the READ (``owed`` /
+    #: ``requested`` / ``armed`` / ``delivered`` / ``skipped``). ADDITIVE. The
+    #: read already carries the whole ``greeting`` record, but a renderer that
+    #: has to promise "she will say hello first" on the step BEFORE the press
+    #: needs the same word the POST answers with, without walking a nested
+    #: object to find it — and ``greeted`` alone cannot say it: a pending
+    #: greeting and one that will never come are both ``false`` there.
+    greeting_state: str = "owed"
+    #: The live-owner flag (see ``AidaOpState.held``), present on the READ so the
+    #: two shapes carry one field set and a client binding them shares a
+    #: decoder. A GET performs no operation, so a live owner is simply acting on
+    #: the next POST — false here means "no operation is being carried by
+    #: someone else right now", which is exactly the fact it reports.
+    held: bool = False
 
 
 class AidaOpState(BaseModel):
@@ -175,6 +189,10 @@ def _state(root: Any) -> AidaState:
         greeting=onboarding.greeting_record(root),
         first_run_pending=onboarding.first_run_pending(root),
         operator=_operator(root),
+        # The read carries the same word the POST answers with: the desktop's
+        # step 3 promises "she will say hello first" BEFORE the press, and it
+        # reads this document to decide.
+        greeting_state=onboarding.greeting_state(root),
     )
 
 
@@ -298,7 +316,20 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
                     },
                 )
             if outcome == "already":
-                return _op_reply(state, f"{name} has already introduced herself.")
+                # ``already`` covers delivered and a racing second arm; the
+                # ledger says which, so the sentence matches the fact.
+                if onboarding.greeting_state(root) == onboarding.GREETING_DELIVERED:
+                    return _op_reply(state, f"{name} has already introduced herself.")
+                return _op_reply(state, f"{name} is already on her way to introducing herself.")
+            if outcome == "skipped":
+                # R-5: NOT the same fact as ``already``. This install already has
+                # conversations, so she will never introduce herself here —
+                # correct behaviour, and saying "she already has" would be false.
+                return _op_reply(
+                    state,
+                    f"{name} does not introduce herself on an install that already "
+                    "has conversations.",
+                )
             return _op_reply(state, f"{name} is introducing herself in her conversation.")
         return _op_reply(_state(root), f"{name}'s conversation is ready.")
 

@@ -67,3 +67,54 @@ def test_the_remote_hint_fires_only_where_a_browser_cannot_reach(monkeypatch) ->
     assert "lop login openai-device" in (catalog.remote_login_hint("openai") or "")
     assert "/login radient-key" in (catalog.remote_login_hint("radient", command="/login") or "")
     assert catalog.remote_login_hint("deepseek") is None
+
+
+def test_every_shipped_login_row_has_a_picker_description_that_fits() -> None:
+    """The picker's short form is required, and budgeted (design round 1, D3).
+
+    The long descriptions ellipsized on most picker rows — the name column, the
+    description column and the state column share one terminal line — so the
+    picker reads PICKER_DESCRIPTIONS and `lop login` reads DESCRIPTIONS. A row
+    with no short form falls back to the long one, which is a silent return of
+    the defect, so the gap is a test failure rather than a fuzzy row.
+    """
+    missing = [d.id for d in list_login_providers() if d.id not in catalog.PICKER_DESCRIPTIONS]
+    assert missing == []
+    over = {
+        row_id: len(text)
+        for row_id, text in catalog.PICKER_DESCRIPTIONS.items()
+        if len(text) > catalog.PICKER_DESCRIPTION_BUDGET
+    }
+    assert over == {}, over
+    # The recommended tag is one word, spelled once, and it is what the picker
+    # and the CLI both say (D10).
+    assert catalog.RECOMMENDED_TAG == "recommended"
+
+
+def test_a_row_with_no_short_form_falls_back_to_the_long_one() -> None:
+    """Embedders' own providers have no catalogue entry; they must not go blank."""
+    assert catalog.picker_description("not-a-real-provider") == ""
+    assert catalog.picker_description("openai") == catalog.PICKER_DESCRIPTIONS["openai"]
+
+
+def test_every_shipped_login_row_has_a_short_unique_picker_label() -> None:
+    """D3's second half: the NAME column is short, and two rows never collide.
+
+    Painting the full registry label moved the ellipsis onto the label itself,
+    because the name and description columns share one picker line. The short
+    form is what makes both fit — and uniqueness is what keeps the twin rows
+    (`OpenAI API key` against `OpenAI speech`) tellable apart at a glance.
+    """
+    shipped = [d.id for d in list_login_providers()]
+    missing = [row_id for row_id in shipped if row_id not in catalog.PICKER_LABELS]
+    assert missing == []
+    over = {
+        row_id: len(text)
+        for row_id, text in catalog.PICKER_LABELS.items()
+        if len(text) > catalog.PICKER_LABEL_BUDGET
+    }
+    assert over == {}, over
+    labels = [catalog.PICKER_LABELS[row_id] for row_id in shipped]
+    assert len(set(labels)) == len(labels), [x for x in labels if labels.count(x) > 1]
+    # An embedder's provider has no entry and keeps its own name.
+    assert catalog.picker_label("not-a-real-provider", "My Provider") == "My Provider"

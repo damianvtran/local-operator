@@ -6524,6 +6524,10 @@ class Editor(TextArea):
         (review round 3, R7; QA round 3, Q5).
         """
         if self._credential_arm is None:
+            # THE GATE COMES FIRST, before the arming rule, and before any secret
+            # could be taken (U11/D2).
+            if not self._credential_capturable():
+                return
             span = self._credential_arm_span()
             if span is not None:
                 self._arm_credential(span)
@@ -6548,6 +6552,33 @@ class Editor(TextArea):
         # buffer would read `[Credential #1, 64 chars]  ` — two spaces, one of
         # them theirs and now meaningless.
         self._credential_arm = (start, end + (len(tail) - len(tail.lstrip(" \t"))))
+
+    def _credential_capturable(self) -> bool:
+        """Whether the host says a masked capture may open at all (U11/D2).
+
+        ``/credential`` in the setup state refuses up front — there is no session
+        to store a secret in — but that refusal only ran when the command was
+        DISPATCHED, and arming happens on the keystroke before. So the gesture a
+        first-run user makes (type ``/credential``, press Enter) took a secret
+        into a masked span first, and the refusal they were meant to see arrived
+        as a store failure with an impossible remedy. Asking the host the same
+        question at the ARM closes it: no masked capture, no chip, no user row,
+        and Enter lands on the refusal it was always meant to reach.
+
+        ``getattr``-reached like :meth:`_credential_names_taken` (the widget is
+        imported by the app and cannot import it back), and permissive whenever
+        the answer cannot be read — a host that does not model this, an editor
+        constructed outside an app (``Editor(...)`` in a unit test raises
+        ``NoActiveAppError`` on ``self.app``), or a gate that itself fails: all
+        of them must keep arming exactly as before.
+        """
+        try:
+            gate = getattr(self.app, "credentials_capturable", None)
+            if not callable(gate):
+                return True
+            return bool(gate())
+        except Exception:  # noqa: BLE001 — an unreadable gate must not block capture
+            return True
 
     def _relocate_armed_token(self) -> tuple[int, int] | None:
         """Where the LATCHED token is now, or ``None`` if it is gone.

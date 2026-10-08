@@ -15780,20 +15780,30 @@ class OperatorApp(App[None]):
             )
         elif unknown_hosting:
             self._announce_on_splash(
-                f"{RECOMMENDED_LOGIN_COMMAND} — '{unknown_hosting}' is not a known "
-                "provider (/provider lists all).",
+                f"{RECOMMENDED_LOGIN_COMMAND} — '{unknown_hosting}' is unknown "
+                "(/provider lists all).",
                 "warning",
                 # The headline is passed rather than sniffed out of the text:
                 # the toast is the ONE element that is never truncated, so it
                 # is where the bad value is guaranteed to reach the user even
                 # on a narrow terminal.
+                #
+                # 64 cells (design round 1, D6): the earlier wording
+                # ("… is not a known provider (/provider lists all).") measured
+                # 78 and lost its "all)." tail at 80 columns, breaking the
+                # ≤74-cell rule this branch's own comment states.
                 headline=f"Unknown provider '{unknown_hosting}'",
             )
         else:
             self._announce_on_splash(
                 AIDA_NO_PROVIDER_CUE,
                 "warning",
-                headline="Connect an AI account",
+                # The DIAGNOSIS only (design round 1, D7): the notice row
+                # directly below already carries the actionable sentence
+                # (``AIDA_NO_PROVIDER_CUE``), and a toast repeating it a few
+                # rows away read as two competing instructions. The toast is
+                # the heading; the notice is the instruction.
+                headline="No AI account connected",
             )
         if self._status is not None:
             # "setup" rather than a model name: there is no model until the user
@@ -46434,8 +46444,11 @@ class OperatorApp(App[None]):
         """
         from local_operator.providers.login_catalog import (
             GROUP_NOT_CHAT,
+            RECOMMENDED_TAG,
             is_non_chat,
             login_groups,
+            picker_description,
+            picker_label,
         )
 
         providers = self._providers
@@ -46455,14 +46468,27 @@ class OperatorApp(App[None]):
                 continue
             seen.add(definition.id)
             row = view.get(definition.id) if view is not None else None
-            description = row_info.description
+            description = picker_description(definition.id)
             if row_info.recommended:
-                description = f"recommended · {description}"
+                # The tag rides the END of the description, in the ONE spelling
+                # the catalogue owns (D10), rather than being prefixed: a
+                # prefix pushes the distinguishing words out of the column
+                # first, which is how `radient`'s row lost them (D3).
+                description = f"{description} — {RECOMMENDED_TAG}"
             elif row_info.group == GROUP_NOT_CHAT and "not for chat" not in description:
                 description = f"{description} (not for chat)"
             choices.append(
                 ArgumentChoice(
                     name=definition.id,
+                    # WHAT THE ROW PAINTS (D3): the short human label, while
+                    # ``name`` stays the value completion inserts. The picker
+                    # painted the machine id — `zai-oauth`,
+                    # `alibaba-token-plan-oauth` — for a first-run user who
+                    # cannot tell those from their twins, and painting the FULL
+                    # registry label instead just moved the ellipsis onto the
+                    # label, because the name and description columns share one
+                    # line. `lop login` prints the full label.
+                    display=picker_label(definition.id, row_info.label),
                     description=description,
                     aliases=tuple(definition.search_aliases),
                     # Blank when the store could not be read: the catalogue is still
@@ -46491,6 +46517,12 @@ class OperatorApp(App[None]):
             choices.append(
                 ArgumentChoice(
                     name=definition.id,
+                    # Same label/value split as the catalogue rows above, so an
+                    # embedder's own provider does not paint an id beside rows
+                    # that paint names (design round 1, D3). Their own registry
+                    # name is the only label available, and it is the right one:
+                    # the catalogue's short forms are ours to know.
+                    display=definition.name,
                     description=_provider_summary(definition.id, definition.name),
                     aliases=tuple(definition.search_aliases),
                     detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
@@ -47790,6 +47822,45 @@ class OperatorApp(App[None]):
         self._system_notice(tui_spelling(lines[-1]), "error")
 
     # -- login / logout -----------------------------------------------------
+    def _login_listing_blocks(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        """``/login``'s bare listing, one tree per catalogue group (round 1, D4).
+
+        The picker's list cannot carry a heading — no non-selectable row, and no
+        room — so the ordering fact is stated here, in the rows' own words: the
+        same ``_login_choices`` the picker offers, split by
+        ``providers.login_catalog.login_groups`` and captioned with the group
+        name the desktop and `lop login` already print. A row no group knows (an
+        embedder's own provider) keeps a block of its own rather than vanishing
+        from the listing.
+        """
+        from local_operator.providers.login_catalog import login_groups
+
+        choices = {choice.name: choice for choice in self._login_choices()}
+        blocks: list[tuple[str, list[tuple[str, str]]]] = []
+        known: set[str] = set()
+        for group, rows in login_groups(include_non_chat=not self._setup_state):
+            items: list[tuple[str, str]] = []
+            for row in rows:
+                known.add(row.id)
+                choice = choices.get(row.id)
+                if choice is None:
+                    continue
+                items.append((choice.display or choice.name, choice.description))
+            if items:
+                # The group name STANDS AS THE CATALOGUE SPELLS IT ("Use an API
+                # key"), because that is the string the desktop and `lop login`
+                # print — lowercasing it here would be a third spelling of one
+                # heading.
+                blocks.append((f"connect an AI account — {group}", items))
+        extras = [
+            (choice.display or name, choice.description)
+            for name, choice in choices.items()
+            if name not in known
+        ]
+        if extras:
+            blocks.append(("connect an AI account — other", extras))
+        return blocks
+
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
         """``/login [provider]`` — list loginable providers, or run a flow."""
         # Rejections go through ``_system_notice`` (see `_cmd_usage`): nothing
@@ -47802,17 +47873,22 @@ class OperatorApp(App[None]):
         if not arg:
             # The bare listing is the picker's content as a block: same order,
             # same words (``_login_choices``), so the two cannot disagree about
-            # what is recommended.
-            items = [(choice.name, choice.description) for choice in self._login_choices()]
+            # what is recommended — and unlike the picker it can afford GROUP
+            # HEADINGS (design round 1, D4): the picker's list is a fraction of
+            # a terminal with no non-selectable row, while this block gets a
+            # tree per group, which is what tells the user why `OpenAI` follows
+            # `Radient`.
+            groups = self._login_listing_blocks()
             # The only one of the five listings with no empty guard. With the
             # echo gone the listing IS the receipt, and `_tree_listing` drops
             # the caption with the rows on an empty list — so an empty registry
             # appended a blank block that retired the splash and rendered
             # nothing at all.
-            if not items:
+            if not groups:
                 self._system_notice("no providers support interactive login", "warning")
                 return
-            self._append_block(RichBlock(_tree_listing(items, "connect an AI account")))
+            for caption, items in groups:
+                self._append_block(RichBlock(_tree_listing(items, caption)))
             return
         from local_operator.providers.auth_cli import LOGIN_STATUS_WORD
 
@@ -47900,6 +47976,22 @@ class OperatorApp(App[None]):
         for line in lines:
             text.append(line + "\n")
         self._append_block(RichBlock(text))
+
+    def credentials_capturable(self) -> bool:
+        """Whether the composer may ARM its masked ``/credential`` capture (U11/D2).
+
+        The setup state refuses ``/credential`` up front (there is no session to
+        store a secret in), but the refusal lived only in
+        :meth:`_cmd_credential` — reached by the ARGUMENT form. The gesture a
+        first-run user actually makes is ``/credential`` + Enter, and by the
+        time Enter dispatches, the composer had already ARMED the masked
+        capture: the secret became a ``[Credential #1, 5 chars]`` chip, the
+        submit looped a remedy that could not work ("Paste the value again after
+        /credential to retry"), and a user row was left for a secret that was
+        never stored. This is the same question the handler asks, exposed so the
+        editor can ask it BEFORE taking a secret off the operator.
+        """
+        return not (self._session is None and self._setup_state)
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.
@@ -48492,7 +48584,10 @@ class OperatorApp(App[None]):
                 )
             if rest:
                 lines.append(Text(rest, style=dim))
-            from local_operator.providers.login_catalog import remote_login_hint
+            from local_operator.providers.login_catalog import (
+                headless_display,
+                remote_login_hint,
+            )
 
             remote = remote_login_hint(provider_id, command="/login")
             if remote:
@@ -48511,7 +48606,15 @@ class OperatorApp(App[None]):
                     style=dim,
                 )
             )
-            lines.append(Text(f"Full link: {url}", style=dim))
+            if headless_display():
+                # THE ONE CASE THE DUMP EXISTS FOR (design round 1, D5): a
+                # browser on another machine cannot follow the short /launch
+                # link, which points at THIS host's loopback, so the full URL is
+                # the only copyable thing. Locally it was the largest object on
+                # the screen — three wrapped lines of ~230 cells, uncopyable
+                # across the wrap — and it asked the user to choose between two
+                # URLs for one flow. The short link above already 302s here.
+                lines.append(Text(f"Full link: {url}", style=dim))
             self._append_block(RichBlock(Group(*lines)))
 
         def on_progress(message: str) -> None:
@@ -48818,10 +48921,22 @@ class OperatorApp(App[None]):
                 # same empty config and drops back into setup.
                 if self._on_config_changed is not None:
                     self._on_config_changed()
-                await notice(self._connected_receipt(provider), "info")
+                receipt = self._connected_receipt(provider)
                 # R26: a fresh install's first conversation is hers; every
                 # other install rebuilds exactly as before.
                 await self._boot_after_setup()
+                # THE RECEIPT GOES ON THE SPLASH, AFTER THE REBUILD (design round
+                # 1, D8). Appended to the transcript BEFORE it, the line was
+                # replaced before it could be read: the rebuild swaps the
+                # session and the transcript is a projection of the new one, so
+                # the receipt described a conversation that no longer existed on
+                # screen — measured, and a splash row set before the rebuild did
+                # not survive it either. It cannot go in the NEW transcript now:
+                # her greeting must be the first row a person sees. The splash
+                # is the empty-state surface, so the receipt stays there —
+                # naming who is connected and what opens next — until her
+                # message retires it.
+                self._announce_on_splash(receipt, "info", headline="Connected")
             elif getattr(self._providers.provider(provider), "local_setup", False):
                 if self._on_config_changed is not None:
                     self._on_config_changed()

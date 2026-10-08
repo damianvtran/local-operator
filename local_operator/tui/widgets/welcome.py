@@ -270,31 +270,62 @@ HINTS: tuple[tuple[str, str], ...] = (
 #: never at the action that unblocks them.
 #:
 #: The first two rows are now the first-run PATH rather than a list of keys
-#: (audit D2/U3/U4): the recommended sign-in, then "any other provider", and
-#: the third row says what happens next — her greeting — so the screen answers
-#: "what do I do and what will that get me" in the table the eye scans. The
-#: ``{aida}`` slot is filled with her LIVE configured name
-#: (:func:`setup_hint_rows`), never a hard-coded "Aida".
+#: (audit D2/U3/U4): the recommended sign-in, then "any other provider", so the
+#: screen answers "what do I run". WHAT THE SCREEN ALSO OWES is the sequence
+#: itself — "connect · sign in · she says hello" — which a table of typeable
+#: keys cannot say (design round 1, D1); that reading is
+#: :func:`setup_step_line`, painted above this table. The ``ctrl/cmd+d`` quit row
+#: is gone in the setup state (D11): it does not advance the task, the keys-only
+#: tier of the table still names every affordance that does, and quitting is a
+#: binding the user already has. Its row is what pays for the step line, so the
+#: first screen's height budget is unchanged.
 HINTS_SETUP: tuple[tuple[str, str], ...] = (
-    (f"/login {RECOMMENDED_LOGIN}", "sign in (recommended)"),
-    ("/login", "other providers or an API key"),
-    ("then", "{aida} says hello and helps you set up"),
-    ("ctrl/cmd+d", "quit"),
+    (f"/login {RECOMMENDED_LOGIN}", "sign in — recommended, no key to paste"),
+    ("/login", "another provider, including API keys"),
+    ("/help", "all commands"),
 )
 
 
-def setup_hint_rows(aida_name: str | None = None) -> tuple[tuple[str, str], ...]:
-    """:data:`HINTS_SETUP` with her name in it, or without the row when she is off.
+#: The checklist above the setup table, longest form first. Each entry is tried
+#: in order and the first that fits the width wins, so the step reading degrades
+#: to the two steps that matter rather than being truncated mid-word (the same
+#: rule the table's own width tiers follow). The numeral and the step are joined
+#: by a middle dot separator the whole line shares.
+SETUP_STEPS: tuple[str, ...] = (
+    "1 connect an account  ·  2 sign in or paste a key  ·  3 {aida} says hello",
+    "1 connect  ·  2 sign in or paste a key  ·  3 {aida} says hello",
+    "1 connect  ·  2 sign in  ·  3 {aida} says hello",
+)
 
-    ``aida_name`` is ``None`` when she is disabled (``aida.enabled = false`` /
-    ``LOCAL_OPERATOR_NO_AIDA``): the row would promise a greeting that never
-    comes, so it is replaced by the command picker it displaced.
+
+def setup_step_line(width: int, aida_name: str | None) -> Text | None:
+    """The 3-step checklist for the first-run screen, or ``None`` when it cannot fit.
+
+    Rendered as its own line above the key table (design round 1, D1): the table
+    answers "what do I run", and the step reading answers "what happens", which
+    is the question a non-technical first-run user actually has. It names HER
+    live configured name, so it promises the person the screen is about — and
+    with her disabled (``aida_name`` is ``None``) there is no third step to
+    promise, so the whole line is withdrawn rather than promising a greeting
+    that never comes.
     """
     if not aida_name:
-        return tuple(
-            ("/", "command picker") if key == "then" else (key, desc) for key, desc in HINTS_SETUP
-        )
-    return tuple((key, desc.replace("{aida}", aida_name)) for key, desc in HINTS_SETUP)
+        return None
+    for template in SETUP_STEPS:
+        body = template.replace("{aida}", aida_name)
+        if cell_len(body) <= width:
+            return Text(body, style=Style(color=theme_mod.semantic_color("fg")), no_wrap=True)
+    return None
+
+
+def setup_hint_rows(aida_name: str | None = None) -> tuple[tuple[str, str], ...]:
+    """The setup table; her name no longer appears in it (:func:`setup_step_line`).
+
+    Kept as a function because the disabled case (``aida_name`` is ``None``) is
+    read by callers that pass the name through: when she is off the table is the
+    plain command list, which is exactly this table without the step line.
+    """
+    return HINTS_SETUP
 
 
 #: Key column width for the hint rows: the roomy default, and the squeezed
@@ -1003,7 +1034,11 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
 
     ``setup`` swaps in the first-run table (:data:`HINTS_SETUP`), whose leading
     row teaches ``/login`` — the one command the setup state exists to teach and
-    the affordance the notice line drops first at narrow widths (D3).
+    the affordance the notice line drops first at narrow widths (D3) — and, when
+    she is enabled, PREPENDS the three-step checklist (:func:`setup_step_line`,
+    design round 1's D1). The checklist is a plain line rather than a table row
+    because it has no key to type: it says what happens, which is the half a
+    list of typeable keys cannot answer.
 
     Three width tiers, because the alternative — letting the final truncation
     pass eat the descriptions — turns "command picker" into "command pi…",
@@ -1014,6 +1049,11 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
     3. keys only, which still names every affordance the user can try.
     """
     hints = setup_hint_rows(aida_name) if setup else HINTS
+    # The checklist is composed HERE rather than by the caller so the line
+    # above the table and the table's own width tiers are measured against the
+    # same column arithmetic the block is painted into.
+    step_line = setup_step_line(width, aida_name) if setup else None
+    steps = [step_line] if step_line is not None else []
     # The same tint pair the PICKER uses for name/description (fg over muted),
     # not a step quieter. These rows are a preview of the picker — one of them
     # literally says "/  command picker" — and rendering the identical
@@ -1041,9 +1081,9 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
     # the same ragged-edge effect that was removed from inside the status stack,
     # surviving one level up.
     if not key_column:
-        return [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
+        return steps + [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
 
-    lines: list[Text] = []
+    lines: list[Text] = list(steps)
     for key, desc in hints:
         line = Text(no_wrap=True)
         line.append(key.ljust(key_column), style=key_style)

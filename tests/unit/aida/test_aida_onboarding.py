@@ -164,7 +164,7 @@ async def test_an_existing_install_is_never_greeted_and_keeps_its_cadence(
     _user_session(isolated_root, "aaaaaaaabbbb")
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
 
-    assert await onboarding.greet(isolated_root, SESSION_ID, surface="desktop") == "already"
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="desktop") == "skipped"
     assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
     assert wake_store.read_entry(isolated_root, SESSION_ID) is None
     # Its cadence behaves exactly as before the ledger existed.

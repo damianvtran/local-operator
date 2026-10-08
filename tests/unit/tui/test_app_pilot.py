@@ -947,7 +947,11 @@ async def test_setup_state_when_hosting_names_an_unknown_provider() -> None:
         assert notice.index("anthropicxyq") + len("anthropicxyq") <= 58
         # It names the offending value and does not read as a crash.
         assert "anthropicxyq" in notice
-        assert "not a known provider" in notice
+        # Reworded in round 1 (D6) and now INSIDE the 74-cell budget the branch
+        # above it claims: the old "is not a known provider (/provider lists
+        # all)." measured 78 and lost its tail at 80 columns.
+        assert "is unknown" in notice
+        assert len(notice) <= 74, f"this variant must fit 74 cells: {len(notice)}"
         assert "failed" not in notice.lower()
         # It must NOT claim nothing is configured -- something is, just wrongly.
         assert "no provider configured" not in notice
@@ -980,7 +984,8 @@ async def test_setup_state_does_not_promise_a_login_it_cannot_honour() -> None:
         assert "/login" not in notice
         # Regrowth ceiling, not an 80-column guarantee -- see the measured note
         # on the sibling assertion above for what this number does and does not
-        # buy (D6).
+        # buy (D6). This variant keeps the wider ceiling: its line names the
+        # SOURCE as well, so it is longer than the plain-provider one by design.
         assert len(notice) <= 78
 
 
@@ -4092,7 +4097,16 @@ async def test_login_lists_providers_from_the_controller() -> None:
         await pilot.press("slash", "l", "o", "g", "i", "n", "escape", "enter")
         await pilot.pause()
         text = _transcript_text(app)
-    assert "openrouter" in text and "deepseek" in text
+    # The LABELS, not the ids (design round 1, D3): this block is the same list
+    # as the picker's, spoken in the same words.
+    assert "OpenRouter" in text and "DeepSeek" in text
+    # And the GROUP each row belongs to, which is the one thing this surface can
+    # say and the picker cannot (round 1, D4): why one row follows another.
+    # These two groups are the ones this fake controller has rows in; a group
+    # with no rows is dropped rather than printed as a bare heading.
+    assert "connect an AI account — Use a subscription" in text, text
+    assert "connect an AI account — Use an API key" in text, text
+    assert "connect an AI account — recommended" not in text, text
 
 
 @pytest.mark.asyncio
@@ -4626,6 +4640,9 @@ async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> No
     every shipped row is described, the recommended one says so, and the
     pairs that are told apart by nothing else (`openai`/`openai-device`,
     `xai`/`xai-oauth`) still read differently.
+
+    Round 1, D3: the picker's rows use the catalogue's SHORT form, because the
+    long sentences ellipsized on most rows; `lop login` keeps the long one.
     """
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RealRegistryController())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -4637,13 +4654,48 @@ async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> No
         described = {
             name: choice.description for name, choice in app.query_one(Editor).picker.suggestions()
         }
-    assert described["radient"].startswith("recommended · ")
-    assert "ChatGPT Plus/Pro" in described["openai"]
+    assert described["radient"].endswith("recommended")
+    assert "ChatGPT plan" in described["openai"]
     assert described["openai"] != described["openai-device"]
     assert described["xai"] != described["xai-oauth"]
     assert "Claude Pro/Max" in described["anthropic"]
     assert all(described[name] for name in ("deepseek", "openrouter", "radient"))
     assert list(described)[0] == "radient"
+
+
+@pytest.mark.asyncio
+async def test_the_login_picker_paints_human_labels_and_nothing_ellipsizes() -> None:
+    """Design round 1, D3: labels in the name column, descriptions that fit.
+
+    The picker painted the MACHINE ID (`zai-oauth`, `alibaba-token-plan-oauth`)
+    while `lop login` printed `Z.AI (GLM browser sign-in)` from the same
+    catalogue, and the long descriptions ellipsized on 11 of the first 14 rows
+    at 120 columns — the cut landing on the words that tell the near-twins
+    apart. Both halves are measured here on the painted rows, not inferred from
+    the choice objects: `render_rows` is what the terminal shows, and the
+    ellipsis character is what its truncation emits.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RealRegistryController())
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/login ")
+        await pilot.pause()
+        picker = app.query_one(Editor).picker
+        choices = dict(picker.suggestions())
+        # ``render_rows`` is the picker's own painter, so this measures what the
+        # terminal shows: its truncation emits the ellipsis character.
+        painted = [row.plain for row in picker.render_rows(picker.size.width or 80)]
+    assert painted, "the picker painted no rows at all"
+    # The VALUE is still the id the completion inserts …
+    assert {"zai-oauth", "alibaba-token-plan-oauth"} <= set(choices)
+    # … while the LABEL is what the row shows.
+    assert any("Z.AI" in row for row in painted), painted
+    assert any("QwenCloud" in row for row in painted), painted
+    assert not any("zai-oauth" in row for row in painted), painted
+    # And nothing is cut: no ellipsis on any painted row at 120 columns.
+    assert not any("…" in row for row in painted), painted
 
 
 @pytest.mark.asyncio
@@ -14328,3 +14380,60 @@ async def test_ctrl_o_shows_the_layer_when_it_is_hidden() -> None:
         assert sidebar.show_subagents is True, "ctrl+o did not reveal the hidden layer"
         assert repolled, "revealing the layer must ask the app to re-poll the catalog"
         assert sidebar.cursor_id == "run1", "the cursor did not land on the first subagent row"
+
+
+@pytest.mark.asyncio
+async def test_the_connected_receipt_survives_the_post_setup_rebuild(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Design round 1, D8: the receipt must be READABLE after the rebuild.
+
+    ``✓ Connected …  - opening <her name>…`` was appended to the transcript
+    BEFORE ``_boot_after_setup()``, and that rebuild replaces the session: the
+    transcript is a projection of the new session's history, so the line was
+    gone before the first frame after it (never observed across 60 sampled
+    pauses in the design round). It cannot go into the NEW transcript either —
+    her greeting must be the first row the user reads — so it rides the SPLASH,
+    which is the surface that is still empty until she speaks.
+
+    Drives the real flow: boot into setup (the factory fails once), submit
+    ``/login deepseek``, and let the rebuild succeed on the second call.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session_factory import HostingNotConfiguredError
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    session = FakeSession()
+    boots = {"n": 0}
+
+    async def _boot_factory():
+        # Counted rather than read off the config: the first call is the launch
+        # boot (the setup state this test starts from), and every later call is
+        # the rebuild after the login, which must boot for real — otherwise the
+        # receipt would be asserted against a rebuild that never happened.
+        # ``hosting`` cannot answer this: an unset config value still resolves
+        # to a default, so the launch boot would succeed and never reach setup.
+        boots["n"] += 1
+        if boots["n"] == 1:
+            raise HostingNotConfiguredError("Hosting platform is not configured.")
+        return session
+
+    app = OperatorApp(_boot_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        _set_editor_line(app.query_one(Editor), "/login deepseek")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(200):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if app._splash_notice and "Connected" in app._splash_notice:
+                break
+        receipt = app._splash_notice
+        transcript_text = _transcript_text(app)
+
+    assert receipt is not None and "Connected" in receipt, receipt
+    # Her conversation's transcript does NOT carry it: a notice row here would
+    # be the first thing above her greeting.
+    assert "Connected" not in transcript_text, transcript_text

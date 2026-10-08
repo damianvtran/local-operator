@@ -583,12 +583,18 @@ async def greet(
     of ``owed``. The engine's own callers (``proactive.resume``) pass none and
     so can only arm a greeting a person already requested — never start one.
 
-    Words: ``"greeted"`` (armed now), ``"already"`` (armed earlier, delivered,
-    or skipped because the install already has conversations), ``"disabled"``,
-    ``"paused"`` (requested and held; a resume arms it), ``"no-provider"``,
-    ``"not-requested"`` (an unattended call on an owed greeting — the
-    headless-runtime refusal), ``"owner"`` (a live runtime holds the session;
-    its reconcile arms the requested row) or ``"failed"``.
+    Words: ``"greeted"`` (armed now), ``"already"`` (delivered, or armed by a racing
+    second call), ``"skipped"`` (an install that already has conversations — she
+    will never introduce herself here), ``"disabled"``, ``"paused"`` (requested
+    and held; a resume arms it), ``"no-provider"``, ``"not-requested"`` (an
+    unattended call on an owed greeting — the headless-runtime refusal),
+    ``"owner"`` (a live runtime holds the session; its reconcile arms the
+    requested row) or ``"failed"``.
+
+    ``"skipped"`` is separate from ``"already"`` on purpose (review round 1,
+    R-5): a route that renders both as "she has already introduced herself"
+    tells the user a sentence that is false — on a skipped install she never
+    will, and that is the correct behaviour, not a pending one.
     """
     from local_operator.aida import proactive
 
@@ -601,7 +607,9 @@ async def greet(
         if not pol.enabled:
             return "disabled"
         current = greeting_state(root)
-        if current in (GREETING_DELIVERED, GREETING_SKIPPED):
+        if current == GREETING_SKIPPED:
+            return "skipped"
+        if current == GREETING_DELIVERED:
             return "already"
         if current == GREETING_OWED:
             if not surface:
@@ -610,9 +618,9 @@ async def greet(
                 return "no-provider"
             if _her_conversation_had(root):
                 _set_greeting(root, GREETING_SKIPPED, now)
-                return "already"
+                return "skipped"
             if not request_greeting(root, surface, now_ms=now):
-                return "already" if greeting_state(root) == GREETING_SKIPPED else "failed"
+                return "skipped" if greeting_state(root) == GREETING_SKIPPED else "failed"
             current = GREETING_REQUESTED
         if pol.paused:
             # Requested and HELD: the user asked, so the resume arms it.
@@ -730,6 +738,14 @@ def nudge_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | N
 # The daily tip ledger (audit A10/U15/D14) — one useful fact on a quiet day
 # --------------------------------------------------------------------------- #
 
+#: The shortest gap between two tips, in milliseconds. 20 hours rather than a
+#: calendar day on purpose: the cadence fires once a day at a fixed local time,
+#: and a check-in that slips by an hour (a laptop asleep at 08:30) would
+#: otherwise skip a whole day's tip. The cost of the shorter window is bounded
+#: by the pool draining rather than repeating — review round 1, Q2 caught this
+#: documented as "one per calendar day" when the code said 20 hours.
+TIP_WINDOW_MS = 20 * 3_600_000
+
 #: Tip ids in the order they are offered, each with the fact that makes it
 #: APPLICABLE (a tip the install has already acted on is skipped, never
 #: offered) and the clause text. One clause per check-in, and a tip id is
@@ -821,10 +837,10 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
     rule: the first applicable, never-given tip is stamped into the ledger
     (``tips_given`` + ``tip_offered_at``) in the same locked write that hands
     back its clause, so a clause never exists without the stamp that spends
-    it. At most one tip per calendar day (a reconcile can rebuild a cadence row
-    more than once a day), and never before the greeting is delivered — the
-    tips are for someone she has met. Never raises; a contended lock answers
-    ``None``.
+    it. At most one tip per :data:`TIP_WINDOW_MS` (a reconcile can rebuild a
+    cadence row more than once a day), and never before the greeting is
+    delivered — the tips are for someone she has met. Never raises; a contended
+    lock answers ``None``.
     """
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -835,7 +851,7 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
             path = state.onboarding_path(root)
             data = state.read_json(path, what="onboarding") or {}
             last = data.get("tip_offered_at")
-            if isinstance(last, int) and not isinstance(last, bool) and now - last < 20 * 3_600_000:
+            if isinstance(last, int) and not isinstance(last, bool) and now - last < TIP_WINDOW_MS:
                 return None
             given = [str(t) for t in data.get("tips_given") or [] if isinstance(t, str)]
             choice = next(
