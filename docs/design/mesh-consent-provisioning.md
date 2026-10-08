@@ -269,7 +269,10 @@ of every `member rm` ending. **Scope, as built:** the provider-key (class-4) `cr
 revoke` keeps the closing sentence it had before S4 — "a copy of the key taken out of that
 device never expires: to end it, rotate the '<key>' key at the provider" — which says the
 second half in that credential's own words and omits the first; it does not print these two
-lines.
+lines. The desktop remove-member route returns no copy receipt —
+`server/routes/desktop_mesh.py:198-203` narrows the relay's `{copies, wiped, timed_out}` to
+`{network_id, removed, epoch}` — so the app reports the removal without the ending; the
+cross-repo fix (the route forwards the counts, the app renders them) is recorded for the UI lane.
 
 ---
 
