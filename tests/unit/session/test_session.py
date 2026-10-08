@@ -3666,6 +3666,34 @@ async def test_the_session_model_errand_follows_a_pinned_fallback_and_drops_fast
 
 
 @pytest.mark.asyncio
+async def test_no_errand_route_pays_the_fast_mode_premium(tmp_path, monkeypatch):
+    """Auto-naming on the session model (no ``lo`` tier) used to inherit the
+    turn's fast mode. Every errand route clears it; the turn keeps it."""
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, None)  # no tier: complete_once uses the session
+    captured: list[ChatRequest] = []
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        captured.append(request)
+
+        async def gen():
+            yield StreamTextDelta(delta="<title>t</title>")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
+    session = make_session(tmp_path, stream_fn, model=fast)
+    await session.complete_once("name this", "p")
+    await session.complete_once_on_session_model("name this", "p")
+    assert session.effective_model.fast_mode is True, "clearing the errand moved the turn"
+    await session.dispose()
+
+    assert [r.model.fast_mode for r in captured] == [False, False]
+
+
+@pytest.mark.asyncio
 async def test_an_errand_on_the_session_model_does_not_retry_itself(tmp_path, monkeypatch):
     """Falling back to the route that just failed buys a second wire attempt for
     the same answer, and blocking a tier that was never in play would demote
