@@ -80,7 +80,11 @@ def _state_provider(state: dict[str, Any], tools: list[Any]):
             goal=state["goal"],
             team_brief=state["team"],
             agent_brief=state["agent"],
-            interactive=state["interactive"],
+            interactive=(
+                state["interactive_from"].interactivity()
+                if "interactive_from" in state
+                else state["interactive"]
+            ),
             channel=CHANNEL_NONE,
             credentials=state["credentials"],
             host_has_browser=False,
@@ -468,16 +472,9 @@ async def test_interactivity_moves_only_at_a_turn_boundary(tmp_path) -> None:
     stream = RecordingStream()
     session = _make_session(tmp_path / "sess", stream, state, [])
 
-    # The provider reads the session's holder, as the real factory does.
-    provider = session._system_blocks_provider
-
-    def live_provider(model_label: str = "") -> list[str]:
-        state["interactive"] = session._goal_state.interactivity()
-        return provider(model_label)
-
-    for name in ("append_only_state", "host_has_browser", "host_has_console"):
-        setattr(live_provider, name, getattr(provider, name))
-    session._system_blocks_provider = live_provider
+    # The provider reads the session's holder, as the real factory's closure
+    # does (``session_factory``: ``goal_state.interactivity()`` per render).
+    state["interactive_from"] = session._goal_state
     session._goal_state.interactive_probe = lambda: attached["value"]
 
     await session.prompt("freeze the prefix")
