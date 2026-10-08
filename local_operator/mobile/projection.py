@@ -1289,6 +1289,15 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # would put a raw '(alarm) The session resumed…' line in the
                 # transcript as if the user had typed it.
                 details = message.details or {}
+                if details.get("hidden"):
+                    # A HIDDEN delivery paints nothing on the phone either —
+                    # the same decision the TUI replay and the desktop window
+                    # make through ``details.hidden``. This branch is reached
+                    # BEFORE the shared ``is_harness_notice_row`` check below,
+                    # so it has to ask itself: without it a patience fire, and
+                    # Aida's first-run trigger, painted as a wake notice above
+                    # her reply on the mobile feed (audit A4).
+                    continue
                 if not details.get("wake_catchup"):
                     # Strip the model-facing envelope with the SAME helper the
                     # TUI's WakeBlock uses. The raw payload is

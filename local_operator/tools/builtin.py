@@ -521,6 +521,31 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 }
 
 
+def own_launcher_path_injection(parent_path: str | None = None) -> dict[str, str]:
+    """``{"PATH": ...}`` with THIS build's script directory prepended when ``lop`` is absent.
+
+    Agent instructions name ``lop`` commands (Aida's ``lop aida note``, the
+    ``lop exec`` delegation fallback), and a desktop-managed backend runs from
+    a private venv the user's shell PATH never names — so on exactly the
+    install a first-run user has, ``lop aida note`` answered ``command not
+    found`` and her first recording silently failed (audit A4's verification
+    item). The fix is to make the instruction true rather than to teach every
+    seed a ``python -m`` spelling: when ``lop`` does not resolve on the child's
+    PATH and the running interpreter's own script directory ships one, that
+    directory is prepended. It is the SAME build the session runs, never a
+    different install, and an operator whose PATH already resolves ``lop``
+    keeps it untouched — so a pinned global launcher still wins.
+    """
+    path = os.environ.get("PATH", "") if parent_path is None else parent_path
+    if shutil.which("lop", path=path) is not None:
+        return {}
+    scripts = Path(sys.executable).parent
+    launcher = scripts / ("lop.exe" if os.name == "nt" else "lop")
+    if not launcher.exists():
+        return {}
+    return {"PATH": os.pathsep.join(part for part in (str(scripts), path) if part)}
+
+
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:
     """The three-arm ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE`` write for a child env.
 
@@ -3932,6 +3957,8 @@ async def execute_bash(
     # the session's own answer — does it hold ``task`` — has to travel with the
     # command, and a name that was never exported cannot be used as one.
     injections.update(may_delegate_env_injection(context))
+    # `lop` must resolve to THIS build in the child (see the helper's docstring).
+    injections.update(own_launcher_path_injection())
     # The session's scratchpad root rides the SAME three arms, from one helper, so
     # the two writers of an inherited-shaped variable cannot drift apart: set to
     # this session's root, cleared when the name is inherited and this session has

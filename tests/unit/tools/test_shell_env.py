@@ -663,3 +663,31 @@ def test_denying_a_parent_defined_name_is_a_denial_that_happened(
     assert any(
         "GH_TOKEN" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
     ), "a name nothing defines must still warn"
+
+
+def test_lop_resolves_to_this_build_when_the_path_has_none(tmp_path, monkeypatch) -> None:
+    """A desktop-managed backend's PATH has no `lop`, so Aida's documented
+    `lop aida note` answered "command not found". The bash tool prepends THIS
+    interpreter's script directory — and only when `lop` is otherwise absent,
+    so an operator's own pinned launcher still wins."""
+    import sys
+
+    from local_operator.tools import builtin
+
+    scripts = tmp_path / "venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "lop").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    injected = builtin.own_launcher_path_injection(str(empty))
+    assert injected["PATH"].split(":")[0] == str(scripts)
+    assert str(empty) in injected["PATH"]
+
+    elsewhere = tmp_path / "global"
+    elsewhere.mkdir()
+    (elsewhere / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (elsewhere / "lop").chmod(0o755)
+    assert builtin.own_launcher_path_injection(str(elsewhere)) == {}

@@ -61,6 +61,20 @@ async def test_get_never_creates_the_session(client, isolated_root: Path) -> Non
         # The rename contract's field rides the read shape and defaults to the
         # packaged name; a renderer never needs a null branch for it.
         "name": "Aida",
+        # First-run onboarding (Lane B), additive: the greeting ledger, the
+        # first-run predicate the desktop's onboarding finish() reads, and the
+        # sign-in identity (null until a Radient login decodes one).
+        "greeting": {
+            "state": "owed",
+            "surface": None,
+            "requested_at": None,
+            "armed_at": None,
+            "delivered_at": None,
+        },
+        # No provider in this rig, so the first-run experience is not yet
+        # reachable (the greeting needs a turn that can run).
+        "first_run_pending": False,
+        "operator": None,
     }
 
 
@@ -71,9 +85,11 @@ async def test_open_creates_and_answers_the_frozen_shape(client, isolated_root: 
     assert response.status_code == 200
     result = response.json()["result"]
     # THE OP SHAPE EXACTLY (freeze §4): `enabled` is GET's field — a POST only
-    # reaches here when it is true — so the answer carries three keys, no more
-    # (design/UI review round 1, nit).
-    assert set(result) == {"session_id", "paused", "greeted"}
+    # reaches here when it is true. ``greeting_state`` is the one additive key
+    # (first-run onboarding): it tells the desktop whether she is about to
+    # speak, which ``greeted`` (now "delivered") cannot.
+    assert set(result) == {"session_id", "paused", "greeted", "greeting_state"}
+    assert result["greeting_state"] == "owed"
     assert result["session_id"]
     assert result["paused"] is False
     assert (isolated_root / "sessions" / result["session_id"]).is_dir()
@@ -175,3 +191,49 @@ async def test_capability_is_advertised(client) -> None:
     async with client as http:
         response = await http.get("/v1/capabilities")
     assert response.json()["result"]["features"].get("aida") == 1
+
+
+@pytest.mark.asyncio
+async def test_greet_is_the_attended_request_and_answers_the_ledger_state(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``greet`` from the desktop moves owed → requested → armed, hidden.
+
+    The contract the desktop's onboarding ``finish()`` is written against: a
+    200 whose ``greeting_state`` is ``armed`` means "navigate to her session,
+    her message is about to land"; ``greeted`` stays false until the fire.
+    """
+    from local_operator.aida import onboarding
+    from local_operator.wakes import store as wake_store
+
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    async with client as http:
+        response = await http.post("/v1/desktop/aida", json={"op": "greet"})
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["greeting_state"] == "armed"
+        assert result["greeted"] is False
+        state = (await http.get("/v1/desktop/aida")).json()["result"]
+        assert state["greeting"]["state"] == "armed"
+        assert state["greeting"]["surface"] == "desktop"
+        assert state["first_run_pending"] is True
+        again = await http.post("/v1/desktop/aida", json={"op": "greet"})
+        assert again.status_code == 200
+        assert "already" in again.json()["message"]
+    entry = wake_store.read_entry(isolated_root, result["session_id"]) or {}
+    rows = [r for r in entry.get("schedules") or [] if r["id"] == onboarding.GREETING_WAKE_ID]
+    assert len(rows) == 1 and rows[0]["hidden"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_read_payload_carries_the_radient_identity(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.aida import onboarding
+
+    monkeypatch.setattr(
+        onboarding, "radient_identity", lambda root: {"name": "Jane Doe", "email": "jane@x.com"}
+    )
+    async with client as http:
+        result = (await http.get("/v1/desktop/aida")).json()["result"]
+    assert result["operator"] == {"name": "Jane Doe", "email": "jane@x.com", "source": "radient"}

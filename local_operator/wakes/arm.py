@@ -205,6 +205,7 @@ async def arm_wake(
     now_ms: int | None = None,
     request_id: str = "",
     wake_id: str = "",
+    hidden: bool = False,
 ) -> WakeWriteOutcome:
     """Add one schedule to ``session_id``'s wakes. ``request`` is the same
     ``message``/``in``/``at``/``every``/``until``/``limit`` mapping the agent's
@@ -225,6 +226,14 @@ async def arm_wake(
     differs, and the caller is responsible for choosing one that is legal
     (``session_directory_name``-safe text) and not already in use. A clash is
     refused as a conflict rather than silently re-pointing at the existing row.
+
+    ``hidden`` marks the row as a HIDDEN delivery (``WakeSchedule.hidden``): its
+    fire emits no receipt and writes ``details.hidden`` on the ``wake_prompt``,
+    so every human surface skips it while the model still reads it. Not exposed
+    to the agent's ``wake`` tool or the CLI — it exists for engine-owned rows
+    whose text is a trigger, not a reminder a person set (Aida's first-run
+    greeting is the one caller). The row's ``kind`` stays ``scheduled``, so it
+    still counts and lists like any other wake for the operator.
     """
 
     def mutate(
@@ -244,6 +253,8 @@ async def arm_wake(
             schedule = schedule.model_copy(update={"id": wake_id})
         if request_id:
             schedule = schedule.model_copy(update={"request_id": request_id})
+        if hidden:
+            schedule = schedule.model_copy(update={"hidden": True})
         return schedule.id, [*existing, schedule], schedule.next_due_at
 
     return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms, intent=request_id)

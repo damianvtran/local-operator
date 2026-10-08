@@ -9,7 +9,7 @@ import pytest
 
 from local_operator.aida import onboarding, proactive, state
 from local_operator.wakes import store as wake_store
-from tests.unit.aida.conftest import write_config
+from tests.unit.aida.conftest import mark_met, write_config
 
 SESSION_ID = "greet1234567"
 
@@ -28,68 +28,184 @@ def _root_with_session(root: Path) -> None:
     state.update_state(root, session_id=SESSION_ID)
 
 
-def test_the_greeting_addresses_her_by_the_configured_name(isolated_root: Path) -> None:
-    """The first-run instruction must name the operator's name for her.
+def test_the_trigger_is_a_fact_line_naming_her_and_the_surface(isolated_root: Path) -> None:
+    """The hidden trigger carries facts, never playbook prose (audit A7).
 
-    The greeting's wake line is user-visible in the transcript, so a hard-coded
-    "Introduce yourself as Aida" after a rename is exactly the stale reference
-    the renameable-chief-of-staff work removes.
+    Her instructions for first contact live in her seed (the stable prefix); a
+    rename must still reach the line the model reads on the first turn.
     """
-    assert "as Aida," in onboarding.greeting_message(isolated_root)
+    line = onboarding.greeting_message(isolated_root, surface="tui")
+    assert line.startswith("[first-run] ")
+    assert "surface=tui" in line
+    assert "signed_in_with=none" in line
+    assert "assistant_name=Aida" in line
+    assert "Introduce yourself" not in line
     write_config(isolated_root, {"aida": {"name": "Sovereign"}})
-    renamed = onboarding.greeting_message(isolated_root)
-    assert "as Sovereign," in renamed
-    assert "as Aida" not in renamed
+    assert "assistant_name=Sovereign" in onboarding.greeting_message(isolated_root)
+
+
+def test_the_trigger_names_a_radient_identity_when_one_is_stored(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signed in with Radient: she confirms the name, never asks for the email."""
+    monkeypatch.setattr(
+        onboarding, "radient_identity", lambda root: {"name": "Jane Doe", "email": "jane@x.com"}
+    )
+    line = onboarding.greeting_message(isolated_root, surface="desktop")
+    assert "signed_in_with=radient" in line
+    assert "identity=Jane Doe <jane@x.com>" in line
 
 
 @pytest.mark.asyncio
-async def test_greet_arms_with_the_configured_name(
+async def test_greet_arms_a_hidden_row_from_an_attended_surface(
     isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """owed → requested → armed, and the row is HIDDEN (audit A3/A4)."""
     _root_with_session(isolated_root)
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
-    write_config(isolated_root, {"aida": {"name": "Sovereign"}})
 
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "greeted"
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="tui") == "greeted"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_ARMED
+    record = onboarding.greeting_record(isolated_root)
+    assert record["surface"] == "tui"
+    assert isinstance(record["requested_at"], int) and isinstance(record["armed_at"], int)
+    # ARMED is not DELIVERED: nothing claims the user saw a greeting yet.
+    assert onboarding.greeted_at(isolated_root) is None
     entry = wake_store.read_entry(isolated_root, SESSION_ID) or {}
     row = next(
         row for row in entry.get("schedules") or [] if row["id"] == onboarding.GREETING_WAKE_ID
     )
-    assert "as Sovereign," in row["message"]
+    assert row["hidden"] is True
+    assert row["message"].startswith("[first-run] ")
+    # Idempotent: a second call (a second window, a retry) does not re-arm.
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="desktop") == "already"
 
 
 @pytest.mark.asyncio
-async def test_greet_refuses_without_a_provider_and_stamps_nothing(isolated_root: Path) -> None:
-    _root_with_session(isolated_root)
-    outcome = await onboarding.greet(isolated_root, SESSION_ID)
-    assert outcome == "no-provider"
-    assert onboarding.greeted_at(isolated_root) is None
-    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
-
-
-@pytest.mark.asyncio
-async def test_greet_arms_once_then_reports_already(
+async def test_an_unattended_greet_never_starts_the_greeting(
     isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With a provider configured the greeting arms as a due-now one-shot.
+    """THE HEADLESS-RUNTIME FIX (audit A1): no surface, no greeting.
 
-    ``provider_configured`` is monkeypatched rather than configured: the real
-    predicate resolves the boot path's hosting/model machinery, and what this
-    test pins is the greeting's own behaviour, not that resolution (which the
-    route tests exercise for real through the 409).
+    ``proactive.resume`` and every engine path call ``greet`` without a
+    surface; on an owed ledger that must arm nothing and move nothing.
     """
     _root_with_session(isolated_root)
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
 
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "greeted"
-    stamp = onboarding.greeted_at(isolated_root)
-    assert isinstance(stamp, int)
-    entry = wake_store.read_entry(isolated_root, SESSION_ID) or {}
-    rows = {row["id"]: row for row in entry.get("schedules") or []}
-    assert onboarding.GREETING_WAKE_ID in rows
+    assert await onboarding.greet(isolated_root, SESSION_ID) == "not-requested"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_OWED
+    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
 
-    # Idempotent: a second call (a second device, a retry) does not re-arm.
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "already"
+
+def test_reconcile_never_arms_an_owed_greeting(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A headless runtime of her session (supervisor fire, `lop exec`, mobile)
+    reconciles with an owed ledger: no greeting row, and no cadence either —
+    she has not met the user yet (audit A9)."""
+    _root_with_session(isolated_root)
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+
+    result = proactive.reconcile(
+        [], config_dir=isolated_root, session_id=SESSION_ID, class_reactive=False
+    )
+    ids = [row.id for row in result.schedules]
+    assert onboarding.GREETING_WAKE_ID not in ids
+    assert proactive.CADENCE_ID not in ids
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_OWED
+
+
+def test_reconcile_arms_a_requested_greeting_hidden_and_holds_the_cadence(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live-owner path: a REQUESTED greeting is armed by the reconcile."""
+    _root_with_session(isolated_root)
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    assert onboarding.request_greeting(isolated_root, "tui") is True
+
+    result = proactive.reconcile(
+        [], config_dir=isolated_root, session_id=SESSION_ID, class_reactive=False
+    )
+    rows = {row.id: row for row in result.schedules}
+    assert rows[onboarding.GREETING_WAKE_ID].hidden is True
+    assert proactive.CADENCE_ID not in rows, "cadence must wait for the delivery"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_ARMED
+
+    # Delivery moves it to delivered; the NEXT reconcile arms the cadence.
+    onboarding.mark_delivered(isolated_root)
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_DELIVERED
+    after = proactive.reconcile(
+        [], config_dir=isolated_root, session_id=SESSION_ID, class_reactive=False
+    )
+    ids = [row.id for row in after.schedules]
+    assert proactive.CADENCE_ID in ids
+    assert onboarding.GREETING_WAKE_ID not in ids, "a delivered greeting never re-arms"
+
+
+@pytest.mark.asyncio
+async def test_ensure_armed_waits_for_the_greeting_on_a_first_run_install(
+    isolated_root: Path,
+) -> None:
+    """The boot armer: no headless 08:30 check-in before she has met the user."""
+    _root_with_session(isolated_root)
+    assert await proactive.ensure_armed(isolated_root, SESSION_ID) == "waiting"
+    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
+    onboarding.mark_delivered(isolated_root)
+    assert await proactive.ensure_armed(isolated_root, SESSION_ID) == "armed"
+
+
+@pytest.mark.asyncio
+async def test_an_existing_install_is_never_greeted_and_keeps_its_cadence(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R22 made durable: human conversations ⇒ ``skipped``, forever."""
+    _root_with_session(isolated_root)
+    _user_session(isolated_root, "aaaaaaaabbbb")
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="desktop") == "already"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
+    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
+    # Its cadence behaves exactly as before the ledger existed.
+    assert onboarding.cadence_allowed(isolated_root) is True
+    assert await proactive.ensure_armed(isolated_root, SESSION_ID) == "armed"
+
+
+def test_an_existing_install_with_an_untouched_ledger_keeps_its_cadence(
+    isolated_root: Path,
+) -> None:
+    """The upgrade path: no ``onboarding.json`` at all, conversations on disk.
+
+    The cadence gate itself migrates the ledger to ``skipped``, so an upgrade
+    never silently stops an existing user's check-in.
+    """
+    _root_with_session(isolated_root)
+    _user_session(isolated_root, "aaaaaaaabbbb")
+    assert onboarding.cadence_allowed(isolated_root) is True
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
+
+
+def test_a_legacy_greeted_at_stamp_reads_as_delivered(isolated_root: Path) -> None:
+    """MIGRATION: the pre-state-machine file carried only an arm-time stamp."""
+    path = isolated_root / "aida" / "onboarding.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"greeted_at": 1234, "nudge_offers": 1}), encoding="utf-8")
+
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_DELIVERED
+    assert onboarding.greeted_at(isolated_root) == 1234
+    assert onboarding.greeting_record(isolated_root)["delivered_at"] == 1234
+    assert onboarding.cadence_allowed(isolated_root) is True
+    assert onboarding.first_run_pending(isolated_root) is False
+
+
+@pytest.mark.asyncio
+async def test_greet_refuses_without_a_provider_and_moves_nothing(isolated_root: Path) -> None:
+    _root_with_session(isolated_root)
+    outcome = await onboarding.greet(isolated_root, SESSION_ID, surface="tui")
+    assert outcome == "no-provider"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_OWED
+    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -100,49 +216,39 @@ async def test_greet_respects_pause_and_disable(
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
 
     write_config(isolated_root, {"aida": {"cadence": {"paused": True}}})
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "paused"
-    assert onboarding.greeted_at(isolated_root) is None
+    # Paused: the REQUEST is recorded (a person asked) but nothing is armed.
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="tui") == "paused"
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
+    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
 
     write_config(isolated_root, {"aida": {"enabled": False}})
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "disabled"
-    assert onboarding.greeted_at(isolated_root) is None
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="tui") == "disabled"
 
 
 @pytest.mark.asyncio
-async def test_pause_unstamps_an_undelivered_greeting_and_resume_rearms_it(
+async def test_pause_returns_an_armed_greeting_to_requested_and_resume_rearms_it(
     isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """m1: the paused receipt's promise is true, and the greeting survives.
+    """m1 under the state machine: a cancelled row is re-owed, never lost.
 
-    ``greet`` while paused used to answer "paused" while the route said the
-    greeting "is being held; /aida resume delivers it" — nothing held it and
-    resume never armed it. Same seam, second half: a greeting row already
-    armed when a pause landed was cancelled as an ``aida-*`` row while
-    ``greeted_at`` stayed stamped, so the one-time greeting was lost with the
-    ledger claiming delivery. Now the stamp is the ledger of an OWED greeting:
-    a pause that cancels the row un-stamps it, and the resume arms it again.
+    A pause landing on the armed row cancels it and moves the ledger back to
+    ``requested`` (the user did ask), and the resume — an UNATTENDED caller —
+    may arm it because the request already exists.
     """
     _root_with_session(isolated_root)
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
 
-    # Paused first: refused, nothing stamped, nothing armed.
     write_config(isolated_root, {"aida": {"cadence": {"paused": True}}})
-    assert await onboarding.greet(isolated_root, SESSION_ID) == "paused"
-    assert onboarding.greeted_at(isolated_root) is None
-    assert wake_store.read_entry(isolated_root, SESSION_ID) is None
-
-    # Resume delivers it: the greeting row is armed and the ledger moves.
+    assert await onboarding.greet(isolated_root, SESSION_ID, surface="tui") == "paused"
     await proactive.resume(isolated_root, SESSION_ID)
     entry = wake_store.read_entry(isolated_root, SESSION_ID) or {}
     ids = [row["id"] for row in entry.get("schedules") or []]
     assert onboarding.GREETING_WAKE_ID in ids, entry
-    assert onboarding.greeted_at(isolated_root) is not None
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_ARMED
 
-    # A pause landing on the armed row cancels it and un-stamps it, so the
-    # next resume arms it again rather than losing it forever.
     outcome = await proactive.pause(isolated_root, SESSION_ID)
     assert onboarding.GREETING_WAKE_ID in outcome.cancelled, outcome
-    assert onboarding.greeted_at(isolated_root) is None
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
     await proactive.resume(isolated_root, SESSION_ID)
     entry = wake_store.read_entry(isolated_root, SESSION_ID) or {}
     ids = [row["id"] for row in entry.get("schedules") or []]
@@ -265,19 +371,21 @@ def test_an_unusable_session_store_fails_closed(isolated_root: Path) -> None:
     assert onboarding.first_run_pending(isolated_root) is False
 
 
-def test_first_run_pending_requires_the_greeting_to_still_be_owed(
+def test_first_run_pending_holds_until_the_greeting_settles(
     isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Requested/armed still route to her (a user who quit before the fire is
+    routed again); delivered ends the first-run experience for good."""
     monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
     assert onboarding.first_run_pending(isolated_root) is True
 
+    onboarding.request_greeting(isolated_root, "tui")
     onboarding.mark_greeted(isolated_root, 1234)
-    assert onboarding.first_run_pending(isolated_root) is False
-
-    # A pause that cancels the unfired greeting re-owes it (m1's clear), and
-    # the routing must follow the ledger back to "owed".
-    onboarding.clear_greeted(isolated_root)
     assert onboarding.first_run_pending(isolated_root) is True
+
+    onboarding.mark_delivered(isolated_root, 5678)
+    assert onboarding.first_run_pending(isolated_root) is False
+    assert onboarding.greeted_at(isolated_root) == 5678
 
 
 def test_the_nudge_window_opens_once_then_closes_for_the_configured_span(
@@ -331,3 +439,71 @@ def test_the_cadence_message_carries_the_clause_only_while_the_window_is_open(
 
     closed = proactive.cadence_message(isolated_root, t0 + 1_000)
     assert closed == proactive.CADENCE_MESSAGE
+
+
+# --------------------------------------------------------------------------- #
+# The quiet-day tip ledger (audit A10/U15/D14)
+# --------------------------------------------------------------------------- #
+
+
+def test_no_tip_before_she_has_met_the_operator(isolated_root: Path) -> None:
+    assert onboarding.tip_offer(isolated_root, now_ms=1_800_000_000_000) is None
+
+
+def test_tips_are_fact_backed_once_each_and_one_a_day(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first tip is mobile via Radient when signed in; never repeated."""
+    mark_met(isolated_root)
+    monkeypatch.setattr(
+        onboarding, "radient_identity", lambda root: {"name": "Jane", "email": "j@x.com"}
+    )
+    t0 = 1_800_000_000_000
+    day = 86_400_000
+    first = onboarding.tip_offer(isolated_root, now_ms=t0)
+    assert first is not None and first.startswith(onboarding.TIP_CLAUSE_PREFIX)
+    assert "Radient relay" in first and "essentially free" in first
+    # Same day: nothing (a reconcile may rebuild the cadence row twice).
+    assert onboarding.tip_offer(isolated_root, now_ms=t0 + 3_600_000) is None
+    data = json.loads((isolated_root / "aida" / "onboarding.json").read_text(encoding="utf-8"))
+    # Both mobile variants are spent by one offer, so signing out later does
+    # not repeat the same suggestion in other words.
+    assert set(data["tips_given"]) == {onboarding.TIP_MOBILE_RADIENT, onboarding.TIP_MOBILE_SIGNIN}
+    assert data["tip_offered_at"] == t0
+
+    second = onboarding.tip_offer(isolated_root, now_ms=t0 + day)
+    assert second is not None and "first one" in second  # the first-team tip
+    seen = {first, second}
+    for n in range(2, 8):
+        tip = onboarding.tip_offer(isolated_root, now_ms=t0 + n * day)
+        assert tip not in seen
+        if tip is None:
+            break
+        seen.add(tip)
+    # The pool drains: no tip is ever offered twice.
+    assert onboarding.tip_offer(isolated_root, now_ms=t0 + 30 * day) is None
+
+
+def test_the_signed_out_mobile_tip_offers_radient_or_cloudflare(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mark_met(isolated_root)
+    monkeypatch.setattr(onboarding, "radient_identity", lambda root: None)
+    monkeypatch.setattr(onboarding, "_radient_oauth_row", lambda root: False)
+    tip = onboarding.tip_offer(isolated_root, now_ms=1_800_000_000_000) or ""
+    assert "/login radient" in tip and "Cloudflare" in tip
+
+
+def test_a_configured_tunnel_skips_the_mobile_tip(isolated_root: Path) -> None:
+    mark_met(isolated_root)
+    (isolated_root / "tunnel").mkdir()
+    (isolated_root / "tunnel" / "config.json").write_text("{}", encoding="utf-8")
+    tip = onboarding.tip_offer(isolated_root, now_ms=1_800_000_000_000) or ""
+    assert "Phone access" not in tip
+
+
+def test_the_cadence_message_carries_one_tip_clause(isolated_root: Path) -> None:
+    mark_met(isolated_root)
+    message = proactive.cadence_message(isolated_root, 1_800_000_000_000)
+    assert message.count(onboarding.TIP_CLAUSE_PREFIX) == 1
+    assert "quiet-day tip" in proactive.CADENCE_MESSAGE

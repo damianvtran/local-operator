@@ -3,9 +3,11 @@
 The frozen contract (design §4), which both repos were written against:
 
     GET  /v1/desktop/aida
-        200 { enabled, session_id, paused, greeted, name }
+        200 { enabled, session_id, paused, greeted, name,
+              greeting: {state, surface, requested_at, armed_at, delivered_at},
+              first_run_pending, operator: {name, email, source} | null }
     POST /v1/desktop/aida   body {"op": open|pause|resume|greet|status}
-        200 { session_id, paused, greeted }
+        200 { session_id, paused, greeted, greeting_state }
         409 when disabled (``aida_disabled``)
 
 ``name`` is her configured display name (``aida.name``, default "Aida"): the
@@ -14,6 +16,12 @@ landed anywhere (``/aida rename``, renaming her conversation, a /settings edit)
 changes what every renderer shows with no restart. ADDITIVE to the frozen
 shape — a client written before it ignores the field and defaults to "Aida"
 (the UI's ``aida.data?.name ?? "Aida"``), so the freeze holds.
+
+``greeting``/``first_run_pending``/``operator`` (first-run onboarding, Lane B)
+and ``greeting_state`` on the op shape are additive the same way. ``greeted``
+now means DELIVERED (it used to flip at arm time); ``greet`` is the ATTENDED
+request — it is the only way the desktop can start the greeting, and a headless
+runtime never can (``aida/onboarding.py``'s state machine).
 
 ``GET`` never creates: ``session_id`` is ``null`` until something ensures her
 (``open``/``greet``, the TUI's ``/aida``, either boot hook). ``open`` and
@@ -86,6 +94,22 @@ class AidaState(BaseModel):
     #: renderer never needs a fallback branch — the field is exactly what the
     #: surfaces should say.
     name: str
+    #: The greeting ledger (``onboarding.greeting_record``): ``state`` is one of
+    #: owed / requested / armed / delivered / skipped, plus the surface that
+    #: requested it and the three stamps. ADDITIVE, like ``name``: ``greeted``
+    #: stays and now means "delivered". The renderer needs the distinction —
+    #: requested/armed means "open her conversation, she is about to speak",
+    #: which a boolean cannot say.
+    greeting: dict[str, Any] = {}
+    #: Whether this install is still owed the first-run experience (no human
+    #: conversations besides hers, a provider resolves, greeting not settled).
+    #: The desktop's onboarding ``finish()`` reads it to decide between
+    #: ``greet`` + her conversation and a plain ``/chat``.
+    first_run_pending: bool = False
+    #: Who the operator is, when the install knows it WITHOUT asking: the
+    #: Radient sign-in's ``id_token`` claims (``{"name", "email", "source":
+    #: "radient"}``), else ``null`` — in which case she asks for it herself.
+    operator: dict[str, str] | None = None
 
 
 class AidaOpState(BaseModel):
@@ -102,6 +126,11 @@ class AidaOpState(BaseModel):
     session_id: str | None = None
     paused: bool
     greeted: bool
+    #: The greeting ledger's state word (see ``AidaState.greeting``). ADDITIVE
+    #: to the frozen op shape: a ``greet`` answers ``requested``/``armed`` when
+    #: she is about to speak, ``delivered``/``skipped`` when she never will
+    #: again — what the desktop needs to decide whether to navigate to her.
+    greeting_state: str = "owed"
 
 
 def _config_dir(request: Request):
@@ -135,7 +164,23 @@ def _state(root: Any) -> AidaState:
         # Read live (never raises; the default stands in for unset/invalid),
         # so a rename needs no invalidation step on this side.
         name=naming.display_name(root),
+        greeting=onboarding.greeting_record(root),
+        first_run_pending=onboarding.first_run_pending(root),
+        operator=_operator(root),
     )
+
+
+def _operator(root: Any) -> dict[str, str] | None:
+    from local_operator.aida import onboarding
+
+    identity = onboarding.radient_identity(root)
+    if not identity:
+        return None
+    return {
+        "name": identity.get("name", ""),
+        "email": identity.get("email", ""),
+        "source": "radient",
+    }
 
 
 def _reply(state: AidaState, message: str) -> CRUDResponse[AidaState]:
@@ -147,7 +192,12 @@ def _op_reply(state: AidaState, message: str) -> CRUDResponse[AidaOpState]:
     return CRUDResponse(
         status=200,
         message=message,
-        result=AidaOpState(session_id=state.session_id, paused=state.paused, greeted=state.greeted),
+        result=AidaOpState(
+            session_id=state.session_id,
+            paused=state.paused,
+            greeted=state.greeted,
+            greeting_state=str(state.greeting.get("state") or "owed"),
+        ),
     )
 
 
@@ -200,7 +250,10 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
                 },
             )
         if body.op == "greet":
-            outcome = await onboarding.greet(root, session_id)
+            # ``surface=desktop``: the route is called by the window the person
+            # is looking at, which is what makes it one of the two attended
+            # entries into the greeting ledger (audit A1).
+            outcome = await onboarding.greet(root, session_id, surface=onboarding.SURFACE_DESKTOP)
             state = _state(root)
             if outcome == "no-provider":
                 # THE ONE REFUSAL THE CONTRACT NAMES: nothing is stamped, so
@@ -234,6 +287,8 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
                         "message": "The greeting could not be scheduled; try again (see the logs).",
                     },
                 )
+            if outcome == "already":
+                return _op_reply(state, f"{name} has already introduced herself.")
             return _op_reply(state, f"{name} is introducing herself in her conversation.")
         return _op_reply(_state(root), f"{name}'s conversation is ready.")
 
