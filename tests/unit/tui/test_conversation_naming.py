@@ -2236,6 +2236,52 @@ async def test_a_slow_provider_gets_a_receipt_not_a_raised_cancellation() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_routed_refresh_asks_the_conversations_own_model() -> None:
+    """``/title --refresh`` is a person asking THIS conversation to name itself,
+    so the model serving the conversation answers — not the ``lo`` tier that
+    ``complete_once`` prefers for unattended naming. The tier's slow tail
+    overran the routed 8 s budget, and the receipt read "could not reach the
+    model" while the session model would have answered in two seconds.
+    """
+
+    asked: list[str] = []
+
+    class _Owner:
+        conversation_name = "Houseplant names"
+
+        def history(self) -> list[Any]:
+            return _turns("name my houseplant", "Leaf Erikson", "tune autovacuum for orders")
+
+        async def complete_once(self, system: str, prompt: str) -> str:
+            asked.append("tier")
+            await asyncio.sleep(60)  # the slow cheap tier
+            return "<title>Never reached</title>"
+
+        async def complete_once_on_session_model(self, system: str, prompt: str) -> str:
+            asked.append("session")
+            return "<title>Autovacuum tuning for orders</title>"
+
+    result = await asyncio.wait_for(
+        naming.routed_refresh("Houseplant names", _Owner()), naming.ROUTED_TITLE_TIMEOUT_S + 4
+    )
+
+    assert asked == ["session"], "the refresh asked the cheap tier instead of the session model"
+    assert result == naming.TitleRefresh(naming.TITLE_REFRESHED, "Autovacuum tuning for orders")
+
+
+def test_the_refresh_completer_falls_back_to_complete_once_without_the_seam() -> None:
+    """A facade without the session-model seam still refreshes, through the
+    errand it always used, rather than failing on a missing attribute."""
+
+    class _Reduced:
+        async def complete_once(self, system: str, prompt: str) -> str:
+            return ""
+
+    reduced = _Reduced()
+    assert naming.refresh_completer(reduced) == reduced.complete_once
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_routed_refresh_is_never_answered_with_a_verdict() -> None:
     """A cancel is the caller going away, so it must not come back as a title
     outcome — and it must behave the same whichever await it lands in.
