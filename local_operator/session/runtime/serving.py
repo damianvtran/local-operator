@@ -7598,17 +7598,23 @@ class ServingSessionHandle(SessionHandle):
                 style="warning",
             )
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
             )
         # The band and the discovery record both name the attached team, so the
         # projection has to refresh before the viewer paints its receipt.
-        from local_operator.teams import display_form
+        from local_operator.teams import display_form, replaced_profile_clause
 
         self._notify()
         shown = display_form(team.name, team.label)
+        # Issue #2014: attaching a team REPLACES a profile the user had chosen,
+        # and a silent replacement is a state change nobody can account for. The
+        # attach reports what it dropped (its return value), so the receipt can
+        # — the ONE clause builder the TUI-local and follower seams share, so
+        # those three surfaces cannot word it differently.
+        dropped = replaced_profile_clause(replaced, team.manager) if replaced else ""
         return SlashResult(
             kind="notice",
             text=(
@@ -7618,7 +7624,8 @@ class ServingSessionHandle(SessionHandle):
                 f"Send a request with /team {team.name} <message>."
                 if not request
                 else f"sending to {shown}. {team.manager} is coordinating."
-            ),
+            )
+            + dropped,
             style="info",
             data={
                 "type": "team_attached",

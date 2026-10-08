@@ -409,3 +409,34 @@ class TestTheRoutedCommands:
 
         assert "no team named" in outcome["text"]
         assert session.active_team_name == "lopdev"
+
+    @pytest.mark.asyncio
+    async def test_slash_team_announces_the_profile_it_replaced(self, routed) -> None:
+        """Issue #2014 + the UI lane (companion #866): the drop is ANNOUNCED.
+
+        Attaching a team claims the agent slot, so a profile the user chose is
+        replaced. A persona that vanishes without a word is the confusion this
+        rule exists to remove, and the desktop half of this change tells users the
+        runtime says so — so the clause is pinned BYTE FOR BYTE here, and built by
+        the one shared builder (``teams.replaced_profile_clause``) in all three
+        seams that paint a team receipt.
+        """
+        handle, session = routed
+        await handle.run_slash_authoritative("agent", "scout", [])
+        assert session.active_agent == "scout"
+
+        outcome = await handle.run_slash_authoritative("team", "lopdev", [])
+
+        assert outcome["text"].endswith(" Replaced profile scout; manager now speaks.")
+        assert session.active_agent == MANAGER
+
+    @pytest.mark.asyncio
+    async def test_slash_team_announces_nothing_when_nothing_was_replaced(self, routed) -> None:
+        """No clause when there was no profile to replace — a notice that fires
+        on every attach is noise, and noise is how a real replacement gets read
+        as boilerplate."""
+        handle, _ = routed
+
+        outcome = await handle.run_slash_authoritative("team", "lopdev", [])
+
+        assert "Replaced profile" not in outcome["text"]

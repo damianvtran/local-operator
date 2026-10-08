@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.resume import write_session_attachment
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import Team, TeamRegistry
@@ -161,13 +162,19 @@ def _is_on_screen(app: OperatorApp, block: Any) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> None:
+async def test_the_band_names_the_team_and_its_manager_a_resume_restored(tmp_path) -> None:
     """Before this, both segments were blank on every resume — honestly so, the
-    persona really was gone. Now the state comes back and the band shows it."""
+    persona really was gone. Now the state comes back and the band shows it.
+
+    Issue #2014: a team OWNS the agent slot, so the two segments a resume has to
+    bring back are the team and the MANAGER it claimed. The sidecar here is the
+    pre-#2014 shape — a team AND an unrelated profile — written directly, since
+    the two attaches that would produce it are now refused; what must paint is
+    the team and its manager, NOT the dropped profile.
+    """
     agents, teams = _registries(tmp_path)
-    first = _session(tmp_path, agents, teams)
-    first.attach_team(teams.get_team_by_name("lopdev"))
-    first.attach_agent_profile("auditor")
+    _session(tmp_path, agents, teams)  # creates tmp_path/sess
+    write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
 
     resumed = _session(tmp_path, agents, teams)
 
@@ -182,7 +189,11 @@ async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> 
         # adds nothing over the key paints the RAW NAME (D2), while a custom
         # label would paint itself.
         assert app._status._team == "lopdev"
-        assert app._status._agent_profile == "auditor"
+        # The manager the TEAM claimed — never the unrelated profile the legacy
+        # sidecar also named. Lowercase is what this path paints: the band's
+        # segment goes through the shared display rule, and with no registry row
+        # and no seed label to add information it falls back to the raw key.
+        assert app._status._agent_profile == "manager"
 
 
 @pytest.mark.asyncio
@@ -278,7 +289,6 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
     agents, teams = _registries(tmp_path)
     first = _session(tmp_path, agents, teams)
     first.attach_team(teams.get_team_by_name("lopdev"))
-    first.attach_agent_profile("auditor")
 
     # Stands in for the remote facade: a different session, nothing attached.
     bare = Session(
@@ -302,7 +312,7 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
         for _ in range(6):
             await pilot.pause()
         assert app._status._team == "lopdev"  # the shared form, as on resume
-        assert app._status._agent_profile == "auditor"
+        assert app._status._agent_profile == "manager"
 
 
 @pytest.mark.asyncio

@@ -6001,16 +6001,18 @@ class Session:
         wants to know which of them moved keeps reading those. This exists so
         that "the team's manager, or the attached profile, or neither" is one
         answer with one author instead of a rule each surface re-implements —
-        the mixed team+agent state that had no defined winner.
+        the mixed team+agent state that had no defined winner. The rule itself
+        lives in ``frontend_state.effective_identity_for``, shared with the
+        ownerless (cold) producers that have no session to ask.
         """
         team = self.active_team_name
-        if self.active_team is not None:
-            return {
-                "speaker": self._team_manager_name() or team,
-                "team": team,
-                "role_of_speaker": "manager",
-            }
-        return {"speaker": self.active_agent, "team": "", "role_of_speaker": ""}
+        from local_operator.session.frontend_state import effective_identity_for
+
+        return effective_identity_for(
+            active_agent=self.active_agent,
+            team=team,
+            manager=self._team_manager_name() if team else "",
+        )
 
     @property
     def goal_status(self) -> str:
@@ -6236,7 +6238,7 @@ class Session:
             return ""
         return str(getattr(team, "name", "") or "")
 
-    def attach_team(self, team: Any) -> None:
+    def attach_team(self, team: Any) -> str | None:
         """Bind this session as the manager of ``team``.
 
         The team's collaboration and project briefs ride the volatile tail
@@ -6252,6 +6254,14 @@ class Session:
         :meth:`_claim_agent_slot_for_team` for the rule and why the manager's
         own instructions stay in ``team_brief`` rather than being stamped
         twice. Passing ``None`` detaches the team and frees the slot.
+
+        Returns the DISPLAY NAME of the ``/agent`` profile this attach REPLACED,
+        or ``None`` when it replaced nothing (issue #2014). A team silently
+        dropping the profile a user had just chosen is the kind of state change
+        the UI has to be able to explain, and a front end can only report it if
+        the mutation says what it did — so the return is the caller's notice
+        material, not a status code. Detaching returns ``None``: it takes the
+        slot away, it does not replace a profile with another.
         """
         self.active_team = team
         # Either branch is the user acting on the team slot, so a carried
@@ -6268,7 +6278,7 @@ class Session:
             self._release_team_agent_slot()
             self._persist_attachment()
             self.refresh_frontend_state()
-            return
+            return None
         preamble = getattr(team, "manager_preamble", lambda: "")()
         # The manager's own profile instructions (the reusable BASE) sit in
         # front of the team brief so a custom manager keeps its voice when
@@ -6298,6 +6308,9 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        # Read BEFORE the claim, because the claim blanks it: this is the
+        # profile the team is about to replace, and the caller's notice names it.
+        replaced = self._goal_state.agent_name or ""
         # The team takes the agent slot (issue #2014), AFTER the brief so the
         # claim can only ever describe a team that is fully attached.
         self._claim_agent_slot_for_team()
@@ -6306,6 +6319,7 @@ class Session:
         # is deliberately not stored (see ``SessionAttachment``).
         self._persist_attachment()
         self.refresh_frontend_state()
+        return replaced or None
 
     def _team_manager_name(self) -> str:
         """The manager role name of the attached team ("" when none).
@@ -6371,6 +6385,12 @@ class Session:
         refusal three ways. ``action`` is ``"attach"`` (a profile was named)
         or ``"detach"`` (``/agent clear``), and both name the way out: the
         team is the thing to move, so the remedy is ``/team clear``.
+
+        The ATTACH sentence itself comes from
+        :func:`local_operator.session.errors.team_owns_the_agent_slot_message`,
+        shared with the preflight that refuses ``--team … --profile …`` before a
+        session exists; the detach sentence has no other caller (a preflight has
+        no slot to clear) and stays here beside it.
         """
         team = self.active_team_name
         manager = self._team_manager_name()
@@ -6380,11 +6400,9 @@ class Session:
                 f"team {team} owns this session's profile{named}, so there is nothing "
                 "to detach here. Run /team clear to detach the team."
             )
-        identity = f"{manager} is the speaker" if manager else "its manager is the speaker"
-        return (
-            f"team {team} owns this session: {identity}, so /agent is closed. "
-            "Run /team clear to detach the team first."
-        )
+        from local_operator.session.errors import team_owns_the_agent_slot_message
+
+        return team_owns_the_agent_slot_message(team, manager)
 
     def _persist_attachment(self) -> None:
         """Journal the attached team/agent/goal beside the transcript.

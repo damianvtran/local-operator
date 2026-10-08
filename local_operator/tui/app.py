@@ -20086,7 +20086,7 @@ class OperatorApp(App[None]):
             )
             return
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:
             self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
             return
@@ -20094,13 +20094,21 @@ class OperatorApp(App[None]):
         # the session after the attach, so the segment matches what was actually
         # stamped rather than the name the user typed.
         self._sync_team_band()
+        # Issue #2014: the attach REPLACES a profile the user had chosen (the
+        # team owns the agent slot) and reports which one, so the receipt says
+        # so rather than leaving the old segment's disappearance unexplained.
+        # One clause builder, shared with the routed runtime and the follower
+        # seam, so all three surfaces word it identically.
+        from local_operator.teams import replaced_profile_clause
+
+        dropped = replaced_profile_clause(replaced, team.manager) if replaced else ""
         if not request:
             notice(
                 # The prose names the team as every surface paints it (D4);
                 # the addressing instruction keeps the raw NAME -- it is what
                 # the user types.
                 f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
-                f"Send a request with /team {team.name} <message>."
+                f"Send a request with /team {team.name} <message>." + dropped
             )
             return
         # `_submit_prompt` writes the user row (the request is what the
@@ -20113,7 +20121,9 @@ class OperatorApp(App[None]):
         # and sends them — the marker sits in the request tail the user typed
         # around, so a pasted screenshot reaches the manager as pixels, not a
         # dead ``[Image #N]`` marker.
-        notice(f"sending to {self._team_display_form(team)}. {team.manager} is coordinating.")
+        notice(
+            f"sending to {self._team_display_form(team)}. {team.manager} is coordinating." + dropped
+        )
         self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
@@ -50286,12 +50296,17 @@ class OperatorApp(App[None]):
                 style="warning",
             )
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
             )
         self._sync_team_band()
+        # The same replacement clause the local handler and the routed runtime
+        # print (issue #2014): one builder, three seams.
+        from local_operator.teams import replaced_profile_clause
+
+        dropped = replaced_profile_clause(replaced, team.manager) if replaced else ""
         return SlashResult(
             kind="notice",
             text=(
@@ -50302,7 +50317,8 @@ class OperatorApp(App[None]):
                 if not request
                 else f"sending to {self._team_display_form(team)}. "
                 f"{team.manager} is coordinating."
-            ),
+            )
+            + dropped,
             style="info",
             data={
                 "type": "team_attached",

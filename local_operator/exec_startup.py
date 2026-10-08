@@ -365,6 +365,29 @@ def resolve_startup(args: Any) -> Any:
         team = TeamRegistry(config_dir()).get_team_by_name(args.team)
         if team is None:
             raise ValueError(f"No team named {args.team!r}; use 'lop teams list'")
+    if team is not None and getattr(args, "profile", None):
+        # ISSUE #2014, refused at PREFLIGHT — before a session or a model exists
+        # — rather than in ``apply_startup``: a team owns the agent slot, so the
+        # pair can never be honoured, and refusing it late would leave a session
+        # directory behind to explain a command that was never going to run
+        # (the same reasoning as ``--loop`` and ``--tools`` above).
+        #
+        # NO MANAGER CARVE-OUT: ``--team X --profile <X's manager>`` is refused
+        # too, because the manager is already the speaker the team attached —
+        # the pair restates what is in force rather than changing anything.
+        #
+        # The sentence is the ONE the runtime raises
+        # (``team_owns_the_agent_slot_message``): the desktop's header lane keys
+        # on those words, and a --profile that reads like /agent (docs/EXEC.md)
+        # must be refused in the words of /agent.
+        from local_operator.session.errors import team_owns_the_agent_slot_message
+
+        raise ValueError(
+            team_owns_the_agent_slot_message(
+                str(getattr(team, "name", "") or args.team),
+                str(getattr(team, "manager", "") or ""),
+            )
+        )
     if getattr(args, "profile", None):
         from local_operator.agent_profiles import resolve_profile_or_specialist
         from local_operator.agents import AgentRegistry, agents_store_present

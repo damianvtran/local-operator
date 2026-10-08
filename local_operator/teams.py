@@ -524,6 +524,25 @@ def role_word_set(registry: "TeamRegistry | None") -> dict[str, tuple[str, ...]]
     return {word: tuple(names) for word, names in out.items()}
 
 
+def replaced_profile_clause(profile: str, manager: str) -> str:
+    """The clause a team attach appends when it REPLACED an earlier profile.
+
+    Issue #2014: attaching a team claims the agent slot, so a profile the user
+    had chosen is dropped. The drop is announced rather than silent — a persona
+    that vanishes without a word is the confusion this rule exists to remove,
+    and the merged desktop half of this change tells users the runtime does say
+    so — and every seam that paints the receipt (the TUI-local handler, its
+    follower seam, the routed runtime) appends THIS sentence, so the three
+    cannot drift. Empty ("") when nothing was replaced, so a caller appends it
+    unconditionally and only a real replacement is announced.
+
+    ``manager`` may be empty on a reduced team double; the clause then names the
+    profile without claiming a speaker.
+    """
+    who = f"; {manager} now speaks" if manager else ""
+    return f" Replaced profile {profile}{who}."
+
+
 def escalation_preamble(reports_to: str) -> str:
     """The chain-of-command line for a team launch or a launch below depth 1.
 

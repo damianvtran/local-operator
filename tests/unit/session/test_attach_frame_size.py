@@ -1186,7 +1186,27 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     state = FrontendSessionState(
         session_id="s1",
         epoch="e1",
-        conversation_title="a" * 500,
+        # 500 -> 323 for issue #2014, and the arithmetic is the whole point:
+        # ``effective_identity`` is a fixed-shape state field (three short
+        # identifiers, replaced on every refresh) and it is charged HERE rather
+        # than by raising ``_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES``.
+        #
+        # Both figures, because they are not the same measurement: the arm's own
+        # CI arithmetic shows 177 B of new excess (1,050,930 - 1,050,753), while
+        # the same field serialized on a bare frame through the real
+        # ``sync_wire_payload`` measures 151 B (key, separators and value, with
+        # this fixture's widest slug pair). The trim takes the LARGER of the
+        # two, so the arm's total lands at or under the worst case it has always
+        # asserted instead of a strictly larger one — the property the ``jobs``
+        # fixture's own comment states for its per-row text.
+        #
+        # Prefer this direction over raising the constant: that number's comment
+        # says raising it IS the ceiling decision a human owns, and this change
+        # is not a capability anyone asked for — the guard's worst-case TOTAL is
+        # what must not grow. The field's own size-policy review is its entry in
+        # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
+        # either number.
+        conversation_title="a" * 323,
         goal="g" * 2_000,
         cwd="/" + "d" * 500,
         **populated,

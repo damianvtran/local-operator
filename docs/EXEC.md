@@ -22,7 +22,7 @@ lop --resume SESSION_ID
 | --- | --- |
 | `command` | Literal initial prompt. `-`, or omitted with piped stdin, reads stdin (surrounding whitespace is trimmed). An omitted prompt is allowed for a valid loop. Slash-looking text stays literal. |
 | `--team NAME` | Resolve a saved team and attach it. Unknown names fail before model construction or a detached spawn, and are checked again by the worker. |
-| `--profile NAME` | Attach a registered role, specialist or packaged starter, exactly like `/agent`. Unknown names fail preflight. A team owns the agent slot, so this flag cannot be combined with `--team`: with a team attached the attach is refused with the reason (`/team clear` detaches the team). |
+| `--profile NAME` | Attach a registered role, specialist or packaged starter, exactly like `/agent`. Unknown names fail preflight. A team owns the agent slot, so this flag cannot be combined with `--team`: the pair is refused at preflight with the reason (`/team clear` detaches the team), and there is no manager carve-out — naming the team's own manager is refused too, since the manager is already the speaker the team attached. |
 | `--agent NAME`, `--agent-name NAME` | Existing legacy named-agent selection; creates a missing agent. Not the `/agent` role attachment. |
 | `--agent-id ID` | Select an exact existing legacy agent; mutually exclusive with `--agent`. |
 | `--goal TEXT` | Set the literal standing goal (`clear` is text, not a command). A goal alone does not start a model, and it is not sent as a message — see [Divergence from `/goal`](#divergence-from-goal). |

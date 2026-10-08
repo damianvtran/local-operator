@@ -2808,6 +2808,30 @@ def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
     return frozen.model_copy(update=updates)
 
 
+def effective_identity_for(*, active_agent: str, team: str, manager: str = "") -> dict[str, str]:
+    """WHO is answering this session, from its two slots — THE rule (#2014).
+
+    One implementation for every producer of the field: the live session
+    (:attr:`Session.effective_identity`, ``local_operator/session/session.py``)
+    and the OWNERLESS paths that have no runtime to ask — ``AttachedSession``'s
+    cold constructors and ``cold_model.synthesise_cold_state``. Two copies of
+    this rule is the disease issue #2014 cures, and a cold pane answering
+    differently from the warm session it is about to attach to is the same
+    confusion one frame later.
+
+    ``team`` is the name of a team IN FORCE, not merely a name on disk: a
+    carried unresolved team name is deliberately not passed, because it is not
+    a team anything is speaking as (the sentinel that means "a host older than
+    this field" is the empty dict, which no producer here emits).
+    ``manager`` is the team's manager role, and may be empty — a nameless team,
+    or a cold open whose registry lookup was best-effort — in which case the
+    TEAM names itself as the speaker rather than nothing naming it.
+    """
+    if team:
+        return {"speaker": manager or team, "team": team, "role_of_speaker": "manager"}
+    return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 

@@ -108,6 +108,7 @@ from local_operator.session.frontend_state import (
     SnapshotWakeScheduler,
     WakeState,
     _fold_goal_status,
+    effective_identity_for,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
@@ -1743,6 +1744,12 @@ class AttachedSession:
                 cwd=self._cwd,
                 selected_model=model,
                 effective_model=model,
+                # Issue #2014: an explicit EMPTY STATEMENT, not the ``{}`` sentinel
+                # that means "a host older than this field". Nothing is attached
+                # at this point in the cold open (there is no checkpoint read
+                # yet), so the honest answer is "nobody" — a client can render
+                # that — while ``{}`` would tell it to guess.
+                effective_identity=effective_identity_for(active_agent="", team=""),
             )
         )
         self._finish_sync()
@@ -1826,6 +1833,29 @@ class AttachedSession:
         # when one is actually needed.
         self._runtime_ready.set()
         return self
+
+    def _cold_team_manager(self, team_name: str) -> str:
+        """The manager of ``team_name`` for a COLD frame, best-effort (#2014).
+
+        Best-effort for the reason the whole cold open is: a registry that cannot
+        be read must cost the user a roster at worst, never their conversation
+        (see :attr:`team_registry`, which is where the guard already lives). The
+        identity triple has a defined fallback rather than an error — the TEAM
+        names itself as the speaker — so a miss here degrades the answer without
+        making one up.
+        """
+        if not team_name:
+            return ""
+        registry = self.team_registry
+        if registry is None:
+            return ""
+        try:
+            team = registry.get_team_by_name(team_name)
+        except Exception:  # noqa: BLE001 — identity is display, never worth a raise
+            return ""
+        if team is None:
+            return ""
+        return str(getattr(team, "manager", "") or "")
 
     def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
         """Fold the durable turn-end checkpoint over synthesised cold state.
@@ -1934,6 +1964,26 @@ class AttachedSession:
                 "goal_history_truncated": durable.goal_history_truncated,
                 "active_agent": durable.active_agent,
                 "active_team": durable.active_team,
+                # Issue #2014: the identity triple is DERIVED here, never copied
+                # from the checkpoint. Every checkpoint written before this field
+                # existed has no key for it, so a copy would hand the frame the
+                # ``{}`` sentinel — the value that means "a host older than the field" —
+                # and a resumed, never-warmed team-bound session would paint as an
+                # old host: the desktop header offers the open picker list until a
+                # runtime engages and only then flips to the closed lock. Found by
+                # the UI lane's review of the companion PR.
+                #
+                # The manager's name is not on the checkpoint either, so it is
+                # resolved best-effort from THIS machine's registry (the same one
+                # the warm session reads) and falls back to the team name exactly
+                # as the shared rule does. Carried unconditionally, like the two
+                # slots above: identity survives a fork, so ``inherited`` does not
+                # gate it.
+                "effective_identity": effective_identity_for(
+                    active_agent=durable.active_agent,
+                    team=durable.active_team,
+                    manager=self._cold_team_manager(durable.active_team),
+                ),
                 # Spend and occupancy are the conversation's history, not this
                 # process's: a resumed session that already cost money must not
                 # open reading zero (the same argument as

@@ -27,6 +27,26 @@ class AttachmentUnavailable(ValueError):
         )
 
 
+def team_owns_the_agent_slot_message(team: str, manager: str) -> str:
+    """THE sentence for an agent attach refused while a TEAM owns the slot.
+
+    One builder for every seam that prints it, because they must not paraphrase
+    each other: the session raises it as :class:`AgentSlotOwnedByTeam` (rendered
+    by the TUI-local handler, its follower seams and the routed runtime), and
+    ``exec_startup.resolve_startup`` refuses ``--team … --profile …`` with it
+    before a session or model exists. The ``local-operator-ui`` header lane keys
+    on this exact sentence, so a rewording is a wire change, not a tidy-up.
+
+    ``manager`` may be empty (a reduced team object); the sentence then states
+    the rule without naming a speaker rather than claiming one it does not have.
+    """
+    identity = f"{manager} is the speaker" if manager else "its manager is the speaker"
+    return (
+        f"team {team} owns this session: {identity}, so /agent is closed. "
+        "Run /team clear to detach the team first."
+    )
+
+
 class AgentSlotOwnedByTeam(ValueError):
     """``/agent`` was refused because a TEAM owns this session's agent slot.
 
