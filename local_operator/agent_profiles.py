@@ -61,7 +61,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, TypeVar
 
 from local_operator.action_class import PROACTIVE as PROACTIVE_CLASS
 from local_operator.action_class import TAG_KEY as CLASS_TAG_KEY
@@ -354,6 +354,31 @@ def load_seed(name: str) -> AgentProfile | None:
         logger.warning("agent seed %s could not be read", key)
         return None
     return _profile_from_text(key, text)
+
+
+def load_seed_class(name: str) -> str | None:
+    """The packaged seed's declared ``class:`` frontmatter, or None when absent.
+
+    Parallel to :func:`load_seed_version` and read through the same parser for
+    the same reason. ``None`` means "this seed declares no class" - distinct
+    from a declared ``reactive`` - and the distinction is what lets the
+    ledger's tail guard and the writer's class rule tell "follows its
+    revision" apart from "deliberately switched" without guessing. A missing
+    or unreadable file answers None, the same safe direction as the version.
+    """
+
+    key = (name or "").strip().lower()
+    if not key or key not in set(list_seeds()):
+        return None
+    try:
+        text = (SEEDS_DIR / f"{key}.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:  # pragma: no cover - unreadable package file
+        return None
+    meta, _body = _split_frontmatter(text)
+    raw = meta.get("class")
+    if raw is None or not str(raw).strip():
+        return None
+    return normalize_action_class(raw)
 
 
 def load_seed_version(name: str) -> str:
@@ -1018,6 +1043,20 @@ _SEED_FIELDS: tuple[str, ...] = (
 )
 
 
+#: The field list the ORIGINAL fingerprint formula hashed, v0.63.5-v0.64.8:
+#: ``_SEED_FIELDS`` minus ``class``. Kept so a row installed before the class
+#: feature can still be proven unchanged - its stamp recomputes under this
+#: list even though the current formula appends ``class`` and produces a
+#: different digest for the same row (the skew behind finding F1 of #2060).
+_LEGACY_SEED_FIELDS: tuple[str, ...] = (
+    "instructions",
+    "description",
+    "tools",
+    "effort",
+    "delegate",
+)
+
+
 def _seed_field_values(profile: AgentProfile) -> tuple[Any, ...]:
     """The seed-written fields, canonicalized, in ``_SEED_FIELDS`` order.
 
@@ -1030,14 +1069,35 @@ def _seed_field_values(profile: AgentProfile) -> tuple[Any, ...]:
     what "the same fields" means.
     """
 
-    return (
-        (profile.instructions or "").strip(),
-        (profile.when_to_use or profile.description or "").strip(),
-        tuple(profile.tools) if profile.tools else None,
-        profile.effort or None,
-        bool(profile.may_delegate),
-        normalize_action_class(profile.action_class),
-    )
+    return _seed_field_values_for(profile, _SEED_FIELDS)
+
+
+def _seed_field_values_for(profile: AgentProfile, fields: tuple[str, ...]) -> tuple[Any, ...]:
+    """The values of ``fields``, canonicalised exactly as the fingerprints hash.
+
+    ONE implementation for both eras: the legacy 5-field list and the current
+    6-field one must agree field-for-field, or a stamp recomputed under the
+    wrong reading would misclassify silently. An unknown name is a programmer
+    error in the field tuple and raises rather than participating in a digest.
+    """
+
+    values: list[Any] = []
+    for field in fields:
+        if field == "instructions":
+            values.append((profile.instructions or "").strip())
+        elif field == "description":
+            values.append((profile.when_to_use or profile.description or "").strip())
+        elif field == "tools":
+            values.append(tuple(profile.tools) if profile.tools else None)
+        elif field == "effort":
+            values.append(profile.effort or None)
+        elif field == "delegate":
+            values.append(bool(profile.may_delegate))
+        elif field == "class":
+            values.append(normalize_action_class(profile.action_class))
+        else:  # pragma: no cover - a typo in a field tuple, caught by tests
+            raise ValueError(f"unknown seed field {field!r}")
+    return tuple(values)
 
 
 def seed_fingerprint(profile: AgentProfile) -> str:
@@ -1061,6 +1121,39 @@ def seed_fingerprint(profile: AgentProfile) -> str:
         list(_seed_field_values(profile)), ensure_ascii=False, separators=(",", ":")
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _legacy_fingerprint(profile: AgentProfile) -> str:
+    """``seed_fingerprint`` under the ORIGINAL 5-field list (v0.63.5-v0.64.8).
+
+    The same canonicalisation and digest, over :data:`_LEGACY_SEED_FIELDS` -
+    i.e. exactly what the formula computed before commit ``0b2dc18deb``
+    appended ``class`` to the field list.
+    """
+
+    payload = json.dumps(
+        list(_seed_field_values_for(profile, _LEGACY_SEED_FIELDS)),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stamp_family_clean(profile: AgentProfile, stamp: str | None) -> bool:
+    """Whether an install stamp recomputes from the profile under EITHER era.
+
+    Two formulas shipped, and a row's stamp names the one that was current
+    when it was written: the original 5-field digest and the current 6-field
+    one that appends ``class``. Accepting both is what keeps a v0.63.5-v0.64.8
+    install provably unchanged today - the current-formula-only comparison
+    marked every such row "diverged", the skew finding F1 of #2060 describes.
+    A malformed stamp is never clean; the same refusal ``_installed_fingerprint``
+    documents for unusable values.
+    """
+
+    if not stamp or not is_sha256_hex(stamp):
+        return False
+    return _legacy_fingerprint(profile) == stamp or seed_fingerprint(profile) == stamp
 
 
 def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...]:
@@ -1260,6 +1353,341 @@ def backfill_seed_action_class(
     return tuple(changed)
 
 
+# -- revision ledger ---------------------------------------------------------
+#
+# WHY A LEDGER, when ``seed_sha256:`` already records what was installed. Two
+# measured failures make the recorded stamp insufficient on its own:
+#
+#   * FORMULA SKEW. ``seed_fingerprint`` hashes a fixed field list, and commit
+#     ``0b2dc18deb`` (shipped in v0.64.9) appended ``class`` to it. Every stamp
+#     written by v0.63.5-v0.64.8 recomputes to a DIFFERENT value under the
+#     current formula, so a row those releases installed can never again be
+#     proven clean however untouched it is - and a plain ``sync`` answered
+#     "re-run with force". The reporter's aida was exactly this row.
+#   * DIRECTION. Version strings repeat (aida shipped four ``1.0.0`` builds,
+#     two of them same-day), so comparing a row against the packaged text
+#     cannot say whether a difference means the row is BEHIND the package or
+#     AHEAD of it - and "ahead" must never be downgraded: an older ``lop``
+#     starting after a newer one updated a row would flip it back, and the
+#     two would ping-pong.
+#
+# The ledger answers both without new row state: it lists every text that
+# SHIPPED in this repository's history, oldest first per seed, so a row whose
+# canonical vector equals an entry is provably an unedited published revision,
+# and the entry's position is what "behind" and "ahead" are defined against.
+# It is generated and committed (``scripts/gen_agent_seed_revisions.py``
+# re-renders it byte-identically), ships INSIDE the package
+# (``agent_seeds/*.json`` package data), and - being per-COMMIT rather than
+# per-release - also covers texts that reached users from ``main`` between
+# releases.
+
+
+#: Name of the shipped revision ledger, beside the seeds it describes. Sorted
+#: seed names, oldest entry first per seed; see :func:`render_seed_revisions`
+#: for the exact bytes.
+SEED_REVISIONS_NAME = "seed_revisions.json"
+
+#: Bumped when the ledger's own shape changes. One consumer refuses any other
+#: value rather than guessing at a schema it does not know.
+SEED_REVISIONS_SCHEMA_VERSION = 1
+
+
+def normalize_seed_prose(text: str) -> str:
+    """A seed's prose under the ONE canonicalisation the ledger shares.
+
+    CRLF/CR -> LF, per-line trailing whitespace stripped, outer blank lines
+    stripped. Measured the IDENTITY on all 96 committed seed versions (every
+    whitespace it would move is already absent), so this is cheap insurance
+    rather than a repair: the ledger compares texts written by many hands over
+    months, and a careless future edit must not turn an untouched row into a
+    false "diverged".
+
+    NEVER applied to ``tools:``/``effort``/``delegate``/``class`` - those are
+    capability boundaries, and an allowlist entry is a name, not prose. Only
+    the two text fields are ever passed through here.
+    """
+
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+
+def seed_revision_vector(profile: AgentProfile) -> tuple[Any, ...]:
+    """The fields that IDENTIFY a published revision, canonicalised.
+
+    Five fields - instructions, routing text, tools, effort, delegate - and
+    ``class`` is deliberately NOT one of them. The exclusion is what makes the
+    reporter's own row matchable: aida's row was migrated by the class
+    backfill to ``class:proactive`` while the ledger's v1.0.0 entry records no
+    class (it shipped before the feature), so a six-field identity would leave
+    the exact row this feature exists for unmatchable. ``class`` is still
+    CARRIED per entry - it is what the narrow writer's class rule reads - it
+    simply does not participate in identity. Instructions ride as the
+    whitespace-normalised string; the sha256 is taken over exactly that string.
+    """
+
+    return (
+        normalize_seed_prose(profile.instructions or ""),
+        normalize_seed_prose(profile.when_to_use or profile.description or ""),
+        tuple(profile.tools) if profile.tools else None,
+        profile.effort or None,
+        bool(profile.may_delegate),
+    )
+
+
+@dataclass(frozen=True)
+class SeedRevision:
+    """One published revision of one seed: what it said, and where it landed.
+
+    ``sha`` is the 40-hex commit that introduced the text in this repository's
+    history; ``version`` is the seed's own frontmatter version AT THAT COMMIT,
+    deliberately allowed to repeat (aida shipped four ``1.0.0`` builds) - it
+    is a label, not an identity. Identity is :func:`seed_revision_vector`'s
+    five fields; ``action_class`` is carried but excluded from identity (see
+    that function) and is what the narrow writer's class rule consults. ``None``
+    there means "this revision declares no class at all", which is NOT the
+    same as a declared ``reactive``.
+    """
+
+    sha: str
+    version: str
+    instructions_sha256: str
+    description: str
+    tools: tuple[str, ...] | None
+    effort: str | None
+    delegate: bool
+    action_class: str | None
+
+
+def _seed_revision_from_profile(
+    profile: AgentProfile, *, sha: str, version: str, action_class: str | None
+) -> SeedRevision:
+    """Build one ledger entry from a loaded profile.
+
+    The ONE constructor shared by the generator (which fills ``sha``/
+    ``version``/``action_class`` from git history) and by tests that publish a
+    scratch revision - so a hand-published entry can never spell a field
+    differently from a generated one.
+    """
+
+    vector = seed_revision_vector(profile)
+    return SeedRevision(
+        sha=sha,
+        version=version,
+        instructions_sha256=hashlib.sha256(vector[0].encode("utf-8")).hexdigest(),
+        description=vector[1],
+        tools=vector[2],
+        effort=vector[3],
+        delegate=vector[4],
+        action_class=action_class,
+    )
+
+
+def _seed_revision_payload(entry: SeedRevision) -> dict[str, Any]:
+    """One entry's JSON shape, key order fixed so bytes are stable."""
+
+    return {
+        "sha": entry.sha,
+        "version": entry.version,
+        "instructions_sha256": entry.instructions_sha256,
+        "description": entry.description,
+        "tools": list(entry.tools) if entry.tools is not None else None,
+        "effort": entry.effort,
+        "delegate": entry.delegate,
+        "class": entry.action_class,
+    }
+
+
+def render_seed_revisions(seeds: Mapping[str, Sequence[SeedRevision]]) -> str:
+    """The exact bytes ``seed_revisions.json`` is committed with.
+
+    ONE serialiser for the generator that writes the packaged file and for
+    tests that publish a scratch revision into a scratch copy of it, because
+    two spellings is how a hand-appended entry would drift from a generated
+    one. Deterministic by construction: seed names sorted, entry keys in a
+    fixed order, ``indent=2``, a trailing newline, and NO timestamps or
+    generator versions - byte-stable across releases, so regeneration is a
+    no-op for anyone who did not move a seed (the manifest's provenance trick
+    is deliberately not needed here).
+    """
+
+    payload = {
+        "schema_version": SEED_REVISIONS_SCHEMA_VERSION,
+        "seeds": {
+            name: [_seed_revision_payload(entry) for entry in seeds[name]] for name in sorted(seeds)
+        },
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def make_seed_revision(
+    profile: AgentProfile,
+    *,
+    sha: str,
+    version: str,
+    declared_class: str | None,
+) -> SeedRevision:
+    """Build one ledger entry from a profile as read at one commit.
+
+    ``declared_class`` is the frontmatter's declared ``class:`` (already
+    normalised) or None when the file declares none - NOT
+    ``profile.action_class``, which defaults to ``reactive`` for every seed
+    and would erase the "no class declared" distinction the writer's class
+    rule depends on (aida's row is the case: her v1.0.0 entry must record no
+    class). ONE constructor, used by the generator and by tests' scratch
+    ``publish_seed`` helpers, so a hand-appended entry cannot drift from a
+    generated one.
+    """
+
+    vector = seed_revision_vector(profile)
+    return SeedRevision(
+        sha=sha,
+        version=version or "",
+        instructions_sha256=hashlib.sha256(vector[0].encode("utf-8")).hexdigest(),
+        description=vector[1],
+        tools=vector[2],
+        effort=vector[3],
+        delegate=vector[4],
+        action_class=(
+            normalize_action_class(declared_class) if declared_class is not None else None
+        ),
+    )
+
+
+def _parse_seed_revision(row: object) -> SeedRevision | None:
+    """One JSON row as a ``SeedRevision``, or None when malformed.
+
+    Tolerant on read, strict in effect: a malformed entry is DROPPED rather
+    than repaired, because a repaired entry would be a claim about a published
+    text nobody can reproduce. A dropped entry costs at worst "no ledger proof"
+    for the rows it described, which is the same safe direction every marker
+    reader in this module takes.
+    """
+
+    if not isinstance(row, dict):
+        return None
+    sha = str(row.get("sha") or "").strip()
+    instructions_sha256 = str(row.get("instructions_sha256") or "").strip()
+    description = row.get("description")
+    tools = row.get("tools", None)
+    effort = row.get("effort", None)
+    delegate = row.get("delegate", None)
+    action_class = row.get("class", None)
+    version = str(row.get("version") or "")
+    if not sha or not is_sha256_hex(instructions_sha256):
+        return None
+    if not isinstance(description, str):
+        return None
+    if tools is not None and not (
+        isinstance(tools, list) and all(isinstance(item, str) for item in tools)
+    ):
+        return None
+    if effort is not None and not isinstance(effort, str):
+        return None
+    if not isinstance(delegate, bool):
+        return None
+    if action_class is not None and not isinstance(action_class, str):
+        return None
+    return SeedRevision(
+        sha=sha,
+        version=version,
+        instructions_sha256=instructions_sha256.lower(),
+        description=description,
+        tools=tuple(tools) if tools is not None else None,
+        effort=effort or None,
+        delegate=delegate,
+        action_class=(normalize_action_class(action_class) if action_class is not None else None),
+    )
+
+
+def load_seed_revisions(
+    seeds_dir: Path | None = None,
+) -> dict[str, tuple[SeedRevision, ...]]:
+    """The packaged revision ledger, keyed by seed name. Never raises.
+
+    A missing or corrupt file answers ``{}`` - the ledger is PROOF, not a
+    precondition: without it, typed sync degrades to the pre-ledger stamp
+    semantics and the startup pass stays silent, because its only proof of
+    direction would be gone. That is the same safe direction ``seed_origin``
+    documents for unmarked rows: withhold the overwrite, never guess it.
+    """
+
+    directory = Path(seeds_dir) if seeds_dir is not None else SEEDS_DIR
+    try:
+        payload = json.loads((directory / SEED_REVISIONS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    rows = payload.get("seeds")
+    if not isinstance(rows, dict):
+        return {}
+    revisions: dict[str, tuple[SeedRevision, ...]] = {}
+    for name, entries in rows.items():
+        if not isinstance(entries, list):
+            continue
+        parsed = tuple(
+            entry for entry in (_parse_seed_revision(row) for row in entries) if entry is not None
+        )
+        if parsed:
+            revisions[str(name).strip().lower()] = parsed
+    return revisions
+
+
+def _entry_matches_profile(entry: SeedRevision, profile: AgentProfile) -> bool:
+    """Whether a ledger entry's identity equals the profile's canonical vector."""
+
+    vector = seed_revision_vector(profile)
+    return (
+        hashlib.sha256(vector[0].encode("utf-8")).hexdigest() == entry.instructions_sha256
+        and vector[1] == entry.description
+        and vector[2] == entry.tools
+        and vector[3] == entry.effort
+        and vector[4] == entry.delegate
+    )
+
+
+def _match_in_entries(
+    profile: AgentProfile, entries: tuple[SeedRevision, ...]
+) -> tuple[int, SeedRevision] | None:
+    """The last ledger entry whose identity equals the profile's vector.
+
+    The LAST match wins: an entry repeats an earlier entry's identity only
+    when the seed's own ``class`` changed without its text (the generator's
+    append rule keys on the full vector), and the later entry is the one whose
+    declared class the writer rule should read.
+    """
+
+    matched: tuple[int, SeedRevision] | None = None
+    for index, entry in enumerate(entries):
+        if _entry_matches_profile(entry, profile):
+            matched = (index, entry)
+    return matched
+
+
+def match_seed_revision(
+    name: str,
+    profile: AgentProfile,
+    *,
+    revisions: Mapping[str, tuple[SeedRevision, ...]] | None = None,
+) -> tuple[int, SeedRevision] | None:
+    """The ledger position a profile's canonical vector holds, or None.
+
+    The LAST matching index wins. An entry can repeat an earlier entry's
+    identity only when the seed's own ``class`` changed without its text (the
+    generator's append rule keys on the full vector), and the later entry is
+    the one whose declared class the writer rule should read. Callers that
+    need a position use the index; callers that need the entry's data use the
+    entry.
+    """
+
+    entries = (revisions if revisions is not None else load_seed_revisions()).get(
+        str(name).strip().lower()
+    )
+    if not entries:
+        return None
+    return _match_in_entries(profile, entries)
+
+
 # -- update checks -----------------------------------------------------------
 
 
@@ -1272,9 +1700,11 @@ class SeedSyncVerdict:
     the desktop route — renders the same list rather than deriving its own.
 
     ``applied`` is the part a caller must not infer from ``verdict``: an
-    ``outdated-clean`` row is written on the spot, an ``outdated-diverged`` row
-    is written only when the caller passed ``force``, and a caller that
-    reported "updated" for a refused apply would be this feature's version of
+    ``outdated-clean`` row is written on the spot WHEN the caller allowed
+    writes (``apply=True``) — under ``apply=False`` it is an update AVAILABLE
+    and ``applied`` stays False — while an ``outdated-diverged`` row is written
+    only when the caller passed ``force``. A caller that reported "updated" for
+    a refused or read-only classification would be this feature's version of
     every over-claiming receipt this repo has had to fix.
     """
 
@@ -1292,6 +1722,15 @@ class SeedSyncVerdict:
     #: :data:`_SEED_FIELDS` order: the reset echo's second half, so a forced
     #: overwrite of a widened ``tools:`` allowlist is still recoverable.
     replaced_fields: tuple[tuple[str, str], ...] = ()
+    #: How many published revisions behind its packaged starter this row is,
+    #: when the revision ledger could position BOTH ends of the move — a
+    #: ledger-ORDER distance, never a version comparison (version strings
+    #: repeat: aida shipped four ``1.0.0`` builds). ``None`` means the ledger
+    #: could not position the row (the stamp-fallback semantics) or the
+    #: distance does not apply (up-to-date/ahead/diverged). The startup pass's
+    #: auto-apply eligibility rides on this being non-None: only a row both
+    #: ends of which the ledger can place may be written unattended.
+    behind_by: int | None = None
     detail: str = ""
 
 
@@ -1380,39 +1819,65 @@ def _installed_seed_rows(registry: "AgentRegistry") -> dict[str, "AgentData"]:
 
 
 def sync_installed_seeds(
-    registry: "AgentRegistry", *, names: Sequence[str] | None = None, force: bool = False
+    registry: "AgentRegistry",
+    *,
+    names: Sequence[str] | None = None,
+    force: bool = False,
+    apply: bool = True,
 ) -> list[SeedSyncVerdict]:
     """Check installed seed-origin roles against the packaged starters; update them.
 
     The update half of "built-in agents have a way to pull the latest": the
-    package ships an improved prompt, and this is the one call that notices —
-    never automatically on boot (version drift is REPORTED, not applied; the
-    first-run-materialises-on-demand property of seeds is deliberate), and
-    never as a second implementation per surface. The ``agent`` tool, the
-    ``sync`` CLI command and the desktop route all funnel through here.
+    package ships an improved prompt, and this is the call every explicit
+    surface funnels through — the ``agent`` tool, the ``sync`` CLI command and
+    the desktop route. Since #2060 it is no longer the only thing that
+    NOTICES: the startup seam classifies every launch
+    (``startup_seed_update_pass``) and auto-applies the rows the ledger proves
+    are unedited and strictly behind. This classification is single-sourced
+    for both, and every apply still funnels through this call's clean arm.
 
     ``names=None`` means every installed seed-origin row; a sequence restricts
     the run to those names (case-folded, the way ``load_seed`` folds) and
     yields a ``not-installed`` verdict for a name with nothing installable
     behind it.
 
-    Classification, in order:
+    ``apply=False`` is READ-ONLY at the byte level: nothing is written,
+    anywhere. The clean arm answers ``outdated-clean`` with ``applied=False``
+    (and its ``behind_by`` distance when the ledger could position it), and
+    the renderer says "update available" — a caller that only wants to KNOW
+    must never be told "updated". ``lop agents sync --check`` and
+    ``--dry-run`` and the startup pass's classification all use this mode.
 
-    * no divergence from the packaged seed → ``up-to-date`` (nothing to write);
-    * the installed stamp equals the packaged version → ``up-to-date`` with a
-      note when local edits are present: the starter has not moved, so sync
-      has nothing to pull — restoring local edits is ``op='reset'``'s job;
-    * the row still holds EXACTLY what was installed (fingerprint match) while
-      the package moved → ``outdated-clean``, applied immediately through
-      :func:`install_seed` with ``overwrite=True``, echoing what it replaced;
-    * anything else that differs → ``outdated-diverged``, reported with the
-      diverged field list and applied only with ``force=True``.
+    Classification, in order — the ledger (``seed_revisions.json``: every text
+    that ever shipped, oldest first per seed) supplies positions, and the
+    recorded install fingerprint remains the belt for rows and packages the
+    ledger cannot see:
+
+    * no divergence from the packaged seed → ``up-to-date`` (nothing to
+      write);
+    * the row's canonical vector equals a ledger entry AND the packaged text
+      has one too → position decides: same → ``up-to-date``; the row strictly
+      BEHIND → ``outdated-clean`` with ``behind_by`` set, applied through the
+      narrow writer; the row AHEAD → ``up-to-date`` with "newer than this
+      build ships" — never a downgrade, because an older ``lop`` must not
+      flip a newer build's update back;
+    * no ledger position, but the stamp recomputes from the row under either
+      shipped fingerprint formula → ``outdated-clean`` (typed surfaces only:
+      the startup pass refuses to auto-apply without a position — a stamp
+      proves "unchanged since install", not which way the package can move);
+    * the stamp equals the PACKAGED starter's fingerprint while the row
+      differs → ``up-to-date`` with a local-edits note: nothing to PULL, and
+      restoring local edits is ``op='reset'``'s job;
+    * anything else → ``outdated-diverged``, reported with the diverged field
+      list and applied only with ``force=True``.
 
     Rows installed before the stamps existed have no fingerprint, so they
-    cannot PROVE cleanliness; a moved starter therefore lands in
-    ``outdated-diverged`` and needs ``--force`` once. That is the same safe
-    direction :func:`seed_origin` documents for unmarked rows: withhold the
-    overwrite, never guess it.
+    cannot prove cleanliness by themselves; the LEDGER is what re-proves them:
+    a row whose text is a published revision is clean by construction, and the
+    v0.63.5-v0.64.8 formula skew (finding F1 of #2060) is exactly that case —
+    the ledger match, not the stamp, is the proof. A row the ledger cannot
+    place either lands in ``outdated-diverged`` and needs the explicit replace
+    once.
     """
 
     rows = _installed_seed_rows(registry)
@@ -1424,6 +1889,7 @@ def sync_installed_seeds(
             if key and key not in requested:
                 requested.append(key)
 
+    revisions = load_seed_revisions()
     verdicts: list[SeedSyncVerdict] = []
     targets = sorted(rows) if requested is None else requested
     for key in targets:
@@ -1437,7 +1903,9 @@ def sync_installed_seeds(
                 )
             )
             continue
-        verdicts.append(_sync_one_seed(registry, key, agent, force=force))
+        verdicts.append(
+            _sync_one_seed(registry, key, agent, force=force, apply=apply, revisions=revisions)
+        )
     return verdicts
 
 
@@ -1468,8 +1936,227 @@ def _role_named(registry: "AgentRegistry", key: str) -> "AgentData | None":
     return None
 
 
+def _resolve_row_revision(
+    name: str,
+    profile: AgentProfile,
+    stamp: str | None,
+    revisions: Mapping[str, tuple[SeedRevision, ...]],
+) -> tuple[int | None, str]:
+    """``(ledger position, proof)`` for one row's current text.
+
+    ``proof`` is ``"ledger"`` when the row's canonical vector equals a
+    published revision — the position is then real, and it is what decides
+    behind/ahead; ``"stamp"`` when only the recorded install fingerprint
+    recomputes from the row's own fields, under EITHER shipped formula (the
+    legacy 5-field one is kept so v0.63.5-v0.64.8 installs stay classifiable);
+    ``"none"`` when neither holds. Only ``"ledger"`` may drive an unattended
+    write: a stamp proves "unchanged since install", never which way the
+    package can move.
+    """
+
+    matched = match_seed_revision(name, profile, revisions=revisions)
+    if matched is not None:
+        return matched[0], "ledger"
+    if _stamp_family_clean(profile, stamp):
+        return None, "stamp"
+    return None, "none"
+
+
+def _packaged_revision_index(seed: AgentProfile, entries: tuple[SeedRevision, ...]) -> int | None:
+    """The ledger position of the PACKAGED starter's text, or None.
+
+    Identity match (the five-field vector), LAST index wins — the same rule
+    :func:`match_seed_revision` applies to rows, so a row and its package can
+    never disagree about which entry they are. None means the packaged text
+    was never published: a draft in a worktree, or a ledger that cannot see
+    it; callers must then fall back to the stamp semantics, and the startup
+    pass must NEVER auto-apply.
+    """
+
+    matched = _match_in_entries(seed, entries)
+    return matched[0] if matched is not None else None
+
+
+def _packaged_tail_entry(
+    name: str, revisions: Mapping[str, tuple[SeedRevision, ...]]
+) -> SeedRevision | None:
+    """The ledger entry the PACKAGED starter must equal to be auto-appliable.
+
+    The runtime guard behind "draft prompts in worktrees never auto-apply":
+    the generator appends the packaged text on every release, so a properly
+    generated ledger's tail IS the packaged revision - full vector, class
+    included - and anything else means the text on disk was never published
+    (an edit in a worktree, a rollback). Returns the tail entry when it
+    matches, else None; callers must then withhold the write and stay silent.
+    """
+
+    key = str(name).strip().lower()
+    entries = revisions.get(key, ())
+    if not entries:
+        return None
+    seed = load_seed(key)
+    if seed is None:
+        return None
+    tail = entries[-1]
+    if not _entry_matches_profile(tail, seed):
+        return None
+    if (tail.action_class or "") != (load_seed_class(key) or ""):
+        return None
+    return tail
+
+
+def _is_seed_owned_tag(tag: object) -> bool:
+    """Whether one row tag is seed-owned (rewritten by a clean update).
+
+    Self-describing ``key:value`` pairs whose key is one the seed encodes
+    (``tools:``, ``effort:``, ``delegate:``, ``class:``, ``seed:``,
+    ``seed_version:``, ``seed_sha256:``), plus the bare ``role`` category.
+    Everything else — a user's ``favourite``, a foreign ``team:`` tag — is the
+    row owner's and survives the narrow writer untouched. The key is
+    case-insensitive, the way every tag reader here is.
+    """
+
+    key, sep, _value = str(tag).partition(":")
+    normalized = key.strip().lower()
+    if not sep:
+        return normalized == ROLE_TAG
+    return normalized in (
+        "tools",
+        "effort",
+        "delegate",
+        "class",
+        "seed",
+        "seed_version",
+        "seed_sha256",
+    )
+
+
+def _resolved_seed_class(
+    agent: "AgentData",
+    profile: AgentProfile,
+    seed: AgentProfile,
+    revisions: Mapping[str, tuple[SeedRevision, ...]],
+) -> str:
+    """Which ``class:`` value the narrow writer stamps on a clean row.
+
+    The rule, written down because it is subtle: the PACKAGED class is written
+    iff the row has no class tag OR its class equals the class of ANY ledger
+    entry whose other five fields match the row's; otherwise the row's own
+    class is preserved. That is what lets aida auto-apply her prose updates —
+    her row carries ``class:proactive`` (the startup backfill's repair) while
+    the ledger's v1.0.0 entry records no class at all, so "preserve" is the
+    right arm — while a role that merely FOLLOWED its starter's own class
+    change still follows it: the row's class equals the matching entry's
+    declared class, so the packaged value flows through. A deliberately
+    SWITCHED row is user data like the label and is never overridden
+    unattended; the packaged class reaching it is deferred to ``reset``
+    (accepted trade, ADR Q2).
+    """
+
+    from local_operator.action_class import is_class_tag
+
+    packaged_class = normalize_action_class(seed.action_class)
+    if not any(is_class_tag(tag) for tag in (agent.tags or ())):
+        return packaged_class
+    row_class = normalize_action_class(profile.action_class)
+    for entry in revisions.get(seed.name, ()):
+        if _entry_matches_profile(entry, profile) and entry.action_class == row_class:
+            return packaged_class
+    return row_class
+
+
+def _apply_seed_update(
+    registry: "AgentRegistry",
+    agent: "AgentData",
+    seed: AgentProfile,
+) -> bool:
+    """Replace ONLY the seed-owned fields of a clean row, atomically.
+
+    WHY THIS EXISTS, and why it is not ``install_seed``: the wholesale
+    overwrite install/reset share rewrites the LABEL and the whole tag list,
+    so a row provably untouched in the seed's fields can still lose a
+    user-chosen label and a tag the user added — measured on the reporter's
+    own shape (finding F4 of #2060), and unacceptable for a write the user
+    never asked for. This writer touches exactly what the seed owns: the
+    instructions, the routing description, the seed-owned capability tags,
+    the class (under :func:`_resolved_seed_class`), and the provenance stamps.
+    Label, model, categories, security prompt, sampling and every non-seed tag
+    are left alone.
+
+    ORDER IS THE CRASH CONTRACT, not style: the prompt lands FIRST (already
+    atomic in the registry), the tag/stamp rewrite LAST, so a crash between
+    the two leaves tags pointing at the OLD revision — the update simply
+    re-applies next launch — never a fresh "updated" stamp over an old
+    prompt. ``update_agent`` writes ``agent.yml`` atomically for the same
+    class of reason: the strict registry gate refuses every profile while that
+    file is short, and several ``lop`` processes start at once on a machine.
+    """
+
+    from local_operator.agents import AgentEditFields
+
+    profile = profile_from_agent(registry, agent)
+    class_value = _resolved_seed_class(agent, profile, seed, load_seed_revisions())
+    target = AgentProfile(
+        name=seed.name,
+        instructions=seed.instructions,
+        description=seed.description,
+        when_to_use=seed.when_to_use,
+        tools=seed.tools,
+        effort=seed.effort,
+        may_delegate=seed.may_delegate,
+        action_class=class_value,
+    )
+    kept = [str(tag) for tag in (agent.tags or []) if not _is_seed_owned_tag(tag)]
+    tags = [
+        *(tag for tag in seed_tags(seed) if not tag.lower().startswith("class:")),
+        *kept,
+        f"{CLASS_TAG_KEY}:{class_value}",
+        f"{SEED_ORIGIN_PREFIX}{seed.name}",
+        f"{SEED_SHA256_PREFIX}{seed_fingerprint(target)}",
+    ]
+    version = load_seed_version(seed.name)
+    if version:
+        tags.append(f"{SEED_VERSION_PREFIX}{version}")
+
+    description = seed.when_to_use or seed.description or ""
+    registry.set_agent_system_prompt(agent.id, seed.instructions)
+    # Every other field is explicitly None: ``AgentEditFields`` is validated in
+    # strict mode and pyright's pydantic pass requires the full spelling - the
+    # same convention ``install_seed``'s ``_fields`` documents and follows.
+    registry.update_agent(
+        agent.id,
+        AgentEditFields(
+            name=None,
+            label=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            description=description,
+            tags=tags,
+            categories=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        ),
+    )
+    return True
+
+
 def _sync_one_seed(
-    registry: "AgentRegistry", key: str, agent: "AgentData", *, force: bool
+    registry: "AgentRegistry",
+    key: str,
+    agent: "AgentData",
+    *,
+    force: bool,
+    apply: bool = True,
+    revisions: Mapping[str, tuple[SeedRevision, ...]] | None = None,
 ) -> SeedSyncVerdict:
     """Classify (and, where allowed, apply) one seed-origin row."""
 
@@ -1487,6 +2174,7 @@ def _sync_one_seed(
     diverged = seed_divergence(profile, seed)
     baseline = _installed_fingerprint(agent)
     mine = _seed_field_values(profile)
+    ledger = revisions if revisions is not None else load_seed_revisions()
 
     def _verdict(**overrides: Any) -> SeedSyncVerdict:
         base: dict[str, Any] = dict(
@@ -1511,8 +2199,8 @@ def _sync_one_seed(
             (field, _field_text(values.get(field))) for field in diverged if field != "instructions"
         )
 
-    def _apply() -> bool:
-        """Overwrite the classified row with the packaged starter.
+    def _apply_forced() -> bool:
+        """Overwrite the classified row with the packaged starter, wholesale.
 
         Targets ``agent.name`` — the row THIS verdict is about — not the folded
         ``key``. Install now falls back to the same fold, but naming the row
@@ -1520,9 +2208,44 @@ def _sync_one_seed(
         direct fix for the case-renamed row folded discovery finds while the
         exact apply lookup used to miss it (there minting a duplicate
         ``reviewer`` beside ``Reviewer``; agent review round 1, M2).
+
+        The WHOLESALE writer, reserved for the explicit path (``force=True``):
+        it restores the packaged label and drops non-seed tags, which is what
+        "reset to the packaged version" promises — and why the unattended
+        clean arm must NOT use it (finding F4 of #2060: a clean apply through
+        install still reset a chosen label and lost a user's own tags).
         """
 
         return install_seed(agent.name, registry=registry, overwrite=True) is not None
+
+    def _apply_clean() -> bool:
+        """The unattended-safe writer: only the fields the seed owns.
+
+        See :func:`_apply_seed_update`. The division of labour is the point:
+        forced replaces keep ``install_seed``'s reset semantics, while an
+        update nobody asked for must leave everything the seed does not own
+        (label, non-seed tags, model, categories) exactly as it found it.
+        """
+
+        return _apply_seed_update(registry, agent, seed)
+
+    def _clean_verdict(behind_by: int | None) -> SeedSyncVerdict:
+        """The shared shape of both clean arms (ledger-positioned and stamp)."""
+
+        applied = _apply_clean() if apply else False
+        return _verdict(
+            verdict="outdated-clean",
+            applied=applied,
+            behind_by=behind_by,
+            replaced_instructions=(profile.instructions or "") if applied else None,
+            replaced_fields=_replaced_fields() if applied else (),
+            detail=(
+                "the packaged starter changed; this copy was unedited"
+                if applied
+                else f"update available ({installed_version or 'installed'} -> "
+                f"{packaged_version or 'packaged'})"
+            ),
+        )
 
     if not diverged:
         return _verdict(
@@ -1530,14 +2253,53 @@ def _sync_one_seed(
             detail=f"matches the packaged starter ({packaged_version or 'unversioned'})",
         )
 
-    if baseline is None:
-        # No install record, so "did the starter move?" is unanswerable: the
-        # row differs from the packaged text, and whether that is because
-        # someone edited it or because the package changed cannot be told from
-        # what was recorded (nothing was). The refusal is the safe direction,
-        # and the wording says exactly what is known instead of announcing an
-        # update or a local edit it cannot prove (agent review round 1, M1).
-        applied = _apply() if force else False
+    matched_index, _proof = _resolve_row_revision(key, profile, baseline, ledger)
+    packaged_index = _packaged_revision_index(seed, ledger.get(key, ()))
+
+    # Position-decided cases first: both ends of the move are published, so the
+    # ledger can say which way "different" points — the direction version
+    # strings cannot (aida shipped four ``1.0.0`` builds, two of them same-day).
+    if matched_index is not None and packaged_index is not None:
+        if matched_index == packaged_index:
+            # The same revision; only the class can differ here (identity
+            # covers every other field), and a switched class is the user's to
+            # keep — nothing to write, nothing to warn about.
+            return _verdict(
+                verdict="up-to-date",
+                detail=(
+                    f"no update to pull (installed {installed_version or 'unversioned'}); "
+                    "this copy has local edits — see op='show'"
+                ),
+            )
+        if matched_index > packaged_index:
+            # AHEAD: this copy holds a NEWER published revision than the
+            # package being run (a downgraded ``lop``, a channel switch).
+            # Silence and no write — an older build must never flip a newer
+            # build's update back, or the two ping-pong the row (finding F6
+            # of #2060). The report explains itself for a typed sync.
+            return _verdict(
+                verdict="up-to-date",
+                detail=(
+                    f"newer than this build ships (installed "
+                    f"{installed_version or 'unversioned'}, packaged "
+                    f"{packaged_version or 'unversioned'}) — leaving it alone"
+                ),
+            )
+        # Strictly behind, provably an unedited published revision: the clean
+        # arm. Applied through the narrow writer; READ-ONLY callers get the
+        # same classification with applied=False so the renderer can say
+        # "update available" without claiming a write that did not happen.
+        return _clean_verdict(packaged_index - matched_index)
+
+    if baseline is None and matched_index is None:
+        # No install record AND no ledger position: "did the starter move?" is
+        # unanswerable — the row differs from the packaged text, and whether
+        # that is because someone edited it or because the package changed
+        # cannot be told from anything recorded. The refusal is the safe
+        # direction, and the wording says exactly what is known instead of
+        # announcing an update or a local edit it cannot prove (agent review
+        # round 1, M1).
+        applied = _apply_forced() if (force and apply) else False
         return _verdict(
             verdict="outdated-diverged",
             applied=applied,
@@ -1548,51 +2310,46 @@ def _sync_one_seed(
                 if applied
                 else (
                     "no install record — cannot tell whether the starter moved or this "
-                    "copy was edited; re-run with force to take the packaged text"
+                    "copy was edited; to take the packaged text, run "
+                    f"`lop agents sync --name {key} --replace --yes`"
                 )
             ),
         )
 
-    if seed_fingerprint(seed) == baseline:
-        # The packaged starter still holds what this row was installed from, so
-        # the difference is a local edit and there is nothing to PULL — applying
-        # would mean silently reverting someone's work, which is ``reset``'s
-        # explicit job. Decided by the FINGERPRINT, not the version string: a
-        # body change shipped without a version bump is a real package move,
-        # and comparing versions first is how it was mis-reported as "local
-        # edits" and became un-updateable even with force (review round 1, M1).
+    if seed_fingerprint(seed) == baseline or _legacy_fingerprint(seed) == baseline:
+        # The packaged starter still holds what this row was installed from
+        # (under either era of the formula), so the difference is a local edit
+        # and there is nothing to PULL — applying would mean silently reverting
+        # someone's work, which is ``reset``'s explicit job. Decided by the
+        # FINGERPRINT, not the version string: a body change shipped without a
+        # version bump is a real package move, and comparing versions first is
+        # how it was mis-reported as "local edits" and became un-updateable
+        # even with force (review round 1, M1).
         return _verdict(
             verdict="up-to-date",
             detail=(
-                f"no update to pull (installed {installed_version}); "
+                f"no update to pull (installed {installed_version or 'unversioned'}); "
                 "this copy has local edits — see op='show'"
             ),
         )
 
-    # The packaged starter moved. Direction is deliberately not gated on version
-    # ORDER: sync means "make this copy match the starter THIS build ships", so
-    # a downgrade (``lop`` downgraded, channel switched, a starter reverted) is
-    # the same update in the other direction — both versions and the replaced
-    # text ride in the receipt, so it is never silent (QA round 1, Q-1, recorded
-    # in the remediation as the intended call).
-    if seed_fingerprint(profile) == baseline:
-        # Provably untouched since install: apply. This is the ordinary "user
-        # updates local-operator, runs sync" path, and it is safe precisely
-        # because the fingerprint proves no local edit can be lost — the echo of
-        # the replaced text is kept anyway, matching reset.
-        applied = _apply()
-        return _verdict(
-            verdict="outdated-clean",
-            applied=applied,
-            replaced_instructions=profile.instructions or "",
-            replaced_fields=_replaced_fields() if applied else (),
-            detail="the packaged starter changed; this copy was unedited",
-        )
+    if _stamp_family_clean(profile, baseline):
+        # No ledger position for the packaged text (a dev worktree, a rollback)
+        # or for the row, but the stamp recomputes from the row's own fields:
+        # it is what SOME build installed, so typed sync keeps its pre-ledger
+        # semantics — "make this copy match the starter THIS build ships", a
+        # downgrade being the same update in the other direction (QA round 1,
+        # Q-1) — while the startup pass refuses this path unattended: a stamp
+        # proves "unchanged", never direction (finding F6 of #2060).
+        return _clean_verdict(None)
 
     # Moved and not provably clean: never overwrite a possibly-edited prompt
-    # without an explicit force — the same refusal `reset` makes for rows it
-    # cannot prove the harness wrote.
-    applied = _apply() if force else False
+    # without an explicit replace — the same refusal ``reset`` makes for rows
+    # it cannot prove the harness wrote. The remedy names the flag pair the
+    # CLI actually honours (``--replace --yes``); ``force`` is deprecated and
+    # hidden, and prescribing it here would have sent users to a flag whose
+    # own warning points at ``--replace`` (finding F2 of #2060).
+    applied = _apply_forced() if (force and apply) else False
     return _verdict(
         verdict="outdated-diverged",
         applied=applied,
@@ -1601,10 +2358,448 @@ def _sync_one_seed(
         detail=(
             "forced over local edits"
             if applied
-            else "re-run with force to replace it"
+            else f"to take the packaged text, run `lop agents sync --name {key} --replace --yes`"
             + (f" (installed {installed_version})" if installed_version else "")
         ),
     )
+
+
+# -- startup pass ------------------------------------------------------------
+#
+# THE STARTUP HALF OF #2060, and where it lives: `run_startup_migrations` is
+# the ONE seam `cli.main` calls for every subcommand, and its doctrine (never
+# raise, no stamp file, refuse before constructing anything on a storeless
+# machine) is exactly what an unattended write needs. One arm here is NOT
+# enough by itself, because the seam knows about surfaces:
+
+#: Whether the startup pass may auto-apply untouched starter updates.
+#: Default ON: an operator upgrading ``lop`` reasonably expects the built-in
+#: roles to learn what the release taught them (issue #2060), and the pass
+#: only ever writes rows the LEDGER proves are unedited published revisions
+#: that are strictly behind their packaged starter. The key
+#: (``agents.auto_update.seeds``) turns the unattended write off while keeping
+#: the drift REPORT: sync stays the only writer.
+AUTO_UPDATE_SEEDS_DEFAULT = True
+
+#: File name of the per-config-root notice queue, beside ``config.yml``. It is
+#: deliberately IN the config dir (not the package): every config root gets
+#: its own de-dup memory, and deleting it costs at most one repeated notice.
+SEED_NOTICES_NAME = ".seed-notices.json"
+
+#: The lock file name serialising unattended writes and notice-state updates.
+#: Sized for a machine where several ``lop`` processes start at once (TUI,
+#: serve, wake) — the same contention the wake store's lock already answers.
+SEED_SYNC_LOCK_NAME = ".seed-sync.lock"
+
+
+@dataclass(frozen=True)
+class SeedStartupOutcome:
+    """What one startup pass did, per row and per notice.
+
+    A frozen record rather than log-only sides: the pass runs unattended, so
+    the test suite is the only observer — and the fields are exactly what a
+    test asserts without re-deriving state (an ``applied`` name, a held name,
+    the lines it announced). ``skipped`` carries the rows whose write was
+    withheld because the lock was busy; "silent" rows (no ledger proof,
+    ahead, up-to-date) are deliberately absent from every field — silence is
+    the documented outcome for them.
+    """
+
+    applied: tuple[str, ...] = ()
+    held: tuple[str, ...] = ()
+    available: tuple[str, ...] = ()
+    announced: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+
+def _auto_update_seeds_enabled(config_dir: Path) -> bool:
+    """The ``agents.auto_update.seeds`` key, read once per pass. Never raises.
+
+    Absent means the shipped default (ON) — turning the pass off is an
+    explicit off. A non-bool value reads as unset rather than truthy (the
+    ``hub_sync.settings._bool`` rule): a hand-edited ``"false"`` string must
+    neither mean True nor crash the start path.
+    """
+
+    from local_operator.config import ConfigManager
+
+    value = ConfigManager(config_dir).get_nested_value(
+        ("agents", "auto_update", "seeds"), AUTO_UPDATE_SEEDS_DEFAULT
+    )
+    return value if isinstance(value, bool) else AUTO_UPDATE_SEEDS_DEFAULT
+
+
+def _installed_via_updater() -> bool:
+    """Whether THIS install kind may be self-updated unattended.
+
+    Lazy import, and the call site late: ``local_operator.update`` drags
+    ``ssl``/``urllib``/``http.client``, and the pass must not pay that on
+    every CLI start. It is also the seam a harness patches to exercise the
+    apply path from a dev venv: an EDITABLE install (a worktree ``.venv``) is
+    report-only by design, because dev venvs share the operator's real config
+    dir (finding F6 of #2060) and an edit in one must not rewrite a row the
+    installed runtime is using.
+    """
+
+    from local_operator.update import InstallKind, install_kind
+
+    return install_kind() in (InstallKind.UV_TOOL, InstallKind.PIPX, InstallKind.PIP)
+
+
+def _seed_version_note(installed: str | None, packaged: str) -> str:
+    """``" (1.0.0 -> 1.4.0)"`` for a notice line, or ``""`` when unknowable."""
+
+    if installed and packaged:
+        if installed == packaged:
+            return f" ({packaged}, text moved)"
+        return f" ({installed} -> {packaged})"
+    return ""
+
+
+def _seed_display_name(agent: "AgentData") -> str:
+    """The row as the user sees it (``Aida``, not ``aida``)."""
+
+    from local_operator.display_labels import display_form
+
+    return display_form(str(agent.name or ""), str(getattr(agent, "label", "") or ""))
+
+
+def _held_notice_line(display: str, name: str, diverged_fields: tuple[str, ...]) -> str:
+    """The held-row notice: an update exists, but it changes a capability."""
+
+    wording = {
+        "tools": "the role's tool access",
+        "delegate": "what the role may delegate",
+        "effort": "which model tier the role runs on",
+    }
+    what = next((text for field, text in wording.items() if field in diverged_fields), None)
+    return (
+        f"{display}: a newer packaged starter is available, but it changes "
+        f"{what or 'what the role is allowed to do'}. "
+        f"Run `lop agents sync --name {name}` to review."
+    )
+
+
+def _reported_notice_line(display: str, installed: str | None, packaged: str) -> str:
+    """The report-only notice (auto-update off, or an install that cannot self-update)."""
+
+    return (
+        f"{display}: an update to the packaged starter is available"
+        f"{_seed_version_note(installed, packaged)}. Run `lop agents sync` to apply it."
+    )
+
+
+def _applied_notice_line(display: str, installed: str | None, packaged: str) -> str:
+    """The applied notice. Only ever composed AFTER a successful write."""
+
+    return (
+        f"{display}'s instructions updated to the packaged starter"
+        f"{_seed_version_note(installed, packaged)}; your settings were kept."
+    )
+
+
+def _load_seed_notice_state(config_dir: Path) -> tuple[dict[str, str], list[str]]:
+    """``(announced, pending)`` from ``.seed-notices.json``; corrupt reads empty.
+
+    A corrupt or missing file costs at most ONE duplicate notice (the de-dup
+    map is what is lost) — it can never suppress a repair or raise on the
+    start path. That is why this is a legitimate exception to the seam's
+    "no stamp file" doctrine: the doctrine exists because a stale/corrupt
+    stamp could SKIP a migration; this file gates only display.
+    """
+
+    try:
+        payload = json.loads((Path(config_dir) / SEED_NOTICES_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, []
+    if not isinstance(payload, dict):
+        return {}, []
+    announced_raw = payload.get("announced")
+    pending_raw = payload.get("pending")
+    announced = (
+        {str(key): str(value) for key, value in announced_raw.items()}
+        if isinstance(announced_raw, dict)
+        else {}
+    )
+    pending = [str(line) for line in pending_raw] if isinstance(pending_raw, list) else []
+    return announced, pending
+
+
+def _write_seed_notice_state(
+    config_dir: Path, *, announced: dict[str, str], pending: list[str]
+) -> None:
+    """Replace ``.seed-notices.json`` atomically; a peer's concurrent write is
+    last-writer-wins and costs at most a duplicate notice, never a partial
+    file — readers only ever see whole documents (``os.replace``)."""
+
+    from local_operator.agents import _write_text_atomically
+
+    payload = {
+        "schema_version": 1,
+        "announced": announced,
+        "pending": pending,
+    }
+    _write_text_atomically(
+        Path(config_dir) / SEED_NOTICES_NAME,
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    )
+
+
+def drain_pending_seed_notices(config_dir: Path) -> list[str]:
+    """Take the queued notice lines and clear them, KEEPING the de-dup map.
+
+    The TUI boot hook's half of the notice channel (delivery). Delivery clears
+    ``pending`` but keeps ``announced``: an undelivered notice survives a
+    crash and shows next boot, while a delivered one cannot fire again — and
+    because the de-dup token is per seed x packaged revision, a FUTURE update
+    re-notifies while a standing one stays quiet. A write failure leaves
+    ``pending`` in place (show again next boot: the safe direction).
+    """
+
+    announced, pending = _load_seed_notice_state(config_dir)
+    if not pending:
+        return []
+    try:
+        _write_seed_notice_state(config_dir, announced=announced, pending=[])
+    except OSError:
+        logger.debug("seed notices: could not clear pending; they will show again")
+    return pending
+
+
+def startup_seed_update_pass(
+    config_dir: Path,
+    *,
+    surface: str = "cli",
+) -> SeedStartupOutcome:
+    """Report starter drift on every launch; auto-apply the rows the ledger proves.
+
+    THE #2060 HEADLINE, in the one place the whole startup doctrine allows an
+    unattended writer. What it does, in order, and every refusal is silent by
+    design except where a notice is named:
+
+    * STORELESS MACHINES RETURN BEFORE ANYTHING IS CONSTRUCTED: no ``agents/``
+      directory, no registry, no config read — ``AgentRegistry.__init__`` would
+      ``mkdir`` the store the machine deliberately does not have
+      (``test_cli_org_sharing`` pins that). The same rule
+      ``backfill_seed_action_class`` documents.
+    * A missing or corrupt LEDGER ends the pass silently: without positions
+      there is no proof of direction, and a dev build must not nag.
+    * A row split into: applied (ledger-positioned strictly behind, delta
+      prose/description-only, packaged text == ledger tail, this install kind
+      may self-update, the setting is on — written through the narrow writer
+      under a lock, after a re-check); held (ledger-positioned, but the delta
+      touches ``tools``/``effort``/``delegate`` — a capability boundary is
+      never widened unattended); available (eligible but report-only: the
+      setting is off, or this install kind is EDITABLE); silent (up-to-date,
+      ahead, no ledger proof, draft packaged text, unsupported rows).
+    * NOTICES de-dup per seed x packaged revision in ``.seed-notices.json``:
+      CLI lines go to ``logger.info`` (visible on CLI stderr; the TUI wraps
+      its run in ``file_logging``), TUI lines go to the file's ``pending``
+      queue for the boot hook to deliver. ``--check``/``--dry-run`` never
+      reach this file at all: the ``agents sync`` carve-out in the seam keeps
+      the whole pass off that command.
+
+    One writer at a time, bounded: the wake store's lock serialises peers (a
+    machine starts the TUI, ``serve`` and a wake supervisor together), a busy
+    lock skips this launch silently and the next retries, and the row is
+    re-verified under the lock so a classification made moments earlier
+    cannot write a row that moved since. Every failure is caught per row and
+    per phase: the pass may skip, delay, or under-claim, and it may never
+    raise into ``cli.main`` or claim a write it did not make.
+    """
+
+    config_dir = Path(config_dir)
+
+    # (1) THE STORELESS GATE, before any construction. See the docstring.
+    if not (config_dir / "agents").is_dir():
+        return SeedStartupOutcome()
+
+    revisions = load_seed_revisions()
+    if not revisions:
+        return SeedStartupOutcome()
+
+    from local_operator.agents import AgentRegistry
+
+    try:
+        registry = AgentRegistry(config_dir)
+        rows = _installed_seed_rows(registry)
+    except Exception:  # noqa: BLE001 - never a reason a launch fails
+        logger.debug("seed update pass: no readable registry", exc_info=True)
+        return SeedStartupOutcome()
+
+    if not rows:
+        return SeedStartupOutcome()
+
+    classified: list[tuple[str, SeedSyncVerdict]] = []
+    for key in sorted(rows):
+        try:
+            classified.append(
+                (
+                    key,
+                    _sync_one_seed(
+                        registry, key, rows[key], force=False, apply=False, revisions=revisions
+                    ),
+                )
+            )
+        except Exception:  # noqa: BLE001 - one unreadable row never stops the pass
+            logger.debug("seed update pass: skipping row %r", key, exc_info=True)
+
+    apply_candidates: list[str] = []
+    held: list[str] = []
+    available: list[str] = []
+    for key, verdict in classified:
+        if verdict.verdict != "outdated-clean" or verdict.behind_by is None:
+            # up-to-date, ahead, or no ledger position: silent. A stamp-cleaned
+            # row lands here too - unattended writes require the ledger.
+            continue
+        if _packaged_tail_entry(key, revisions) is None:
+            # The packaged text is not the ledger's tail: a draft prompt in a
+            # worktree, or a rollback. Never auto-apply, never nag.
+            continue
+        if set(verdict.diverged_fields) <= {"instructions", "description"}:
+            apply_candidates.append(key)
+        else:
+            held.append(key)
+
+    if apply_candidates:
+        if not _auto_update_seeds_enabled(config_dir):
+            available.extend(apply_candidates)
+            apply_candidates = []
+        elif not _installed_via_updater():
+            available.extend(apply_candidates)
+            apply_candidates = []
+
+    def _notice_token(key: str) -> str | None:
+        entry = _packaged_tail_entry(key, revisions)
+        return f"{key}:{entry.sha}" if entry is not None else None
+
+    announced, pending = _load_seed_notice_state(config_dir)
+    planned: list[tuple[str, str]] = []  # (token, line), in emission order
+
+    def _plan(key: str, line: str) -> None:
+        token = _notice_token(key)
+        if token is None or token in announced or any(t == token for t, _ in planned):
+            return
+        planned.append((token, line))
+
+    for key in held:
+        agent = rows.get(key)
+        if agent is not None:
+            verdict = next((v for k, v in classified if k == key), None)
+            _plan(
+                key,
+                _held_notice_line(
+                    _seed_display_name(agent),
+                    key,
+                    verdict.diverged_fields if verdict is not None else (),
+                ),
+            )
+    for key in available:
+        agent = rows.get(key)
+        if agent is None:
+            continue
+        _plan(
+            key,
+            _reported_notice_line(
+                _seed_display_name(agent),
+                marker_value(agent, SEED_VERSION_PREFIX),
+                load_seed_version(key),
+            ),
+        )
+
+    if not apply_candidates and not planned:
+        return SeedStartupOutcome(
+            held=tuple(sorted(held)),
+            available=tuple(sorted(available)),
+        )
+
+    from local_operator.wakes.lock import (
+        WakeLockBusy,
+        WakeLockUnavailable,
+        WakeWriteLock,
+    )
+
+    lock = WakeWriteLock(config_dir, name=SEED_SYNC_LOCK_NAME, timeout_s=5.0)
+    try:
+        lock.acquire()
+    except (WakeLockBusy, WakeLockUnavailable):
+        # Another launch is mid-write: skip this launch SILENTLY (nothing
+        # logged, nothing queued, nothing recorded); the next launch retries.
+        logger.debug("seed update pass: another writer holds the lock; skipping")
+        return SeedStartupOutcome(skipped=tuple(sorted({*apply_candidates, *held, *available})))
+
+    try:
+        emitted: list[str] = []
+        applied: list[str] = []
+        if apply_candidates:
+            try:
+                registry.refresh_now()
+                fresh_rows = _installed_seed_rows(registry)
+            except Exception:  # noqa: BLE001
+                fresh_rows = rows
+            for key in apply_candidates:
+                agent = fresh_rows.get(key)
+                if agent is None:
+                    continue
+                try:
+                    # Re-verify under the lock: the row may have moved since
+                    # classification (another process, a person's edit).
+                    recheck = _sync_one_seed(
+                        registry, key, agent, force=False, apply=False, revisions=revisions
+                    )
+                    if recheck.verdict != "outdated-clean" or recheck.behind_by is None:
+                        continue
+                    if _packaged_tail_entry(key, revisions) is None:
+                        continue
+                    seed = load_seed(key)
+                    if seed is None:  # pragma: no cover - tier 1 already loaded it
+                        continue
+                    _apply_seed_update(registry, agent, seed)
+                    applied.append(key)
+                    line = _applied_notice_line(
+                        _seed_display_name(agent),
+                        marker_value(agent, SEED_VERSION_PREFIX),
+                        load_seed_version(key),
+                    )
+                    emitted.append(line)
+                    # The applied notice joins the SAME de-dup map as the
+                    # held/available ones (both de-dup, per the manager
+                    # addendum): recorded under this seed x packaged revision,
+                    # so a NEW revision still re-notifies while this one never
+                    # repeats.
+                    token = _notice_token(key)
+                    if token is not None:
+                        announced[token] = line
+                except Exception:  # noqa: BLE001 - never partial claims, never stops start
+                    logger.warning("seed update pass: could not update %r", key, exc_info=True)
+
+        for token, line in planned:
+            if token in announced:
+                continue
+            announced[token] = line
+            emitted.append(line)
+
+        if emitted:
+            try:
+                if surface == "tui":
+                    _write_seed_notice_state(
+                        config_dir, announced=announced, pending=[*pending, *emitted]
+                    )
+                else:
+                    _write_seed_notice_state(config_dir, announced=announced, pending=pending)
+            except Exception:  # noqa: BLE001 - display-only state
+                logger.debug("seed update pass: could not record notices", exc_info=True)
+        if emitted and surface != "tui":
+            for line in emitted:
+                logger.info("%s", line)
+        return SeedStartupOutcome(
+            applied=tuple(applied),
+            held=tuple(sorted(held)),
+            available=tuple(sorted(available)),
+            announced=tuple(emitted),
+        )
+    finally:
+        lock.release()
 
 
 #: Anything with a ``.name``; the tool types live in ``harness.types`` and

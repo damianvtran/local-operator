@@ -437,3 +437,35 @@ def test_the_payload_carries_every_verdict_field_and_a_kind(tmp_path) -> None:
     assert by_name["hunter"]["kind"] == "hub"
     assert by_name["hunter"]["hub_id"] == "abc-123"
     assert payload["summary"]["up-to-date"] == 1
+
+
+def test_an_available_update_renders_as_available_not_updated() -> None:
+    """A READ-ONLY classification must not claim a write (F2's over-claim trap).
+
+    ``counts()`` used to bucket any ``outdated-clean`` as "updated" and the
+    renderer printed "updated to the packaged starter" unconditionally — both
+    were true only while a clean row was ALWAYS applied on the spot. Under
+    ``--check``/``--dry-run`` it is written nowhere, so both halves must learn
+    the distinction, and the applied form keeps its old words.
+    """
+
+    def verdict(*, applied: bool) -> SeedSyncVerdict:
+        return SeedSyncVerdict(
+            name="reviewer",
+            verdict="outdated-clean",
+            installed_version="1.0.0",
+            packaged_version="2.0.0",
+            applied=applied,
+        )
+
+    available = SyncReport(entries=(verdict(applied=False),))
+    text = available.render()
+    assert "update available (1.0.0 -> 2.0.0)" in text
+    assert "updated to the packaged starter" not in text
+    assert available.counts()["available"] == 1
+    assert available.counts()["updated"] == 0
+
+    applied = SyncReport(entries=(verdict(applied=True),))
+    assert "updated to the packaged starter (1.0.0 -> 2.0.0)" in applied.render()
+    assert applied.counts()["updated"] == 1
+    assert applied.counts()["available"] == 0

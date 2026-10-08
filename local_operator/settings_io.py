@@ -681,6 +681,21 @@ SECTIONS: tuple[Section, ...] = (
         "which model resolves a conflict. Your edits and deletions are merged, "
         "never overwritten.",
     ),
+    # The agents key. NEW_LAUNCH, honestly: its one consumer is the startup
+    # seed-update pass, which reads it under the config-migration seam at each
+    # ``lop`` process start — an edit lands on the next launch and nothing
+    # re-reads it mid-session. Turning it OFF keeps REPORTING (drift is still
+    # classified and noticed; only the unattended write stops) — the same
+    # split the hub's auto-update switches use.
+    Section(
+        "agents",
+        "Agents",
+        Scope.NEW_LAUNCH,
+        "Whether installed starter roles (reviewer, coder, aida, ...) update "
+        "themselves to the packaged text at launch when you have not edited "
+        "them. Off = updates are still reported; apply them with 'lop agents "
+        "sync'.",
+    ),
     # The projects store's own knobs. LIVE because the staleness window is
     # resolved at each staleness computation (the badge, the tool rows, the
     # completion check and the wake-trigger snapshot all read through
@@ -4119,6 +4134,26 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder="provider/model",
         help="provider/model for merges; empty uses your default model.",
         empty_unsets=True,
+    ),
+    # -- agents ------------------------------------------------------------
+    # The starter-update switch. A LITERAL default for the same reason the hub
+    # keys are literals: this module stays off the import path of the package
+    # that reads the key (``local_operator.agent_profiles`` pulls the registry
+    # machinery), and ``_consumer_defaults()`` in tests/unit/test_settings_io.py
+    # imports ``AUTO_UPDATE_SEEDS_DEFAULT`` from there to pin the two cannot
+    # drift. Path is a genuinely NESTED tuple, read back through
+    # ``ConfigManager.get_nested_value`` by ``_auto_update_seeds_enabled``.
+    Setting(
+        key="agents.auto_update.seeds",
+        path=("agents", "auto_update", "seeds"),
+        section="agents",
+        label="Auto-update starters",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            "update untouched starters automatically", "only tell me; I apply them"
+        ),
+        help="Apply packaged starter updates you have not edited, at launch.",
     ),
     # -- aida --------------------------------------------------------------
     # Defaults are LITERALS here, not imports: this module deliberately keeps the
