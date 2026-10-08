@@ -588,15 +588,27 @@ def test_a_specialist_named_after_a_seed_attaches_its_own_prompt(tmp_path, monke
     assert "[role: reviewer]" not in brief, brief
 
 
-def test_agent_brief_coexists_with_team_brief(tmp_path, monkeypatch):
-    """The two briefs live in separate fields: attaching an agent must not
-    drop the roster a /team manager is coordinating, and vice versa."""
+def test_a_team_supersedes_an_agent_and_then_closes_the_slot(tmp_path, monkeypatch):
+    """Issue #2014: the two briefs no longer COEXIST — a team owns the slot.
+
+    The previous behaviour layered a specialist brief after the manager's and
+    left prompt ORDER as the only precedence rule, so a manager told "you
+    coordinate; you do not implement" could be handed a reviewer brief in the
+    same session with nothing deciding which voice won. What has to hold now:
+    attaching a team replaces the profile adopted before it (one persona on the
+    tail), and ``/agent`` is refused while the team is attached, naming the team
+    and the way out.
+    """
     from datetime import datetime, timezone
 
+    from local_operator.session.errors import AgentSlotOwnedByTeam
     from local_operator.teams import Team, TeamMember
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
+    assert parent.active_agent == "reviewer"
+
     parent.attach_team(
         Team(
             id="t1",
@@ -607,9 +619,22 @@ def test_agent_brief_coexists_with_team_brief(tmp_path, monkeypatch):
             instructions="Review before merge.",
         )
     )
-    assert parent.attach_agent_profile("reviewer") == "reviewer"
+
+    # The team's manager is the speaker; the reviewer brief is GONE, not layered.
+    assert parent.active_agent == "manager"
+    assert parent._goal_state.agent_brief == ""
     assert "Review before merge." in parent._goal_state.team_brief
-    assert parent._goal_state.agent_brief.startswith("[role: reviewer]")
+
+    # And the slot is closed, with the reason and the remedy.
+    with pytest.raises(AgentSlotOwnedByTeam) as refusal:
+        parent.attach_agent_profile("reviewer")
+    assert "team feature-release" in str(refusal.value)
+    assert "/team clear" in str(refusal.value)
+
+    # Detaching the team frees the slot again.
+    parent.attach_team(None)
+    assert parent.active_agent == ""
+    assert parent.attach_agent_profile("reviewer") == "reviewer"
 
 
 def test_a_team_manager_specialist_named_after_a_seed_wins_over_the_seed(tmp_path, monkeypatch):

@@ -51,7 +51,7 @@ def test_real_team_preflight_and_attachment(tmp_path):
             model_suggestion=ModelSuggestion(hosting="openrouter", model="vendor/model"),
         )
     )
-    args = ExecArgs(team="release", profile="reviewer", goal="clear", name="Audit")
+    args = ExecArgs(team="release", goal="clear", name="Audit")
     resolved = resolve_startup(args)
     assert resolved.id == team.id
     # The stored suggestion survives the registry round trip, so the value the
@@ -64,9 +64,47 @@ def test_real_team_preflight_and_attachment(tmp_path):
     session = Mock()
     apply_startup(session, args, resolved)
     session.attach_team.assert_called_once_with(resolved)
-    session.attach_agent_profile.assert_called_once_with("reviewer")
+    # A team owns the agent slot (issue #2014), so the team half attaches and
+    # NOTHING is stamped over it. The pair is refused one cell below.
+    session.attach_agent_profile.assert_not_called()
     session.set_goal.assert_called_once_with("clear")
     session.set_conversation_name.assert_called_once_with("Audit")
+
+
+def test_a_team_and_a_profile_are_refused_at_preflight(tmp_path):
+    """Issue #2014: a team owns the agent slot, so ``--team X --profile Y`` never
+    reaches a session at all.
+
+    The refusal lives in ``resolve_startup`` ("validate independent inputs
+    without constructing a session or model"), NOT in ``apply_startup`` where
+    the attach would raise: a pair that can never be honoured must not leave a
+    session directory behind to explain itself. The sentence is the session's
+    own (``team_owns_the_agent_slot_message``), printed verbatim here so a
+    rewording that reaches the CLI without reaching the TUI is a test failure.
+    """
+    TeamRegistry(tmp_path / "config").create_team(
+        TeamEditFields(
+            name="release",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="review first",
+            project="headless work",
+        )
+    )
+    with pytest.raises(ValueError) as refusal:
+        resolve_startup(ExecArgs(team="release", profile="reviewer"))
+    # The flag-level fact leads, then the SESSION's sentence verbatim (design
+    # round 1, D6 — a shell user needs to hear which pair is wrong first, and
+    # the desktop lane keys on the second sentence's exact words).
+    assert str(refusal.value) == (
+        "--profile cannot be combined with --team: a team owns the session's "
+        "agent slot. team release owns this session: manager is the speaker, so "
+        "/agent is closed. Run /team clear to detach the team first."
+    )
+    # No manager carve-out: naming the team's own manager is refused too, since
+    # the manager is already the speaker the team attached.
+    with pytest.raises(ValueError):
+        resolve_startup(ExecArgs(team="release", profile="manager"))
 
 
 @pytest.mark.parametrize(

@@ -151,7 +151,7 @@ from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
 # (backend load report B-F10). They are imported at their call sites instead;
 # `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
-from local_operator.session.errors import RuntimeRetiring
+from local_operator.session.errors import AgentSlotOwnedByTeam, RuntimeRetiring
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
     ACTIVITY_PHASE_QUEUED,
@@ -19626,9 +19626,18 @@ class OperatorApp(App[None]):
         the invitation and the refusal can never disagree: where running a team
         works the footer offers it, and where it does not the footer offers
         charting, which does work.
+
+        A team IN FORCE adds the verb that leaves that state (design round 1,
+        D3): the ``/agent`` listing teaches its own detach on a row of its own
+        (``Detach: /agent clear``), and freeing the agent slot is now the only
+        way out of a team, so the command that can enter the state advertises
+        the one that exits it. Read off the session, so the hint cannot outlive
+        the attachment it describes.
         """
         session = self._session
         if callable(getattr(session, "attach_team", None)):
+            if str(getattr(session, "active_team_name", "") or ""):
+                return "Send: /team <name> <message> · Detach: /team clear"
             return "Send: /team <name> <message>"
         return "Chart: /team chart <name>"
 
@@ -19937,6 +19946,56 @@ class OperatorApp(App[None]):
                         next_items.append(text)
         return {session_id: {"todos": {"open": open_count, "total": total, "next": next_items}}}
 
+    def _team_detach_receipt(self) -> tuple[str, str]:
+        """``/team clear`` (and ``/team none``) — detach, and say what moved.
+
+        THE detach implementation for this process, shared by ``_cmd_team`` and
+        ``_team_attach_slash_result`` (the follower seam), so one command cannot
+        paint two receipts (agent review round 1, MINOR-1/MINOR-2). It returns
+        ``(text, style)`` rather than painting, because one caller pushes a
+        plain notice and the other returns a ``SlashResult`` — and a refusal is
+        a line like any other, so neither caller has to distinguish.
+
+        It reads what was in force BEFORE the call, because ``attach_team(None)``
+        deliberately releases the agent slot only when a team owned it: with no
+        team attached the verb is a true no-op, and the receipt must not claim
+        anything moved (agent review + design round 1, D1).
+        """
+        session = self._session
+        detach = getattr(session, "attach_team", None)
+        if not callable(detach):
+            # Name what this session can do instead of reporting a detach it
+            # never made.
+            return (
+                "this session can list and chart teams, but not run one, "
+                "so there is no team to detach",
+                "warning",
+            )
+        # Whether a team was IN FORCE is read off the OBJECT, not the name
+        # (agent review round 2, MINOR-1): ``attach_team``'s own gate is
+        # ``active_team is not None``, and a nameless team used to detach here
+        # under a receipt claiming nothing had happened.
+        attached_before = getattr(session, "active_team", None) is not None
+        try:
+            detach(None)
+        except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
+            return (f"could not detach the team: {exc}", "warning")
+        # BOTH segments move when a team was in force: the roster goes, and so
+        # does the manager name the team claimed for the agent slot (U2 keeps
+        # each synced FROM the session, so the band cannot disagree).
+        self._sync_team_band()
+        self._sync_agent_band()
+        if not attached_before:
+            profile = str(getattr(session, "active_agent", "") or "")
+            if profile:
+                return (
+                    f"no team is attached; {profile} is still this session's speaker, "
+                    "so nothing was detached. Run /agent clear to drop it.",
+                    "info",
+                )
+            return ("no team is attached, so nothing was detached.", "info")
+        return ("no team active; this session uses its base instructions.", "info")
+
     def _cmd_team(
         self,
         arg: str,
@@ -19961,6 +20020,26 @@ class OperatorApp(App[None]):
             self._system_notice(*self._no_session_notice())
             return
         registry = self._team_registry()
+        # The DETACH verb is answered BEFORE the availability guard below it: it
+        # needs the SESSION, not the registry (it is ``attach_team(None)``), and a
+        # session holding a team while the registry read is unavailable must still
+        # be able to free the slot it holds — otherwise the one-way door this verb
+        # exists to prevent is shut exactly when the machine is degraded (agent
+        # review round 1, NIT-3).
+        head, _, tail = arg.partition(" ")
+        matched = head.strip()
+        # ONE leading `=` only, the grammar every other seam runs (agent review
+        # round 2, NIT-2): ``lstrip`` stripped all of them, so ``/team ==clear``
+        # detached here and reported an unknown name everywhere else.
+        if matched.startswith("="):
+            matched = matched[1:]
+        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
+            text, style = self._team_detach_receipt()
+            if style == "warning":
+                self._system_notice(text, style)
+            else:
+                notice(text)
+            return
         if registry is None or not hasattr(registry, "list_teams"):
             self._system_notice(
                 "teams are unavailable in this session. Ask the agent to create one.",
@@ -20007,6 +20086,9 @@ class OperatorApp(App[None]):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # ``clear``/``none`` was answered ABOVE, before the registry guard: only
+        # the bare verb detaches, so a trailing request falls through to the
+        # lookup here, which reports the unknown name it is.
         try:
             team = registry.get_team_by_name(name)
         except Exception as exc:
@@ -20055,8 +20137,12 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
+        # after the claim this session's name is the new one (design round 1,
+        # D5).
+        prior_team = str(getattr(session, "active_team_name", "") or "")
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:
             self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
             return
@@ -20064,13 +20150,25 @@ class OperatorApp(App[None]):
         # the session after the attach, so the segment matches what was actually
         # stamped rather than the name the user typed.
         self._sync_team_band()
+        # Issue #2014: the attach REPLACES the speaker in the agent slot (the
+        # team owns it) and reports which one, so the receipt says so rather than
+        # leaving the old segment's disappearance unexplained. One clause builder,
+        # shared with the routed runtime and the follower seam, so all three
+        # surfaces word it identically.
+        from local_operator.teams import replaced_profile_clause
+
+        dropped = (
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
+            if replaced
+            else ""
+        )
         if not request:
             notice(
                 # The prose names the team as every surface paints it (D4);
                 # the addressing instruction keeps the raw NAME -- it is what
                 # the user types.
                 f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
-                f"Send a request with /team {team.name} <message>."
+                f"Send a request with /team {team.name} <message>." + dropped
             )
             return
         # `_submit_prompt` writes the user row (the request is what the
@@ -20083,7 +20181,9 @@ class OperatorApp(App[None]):
         # and sends them — the marker sits in the request tail the user typed
         # around, so a pasted screenshot reaches the manager as pixels, not a
         # dead ``[Image #N]`` marker.
-        notice(f"sending to {self._team_display_form(team)}. {team.manager} is coordinating.")
+        notice(
+            f"sending to {self._team_display_form(team)}. {team.manager} is coordinating." + dropped
+        )
         self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
@@ -20595,7 +20695,14 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the session's profile IS
+                # the team's manager, so the answer is the team's refusal (which
+                # names ``/team clear``), not "nothing to detach".
+                self._system_notice(str(refusal), "warning")
+                return
             # U2: the band's active-agent segment disappears on detach. Synced
             # from the session (the source of truth `clear_agent_profile` just
             # blanked), not by pushing "" directly, so the band and session can
@@ -20629,6 +20736,13 @@ class OperatorApp(App[None]):
             return
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            # Issue #2014: refused BEFORE resolution, so this is a rule
+            # statement rather than a report about the name the user typed.
+            # Raised by the session, so this copy is the same one the routed
+            # runtime and the ``lop exec`` preflight print.
+            self._system_notice(str(refusal), "warning")
+            return
         except Exception as exc:
             self._system_notice(f"could not attach agent {name!r}: {exc}", "warning")
             return
@@ -50102,6 +50216,14 @@ class OperatorApp(App[None]):
 
     def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
         registry = self._team_registry()
+        if arg:
+            # EVERY argument-carrying form — including the detach verb, which
+            # needs the session and not the registry — is delegated ABOVE the
+            # availability guard, exactly as ``serving.py::_team_slash`` does
+            # (agent review round 3, NIT-3). The attach half applies that guard
+            # itself, for the lookup it actually needs, so the grammar lives in
+            # one place per seam instead of being re-matched here.
+            return self._team_attach_slash_result(arg, registry, SlashResult)
         if registry is None or not hasattr(registry, "list_teams"):
             return SlashResult(
                 kind="notice",
@@ -50194,6 +50316,35 @@ class OperatorApp(App[None]):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # The DETACH verb, byte-for-byte the grammar ``_cmd_team`` and
+        # ``serving.py`` run (issue #2014 added it because a team OWNS the
+        # agent slot, so detaching is the only way to free it again). A request
+        # after the verb is a mistyped attach and falls through to the lookup.
+        if name.lower() in ("clear", "none") and not request:
+            # ONE implementation of the verb for this process (MINOR-1): it also
+            # syncs BOTH band segments, which this seam used to skip. The typed
+            # ``data`` rides only a SUCCESSFUL detach (agent review round 3,
+            # NIT-2): a refusal must not be published as a detach-of-no-team,
+            # or a client painting from it would clear a segment that is still
+            # attached.
+            text, style = self._team_detach_receipt()
+            if style == "warning":
+                return SlashResult(kind="notice", text=text, style=style)
+            return SlashResult(
+                kind="notice",
+                text=text,
+                style=style,
+                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
+        if registry is None or not hasattr(registry, "get_team_by_name"):
+            # The ATTACH half is the one that needs the registry; refusing here
+            # keeps the "unavailable" answer to the form that requires it, now
+            # that the caller delegates before its own guard (NIT-3).
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
+            )
         try:
             team = registry.get_team_by_name(name)
         except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
@@ -50216,13 +50367,27 @@ class OperatorApp(App[None]):
                 text="this session cannot run a team. /team chart <name> shows a roster",
                 style="warning",
             )
+        # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
+        # after the claim this session's name is the new one (design round 1,
+        # D5).
+        prior_team = str(getattr(session, "active_team_name", "") or "")
         try:
-            attach(team)
+            replaced = attach(team)
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
             )
         self._sync_team_band()
+        # The same replacement clause the local handler and the routed runtime
+        # print (issue #2014): one builder, three seams. ``prior_team`` names the
+        # team a TEAM SWITCH displaced, where "profile" would be the wrong noun.
+        from local_operator.teams import replaced_profile_clause
+
+        dropped = (
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
+            if replaced
+            else ""
+        )
         return SlashResult(
             kind="notice",
             text=(
@@ -50233,7 +50398,8 @@ class OperatorApp(App[None]):
                 if not request
                 else f"sending to {self._team_display_form(team)}. "
                 f"{team.manager} is coordinating."
-            ),
+            )
+            + dropped,
             style="info",
             data={
                 "type": "team_attached",
@@ -50262,10 +50428,16 @@ class OperatorApp(App[None]):
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the refusal names the team
+                # and ``/team clear``, and it is raised from the session rather
+                # than rebuilt here so all three seams word it identically.
+                return SlashResult(kind="notice", text=str(refusal), style="warning")
             return SlashResult(
                 kind="notice",
-                text="this session uses its base instructions",
+                text="no agent active; this session uses its base instructions",
                 style="info",
                 data={"type": "agent_attached", "agent": "", "request": ""},
             )
@@ -50276,6 +50448,8 @@ class OperatorApp(App[None]):
             )
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            return SlashResult(kind="notice", text=str(refusal), style="warning")
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"

@@ -27,6 +27,48 @@ class AttachmentUnavailable(ValueError):
         )
 
 
+def team_owns_the_agent_slot_message(team: str, manager: str) -> str:
+    """THE sentence for an agent attach refused while a TEAM owns the slot.
+
+    One builder for every seam that prints it, because they must not paraphrase
+    each other: the session raises it as :class:`AgentSlotOwnedByTeam` (rendered
+    by the TUI-local handler, its follower seams and the routed runtime), and
+    ``exec_startup.resolve_startup`` refuses ``--team … --profile …`` with it
+    before a session or model exists. The ``local-operator-ui`` header lane keys
+    on this exact sentence, so a rewording is a wire change, not a tidy-up.
+
+    ``manager`` may be empty (a reduced team object); the sentence then states
+    the rule without naming a speaker rather than claiming one it does not have.
+    """
+    identity = f"{manager} is the speaker" if manager else "its manager is the speaker"
+    return (
+        f"team {team} owns this session: {identity}, so /agent is closed. "
+        "Run /team clear to detach the team first."
+    )
+
+
+class AgentSlotOwnedByTeam(ValueError):
+    """``/agent`` was refused because a TEAM owns this session's agent slot.
+
+    Issue #2014: a session can carry both a team and an agent, and the two
+    briefs contradicted each other with prompt ORDER as the only precedence
+    rule and no membership check anywhere. The rule is now ``a team owns the
+    agent slot`` (see ``Session.attach_team``): attaching a team makes that
+    team's manager the session's speaker, and the slot is closed to ``/agent``
+    until the team is detached with ``/team clear``.
+
+    Raised from the ONE place the slot moves (``attach_agent_profile`` and
+    ``clear_agent_profile``) rather than checked separately in each front end,
+    so the TUI, the routed runtime, the SDK and the headless ``lop exec``
+    preflight all refuse the same combination with the same sentence — the
+    message IS the operator-facing copy, and a ``ValueError`` subclass keeps
+    every existing ``except Exception`` / preflight handler working.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 #: The sentence ``Session.prompt`` raises when a turn (or a compaction) already
 #: holds the lock. Public because four call sites classify that refusal —
 #: ``mobile/attach_client``, ``mobile/tui_handle``, ``session/runtime/serving``
