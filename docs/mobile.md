@@ -173,8 +173,10 @@ Screens, following branding.md §7's agent-output hierarchy:
   section) and about which list a conversation is in, and the phone's list is
   STABLE across activity refreshes (an early version re-derived the key from
   live state and moved rows as sessions streamed). Two asymmetries, both
-  deliberate: the wake band (the phone's rows carry no wake data, so `wake_rank`
-  is a constant here), and the phone-woken window (a `/wake` accepted but not yet
+  deliberate: the wake band (the phone's session rows carry no wake data, so
+  `wake_rank` is a constant here; wakes and monitors are a separate,
+  machine-wide read — "The armed index" below), and the phone-woken window (a
+  `/wake` accepted but not yet
   discovered is ranked as a live `idle` row so it lands in Active at once — the
   sidebar has no equivalent window, so no equivalent tier). The screen only
   GROUPS what it is sent:
@@ -235,6 +237,31 @@ Screens, following branding.md §7's agent-output hierarchy:
   to the field, and the retained-envelope retry beside it names the instruction
   it would resend — because the field is not where that text necessarily is any
   more.
+
+### The armed index — wakes and monitors (`GET /api/schedules`)
+
+The machine-wide read of what is ARMED: every conversation carrying wakes and
+monitors, in one answer. It is index-backed like the asks aggregate and for
+the same reason — a schedule outlives the runtime it was armed from, so this
+answers with nothing running: one directory scan per store (`wakes/store.py`,
+`monitors/store.py`), no session opened and no owner dialled. The two families
+share one route because they share every surface they are drawn on (the TUI
+paints both into its single wake band), so one fetch feeds the phone's
+Schedules view.
+
+The payload is `{"wakes": …, "monitors": …}`; each value is its desktop
+listing's shape field for field (`GET /v1/desktop/wakes` / `…/monitors`):
+`entries` per carrying conversation (`session_id`, `name`, `cwd`, `origin`,
+`dormant`, `ghost`, `next_due_at`, and the rows beneath), plus `generated_at`,
+`total`, `truncated` and the store's own `read_error` — an index that could
+not be read is reported as such, never as "nothing is armed". The wake listing
+also carries the `supervisor` block (whether anything would actually fire a
+cold wake); the monitor listing deliberately has none — monitors never engage
+a cold session, so a supervisor-shaped field would advertise a watcher that
+does not exist.
+
+The route is READ-ONLY. Arm, edit and cancel stay on the terminal and the
+desktop plane until the phone's write half ships with its own review.
 
 ## Failure modes and rules
 
@@ -318,7 +345,7 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
-| Wakes / schedules | `wake_panel` | schedules | missing (phase 4) |
+| Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
 | Move session | `move_picker` | move session | missing (phase 5) |
 | Org chart / team view | `org_chart_view` | agent hub | missing (phase 5) |
