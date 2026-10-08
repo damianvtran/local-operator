@@ -1173,6 +1173,74 @@ async def test_a_create_on_a_peer_seeds_the_id_every_route_resolves(
     assert relay.ops() == ["peer_session_create"], relay.ops()
 
 
+#: "The reply's record carried no ``started`` key at all" for the seed cell below.
+_SEED_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("claim", "expected"),
+    [
+        pytest.param(True, 0.0, id="bool-true"),
+        pytest.param(False, 0.0, id="bool-false"),
+        pytest.param(None, 0.0, id="null"),
+        pytest.param("abc", 0.0, id="garbage-string"),
+        pytest.param(_SEED_ABSENT, 0.0, id="absent"),
+        pytest.param("1700000000.0", 1700000000.0, id="numeric-string"),
+        pytest.param(1789400999.0, 1789400999.0, id="epoch-float"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_seed_reads_started_exactly_as_the_poll_does(
+    mesh_api, monkeypatch: pytest.MonkeyPatch, claim: object, expected: float
+) -> None:
+    """ONE boundary rule for the claim, on BOTH the seed and the poll (QA round 1, #2044).
+
+    The create reply's ``record`` is a ``local_session_rows``-shaped row, and a
+    peer that has not updated yet still answers with the BOOL this side used to
+    publish under ``started``. The seed used to hand-roll its own reading while
+    the poll's ``PeerRow.from_json`` sent the same claim to its own default —
+    two spellings of one rule, which is how an old peer's bool became ``1.0``
+    (an epoch second into 1970 the sidebar dates "56y") on one path and
+    ``0.0`` on the other. Both now read the claim with ``peer_number``: bools,
+    nulls, garbage, negatives and over-long numbers are the no-claim ``0.0``;
+    a real epoch passes — including the numeric-string spelling the peer
+    boundary documents.
+    """
+    client, root = mesh_api
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=MINE, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(device_id=PEER, name="build-box", role="drive")
+    )
+    network_store.save(record, root)
+    reply_record: dict[str, object] = {"conversation_name": "from an old peer"}
+    if claim is not _SEED_ABSENT:
+        reply_record["started"] = claim
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": OTHER,
+                "admitted": False,
+                "record": reply_record,
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    from local_operator.session.peer_rows import clear_cache, peer_session_row
+
+    clear_cache()
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    row = peer_session_row(OTHER, root)
+    assert row is not None, "the seeded id must still resolve"
+    assert row.created_at == expected, f"the seed read {claim!r} as {row.created_at!r}"
+    assert row.mtime == expected
+
+
 @pytest.mark.asyncio
 async def test_a_name_shaped_peer_still_seeds_the_membership_id(
     mesh_api, monkeypatch: pytest.MonkeyPatch

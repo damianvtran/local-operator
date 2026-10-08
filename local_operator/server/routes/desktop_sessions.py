@@ -2443,6 +2443,7 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     admission in the route.
     """
     from local_operator.network.peers import resolve_peer
+    from local_operator.network.types import peer_number
     from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
     from local_operator.session.peer_rows import seed_peer_row
 
@@ -2452,7 +2453,15 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     record = reply.get("record")
     record = record if isinstance(record, Mapping) else {}
     started_raw = record.get("started")
-    started = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    # THE SAME BOUNDARY RULE THE POLL READS THE CLAIM WITH (``PeerRow.from_json``
+    # calls this same ``peer_number``), so the seed and the next federated poll
+    # cannot disagree about one claim: a bool (an int subclass — ``float(True)``
+    # is 1.0, the epoch second into 1970 the sidebar dates "56y"), a null, a
+    # garbage string, a negative or an over-long number all become the no-claim
+    # ``0.0``, and a real epoch — including the numeric-string spelling the peer
+    # boundary documents — passes. QA round 1 on #2044: the hand-rolled
+    # ``isinstance`` reading here was a second spelling of the poll's rule.
+    started = peer_number(started_raw, default=0.0)
     name_raw = record.get("conversation_name")
     name = name_raw if isinstance(name_raw, str) and name_raw else UNTITLED_CONVERSATION
     matches = resolve_peer(peer, root)
