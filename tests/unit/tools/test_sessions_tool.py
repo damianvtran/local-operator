@@ -512,6 +512,45 @@ async def test_list_include_stored_appends_stored_rows_as_stored(root: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_legacy_stored_claim_never_reaches_the_machine_payload(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, F2: pin the rule at ASSEMBLY, not only in paint.
+
+    ``details["rows"]`` carries the raw dicts the list op merged, so the three
+    text renderers calling ``row_needs_claim`` was the only thing dropping a
+    pre-correction peer's claim — a consumer reading the details saw it
+    verbatim. This feeds a stored row with the legacy ``"ask"`` through the
+    tool (its mesh answer stubbed at ``_mesh_op``) and asserts both halves:
+    the text has no claim, and the machine payload says ``None``.
+    """
+    import local_operator.tools.builtin as builtin_module
+
+    async def _fake_mesh_op(*_args: Any, **_kwargs: Any) -> tuple[None, dict[str, Any]]:
+        return None, {
+            "sessions": [
+                {
+                    "session_id": "cccc11112222",
+                    "conversation_name": "legacy stored row",
+                    "state": "stored",
+                    "pending": "ask",
+                    "locality": "remote",
+                }
+            ],
+            "peers": {},
+        }
+
+    monkeypatch.setattr(builtin_module, "_mesh_op", _fake_mesh_op)
+    result = await execute_sessions(
+        "t", {"op": "list", "scope": "remote"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    rows = (result.details or {}).get("rows") or []
+    assert rows and rows[0]["pending"] is None, rows
+    assert "pending" not in result.text, result.text
+
+
+@pytest.mark.asyncio
 async def test_info_reports_origin_visibility_and_opener(root: Path) -> None:
     directory = _session(root, "cccc55556666", "stated")
     mark_session_origin(

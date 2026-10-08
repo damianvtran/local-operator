@@ -14867,8 +14867,15 @@ def _session_row_brief(row: Mapping[str, Any]) -> str:
         bits.append(str(row["model_label"]))
     if row.get("busy"):
         bits.append("busy")
-    if row.get("pending"):
-        bits.append(f"pending {row['pending']}")
+    # THE ROW-LEVEL RULE, not the raw field: a STORED row carries no needs
+    # claim, whatever its producer said (``network.types.row_needs_claim``) —
+    # "pending ask" on a session with no runtime advertises a gate nothing can
+    # answer and no receipt can clear.
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        bits.append(f"pending {needs}")
     # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
     # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
     # would dress a dead session as a just-started one — the exact
@@ -14972,6 +14979,14 @@ async def _sessions_list(
         merged.extend(local_rows)
     if scope in ("all", "remote"):
         merged.extend(remote_rows)
+    # THE MACHINE PAYLOAD GETS THE SAME RULE AS THE TEXT (agent review round 1,
+    # F1): ``details["rows"]`` hands consumers these dicts verbatim, so a legacy
+    # peer's stored-row claim is dropped HERE rather than only inside
+    # ``_session_row_brief`` — one row, one shape, whichever half of the result
+    # a caller reads.
+    from local_operator.network.types import row_without_stored_claims
+
+    merged = [row_without_stored_claims(row) for row in merged]
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in merged:
@@ -15162,8 +15177,12 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
         parts.append(f"pid {row['pid']}")
     if row.get("busy"):
         parts.append("busy")
-    if row.get("pending"):
-        parts.append(f"pending {row['pending']}")
+    # No needs claim on a stored row (``network.types.row_needs_claim``).
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        parts.append(f"pending {needs}")
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
     return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
@@ -15232,8 +15251,12 @@ async def _sessions_info_mesh(
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
         bits.append(str(row["model_label"]))
-    if row.get("pending"):
-        bits.append(f"pending {row['pending']}")
+    # No needs claim on a stored row (``network.types.row_needs_claim``).
+    from local_operator.network.types import row_needs_claim
+
+    needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
+    if needs:
+        bits.append(f"pending {needs}")
     text = (
         ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
         "transcript live on that device; peek reads its live tail there, resume warms "

@@ -32,6 +32,14 @@ than run (a sandbox cannot start a model-backed runtime), which changes the
 ORDERING the frame shows and is therefore load-bearing rather than decorative;
 ``_start_hosts`` states it in full.
 
+AND ONE SESSION B HOLDS BUT DOES NOT RUN: ``STORED_SESSION`` is seeded with an
+UNREAD completion and no host process — the stored half the operator's 2026-10-07
+report was about. A stored row has no runtime, so a claim on it can never be
+answered nor cleared (no surface holds its completion token), which is why the
+catalogue no longer mints one; ``_publish_unread_completion`` writes the
+completion through the attention store's own writer so the frame shows the
+product's answer to a real unread state, not a stamp.
+
 Everything runs in this process except the capture, which is a CHILD process
 given A's config root and left to dial A's relay the way the TUI does in
 production. Both relays are stopped in ``finally``; no LaunchAgent is written.
@@ -71,6 +79,17 @@ SESSIONS = (
     ("4c81ba77e310", "Federated catalogue fan-out"),
     ("9f3ac1e0b7d2", "Mesh transport identity design"),
 )
+
+#: One session B HOLDS BUT DOES NOT RUN, carrying one UNREAD completion — the
+#: stored half the operator's 2026-10-07 report was about. It gets no host
+#: process on purpose: a stored row has no runtime, which is exactly why the
+#: "needs you" claim the catalogue used to derive for it (from the owner's
+#: ``unseen`` flag) could never be cleared — nothing can answer it, and no
+#: surface holds its completion token — and why the claim was removed.
+#: ``pending`` on this row is deliberately NOT asserted by ``_require_rows``:
+#: this rig runs against both the pre- and post-correction trees for the pair,
+#: and the claim's absence is the change the pair exists to show.
+STORED_SESSION = ("e5e1c3a70dc2", "Backfill the settlement ledger")
 
 
 def _network_record(
@@ -164,6 +183,29 @@ def _seed_session(
             ),
             origin={"kind": "user", "source_device": "", "source_session_id": ""},
         ),
+    )
+
+
+def _publish_unread_completion(root: Path, session_id: str) -> None:
+    """One UNREAD completion for a STORED session — the claim defect's fixture.
+
+    Written through the attention store's REAL writer (the same
+    ``AttentionStore.publish`` the runtime journals through), with
+    ``baseline_seen=False`` so it reads ``unseen=True`` exactly as a finished
+    turn's first sighting does. The stored half of the federated catalogue used
+    to translate this fact into a "needs you" claim with no way to clear it;
+    the row this produces is the surface the operator reported.
+    """
+    import uuid
+
+    from local_operator.session.attention import AttentionStore
+
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}",
+        token=str(uuid.uuid4()),
+        anchor="mesh-sidebar-shot",
+        kind="complete",
+        baseline_seen=False,
     )
 
 
@@ -310,7 +352,11 @@ def _stop_hosts(proc_list: list[subprocess.Popen[bytes]]) -> None:
             proc.wait(timeout=10)
 
 
-def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
+def _require_rows(
+    root: Path,
+    live_titles: tuple[str, ...],
+    stored_titles: tuple[str, ...] = (),
+) -> None:
     """Refuse to write a frame unless the producer returns these NAMES.
 
     A GUARD THAT COUNTS ROWS CANNOT SEE THIS CLASS OF LIE, which is exactly why
@@ -319,38 +365,53 @@ def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
     them. So the assertion is on the names, and it fails on an id (the
     nameless-row fallback that shipped) as loudly as on a missing row.
 
-    THE STATE IS ASSERTED FOR THE SAME REASON (QA round 12). Every row has to read
-    ``idle`` — resident, unwatched — because that is what ranks the tier into the
-    drawn page (``_start_hosts``): a cold row here is not a slightly worse frame,
-    it is a frame with no mesh tier in it at all. A host that died before the
-    capture would otherwise ship that silently.
+    THE STATE IS ASSERTED FOR THE SAME REASON (QA round 12). Every LIVE row has to
+    read ``idle`` — resident, unwatched — because that is what ranks the tier into
+    the drawn page (``_start_hosts``): a live row that came back cold is not a
+    slightly worse frame, it is a frame with no live mesh tier in it at all. A
+    host that died before the capture would otherwise ship that silently. The
+    STORED row is asserted cold (``""``) for the mirror reason: it must have no
+    runtime, and a stored row reporting a state would mean a host this rig did
+    not start — or a record it leaked.
+
+    ``pending`` is deliberately asserted NOWHERE: this rig runs against both
+    sides of the 2026-10-07 stored-claim correction, and whether the stored row
+    carries a claim is precisely what differs between the two frames.
     """
     from local_operator.session.peer_rows import clear_cache, peer_session_rows
 
     clear_cache()
     rows = peer_session_rows(root)
-    if len(rows) != len(titles):
+    expected_total = len(live_titles) + len(stored_titles)
+    if len(rows) != expected_total:
         raise SystemExit(
             f"the producer returned {len(rows)} remote rows for a mesh holding "
-            f"{len(titles)}: the frame would show a surface the product does not "
+            f"{expected_total}: the frame would show a surface the product does not "
             "render, so none was written"
         )
     names = sorted(row.name for row in rows)
-    if names != sorted(titles):
+    if names != sorted((*live_titles, *stored_titles)):
         raise SystemExit(
             "the producer returned rows whose names are not the ones seeded: "
-            f"{names} != {sorted(titles)}. A row naming a session by its id is the "
-            "shape this guard exists to catch: the frame would show bare ids where "
-            "a user sees titles."
+            f"{names} != {sorted((*live_titles, *stored_titles))}. A row naming a "
+            "session by its id is the shape this guard exists to catch: the frame "
+            "would show bare ids where a user sees titles."
         )
     print(f"producer rows: {[(row.id, row.name, row.owner_device_name) for row in rows]}")
-    states = sorted(str(row.live_state) for row in rows)
-    if states != ["idle"] * len(titles):
+    live = sorted(str(row.live_state) for row in rows if str(row.live_state) != "")
+    if live != ["idle"] * len(live_titles):
         raise SystemExit(
-            f"the producer returned rows whose live states are {states}, not one "
-            "``idle`` per seeded session: a host process is gone or never "
-            "published, and a COLD peer row ranks below the drawn page at this "
-            "size, so the frame would show no mesh tier at all. Re-run."
+            f"the producer returned live states {live}, not one ``idle`` per RUNNING "
+            "session: a host process is gone or never published, and a COLD peer row "
+            "ranks below the drawn page at this size, so the frame would show no "
+            "live mesh tier at all. Re-run."
+        )
+    cold = [row for row in rows if str(row.live_state) == ""]
+    if len(cold) != len(stored_titles):
+        raise SystemExit(
+            f"{len(cold)} rows read cold, not {len(stored_titles)}: the stored row "
+            "(the claim fixture) is missing from the answer or a second session went "
+            "cold. Re-run."
         )
 
 
@@ -389,6 +450,34 @@ def _require_caret_on_a_remote_row(path: Path) -> None:
         f"no row in {path.name} carries both the caret ({caret!r}) and a locality "
         f"mark ({locality_marks!r}): the remote row, or the caret on it, is "
         "outside the drawn page — which is this frame's whole subject. Re-capture."
+    )
+
+
+def _require_title_drawn(path: Path, title: str) -> None:
+    """Refuse a frame that does not DRAW the stored session's row.
+
+    The stored row files into ``Previous Sessions`` (no runtime, no claim), so
+    it is the row most able to fall below the drawn page — and a pair of frames
+    where the row is simply absent would read as "the mark disappeared" for the
+    wrong reason. Read from the exported SVG's own text runs, like the guards
+    beside it; if a ranking change pushes the row off the page this refuses the
+    frame rather than shipping it.
+
+    A PREFIX, not the whole title: the sidebar truncates a title to its own
+    cell (this width draws "Backfill the settlemen…"), and the paint splits one
+    row across several runs, so the match is the first twelve characters in a
+    row's JOINED runs — long enough to be distinctive among the fixture's own
+    titles, short enough to survive the narrowest sidebar this rig captures at.
+    """
+    prefix = title[:12]
+    svg = path.read_text(encoding="utf-8")
+    for runs in svg_text_runs_by_row(svg):
+        if prefix in "".join(runs):
+            return
+    raise SystemExit(
+        f"the stored session {title!r} (or its drawn prefix {prefix!r}) is not in "
+        f"{path.name}: its row fell outside the drawn page, so this frame cannot "
+        "show where it sits. Re-capture at a taller size."
     )
 
 
@@ -511,7 +600,21 @@ def main() -> int:
         # whose rows are not these sessions IN A LIVE STATE.
         host_procs.extend(_start_hosts(root_b, SESSIONS))
         _await_hosts(root_b, host_procs)
-        _require_rows(root_a, tuple(title for _session_id, title in SESSIONS))
+        # AND ONE IT HOLDS WITHOUT RUNNING, carrying an unread completion: the
+        # stored half the 2026-10-07 correction is about (no host, on purpose).
+        _seed_session(
+            root_b,
+            STORED_SESSION[0],
+            STORED_SESSION[1],
+            network_id=record_a.network_id,
+            home_device=server_b.identity.device_id,
+        )
+        _publish_unread_completion(root_b, STORED_SESSION[0])
+        _require_rows(
+            root_a,
+            tuple(title for _session_id, title in SESSIONS),
+            (STORED_SESSION[1],),
+        )
 
         env = {**os.environ, "LO_SIDEBAR_SHOT_MESH": str(root_a)}
         shot = subprocess.run(
@@ -530,6 +633,7 @@ def main() -> int:
             return shot.returncode
         _require_settled_chip(out)
         _require_caret_on_a_remote_row(out)
+        _require_title_drawn(out, STORED_SESSION[1])
         print(f"wrote {out}")
         return 0
     finally:

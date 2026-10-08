@@ -5752,7 +5752,12 @@ def sessions_command(args: argparse.Namespace) -> int:
         ]
 
     if args.json:
-        print(_json.dumps(rows, indent=2))
+        # THE MACHINE PAYLOAD GETS THE SAME RULE AS THE TABLE (agent review
+        # round 2, F4): a pre-correction peer's stored row must not carry its
+        # legacy claim into `--json` when the text beside it refuses it.
+        from local_operator.network.types import row_without_stored_claims
+
+        print(_json.dumps([row_without_stored_claims(row) for row in rows], indent=2))
         return 0
 
     if not rows:
@@ -5898,6 +5903,15 @@ def sessions_command(args: argparse.Namespace) -> int:
     if show_held:
         header += f" {'STALLED':<{HELD_COLUMN_WIDTH}}"
     print(header)
+    # THE ROW-LEVEL RULE, not the raw field: a STORED session has no runtime
+    # and no gate, so a claim on its row (from a peer that predates the
+    # stored-half correction) names a waiting nothing can answer and no receipt
+    # can clear — the permanent "needs you" mark this column would otherwise
+    # print forever (``types.row_needs_claim``). Imported here rather than at
+    # module scope for the reason every other network import in this file is
+    # (``cli`` is on the boot path).
+    from local_operator.network.types import row_needs_claim
+
     now = time.time()
     for row in rows:
         # CELLS, not characters, for the three columns that carry text this
@@ -5912,7 +5926,10 @@ def sessions_command(args: argparse.Namespace) -> int:
             CONVERSATION_COLUMN_WIDTH,
         )
         model = _fit_cell(row["model_label"] or "", MODEL_COLUMN_WIDTH)
-        needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
+        needs = _fit_cell(
+            row_needs_claim(state=row.get("state"), pending=row.get("pending")) or "",
+            NEEDS_COLUMN_WIDTH,
+        )
         stored = row["state"] == "stored"
         state = _state_cell(row["state"])
         # A remote row has no local uptime or heartbeat: those are facts of a
