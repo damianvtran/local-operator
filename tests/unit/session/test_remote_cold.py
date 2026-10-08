@@ -2599,3 +2599,56 @@ async def test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement
         }
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE compatibility cell: every session that already exists on disk.
+
+    A checkpoint written before this field shipped carries
+    ``effective_identity: {}`` — the model dumps every field, so the key is
+    present with the sentinel value rather than absent. That value means "a host
+    older than this field" to a client, so a restore that COPIES the field from
+    the checkpoint hands the sentinel back and the header reads an old host until
+    a runtime engages: the bug this whole derivation exists to fix, for exactly
+    the sessions that already exist.
+
+    The cell therefore asserts the stored shape first (the key is present and
+    empty), then the derived triple — so a future change back to
+    ``dict(durable.effective_identity)`` fails HERE rather than in a user's
+    header. Sabotage-proof run recorded in the commit body.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        active_agent="manager",
+        active_team="lopdev",
+    )
+    dumped = durable.model_dump(mode="json")
+    # THE PRE-FIX SHAPE, asserted rather than assumed: the key is present and
+    # empty, which is what every checkpoint on disk from before this field holds.
+    assert dumped["effective_identity"] == {}, dumped["effective_identity"]
+    await _checkpoint(directory, durable)
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "manager",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
