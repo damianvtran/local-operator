@@ -534,10 +534,12 @@ Every surface presents the open ask set in one of **two states**. Both are **cli
 interaction state: no wire change, §4 is untouched by this section.**
 
 - **EXPANDED** — the answer surface is active (TUI picker/list row, desktop `QuestionDock` or
-  sheet, phone/app sheet). **Entered only by the user** (click the minimized bar, Enter on a
-  focused row, or the explicit `/asks` / header action). **Never automatic on ask arrival** —
-  §5.1's no-auto-mount, no-focus-steal rule is unchanged. Left by Esc, the collapse control,
-  or a click on the bar/chevron.
+  sheet, phone/app sheet). **Entered by the user** (click the minimized bar, Enter on a
+  focused row, or the explicit `/asks` / header action), **or ONCE by the open-by-default
+  policy** when a conversation is opened with asks already pending (the shared six-clause
+  contract the TUI, desktop drawer, relay sheet and app sheet keep — `tui/ask_open_policy.py`
+  states it). **Never automatic on ask arrival** — §5.1's no-auto-mount, no-focus-steal rule
+  is unchanged. Left by Esc, the collapse control, or a click on the bar/chevron.
 - **MINIMIZED** — a compact, persistent single-line affordance; the answer surface is *not*
   mounted. This is the state a new ask lands in when the user is already mid-answer or
   mid-draft, and the state the user returns to when they collapse.
@@ -559,11 +561,15 @@ desktop, relay web and app gain the explicit `Other` field with their own `Other
 this section states the target those PRs build to. An ask surface never
 moves, sends or discards composer text: the composer's draft stays in its own buffer
 through expand, collapse, settle and a conversation switch, and the ask surface's draft is
-never sent into the composer's channel. (A *user* expand may take the caret for the card —
-that is caret, not text movement; the TUI's automatic open-by-default mount does NOT take
-the caret, so the composer keeps focus until the user expands or presses f4.) Where a
-surface keeps an answer draft across collapse (desktop and relay web do; the native app
-deliberately persists nothing — ADR 0005 §2 — and re-expands empty), toggling the surface
+never sent into the composer's channel. (A *user* expand — f4, the bar, a list row — DOES take
+the caret for the card, which is caret movement, not text movement; the TUI's automatic
+open-by-default mount does NOT take it, so the composer keeps focus until the user asks for
+the surface, and the caret hand-off on such an ask is Tab from the composer (a draft there
+stays put) or a click. f4 itself is a pure TOGGLE and not an expand: on an auto-opened
+surface it CLOSES that surface and records the dismissal, exactly as a click on the bar
+does.)
+Where a surface keeps an answer draft across collapse (desktop and relay web do; the native
+app deliberately persists nothing — ADR 0005 §2 — and re-expands empty), toggling the surface
 preserves it. When the ask **settles** (answered, timed out, declined, dismissed) its draft
 is released with it (a surface may hold the dead key until it unmounts; nothing offers it
 again).
