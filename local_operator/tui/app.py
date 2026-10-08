@@ -47852,7 +47852,12 @@ class OperatorApp(App[None]):
             from local_operator.providers.auth_store import credential_identity
             from local_operator.providers.registry import credential_provider_id
 
-            rows = self._providers.auth_store.list_credentials(credential_provider_id(provider))
+            # ``_providers`` is optional (an embedding host may pass none), so
+            # the store read is guarded rather than assumed.
+            controller = self._providers
+            if controller is None:
+                raise LookupError("no provider facade on this host")
+            rows = controller.auth_store.list_credentials(credential_provider_id(provider))
             identity = credential_identity(rows[-1]) if rows else None
             if identity:
                 who = f"as {identity} ({label})"

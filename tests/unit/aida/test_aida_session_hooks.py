@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -343,7 +344,9 @@ async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
     onboarding.request_greeting(isolated_root, "tui")
     onboarding.mark_greeted(isolated_root, 1)
     session = make_session(isolated_root, session_id)
-    stream = session._stream_fn
+    # The session's provider double is the scripted stream the harness built;
+    # cast because the session's own annotation is the callable it was given.
+    stream = cast(Any, session._stream_fn)
     events: list[object] = []
     session.subscribe(events.append)
     try:

@@ -67,6 +67,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,9 @@ def record_account_identity(
     return "recorded"
 
 
-def record_radient_login(credential: dict, *, config_dir: Path | str | None = None) -> str:
+def record_radient_login(
+    credential: dict[str, Any], *, config_dir: Path | str | None = None
+) -> str:
     """Record a fresh Radient OAuth credential's identity. Never raises.
 
     The ONE call both login hosts make (``providers.controller`` for the TUI

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -134,12 +136,12 @@ async def test_radient_auth_store_round_trip(tmp_path):
     assert oauth_access.kind == "oauth"
 
 
-def _jwt(claims: dict) -> str:
+def _jwt(claims: dict[str, Any]) -> str:
     """An UNSIGNED JWT carrying ``claims`` — the decoder never verifies."""
     import base64
     import json
 
-    def seg(value: dict) -> str:
+    def seg(value: dict[str, Any]) -> str:
         return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
 
     return f"{seg({'alg': 'HS256'})}.{seg(claims)}.sig"
