@@ -2605,28 +2605,33 @@ async def test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement
 async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """THE compatibility cell: the sentinel shape a pre-field session holds.
-
-    TWO shapes exist on disk, and the sibling cell covers the other one (agent
-    review on the follow-up, NIT-2 — a reader who believed the first draft of
-    this docstring could have deleted that sibling as redundant):
-
-    * a checkpoint written by THIS build with nothing attached holds
-      ``effective_identity: {}``, because the model dumps every field;
-    * a checkpoint last written by a build that predates the field holds NO key
-      for it at all (``test_a_cold_resume_derives_the_identity_the_team_binds``
-      pops the key to reproduce that shape).
+    """THE compatibility cell: the field present-and-EMPTY beside a bound team.
 
     ``{}`` means "a host older than this field" to a client, so a restore that
-    COPIES either shape from the checkpoint hands back something a header has to
-    read as "cannot say" — the bug this derivation exists to fix, for exactly the
-    sessions that already exist.
+    COPIES the field from a checkpoint hands back something a header must read as
+    "cannot say" — the bug this derivation exists to fix. Three input shapes can
+    reach that copy, and there is one cell per shape:
+
+    * **present and ``{}``** — THIS cell. Its producers are a reduced/embedded
+      host with no ``effective_identity`` property (``refresh_from_session``
+      takes its ``or {}`` fallback), or a state restored from a pre-field
+      checkpoint before its first refresh. It is NOT what a normal session with
+      nothing attached writes: that sends the explicit empty statement, which is
+      why the sibling cell below can say "never ``{}``" without contradicting
+      this one (agent review on the follow-up, MINOR-1 — the first two drafts of
+      this docstring got that provenance wrong).
+    * **the key ABSENT** — a checkpoint last written by a build that predates the
+      field (``test_a_cold_resume_derives_the_identity_the_team_binds`` pops the
+      key to reproduce it).
+    * **the explicit empty statement with nothing attached** — which must arrive
+      as itself, not as the sentinel
+      (``test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement``).
 
     The cell asserts the stored shape first (the key present and empty, checked
     before the checkpoint is written, so it fails LOUDLY at its own precondition
     if the model ever stops dumping empty fields rather than passing vacuously),
     then the derived triple. Under the sabotage run (the derivation replaced by
-    ``dict(durable.effective_identity)``) it reds alongside its two siblings —
+    ``dict(durable.effective_identity)``) it reds alongside those two siblings —
     3 failed / 39 passed on the whole file.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
