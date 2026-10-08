@@ -25,7 +25,11 @@ dependencies = [
     # HTTP + data model. httpx drives every provider client and the OAuth
     # flows; pydantic is the schema layer the whole harness is typed against.
     "httpx>=0.27",
-    "pydantic>=2.7",
+    # Ceiling below 2.14: 2.14.0 (published 2026-10-08) fails the type-check
+    # gate at output_contract.py:303 and frontend_state.py:7963, identically on
+    # main and on every branch. Lift once those two sites are migrated to
+    # 2.14's TypeAdapter typings.
+    "pydantic>=2.7,<2.14",
     # PEP 696 TypeVar defaults are used in harness/types.py and only reached
     # typing in 3.13, while we support 3.12. Declared explicitly rather than
     # leaned on as a pydantic transitive, because an import in our own module
