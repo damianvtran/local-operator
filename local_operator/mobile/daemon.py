@@ -87,6 +87,10 @@ try:
     from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
 except ImportError:  # pragma: no cover — only on a pre-carriage tree
     INPUT_MODE_CAPABILITY = ""
+from local_operator.session.runtime.types import (
+    ASK_ATTACHMENTS_CAPABILITY,
+    ASK_ATTACHMENTS_UNSUPPORTED,
+)
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
@@ -3426,6 +3430,19 @@ class MobileDaemon:
         from local_operator.mobile.attach_client import fit_request_frame
 
         frame: dict[str, Any] = {"op": op, "req": req, **fields}
+        if (
+            op == "ask_respond"
+            and frame.get("images")
+            and ASK_ATTACHMENTS_CAPABILITY not in entry.record.capabilities
+        ):
+            # REFUSE, NEVER STRIP — the relay's half of the gate the attach client
+            # enforces on its own connections (``AttachClient.ask_respond``). The
+            # annotation strip below is right for metadata; an image is content on
+            # a TERMINAL answer, and an owner without the capability would record
+            # the text and ignore the pictures with no error anywhere. Raised
+            # before a future is registered, as a ``ValueError`` the HTTP layer
+            # already renders as a 422 carrying this sentence.
+            raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
         if op in ("prompt", "steer"):
             # THE STRIP-GATE (mobile STT — see _strip_unsupported_annotation): the
             # phone sends its provenance, the relay forwards it only to an owner
@@ -5036,6 +5053,10 @@ def build_app(daemon: MobileDaemon):
                     str(key): [str(item) for item in (value or [])]
                     for key, value in (body.get("answers") or {}).items()
                 }
+                # Already shape-checked by ``validate_control_frame`` above; the
+                # client re-checks the owner's capability and REFUSES (a 422 via
+                # ``_engage_and_publish``'s error path) rather than stripping.
+                images = list(body.get("images") or [])
 
                 async def _deliver_answer() -> str:
                     # BUDGET, because the surface has to live with it: this call
@@ -5052,6 +5073,10 @@ def build_app(daemon: MobileDaemon):
                     )
                     try:
                         if op == "ask_respond":
+                            if images:
+                                return await client.ask_respond(
+                                    ask_id, answers, by=by, images=images
+                                )
                             return await client.ask_respond(ask_id, answers, by=by)
                         if op == "ask_revise":
                             return await client.ask_revise(ask_id, answers, by=by)

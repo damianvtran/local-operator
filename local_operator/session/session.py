@@ -9301,7 +9301,12 @@ class Session:
         return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
     def respond_ask(
-        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str = "unknown",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """Answer a queued ask (design §2.4), storing any secret values first.
 
@@ -9315,6 +9320,15 @@ class Session:
         The one sanctioned way to CHANGE a recorded answer is :meth:`revise_ask`
         (design §10, #1936) — a plain repeat of this call keeps its refusal,
         because a repeat tap is a retry, not a change of mind.
+
+        ``attachments`` are images answering particular questions (already
+        decoded and bounded by the owner dispatch). They are refused here, BEFORE
+        the secret hop below, when the queue would refuse them -- a secret
+        question, an unknown one, too many -- so an answer that is going to be
+        turned down for its pictures has not first stored a credential value it
+        will never record (the same probe-before-the-effect order as
+        :meth:`revise_ask`'s). The queue re-checks at the write, which is the
+        authority.
         """
         queue = self.ask_queue()
         if queue is None:
@@ -9325,6 +9339,10 @@ class Session:
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
+        if attachments:
+            image_refusal = queue.attachment_refusal(record, attachments)
+            if image_refusal:
+                return {"ok": False, "error": image_refusal}
         merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
         if any(q.get("secret") for q in (record.get("questions") or ())):
             # The same hop the blocking path used: it keeps the raw bytes out of
@@ -9340,10 +9358,17 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
+        if attachments:
+            return queue.respond(ask_id, merged, by=by, attachments=attachments)
         return queue.respond(ask_id, merged, by=by)
 
     def revise_ask(
-        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str = "unknown",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """Revise a queued ask's recorded answer while it is still undelivered.
 
@@ -9371,7 +9396,16 @@ class Session:
         Under the kill switch this refuses in words exactly like
         :meth:`respond_ask`: with no queue there is nothing to revise, and the
         caller hears that rather than a traceback or a silent success.
+
+        ``attachments`` is accepted only to be REFUSED in words (design D5): a
+        revision carries text, and an answer's images are immutable once sent. The
+        parameter exists so a caller that passes images is told so, rather than
+        hitting a ``TypeError`` or -- worse -- having them ignored.
         """
+        if attachments and any(attachments.values()):
+            from local_operator.asks.queue import REVISION_IMAGES_REFUSED
+
+            return {"ok": False, "error": REVISION_IMAGES_REFUSED}
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}

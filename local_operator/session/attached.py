@@ -3452,6 +3452,7 @@ class AttachedSession:
         *,
         decline: bool = False,
         revise: bool = False,
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
         """Answer, decline, or REVISE a QUEUED ask from a desktop client (§2.4/§4/§10).
 
@@ -3476,7 +3477,22 @@ class AttachedSession:
         them may be gone — the single-winner rule that replaces it lives on the
         log (the first ``answered`` event wins), so a stale screen cannot settle
         a question twice.
+
+        ``images`` are the answer's attachments, a flat list of
+        ``{question_id, data_b64, mime_type}`` (the route's ``AnswerImage``
+        dumped, which is also the frame's shape). They ride a FIRST answer only:
+        a revision carries text (design D5) and a decline has nothing to attach,
+        and both are refused here in words rather than left for the owner to
+        ignore — the route's validator already 422s them, so this is the backstop
+        for a non-HTTP caller, and it stays loud because dropping an image is the
+        one failure the user cannot see.
         """
+        if images and (revise or decline):
+            raise ValueError(
+                "images can only accompany a first answer; send a revision as text"
+                if revise
+                else "images cannot accompany a decline"
+            )
         # ONE plumbing point (`_ask_client_method`) for both contracts this
         # facade offers on the same wire op family: the ROUTE wants a detail
         # string and an exception it can map onto an HTTP error, the DOCK wants a
@@ -3489,7 +3505,7 @@ class AttachedSession:
             name = "ask_decline"
         else:
             name = "ask_respond"
-        return await self._ask_client_method(name, ask_id, answers, by="desktop")
+        return await self._ask_client_method(name, ask_id, answers, by="desktop", images=images)
 
     async def respond_ask(
         self,
@@ -3576,8 +3592,15 @@ class AttachedSession:
         answers: Mapping[str, Sequence[str]] | None,
         *,
         by: str,
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
-        """Bind an owner if needed, then send ONE ask op on the wire."""
+        """Bind an owner if needed, then send ONE ask op on the wire.
+
+        ``images`` is forwarded to the client ONLY when non-empty, so a text-only
+        answer reaches ``AttachClient.ask_respond`` with exactly the call shape it
+        always had (a construction-free double or an older client signature keeps
+        working) and the frame it writes is byte-identical to today's.
+        """
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
@@ -3588,6 +3611,8 @@ class AttachedSession:
                 str(key): [str(item) for item in (values or ())]
                 for key, values in (answers or {}).items()
             }
+            if images:
+                return await method(ask_id, body, by=by, images=[dict(i) for i in images])
             return await method(ask_id, body, by=by)
         return await method(ask_id, by=by)
 

@@ -9225,3 +9225,189 @@ async def test_the_stored_peer_page_marks_its_journal_rows_as_entry(tmp_path, mo
     )
     assert [row["id"] for row in cut["entries"]] == ["a"]
     assert cut["entries"][0]["ts_source"] == "entry"
+
+
+# ---------------------------------------------------------------------------
+# Image answers on a queued ask (``Answer.images``, feature ``ask_attachments``)
+# ---------------------------------------------------------------------------
+
+
+def _answer_image(
+    question_id: str = "q0", payload: bytes = b"\x89PNG-not-really-a-png"
+) -> dict[str, str]:
+    """One wire image. The route validates shape and size; DECODING is the owner's."""
+    import base64
+
+    return {
+        "question_id": question_id,
+        "data_b64": base64.b64encode(payload).decode(),
+        "mime_type": "image/png",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_images_reaches_the_facade_with_the_flat_list(answers_api) -> None:
+    """One shape end to end: the body's ``images`` is what the facade is handed."""
+    client, app = answers_api
+    seen: dict[str, Any] = {}
+
+    class _Remote(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            seen["images"] = images
+            return await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+
+    remote = _Remote()
+    _install_ask_remote(app, remote)
+    image = _answer_image()
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["see screenshot"]}, "images": [image]},
+    )
+    assert result.status_code == 200, result.text
+    assert seen["images"] == [image]
+    assert remote.calls == [("a-1", {"q0": ["see screenshot"]}, False, False)]
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_answer_calls_the_facade_without_the_images_keyword(answers_api) -> None:
+    """OLD UI -> NEW core: no ``images`` key is accepted, and the facade call is the
+    pre-feature call (a facade or double that predates the keyword keeps working)."""
+    client, app = answers_api
+    kwargs_seen: list[dict[str, Any]] = []
+
+    class _Strict:
+        frontend_state = SimpleNamespace(epoch="e")
+
+        async def ask_respond(self, ask_id, answers=None, *, decline=False, revise=False):
+            kwargs_seen.append({"ask_id": ask_id})
+            return "answered"
+
+    _install_ask_remote(app, _Strict())
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert kwargs_seen == [{"ask_id": "a-1"}]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_images_422_matrix(answers_api) -> None:
+    """Every shape the door refuses, none of which may reach the runtime."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    image = _answer_image()
+    refused: dict[str, dict[str, Any]] = {
+        "images on a decline": {"ask_id": "a-1", "decline": True, "images": [image]},
+        "images with no answers": {"ask_id": "a-1", "images": [image]},
+        "images on a revision": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "revise": True,
+            "images": [image],
+        },
+        "unknown question_id": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [_answer_image("nope")],
+        },
+        "missing question_id": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{k: v for k, v in image.items() if k != "question_id"}],
+        },
+        "more than eight": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [image] * 9,
+        },
+        "bad mime": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "mime_type": "image/bmp"}],
+        },
+        "empty base64": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "data_b64": ""}],
+        },
+        "an extra key on an image": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            "images": [{**image, "filename": "a.png"}],
+        },
+        "images on a gate answer": {
+            "epoch": "e",
+            "request_id": "r",
+            "approved": True,
+            "images": [image],
+        },
+        "past the body cap": {
+            "ask_id": "a-1",
+            "answers": {"q0": ["x"]},
+            # 5 x ~240 kB of base64 clears the per-image cap but not the 900,000 B body cap.
+            "images": [_answer_image(payload=b"\x00" * 180_000)] * 5,
+        },
+    }
+    for label, body in refused.items():
+        result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+        assert result.status_code == 422, (label, result.status_code, result.text)
+    assert remote.calls == [], "a refused body must not reach the runtime"
+
+
+@pytest.mark.asyncio
+async def test_eight_images_inside_the_body_cap_are_accepted(answers_api) -> None:
+    client, app = answers_api
+
+    class _Remote(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            assert images is not None and len(images) == 8
+            return await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+
+    remote = _Remote()
+    _install_ask_remote(app, remote)
+    body = {
+        "ask_id": "a-1",
+        "answers": {"q0": ["x"]},
+        "images": [_answer_image(payload=b"\x00" * 60_000)] * 8,
+    }
+    result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+    assert result.status_code == 200, result.text
+
+
+@pytest.mark.asyncio
+async def test_an_image_answer_refused_by_an_old_owner_is_a_409_with_the_sentence(
+    answers_api,
+) -> None:
+    """NEW core -> OLD owner runtime: the capability refusal reaches the card verbatim."""
+    from local_operator.session.runtime.types import ASK_ATTACHMENTS_UNSUPPORTED
+
+    client, app = answers_api
+
+    class _Old(_AskRemote):
+        async def ask_respond(  # type: ignore[override]
+            self, ask_id, answers=None, *, decline=False, revise=False, images=None
+        ):
+            raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
+
+    _install_ask_remote(app, _Old())
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["x"]}, "images": [_answer_image()]},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == ASK_ATTACHMENTS_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_the_ask_attachments_feature_is_published(draft_api) -> None:
+    """The key a renderer gates the attach affordance on (``Answer`` is
+    ``extra="forbid"``, so an ungated send to an older backend would 422)."""
+    client, _root = draft_api
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["ask_attachments"] == 1
