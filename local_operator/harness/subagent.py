@@ -3018,6 +3018,11 @@ async def _construct_child_session(
 
     host_has_browser, host_has_console = host_capability_probes()
 
+    #: The child's ``GoalState``, filled in once the child Session exists (the
+    #: provider is built before it). Empty means "not built yet": the parent's
+    #: reading answers until then.
+    child_holder: list[Any] = []
+
     def system_blocks_provider(model_label: str = "") -> list[str]:
         # ``model_label`` is passed by the child Session each turn (its own
         # ``model_label``), which for a subagent is the resolved effort-tier
@@ -3077,7 +3082,16 @@ async def _construct_child_session(
             # builder would infer (``ask``) is a tool no child has
             # (``build_ask_tool`` refuses without a hook), which is exactly what the
             # round-1 reviews found this child being told to use (BLOCKER).
-            interactive=parent_session.interactivity(),
+            #
+            # Read through the CHILD's own holder once it exists: that holder
+            # carries the parent's probe OBJECT (installed below) and latches it
+            # at the child's own turn boundary (``GoalState.latch_interactivity``),
+            # so a transient detach inside a child turn publishes nothing. Reading
+            # ``parent_session.interactivity()`` instead would serve the PARENT's
+            # snapshot, frozen at the parent's turn start for the whole child run.
+            interactive=(
+                child_holder[0].interactivity() if child_holder else parent_session.interactivity()
+            ),
             channel=CHANNEL_HUB,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
@@ -3204,6 +3218,10 @@ async def _construct_child_session(
     parent_probe = parent_session.interactivity_probe
     if parent_probe is not None:
         child._goal_state.interactive_probe = parent_probe
+        # Only when the parent HAS a probe: a child of an unmeasured parent keeps
+        # reading ``parent_session.interactivity()`` (``None``), never a holder
+        # with no probe, which would read the same but by accident.
+        child_holder.append(child._goal_state)
     if child_stream is not parent_stream:
         child.add_dispose_hook(child_stream.close)
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
