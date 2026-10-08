@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import statistics
+import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Iterator
@@ -5416,6 +5417,178 @@ class _ParkedSteerHandle(FakeHandle):
         # Bounded so a failing test reports an assertion rather than hanging.
         await asyncio.to_thread(self.steer_gate.wait, 10.0)
         return "steering queued"
+
+
+class _BusyTurnHandle(FakeHandle):
+    """An owner mid-turn, as the QA cancel matrix's F1 repro had it.
+
+    Turn A is running a REAL tool subprocess (``sleep``, the matrix's shape). A
+    ``prompt`` that lands meanwhile parks until turn A ends — what
+    ``ServingSessionHandle.prompt`` does while it waits for the turn lock — and
+    ``abort`` kills turn A's tool, which is what frees that lock. ``abort`` also
+    records whether the parked prompt's own turn had STARTED when it ran: the
+    deferred-abort half of F1 is an abort that executes only after the parked
+    prompt's turn B began, and so aborts B instead of A.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool = subprocess.Popen(["sleep", "60"])
+        self.prompt_entered = threading.Event()
+        self.turn_a_over = threading.Event()
+        self.turn_b_started = threading.Event()
+        self.turn_b_started_when_aborted: bool | None = None
+        self.aborts = 0
+
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
+        self.calls.append(("prompt", (text,), {}))
+        self.prompt_entered.set()
+        # Bounded so a failing test reports an assertion rather than hanging.
+        await asyncio.to_thread(self.turn_a_over.wait, 10.0)
+        self.turn_b_started.set()
+        return "prompt ok"
+
+    async def abort(self):  # noqa: ANN202
+        self.calls.append(("abort", (), {}))
+        self.aborts += 1
+        self.turn_b_started_when_aborted = self.turn_b_started.is_set()
+        self.tool.kill()
+        await asyncio.to_thread(self.tool.wait, 5.0)
+        self.turn_a_over.set()
+        return "aborted"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_is_not_queued_behind_a_parked_prompt_on_the_same_connection() -> None:
+    """F1: ``abort`` lands at once even though a ``prompt`` is parked ahead of it.
+
+    The QA cancel matrix reproduced the operator's "Stop does not interrupt":
+    message B sent as a ``prompt`` while turn A streams parks on the daemon's one
+    attach connection, and a Stop pressed behind it chained after it — 15.024 s
+    to a 503, the tool alive to its natural end (56.88 s), and the queued abort
+    then executing at +56.93 s to abort B's turn rather than A's. Controls: the
+    same abort on a fresh connection took 4 ms, on this connection with nothing
+    parked 11 ms, so the chain was the whole delay.
+
+    The cell fails if ``abort`` is removed from ``_UNCHAINED_OPS`` (the ack never
+    arrives inside the bound). The bound is deliberately generous for a loaded CI
+    host yet two orders of magnitude under the 15 s the client waits.
+    """
+    handle = _BusyTurnHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        assert handle.tool.poll() is None, "turn A's tool must be running"
+
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "msg B"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        started = time.monotonic()
+        writer.write(json.dumps({"op": "abort", "req": 2}).encode() + b"\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(_until(reader, "ack", 2), timeout=1.0)
+        elapsed = time.monotonic() - started
+        assert reply["detail"] == "aborted"
+        assert elapsed < 1.0, f"the Stop took {elapsed:.3f}s behind a parked prompt"
+
+        # THE TOOL ACTUALLY DIED, and before the parked prompt's turn began: the
+        # abort stopped the turn it was pressed on, not the user's next message.
+        assert handle.tool.poll() is not None, "the running tool survived the Stop"
+        assert handle.turn_b_started_when_aborted is False, (
+            "the abort ran after the parked prompt's turn had started — it " "aborted the NEXT turn"
+        )
+
+        # The parked prompt is not lost: with turn A over it runs as a new turn,
+        # unaborted, and answers on its own req.
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ok"
+        assert handle.aborts == 1, "the Stop must run exactly once, not again later"
+    finally:
+        handle.turn_a_over.set()
+        if handle.tool.poll() is None:
+            handle.tool.kill()
+        handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_abort_with_nothing_parked_still_answers_and_a_replay_runs_again() -> None:
+    """The healthy matrix cases at the unit level: nothing parked, plus a repeat.
+
+    Same connection, no earlier op in flight, so exempting ``abort`` from the
+    chain must change nothing here. A second press on the same connection (the
+    matrix's replay/idle shape: the handle owns idempotence, the dispatch owns
+    none) is dispatched again rather than swallowed.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        for req in (1, 2):
+            writer.write(json.dumps({"op": "abort", "req": req}).encode() + b"\n")
+            await writer.drain()
+            assert (await _until(reader, "ack", req))["detail"] == "abort ok"
+        assert [call[0] for call in handle.calls].count("abort") == 2
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_abort_does_not_become_the_chain_head() -> None:
+    """The exemption keeps the ping docstring's ordering property for ``abort``.
+
+    An exempt op must not take the chain head: the head is what the next
+    mutation waits on, and an abort finishes at once, so a head held by it would
+    let the mutation admitted AFTER it overtake the one still in flight. Same
+    sequence as the ping cell — steer #1 parked, an exempt op, steer #2 — with
+    ``abort`` as the exempt op. Steer #2 must still wait on steer #1 (the last
+    CHAINED op), while the abort between them answers immediately.
+    """
+    handle = _ParkedSteerHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+
+        writer.write(json.dumps({"op": "steer", "req": 1, "text": "first"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.steer_entered.wait, 5), "the steer never parked"
+
+        writer.write(json.dumps({"op": "abort", "req": 2}).encode() + b"\n")
+        await writer.drain()
+        assert (await asyncio.wait_for(_until(reader, "ack", 2), timeout=1.0))[
+            "detail"
+        ] == "abort ok"
+
+        writer.write(json.dumps({"op": "steer", "req": 3, "text": "second"}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.1)
+        assert [call[1][0] for call in handle.calls if call[0] == "steer"] == ["first"], (
+            "a mutation admitted after an abort overtook the one still in flight "
+            "— the abort took the chain head"
+        )
+
+        handle.steer_gate.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "steering queued"
+        assert (await _until(reader, "ack", 3))["detail"] == "steering queued"
+        assert [call[1][0] for call in handle.calls if call[0] == "steer"] == ["first", "second"]
+    finally:
+        handle.steer_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio

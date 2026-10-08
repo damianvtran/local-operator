@@ -957,15 +957,42 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: lands (ADMISSION), this one decides what may run without waiting for an
 #: earlier op to finish (ORDERING).
 #:
-#: ``ping`` alone, and the argument is that its answer cannot depend on session
-#: state: it reports that the runtime's loop is alive and serving. Chaining it
-#: made it report something else entirely — measured over a real socket (review
-#: round 1, UX U3), a ``ping`` sent after a parked ``steer`` on the SAME
-#: connection went unanswered for 8-15 s, so the one request a surface speaks to
-#: ask "are you there" was queued behind a mutation. Everything else keeps its
-#: place in the chain, because ordering is what stops two mutations interleaving
-#: and only a liveness probe has no state to be ordered against.
-_UNCHAINED_OPS = frozenset({"ping"})
+#: ``ping`` and ``abort``.
+#:
+#: ``ping``: its answer cannot depend on session state: it reports that the
+#: runtime's loop is alive and serving. Chaining it made it report something
+#: else entirely — measured over a real socket (review round 1, UX U3), a
+#: ``ping`` sent after a parked ``steer`` on the SAME connection went unanswered
+#: for 8-15 s, so the one request a surface speaks to ask "are you there" was
+#: queued behind a mutation.
+#:
+#: ``abort``: the kill switch, and the same failure with worse consequences. A
+#: prompt-class op sent while the owner is mid-turn parks inside the handle until
+#: the turn lock frees, and every later op on that connection used to wait for
+#: it — including the Stop. Measured against a real daemon (QA cancel matrix,
+#: F1): a Stop pressed 1 s after such a parked ``prompt`` got no reply for
+#: 15.02 s (the client's ack timeout, a 503 ``runtime_busy``) and stopped
+#: nothing; the running tool lived to its natural end at +56.9 s; and because a
+#: client-side timeout cancels nothing, the abort was still queued and then
+#: executed the moment the parked op settled — aborting the user's NEXT turn
+#: instead of the one the press was for. This is the "cannot stop the session
+#: you are looking at" failure that :data:`_SYNC_PRIORITY_OPS` already refuses
+#: at admission; exempting ``abort`` here extends the same promise to ordering.
+#: Controls on the same daemon: an abort on a fresh connection took 4 ms, on the
+#: same connection with nothing parked 11 ms — so the chain, not the abort, was
+#: the whole delay. Not a loss of ordering that matters: ``abort`` acts on the
+#: turn that is running NOW and is idempotent, so there is no earlier-admitted
+#: mutation whose effect it must wait to observe.
+#:
+#: ``steer``, ``stop`` and ``cancel`` are deliberately NOT exempt: they are
+#: mutations whose meaning depends on arrival order (a ``steer`` must not
+#: overtake the ``steer`` before it), and widening this set further is a
+#: separate decision from the measured abort stall.
+#:
+#: Everything else keeps its place in the chain, because ordering is what stops
+#: two mutations interleaving. An exempt op never becomes the chain head — see
+#: :meth:`RuntimeServer._dispatch_frame`.
+_UNCHAINED_OPS = frozenset({"ping", "abort"})
 
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
@@ -4331,7 +4358,10 @@ class RuntimeServer:
         frame), and an ordering link must never be an error channel that takes
         the next request down with it.
 
-        ``ping`` is exempt from the chain (see :data:`_UNCHAINED_OPS`): a health
+        ``ping`` and ``abort`` are exempt from the chain (see
+        :data:`_UNCHAINED_OPS`; ``abort`` for the Stop queued behind a parked
+        ``prompt``, the stall that then aborted the NEXT turn). The rest of this
+        paragraph is argued from ``ping`` but holds for every exempt op. A health
         check queued behind a mutation answers the wrong question, and measured
         (review round 1, UX U3) it did exactly that — 8-15 s of silence on a
         connection whose only sin was a parked ``steer``. An exempt op also does
