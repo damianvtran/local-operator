@@ -1400,6 +1400,27 @@ class _reverse_name(str):
         return str.__lt__(self, str(other))
 
 
+def is_session_id_shape(requested: str) -> bool:
+    """Whether ``requested`` could NAME a session: one path component, nothing else.
+
+    The single copy of the rule :func:`resume_dir` refuses a non-id with, exposed
+    so a caller that must decide "is this a typed id at all?" asks the same question
+    rather than re-deriving it. ``--resume``'s peer pre-check needs exactly that: a
+    silent device is evidence only about an id a device could be HOLDING, so the bare
+    ``@latest`` sentinel and a path-shaped string must keep their own refusals
+    ("no previous session to resume", "not a session id") instead of being reported
+    as a peer's silence (agent review round 1, F-1).
+
+    Enumerating the ways to escape (`/`, `\\`, `..`, and on Windows the drive-relative
+    `C:x` form) is a list that is never finished; asking the path library whether the
+    string survives as its own basename is the same question asked once. The
+    empty/dot cases are named because `Path("").name` is `""`, which would pass a
+    bare equality check. ``@latest`` is a single component, so it IS shaped like an
+    id here; callers that treat the sentinel specially compare it first.
+    """
+    return requested not in ("", ".", "..") and Path(requested).name == requested
+
+
 def resume_dir(config_dir: Path, requested: str) -> Path:
     """The session directory ``--resume`` names, or raise :class:`ResumeNotFound`.
 
@@ -1443,13 +1464,9 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
             raise ResumeNotFound("no previous session to resume")
         return max(candidates, key=lambda item: (item[0], _reverse_name(item[1].name)))[1]
 
-    # A session id must be ONE path component and nothing else. Enumerating the
-    # ways to escape (`/`, `\`, `..`, and on Windows the drive-relative `C:x`
-    # form) is a list that is never finished; asking the path library whether the
-    # string survives as its own basename is the same question asked once. The
-    # empty/dot cases are named because `Path("").name` is `""`, which would pass
-    # a bare equality check.
-    if requested in ("", ".", "..") or Path(requested).name != requested:
+    # A session id must be ONE path component and nothing else (the rule and its
+    # reasoning live on ``is_session_id_shape``).
+    if not is_session_id_shape(requested):
         raise ResumeNotFound(f"not a session id: {requested!r}")
     candidate = sessions / requested
     try:

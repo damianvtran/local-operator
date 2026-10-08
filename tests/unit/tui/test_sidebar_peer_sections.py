@@ -498,18 +498,21 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
 
     monkeypatch.setattr(
         peer_rows_mod,
-        "peer_session_rows",
+        "read_listing",
         lambda root=None, **kwargs: (
-            SessionRow(
-                "peer-session-1",
-                time.time(),
-                "Federated catalogue fan-out",
-                live_state="idle",
-                locality="remote",
-                owner_device="d_radiant",
-                owner_device_name="radiant-m4",
-                owner_network_name="devmesh",
+            (
+                SessionRow(
+                    "peer-session-1",
+                    time.time(),
+                    "Federated catalogue fan-out",
+                    live_state="idle",
+                    locality="remote",
+                    owner_device="d_radiant",
+                    owner_device_name="radiant-m4",
+                    owner_network_name="devmesh",
+                ),
             ),
+            (),
         ),
     )
     app = OperatorApp(lambda: _factory(FakeSession()))

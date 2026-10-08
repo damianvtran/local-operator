@@ -1289,9 +1289,15 @@ What a client may rely on:
   device in the pointer must use `--peer` and is CLI-only.
 * **it inherits through the door**: `sessions.get` (snapshot), `/history` and
   `/events` all reach it through the same error ladder, so a client sees one code
-  for one situation whichever read it made. The same miss refuses the same way on
-  the shell (`lop --resume <id>`) and on `lop network <verb>`, which reach the
-  shared composer rather than a surface-local copy.
+  for one situation whichever read it made. The same miss refuses with the same
+  sentence on the shell: `lop --resume <id>` (its startup pre-check composes it
+  from the same read, for a real session id only — the bare `--resume` sentinel
+  and a path-shaped string keep their own refusals) and the TUI's in-app
+  `/resume` (the `viewer_factory` arm in `cli.py`, which guards the mid-session
+  path). `lop network <verb>` resolves through its own refusal taxonomy
+  (`session_unknown` / `peer_unreachable`) on the id-resolution path; it can still
+  raise `session_unresolved` through `open_remote_viewer` when a row resolved from
+  the cache and the later open then misses, so the composer is shared there too.
 
 **The surface contract (the UI lane's half, `mesh-wire-honesty.md` §S2):** an
 unresolved id must not be presented as a deletion and must not close the

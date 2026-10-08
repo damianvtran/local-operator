@@ -272,6 +272,14 @@ to re-derive them:
   `sessions/<id>/` directory that will not open means `remote_row_and_silence` performs
   NO read, and no read means no silence to report, so it answers the shared `404` — cold
   and warm, measured — instead of the 409 the two-call shape produced from a stale entry.
+- **Which arm answers the shell's `--resume`** (QA round 2, Q4; review round 2, R2-2):
+  the startup pre-check in `cli.main()` — a SIBLING of the subprocess-subcommand branch,
+  so it runs for the TUI launch too and returns 1 before `use_tui` is computed — answers
+  the `--resume` FLAG, and on a silent miss it prints `unresolved_peer_sentence` (read
+  through `remote_row_and_silence`, nothing boots locally). The `viewer_factory` arm
+  guards the MID-SESSION path (the TUI's in-app `/resume`), which never passes through
+  that pre-check. Before the follow-up the pre-check discarded the silence and printed the
+  generic "no session to resume" copy.
 - **The boundary, stated** (QA round 1, Q2): this state covers silence the relay
   REPORTED. If this device's own relay is down while the peer is up, no row and no
   silence signal arrive, and the answer is still the shared `404` — the residual
