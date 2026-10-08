@@ -1592,16 +1592,82 @@ async def test_a_live_turn_behind_a_recovering_dial_is_not_idle(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_a_stale_mirror_press_whose_dial_times_out_is_not_idle(tmp_path, monkeypatch):
-    """The parked-op dial: the same stall that froze the mirror parks the abort.
+async def test_a_quiet_mirror_behind_a_recovering_dial_is_not_idle(tmp_path, monkeypatch):
+    """The ``_recovering`` disjunct on its own: a settled-looking mirror behind a
+    dial that recovery owns.
 
-    Abort is CHAINED like every mutation (only ``ping`` is chain-exempt), so a
-    press arriving while the head op is parked queues behind it and the client
-    times out at ``ACK_TIMEOUT_S`` — an ``OwnerAckTimeout``: the owner is alive
-    and simply did not answer this request in time. The route must answer that
-    through its ladder (503, retryable) and NOT fall back to ``idle``: the press
-    was never served, and "nothing to stop" would invent the very answer the
-    owner did not give.
+    The sibling test above freezes a LIVE turn at the drop, so its press is
+    already owed a dial by ``_work_is_running``. This one publishes a boundary
+    instead — the drop landed between turns and the last canonical fold reports
+    no work — with every OTHER term of ``canonical_current`` deliberately quiet
+    (synced, no owed re-sync), which leaves exactly one term between this press
+    and a false ``idle``: ``_recovering``. Sabotage check (review round 1, S3a):
+    drop that disjunct alone and this is the only test that reds — the shortcut
+    reads the boundary as settled and answers ``idle`` while recovery still owns
+    the dial. The boundary fold predates the drop, and what the owner did after
+    it is unobservable until recovery re-binds: nothing here may be called
+    settled.
+
+    THIS TEST FAILS WITHOUT THE DISJUNCT — and with it the press answers 503
+    (never ``idle``): no dial can be served, so it is handed to the ladder.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # THE ONE-LINE VARIANT: the last canonical fold is the boundary, not
+            # a frozen live turn — no term of ``_work_is_running`` fires.
+            _publish_roster(bridge, streaming=False)
+            # The pump's own order: ``_connected`` is false BEFORE the host's
+            # disconnect handler runs (``attach_client``'s pump end).
+            owner.connected = False
+            bridge.remote._on_disconnected("owner connection reset")
+            assert bridge.remote.recovering, "the fixture is not the state under test"
+            assert not bridge.remote.owner_reachable, "recovery owns the dial"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable", detail
+            assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_mirror_press_whose_dial_times_out_is_not_idle(tmp_path, monkeypatch):
+    """The unanswerable dial: an ``OwnerAckTimeout`` must never be presented as ``idle``.
+
+    Since the merged companion fix (#2049) ``abort`` is chain-exempt
+    (``_UNCHAINED_OPS = {"ping", "abort"}``), so this is no longer the
+    queued-behind-a-parked-op shape — it is the other way a dial goes unserved:
+    the owner's loop stalls or half-dies and the abort is not answered within
+    ``ACK_TIMEOUT_S`` at all. That raises ``OwnerAckTimeout`` (whose
+    ``owner_alive`` mark says the owner is alive and simply did not answer this
+    request in time), and the route must answer it through its ladder (503,
+    retryable) and NOT fall back to ``idle``: the press was never served, and
+    "nothing to stop" would invent the very answer the owner did not give.
 
     THIS TEST FAILS BEFORE THE FIX — the stale mirror answered ``idle`` without
     even sending the abort.
