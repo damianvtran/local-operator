@@ -2599,3 +2599,121 @@ async def test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement
         }
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE compatibility cell: the field present-and-EMPTY beside a bound team.
+
+    ``{}`` means "a host older than this field" to a client, so a restore that
+    COPIES the field from a checkpoint hands back something a header must read as
+    "cannot say" — the bug this derivation exists to fix. Three input shapes can
+    reach that copy, and there is one cell per shape:
+
+    * **present and ``{}``** — THIS cell. Its producers are a reduced/embedded
+      host with no ``effective_identity`` property (``refresh_from_session``
+      takes its ``or {}`` fallback), or a state restored from a pre-field
+      checkpoint before its first refresh. It is NOT what a normal session with
+      nothing attached writes: that sends the explicit empty statement, which is
+      why the sibling cell below can say "never ``{}``" without contradicting
+      this one (agent review on the follow-up, MINOR-1 — the first two drafts of
+      this docstring got that provenance wrong).
+    * **the key ABSENT** — a checkpoint last written by a build that predates the
+      field (``test_a_cold_resume_derives_the_identity_the_team_binds`` pops the
+      key to reproduce it).
+    * **the explicit empty statement with nothing attached** — which must arrive
+      as itself, not as the sentinel
+      (``test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement``).
+
+    The cell asserts the stored shape first (the key present and empty, checked
+    before the checkpoint is written, so it fails LOUDLY at its own precondition
+    if the model ever stops dumping empty fields rather than passing vacuously),
+    then the derived triple. Under the sabotage run (the derivation replaced by
+    ``dict(durable.effective_identity)``) it reds alongside those two siblings —
+    3 failed / 39 passed on the whole file.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        active_agent="manager",
+        active_team="lopdev",
+    )
+    dumped = durable.model_dump(mode="json")
+    # THE PRE-FIX SHAPE, asserted rather than assumed: the key is present and
+    # empty, which is what every checkpoint on disk from before this field holds.
+    assert dumped["effective_identity"] == {}, dumped["effective_identity"]
+    await _checkpoint(directory, durable)
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "manager",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_cold_fallback_names_the_team_when_the_registry_cannot_be_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cold path's VISIBLE LIMIT, pinned because a UI lane keys on it.
+
+    The speaker's NAME comes from this machine's team registry, and that lookup is
+    best-effort on purpose: an unreadable or absent registry must cost a user a
+    roster at worst, never their conversation. When it cannot answer, the TEAM
+    names itself — so a client painting "who is speaking" from ``speaker`` alone
+    sees a roster name where the warm frame would show the manager's profile name
+    (agent review on the follow-up, which found this row had no cell at all while
+    the contract block published it).
+
+    The KIND is unaffected and that is the point of the contract's advice: a team
+    is in force either way, ``role_of_speaker`` still reads ``"manager"``, and
+    ``/agent`` is still refused. Here the team is simply not in this machine's
+    registry, which is the ordinary way the lookup comes up empty.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    # No _write_team: the checkpoint knows the team's NAME, this machine cannot
+    # resolve it, and the open must still succeed.
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="manager",
+            active_team="lopdev",
+        ),
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "lopdev",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
