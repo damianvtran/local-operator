@@ -41,6 +41,7 @@ import pytest
 
 from local_operator.network import store
 from local_operator.network.credentials import sync
+from local_operator.network.credentials.messages import COPY_CEILING_LINES
 from local_operator.network.credentials.sync import SyncState
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_credentials_real_link import (  # noqa: F401
@@ -186,7 +187,12 @@ def test_member_rm_delivers_the_ending_while_the_member_is_contactable(
     assert net_fixtures.wait_for(
         lambda: _ledger_wiped(mesh)
     ), "the wipe was not confirmed to the owner"
-    assert "were deleted (the ending is confirmed)" in out, out
+    assert "1 copy on " in out and "was deleted (the ending is confirmed)" in out, out
+    # The confirmed arm used to be the one removal state WITHOUT the ceiling (design
+    # review round 1, D8: the state that claims the most withheld the sentence about what
+    # it did not do), so the ceiling rides it too.
+    for ceiling_line in COPY_CEILING_LINES:
+        assert ceiling_line in out, out
     # The tombstone is still the verb's observable side effect, and the removed
     # member is never ticked again — no later contact can re-deliver anything.
     removed = store.load(mesh.network_id, mesh.a.root).member(mesh.member)
@@ -336,7 +342,7 @@ def test_a_lock_refused_removal_does_not_run_its_ending_exchange(
     out = capsys.readouterr().out
     assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
     assert net_fixtures.wait_for(lambda: _ledger_wiped(mesh))
-    assert "were deleted (the ending is confirmed)" in out, out
+    assert "was deleted (the ending is confirmed)" in out, out
 
 
 def test_member_rm_without_contact_records_the_open_ending(
@@ -354,8 +360,6 @@ def test_member_rm_without_contact_records_the_open_ending(
     reads — measured while writing this cell. A genuinely unreachable peer has
     none, so the cell closes what the idle reaper eventually would.
     """
-    from local_operator.network.credentials.messages import COPY_CEILING_SENTENCE
-
     mesh = copied_mesh
     for link in list(mesh.a.links.values()):
         if getattr(link, "device_id", "") == mesh.member:
@@ -371,7 +375,9 @@ def test_member_rm_without_contact_records_the_open_ending(
     assert _member_has(mesh.b.root, SECRET_NAME), "no contact, no wipe"
     assert not _ledger_wiped(mesh), "nothing confirmed it, so it must stay open"
     assert "could NOT be confirmed deleted" in out, out
-    assert COPY_CEILING_SENTENCE in out, out
+    # Two lines now (one fact each), printed after the state line.
+    for ceiling_line in COPY_CEILING_LINES:
+        assert ceiling_line in out, out
 
 
 def test_an_unconfirmable_wipe_does_not_starve_other_keys(
@@ -509,8 +515,12 @@ def test_the_revoke_and_mark_receipts_say_which_ending_applies(
 
     assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
     out = capsys.readouterr().out
-    assert f"a wipe notice for '{KEY}' is queued for" in out
-    assert "This removed the copies it could reach." in out
+    # Prose names the secret the way the operator typed it (design review round 1, D5);
+    # the placement key is an identifier and stays in --json and the listing.
+    assert f"a wipe notice for '{SECRET_NAME}' is queued for" in out
+    assert "secret:" not in out.split("a wipe notice for", 1)[1]
+    for ceiling_line in COPY_CEILING_LINES:
+        assert ceiling_line in out, out
 
 
 def test_a_re_share_after_a_wipe_delivers_again(copied_mesh: Any) -> None:

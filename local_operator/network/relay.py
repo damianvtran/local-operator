@@ -1815,7 +1815,7 @@ def rotation_lock_refusal(record: NetworkRecord, *, now: float | None = None) ->
         raise MeshRefusal(
             "rotation_in_progress",
             f"a rotation of {record.name} is already in progress; wait "
-            f"{int(record.rotation_lock_until - moment)}s and try again",
+            f"{int(record.rotation_lock_until - moment)} s and try again",
         )
 
 

@@ -769,7 +769,8 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
-        "revoke", help="Stop letting a device borrow a credential"
+        "revoke",
+        help="Stop letting a device borrow a credential, or end its copy of a stored secret",
     )
     cred_revoke.add_argument(
         "key", help="A provider name, mcp:<server-url>, or a stored secret's name"
@@ -790,8 +791,8 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         # about a STORE secret's copy policy — the default set is the needs-list
         # ∪ `sync`, and `local-only` is the kill switch.
         help=(
-            "Set a secret's copy policy — 'sync' sends it to approved devices by "
-            "default, 'local-only' keeps it here, 'default' clears the mark"
+            "Set a secret's copy policy — 'sync' preselects it for devices approved from now "
+            "on, 'local-only' keeps it here, 'default' clears the mark"
         ),
     )
     cred_mark.add_argument(
@@ -2119,8 +2120,16 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         "owner_device": entry_json.get("owner_device", ""),
     }
     name = _member_name(record, device) or device
+    # PROSE NAMES A STORE SECRET BY THE NAME THE OPERATOR TYPES (design review round 1, D5).
+    # ``mark`` says ``CRM_API_KEY`` and ``share|revoke`` accept it, so a receipt that read
+    # back ``secret:CRM_API_KEY`` made the person recognise one spelling as the other.
+    # Identifiers keep the placement key: the ``--json`` payload above and the listing's
+    # rows are matched on, not read. Every other key comes out as typed.
+    from local_operator.network.credentials.messages import render_key_name
+
+    shown = render_key_name(key)
     lines = [
-        f"{action} {key!r} with {name}" if verb == "share" else f"{action} {key!r} from {name}",
+        f"{action} {shown!r} with {name}" if verb == "share" else f"{action} {shown!r} from {name}",
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
@@ -2163,21 +2172,20 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
         if is_secret_key(key):
-            # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the
-            # receipt says which happened — a queued notice, an already-wiped
-            # copy, or no confirmed copy to wipe — and carries the ceiling
-            # sentence whenever a copy existed at all.
+            # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the receipt says
+            # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
+            # and carries the ceiling after EVERY one of them (design review round 1, D1: the
+            # state that claims the most used to be the only one without it).
             copied, wiped = _copy_ledger_state(record.network_id, device, key)
             payload["copy"] = {
                 "confirmed": copied,
                 "wiped": wiped,
                 "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
             }
-            lines.append(
+            lines.extend(
                 messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
             )
-            if copied:
-                lines.append(messages_mod.COPY_CEILING_SENTENCE)
+            lines.extend(messages_mod.COPY_CEILING_LINES)
             return _emit(args, payload, lines)
         # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
         # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
@@ -2190,7 +2198,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # The class-4 copy half, same vocabulary as class 2's (§4.3: the
             # receipt says which happened).
             payload["copy"] = {"confirmed": copied, "wiped": wiped}
-            lines.append(
+            lines.extend(
                 messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
             )
         if github_mod.is_github_key(key):
@@ -2332,7 +2340,7 @@ def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> in
         raise MeshRefusal(
             "no_local_credential",
             f"this device holds no secret named {name!r}, so there is nothing to mark; "
-            f"store it first ('lop secret set {name} ...')",
+            f"store it first ('lop secret set {name}')",
         )
     mark = "" if str(args.mark) == "default" else str(args.mark)
     with sync_mod.mutate(record.network_id) as state:
@@ -2343,20 +2351,44 @@ def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> in
         row = by_key.get(key) if isinstance(by_key, dict) else None
         if isinstance(row, dict) and not row.get("wiped"):
             outstanding += 1
+    # WHAT EACH RECEIPT PROMISES IS WHAT THE MARK DOES, AND NO MORE (design review round 1,
+    # D6, and the overclaim found beside it). ``sync`` writes the mark and NOTHING ELSE: it
+    # changes what a device approved from now on is PRESELECTED with on the card; a device
+    # that is already approved but not yet sharing it holds no grant for the key, so it
+    # needs the share verb (pinned on the owner's real announce computation in
+    # test_copy_receipts). The first draft said "approved devices get it by default", which
+    # an operator with three approved devices read as "all three have it now".
+    # ``default`` clears the mark and nothing else: a device that already holds a grant is
+    # STILL served the value afterwards - including one whose copy an earlier local-only mark
+    # wiped, which is copied again (derived on the owner's real announce computation) - so the
+    # receipt says "still gets it", not "keeps it".
     if mark == "sync":
-        lines = [f"'{name}' is marked sync: approved devices get it by default from now on"]
+        lines = [
+            f"'{name}' is marked sync: devices approved from now on get it by default",
+            "an approved device that is not yet sharing it needs 'lop network credential "
+            f"share {name} --with <device>'",
+        ]
     elif mark == "local-only":
         lines = [f"'{name}' is marked local-only: it never crosses to another device"]
         if outstanding:
-            plural = "copies" if outstanding > 1 else "copy"
+            # TWO PARSEABLE LINES (D6). "N copies end with a wipe notice" read as if the
+            # copies acquired a notice, and this surface — where the policy is SET — was the
+            # only one of the four with nothing about a holder that never reconnects.
+            many = outstanding > 1
             lines.append(
-                f"{outstanding} existing {plural} end with a wipe notice on the "
-                "holder's next contact"
+                f"{outstanding} existing {'copies' if many else 'copy'} will be wiped the next "
+                f"time {'their holders are' if many else 'its holder is'} reached"
+            )
+            lines.append(
+                "a holder that never reconnects keeps its copy — rotating the secret at its "
+                "source is the only ending for that one"
             )
     else:
         lines = [
-            f"'{name}' has no mark: it is copied only where a device's own declared "
-            "needs call for it"
+            f"'{name}' has no mark: devices approved from now on get it only where their "
+            "own declared needs call for it",
+            "a device already sharing it still gets it; 'lop network credential revoke "
+            f"{name} --from <device>' ends that",
         ]
     _audit(
         "credential.marked",

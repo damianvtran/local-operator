@@ -214,12 +214,15 @@ workload that assumed a GitLab or Linear server finds none on a freshly paired p
 `lop network mcp push [--peer <id>|--all-peers]` reconciles this device's user-scope
 MCP servers onto a peer (the mesh-definitions cadence also carries them after pairing,
 so a device converges on its own), and `lop network mcp state` shows what THIS device
-holds and which keys a mirror still needs. **Values never travel**: `env` and
+holds and which keys a mirror still needs. **The push itself carries no values**: `env` and
 `headers` move as `${NAME}` references and per-key state (a literal value stays on
 the device that wrote it), an OAuth server re-registers on the peer instead of
 copying its client secret, and a mirrored server whose key the peer's store lacks is
-NOT hidden — it refuses at connect, by name, and the fix is `lop secret set <KEY>`
-on the device that runs it. A row whose text looks like a credential is withheld and
+NOT hidden — it refuses at connect, by name. The key reaches that device one of two
+ways: `lop secret set <KEY>` on the device that runs it, or a COPY from the owner (a
+secret a pushed bundle declares as `ref:<NAME>` is preselected when the device is
+approved, and `lop network credential mark <NAME> sync` preselects any other; see
+"Credentials on a peer"). A row whose text looks like a credential is withheld and
 named rather than sent, on both ends.
 
 WHAT A PEER MAY AND MAY NOT BE ASKED FOR, and each is refused in words rather than
@@ -540,27 +543,43 @@ for work that follows the person, not for work that follows the machine.
 ## Credentials on a peer
 
 Credentials are brokered by default, and TWO CLASSES ARE COPIED (the provisioning
-design, `mesh-consent-provisioning.md` §2.1): static keys (a GitHub PAT, an
-api-key-static credential) and the `lop secret` store's secrets reach an approved
-device as COPIES — re-sealed into that device's own encrypted store, never
-plaintext, never the owner's key. For everything else the old rule stands: never
-copy a token or a key by hand, never run a login on a peer, and never "fix" an
-expiry by re-authenticating for someone else — a refresh is requested from the
-device that owns the credential, which lends a short-lived access token and never
-its refresh token (`lop network credential share|revoke`, `lop network credentials`).
+design, `mesh-consent-provisioning.md` §2.1): rows of kind `api-key-static` (a
+provider API key you signed in with) and rows whose key starts `secret:` (kind
+`store-secret`: anything in the `lop secret` store, a `GITHUB_TOKEN` among them).
+What arrives is that device's OWN material, and where it rests depends on the class.
+A `store-secret` copy is re-sealed into the device's own encrypted store under its
+own master key: never plaintext, never the owner's key. An `api-key-static` copy is
+the same row a local sign-in would write, in that device's 0600 `auth.db` — the
+login's at-rest protection, not the store's. The `github` credential itself is
+brokered, never copied: a `GITHUB_TOKEN` marked `sync` puts that token on the device as
+an ordinary secret, while sharing `github` lends it as a short-lived grant (the GitHub
+section below). For everything else the old rule stands: never copy a token
+or a key by hand, never run a login on a peer, and never "fix" an expiry by
+re-authenticating for someone else — a refresh is requested from the device that
+owns the credential, which lends a short-lived access token and never its refresh
+token (`lop network credential share|revoke`, `lop network credentials`).
 
-WHICH store secrets are copied is a standing selection, not a per-share decision:
-`lop network credential mark <NAME> sync` sends a secret to approved devices by
-default; `... mark <NAME> local-only` keeps it here (and ends copies that already
-left); `... mark <NAME> default` clears the mark. An UNMARKED secret is only copied
-when the pushed bundles declare it (`ref:<NAME>`) — offered otherwise, never copied
-by default. Un-approving a device (`lop network member rm`) and `credential revoke`
-each END the copies they can reach: a reachable device deletes its copy and
-confirms, and the receipt says so; a device that is unreachable at that instant
-keeps its copy — and the receipt says THAT too, because a removed member is never
-contacted again. And the ceiling holds regardless: this removed the copies it could
-reach. A copy that already left that device can only be ended by rotating the
-secret at its source.
+WHICH store secrets are copied is a standing selection, not a per-share decision.
+`lop network credential mark <NAME> sync` marks a secret for devices approved FROM NOW
+ON: the approval preselects it. The mark writes no grant of its own, so an approved
+device that is not yet sharing it needs
+`lop network credential share <NAME> --with <device>`. `... mark <NAME> local-only`
+keeps it here and ends the copies this device can still reach (the ceiling, below);
+`... mark <NAME> default` clears the mark. An UNMARKED secret is preselected only when
+the pushed bundles declare it (`ref:<NAME>`); otherwise the pairing screens' share list
+(above) shows it as `not offered` and it is not copied. That list can only REDUCE, never
+add, so a `not offered` secret reaches a device by being marked `sync` before the
+approval, or by `credential share` after it.
+
+Un-approving a device (`lop network member rm`) and `credential revoke` each END the
+copies they can reach: a reachable device deletes its copy and confirms, and the
+receipt says so; a device that is unreachable at that instant keeps its copy — and
+the receipt says THAT too, because a removed member is never contacted again. A
+receipt reports what the owner's ledger holds: "no copy ... is recorded" means no
+confirmation arrived, not that nothing is there. Every receipt that reports an ending
+closes with the same two lines, because the ceiling holds regardless: "This ends the
+copies the owner can still reach. A copy that has left the owner's control can only be
+ended by rotating the secret at its source."
 
 Provider logins are shareable by name (except device-bound ones such as kimi),
 and the ledger lists them beside the MCP servers: `lop network credentials`

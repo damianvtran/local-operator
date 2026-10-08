@@ -257,9 +257,14 @@ What follows from it, for copies specifically:
 | Copy (classes 2/4, forge opt-in) | Sends a **wipe notice** for every copied key with this owner's provenance; the node deletes and acks. Reachable: immediate. Unreachable: queued to the next contact (§5.5). | A copy already exfiltrated from the node cannot be recalled. **Rotate at the source** — that is the only ending, and every surface that ends a copy says so (the `member rm` receipt, the network guide, `credential revoke` output). |
 | Refuse (1/6) | Nothing to do. | — |
 
-The one sentence the design commits to, on every surface that ends a copy: *"This
-removed the copies it could reach. A copy that already left that device can only be
-ended by rotating the secret at its source."*
+The one commitment the design makes, on every surface that ends a copy: *"This ends the
+copies the owner can still reach. A copy that has left the owner's control can only be
+ended by rotating the secret at its source."* **As built (S4, design review round 1, D2):**
+tense-free on purpose. It follows state lines ("a wipe notice ... is queued", "could NOT be
+confirmed deleted") in which nothing has been removed yet, so the first draft's "This
+removed the copies it could reach" claimed a completed action on exactly the arms that say
+nothing completed, and re-used the tombstone's verb on the `member rm` receipt. It prints as
+two lines, one fact each, after every state line.
 
 ---
 
@@ -412,6 +417,10 @@ defaults off this paragraph:
 - `sync` — the operator's standing "send this to approved nodes" mark. A key so marked
   joins every approved device's copy-set by default, for keys the operator knows a node
   will need before the node's bundles can say so.
+  **As built (S4):** the mark is read when a device is APPROVED — it preselects the key on
+  the pairing screens' share list and in the run-only approval's default set — and writes
+  no grant of its own, so an approved device that is not yet sharing it takes one step:
+  `credential share <NAME> --with <device>`.
 - `local-only` — never crosses. The operator's per-key kill switch (and the class rule
   for anything device-bound).
 - `refuse`-by-class — the structural exclusions of §1.4 apply; nothing here can widen
@@ -420,6 +429,10 @@ defaults off this paragraph:
 Everything outside the default set is *offered* — visible on the approval card, one
 step to add — and not copied unless selected. One keystroke up per key when wanted, not
 an opt-out per key to keep it out.
+**As built (S4):** the pairing screens' share list (`offers.render_rows`) prints such a row
+as `not offered`, and that list is reduce-only (§1.4), so the "one step" is the operator's
+own: `mark <NAME> sync` before the approval, or `credential share <NAME> --with <device>`
+after it.
 
 The **bounding story**, stated as five concrete bounds:
 
@@ -489,9 +502,12 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
 - **The receipt says which happened**, and both sentences are shipped in
   `credentials/messages.py`'s house style — one home per surface
   (`mesh-credentials.md` §4 intro). **As built (S4):** `render_copy_revoke_notice`
-  renders the per-state line (a queued notice / an already-wiped copy / no confirmed
-  copy) from the same ledger the listing reads, and `COPY_CEILING_SENTENCE` is the
-  §2.3 ceiling, printed by `credential revoke` whenever a copy existed at all.
+  renders the per-state lines (a queued notice / an already-wiped copy / no RECORDED
+  copy — the ledger's word: a row is written from the member's reply, so a copy whose
+  confirmation never arrived is not tracked, and the receipt says so) from the same
+  ledger the listing reads. The §2.3 ceiling (`COPY_CEILING_LINES`; `COPY_CEILING_SENTENCE`
+  is the same words joined) prints after EVERY state line of `credential revoke` and every
+  `member rm` ending arm (design review round 1, D1/D8).
 
 ---
 
