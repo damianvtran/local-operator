@@ -781,23 +781,25 @@ def _fixture_runner_environment() -> dict[str, str]:
     """The environment a fixture runner is given: built, never inherited.
 
     WHY: the recorded run's agent committed `__pycache__/calc.cpython-312.pyc` beside
-    its fix, so the fixture's merge base TRACKS a bytecode file the runner regenerates
-    the moment it imports `calc`. Importing writes nothing only while bytecode writing
-    is off, and that switch has to reach the CHILD — which is what this builds. A run
-    that relied on the ambient `PYTHONDONTWRITEBYTECODE` answered a question about the
-    host rather than about the artifact: with it unset, the fixture-SHA run drops an
-    untracked `__pycache__/` into a tree whose branch tracks that exact path, the
-    branch checkout then refuses to overwrite an untracked file, and
-    `acceptance2.checkout_branch` FAILs on a run that is itself correct (observed: 21
-    PASS / 1 FAIL, nothing else moved). Setting the switch here is what makes `verify`
+    its fix, so the BRANCH that commit produced TRACKS a bytecode file the runner regenerates
+    the moment it imports `calc` (the merge base tracks none — what collides is the checkout
+    of the branch, against the untracked path the fixture-SHA run just wrote). Importing
+    writes nothing only while bytecode writing is off, and that switch has to reach the
+    CHILD — which is what this builds. A run that relied on the ambient
+    `PYTHONDONTWRITEBYTECODE` answered a question about the host rather than about the
+    artifact: with it unset, the fixture-SHA run leaves that path untracked, the branch
+    checkout then refuses to overwrite it, and `acceptance2.checkout_branch` FAILs on a run
+    that is itself correct — observed: 20 PASS / 1 FAIL / 0 BLOCKED over the 21 rows printed,
+    one row short of the passing table because the failing row returns before
+    `acceptance2.test_passes_on_branch`. Setting the switch here is what makes `verify`
     host-independent; `PYTHONPYCACHEPREFIX` is likewise not forwarded, so a host that
     redirects bytecode elsewhere cannot mask the same defect.
 
-    Credentials are the other half: the driver holds an assumed controller session
-    while `verify` runs, so inheriting `os.environ` would hand a fixture command the
-    operator's AWS/`lop` material for no reason it has. An allowlist gives it nothing
-    it did not need — which is the same rule `_verify_session`'s `env -i`-style mapping
-    follows for the transplanted session.
+    Credentials are the other half: `verify` parses `--profile` but assumes no role, so what
+    the allowlist keeps out of a fixture command is the CALLER's ambient material — the
+    operator's `AWS_*` profile and `LOP_*` store variables — which a fixture command has no
+    use for. An allowlist gives it nothing it did not need, the same rule
+    `_verify_session`'s `env -i`-style mapping follows for the transplanted session.
     """
     environment = {
         name: os.environ[name] for name in _FIXTURE_RUNNER_PASSTHROUGH if name in os.environ

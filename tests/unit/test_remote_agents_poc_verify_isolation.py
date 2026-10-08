@@ -1,20 +1,22 @@
 """`verify` must answer about the recorded run, not about the host that runs it.
 
 WHY THIS FILE EXISTS. The real-key run's agent committed
-`__pycache__/calc.cpython-312.pyc` beside its fix, so the fixture's merge base tracks a
-bytecode file the fixture runner regenerates the moment it imports `calc`. `verify`
-handed that runner its own inherited environment, which made acceptance 2 depend on an
-ambient `PYTHONDONTWRITEBYTECODE`: unset, the fixture-SHA run drops an untracked
-`__pycache__/` into a tree whose branch TRACKS that exact path, the branch checkout
-refuses to overwrite an untracked file, and `acceptance2.checkout_branch` FAILs on a
-run that is itself correct — observed on the recorded `ct_92161251` artifact as 21 PASS
-/ 1 FAIL / 0 BLOCKED with nothing else moved. The verdict is the product here, so that
-is a correctness defect in `verify` rather than a caveat about a host, and the driver
-now builds the child's environment itself (`_fixture_runner_environment`).
+`__pycache__/calc.cpython-312.pyc` beside its fix, so the BRANCH that run produced tracks a
+bytecode file the fixture runner regenerates the moment it imports `calc` (its merge base tracks
+none — what collides is the checkout of the branch, against the untracked path the fixture-SHA
+run has just written). `verify` handed that runner its own inherited environment, which made
+acceptance 2 depend on an ambient `PYTHONDONTWRITEBYTECODE`: unset, the fixture-SHA run drops the
+untracked `__pycache__/`, the branch checkout refuses to overwrite it, and
+`acceptance2.checkout_branch` FAILs on a run that is itself correct — observed on the recorded
+`ct_92161251` artifact as 20 PASS / 1 FAIL / 0 BLOCKED over the 21 rows printed, one row short of
+the passing table because the failing row returns before `acceptance2.test_passes_on_branch`.
+The verdict is the product here, so that is a correctness defect in `verify` rather than a
+caveat about a host, and the driver now builds the child's environment itself
+(`_fixture_runner_environment`).
 
 The cases are the pair the repository asks for: one asserts the environment the child
 RECEIVES (including the credential families that must not cross into it), and two run
-the real thing end to end on a synthetic fixture whose merge base tracks a pyc — the
+the real thing end to end on a synthetic fixture whose agent branch tracks a pyc — the
 green arm, and the red arm that proves the guard can still fail.
 """
 
@@ -197,7 +199,16 @@ def _build_fixture(root: Path) -> _Fixture:
     branch = "lop/ct_test"
     _git(origin, "checkout", "-q", "-b", branch)
     (origin / "calc.py").write_text(FIXED_CALC, encoding="utf-8")
+    # `cache_from_source` is the interpreter's own spelling of where `calc`'s bytecode goes,
+    # and it reads the PROCESS's `sys.pycache_prefix` — so a host that exports
+    # `PYTHONPYCACHEPREFIX` makes it an ABSOLUTE path outside the fixture, which would plant
+    # the placeholder in the operator's shared cache, leave the branch tracking nothing, and
+    # quietly cost both arms their teeth (review MAJOR). `_unset_bytecode_variables` clears
+    # the attribute; the assertion makes a regression of that loud HERE, where the damage
+    # would be done, rather than as a silently toothless arm later.
     pyc_relpath = importlib.util.cache_from_source("calc.py")
+    redirect_active = Path(pyc_relpath).is_absolute()
+    assert not redirect_active, "bytecode redirect active: .pyc would land outside the fixture"
     pyc_bytes = b"\x00" * 442
     pyc = origin / pyc_relpath
     pyc.parent.mkdir(parents=True, exist_ok=True)
@@ -219,14 +230,21 @@ def _clone(fixture: _Fixture, root: Path) -> Path:
 
 
 def _unset_bytecode_variables(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ambient state that exposed the defect.
+    """The ambient state that exposed the defect, cleared on BOTH sides of the switch.
 
-    `PYTHONPYCACHEPREFIX` goes with it: a host that redirects bytecode away from the
-    source tree would leave the clone clean for a reason that has nothing to do with
-    the driver, which is how the defect stayed invisible here for a round.
+    `PYTHONDONTWRITEBYTECODE` goes so that a child inheriting the environment writes
+    bytecode, and `PYTHONPYCACHEPREFIX` goes so that it writes it BESIDE THE SOURCE, where
+    the collision is. Clearing only `os.environ` is not the same thing: the interpreter set
+    `sys.pycache_prefix` from that variable at start-up, `importlib.util.cache_from_source`
+    reads the ATTRIBUTE rather than the variable, and a host that exports the redirect
+    leaves this file answering about the host — the fixture's `.pyc` planted outside the
+    fixture, the branch tracking nothing, the red arm failing outright and the green one
+    asserting about a path outside the clone. `tests/unit/test_bytecode_cache.py` clears the
+    same attribute for the same reason.
     """
     monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    monkeypatch.setattr(sys, "pycache_prefix", None)
 
 
 def test_verify_fails_the_normal_acceptance_rows_but_never_dirties_the_clone(
@@ -285,5 +303,8 @@ def test_with_bytecode_writing_on_the_branch_checkout_is_the_row_that_fails(
         pytest.skip("this interpreter writes no bytecode even with the switch unset")
 
     checkout = driver._run(["git", "checkout", "--quiet", branch], cwd=clone)
-    assert checkout.returncode != 0
-    assert "would be overwritten" in checkout.stdout + checkout.stderr
+    assert checkout.returncode != 0, "bytecode writing on must still break the branch checkout"
+    # The property, not git's wording: the untracked file is still standing and the branch
+    # (whose commit tracks it) is still not checked out. Git localises its refusal text.
+    assert (clone / fixture.pyc_relpath).exists()
+    assert _git(clone, "rev-parse", "HEAD").strip() == fixture.fixture_sha

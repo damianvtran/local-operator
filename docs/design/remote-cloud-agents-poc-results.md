@@ -133,18 +133,22 @@ PASS  acceptance2.test_passes_on_branch: exit 0: PASS test_add: 5 == 5 / PASS te
 
 The commit fixes `calc.add` (`return a - b` → `return a + b`) and carries, beside it,
 `__pycache__/calc.cpython-312.pyc` (442 B) — the container's Python 3.12 bytecode, which the
-agent committed along with the fix. It changes no test, but it means the fixture's merge base
-TRACKS a bytecode file that the fixture runner regenerates the moment it imports `calc`: the
-fixture-SHA run writes that path as an **untracked** file, and the branch checkout then refuses
-to overwrite an untracked file. `verify` answers that itself rather than leaving it to whoever
-runs it — it gives the fixture runner an environment it BUILDS (PATH and the locale family, plus
-`PYTHONDONTWRITEBYTECODE=1`, and nothing else, so the parent's credentials never cross) — which
-is what makes the verdict a statement about the recorded run and not about the host.
+agent committed along with the fix. It changes no test, but it means the BRANCH that commit
+produced tracks a bytecode file the fixture runner regenerates the moment it imports `calc` (the
+merge base, `69db7e55…`, tracks none): the fixture-SHA run writes that path as an **untracked**
+file, and the checkout of the branch then refuses to overwrite an untracked file. `verify`
+answers that itself rather than leaving it to whoever runs it — it gives the fixture runner an
+environment it BUILDS (PATH and the locale family, plus `PYTHONDONTWRITEBYTECODE=1`, and nothing
+else, so the caller's credentials and `LOP_*` store variables never cross) — which is what makes
+the verdict a statement about the recorded run and not about the host.
 
 With the ambient switch unset that is the difference between a PASS and a FAIL: the pre-fix
 driver's fixture-SHA run left the untracked bytecode, the branch checkout refused it, and
-`acceptance2.checkout_branch` was the one row that FAILed — 21 PASS / 1 FAIL / 0 BLOCKED, every
-other row unchanged — on an artifact that is itself correct. Both directions are pinned by
+`acceptance2.checkout_branch` was the one row that FAILed — **20 PASS / 1 FAIL / 0 BLOCKED of the
+21 rows printed**, every other row unchanged — on an artifact that is itself correct. The table
+is one row short of the 22 a passing run prints because the failing row RETURNS EARLY, so
+`acceptance2.test_passes_on_branch` is never recorded: a FAIL here does not just mark a row, it
+drops the rows after it. Both directions are pinned by
 `tests/unit/test_remote_agents_poc_verify_isolation.py`.
 
 Item 3, on the transplanted **real** session (the session listing elided):
