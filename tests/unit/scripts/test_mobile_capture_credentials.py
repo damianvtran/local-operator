@@ -31,6 +31,11 @@ PASSWORD_SOURCES = (
     "mobile_overflow_fixture.py",
     "mobile_overflow_capture.py",
     "mobile_reachability_check.py",
+    # The open-by-default rig: the capture MINTS the per-run value and hands it to the
+    # fixture through the environment, the fixture resolves it with the shared refusing
+    # helper. Both are entry points that touch the credential, so both are scanned.
+    "mobile_asks_open_capture.py",
+    "mobile_asks_open_fixture.py",
 )
 
 PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
@@ -188,7 +193,10 @@ def test_the_capture_accepts_a_per_run_credential_without_echoing_it(tmp_path: P
     assert minted not in done.stdout and minted not in done.stderr
 
 
-@pytest.mark.parametrize("name", ("mobile_delegating_fixture.py", "mobile_overflow_fixture.py"))
+@pytest.mark.parametrize(
+    "name",
+    ("mobile_delegating_fixture.py", "mobile_overflow_fixture.py", "mobile_asks_open_fixture.py"),
+)
 def test_the_fixtures_refuse_to_start_without_a_credential(tmp_path: Path, name: str) -> None:
     done = _run(tmp_path, [sys.executable, str(SCRIPTS / name), "4199"], env_extra={})
     assert done.returncode != 0, f"{name} started without a credential"

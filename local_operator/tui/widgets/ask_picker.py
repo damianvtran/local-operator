@@ -224,6 +224,28 @@ NUMBER_CELLS = 3
 #: card; an experimental press is free, since Escape leaves.
 TAB_HINT_KEY = "⇥"
 
+#: Where a card puts the caret when it mounts (``AskPickerScreen(caret=...)``). Three
+#: kinds of mount, three rules — a boolean could only name two of them, and the third
+#: is the one whose absence let an auto-opened card take the keyboard:
+#:
+#: * ``CARET_FOLLOW_DRAFT`` — a question the AGENT raised (the blocking ``ask`` and the
+#:   approval gate). It can land mid-sentence, so it takes the caret over an EMPTY
+#:   composer and yields to a draft (D12, design round 3: typing ``yes do it`` through
+#:   the mount used to approve a ``rm -rf``). The default, and what every pre-existing
+#:   construction site gets.
+#: * ``CARET_TAKE`` — a mount the USER asked for (f4, the bar, a list row). They are
+#:   about to answer on it, and a draft they hold stays in the composer untouched.
+#: * ``CARET_KEEP`` — a mount NOBODY asked for: the open-by-default policy showing the
+#:   questions waiting in a conversation that was just opened. It never moves the
+#:   caret, empty composer or not (a user who has only just arrived and starts typing
+#:   must land in the composer), and it wins over a restored-focus snapshot too. Such
+#:   a card is PASSIVE until the user hands it the caret (Tab, or a click): see
+#:   :meth:`AskPickerScreen.answer_keys`.
+CARET_FOLLOW_DRAFT = "follow-draft"
+CARET_TAKE = "take"
+CARET_KEEP = "keep"
+CARET_MODES = (CARET_FOLLOW_DRAFT, CARET_TAKE, CARET_KEEP)
+
 #: The digit that always reaches the free-text row. ``0`` because it is the one
 #: digit the ordinals never claim, and because the row it reaches is the row a
 #: long list pushes past nine — where a blank gutter left the only answer that
@@ -644,8 +666,29 @@ class AskPickerScreen(Container):
         widget_id: str | None = None,
         title: str = "the agent needs your decision",
         exit_hint: tuple[str, str] = ("esc", "skip"),
+        caret: str = CARET_FOLLOW_DRAFT,
     ) -> None:
         super().__init__(id=widget_id or f"ask-picker-{id(self):x}", classes="prompt-slot")
+        if caret not in CARET_MODES:
+            raise ValueError(f"caret must be one of {CARET_MODES}, not {caret!r}")
+        #: What the mount does with the caret — see the ``CARET_*`` constants.
+        self._caret = caret
+        #: True from a ``CARET_KEEP`` mount until the user ENGAGES with the card — an
+        #: explicit gesture (:meth:`engage`: the Tab handover, a click), and NOT merely
+        #: receiving focus. While it holds, NOTHING is routed from the composer to this
+        #: card: a digit typed into an empty composer is the user's text, not an answer
+        #: to a question they never looked at. Measured, not argued: the routed-key
+        #: hold is 180 ms, and a typist's inter-key gap is of the same order, so the
+        #: first digit of "3 more tests please" would have committed option 3 before
+        #: the space arrived.
+        #:
+        #: Focus alone cannot be the signal, and a probe showed why: answering an
+        #: APPROVAL over a passive card made Textual hand the card the caret for one
+        #: frame (it is the next focusable node when the approval is removed), the
+        #: app moved it straight on to the composer, and the card — having "received
+        #: focus" — had already stopped being passive, so the next bare ``1`` answered
+        #: a question nobody had looked at.
+        self._passive = caret == CARET_KEEP
         #: Whether the list carries the trailing "Other (type your own)" row.
         #:
         #: A property of the SURFACE rather than of ``AskQuestion``, so the
@@ -865,9 +908,18 @@ class AskPickerScreen(Container):
         return self._settled
 
     def restore_focus(self) -> None:
-        """Return focus to whatever held it when the question appeared."""
+        """Return focus to whatever held it when the question appeared.
+
+        Nothing to return while the card is PASSIVE (``CARET_KEEP``): it never took
+        the caret, so the target it recorded at mount is only where focus WAS, and
+        the user may have moved it since (clicked into the transcript to read). Giving
+        it back would be the card moving the caret on the way out, which it did not do
+        on the way in.
+        """
         widget = self._restore_target
         self._restore_target = None
+        if self._passive:
+            return
         if widget is not None and getattr(widget, "is_attached", False):
             widget.focus()  # type: ignore[attr-defined]
 
@@ -1206,8 +1258,10 @@ class AskPickerScreen(Container):
         """
         if getattr(event, "button", 1) != 1:
             return
-        if not self.has_focus:
-            self.focus()
+        # Through ``engage`` even when focus is already here: a click is the user
+        # choosing this card, and that has to end a passive card's passivity for good,
+        # not only while it happens to hold the caret.
+        self.engage()
         index = self._index_at(event)
         if index is None:
             return
@@ -2374,11 +2428,20 @@ class AskPickerScreen(Container):
         from the composer (`OperatorApp.route_key_to_live_prompt`), the footer
         names only the ones that work from there, and clicking the card takes
         focus deliberately.
+
+        ``CARET_TAKE`` is the one exception to yielding, and it is for a mount the
+        USER caused (see the ``CARET_*`` constants): there is no sentence to protect,
+        because the user is the one who asked for the card, and the draft stays in
+        the composer untouched. ``CARET_KEEP`` is the opposite exception — a mount
+        nobody asked for — and it outranks everything here, a restored-focus
+        snapshot included, which belongs to an earlier mount the user DID drive.
         """
         screen = self.screen
         self._restore_target = screen.focused if screen is not None else None
-        if self._restored_focus is True or (
-            self._restored_focus is None and not self._composer_has_draft()
+        if self._caret != CARET_KEEP and (
+            self._restored_focus is True
+            or self._caret == CARET_TAKE
+            or (self._restored_focus is None and not self._composer_has_draft())
         ):
             self.focus()
         self._repaint()
@@ -2423,6 +2486,12 @@ class AskPickerScreen(Container):
         4). The test that pinned the fix read `render_lines_for_test`, which
         re-derives the text and therefore could not see the staleness — it was
         measuring the intent, not the pixels.
+
+        Receiving focus does NOT end a passive card's passivity (see ``CARET_KEEP`` and
+        :meth:`engage`): focus also arrives by accident, as Textual's fallback when a
+        neighbouring prompt is removed. While the card holds focus it is simply a card
+        that holds the caret — :attr:`passive` already reads ``False`` — and when focus
+        moves on, it is passive again.
         """
         self.call_after_refresh(self._repaint)
 
@@ -2578,12 +2647,43 @@ class AskPickerScreen(Container):
 
         Empty while the card is drawing no rows, so a key can never commit an
         answer the user was not shown (the rule :meth:`action_accept` follows).
+
+        Empty while the card is PASSIVE too (an open-by-default mount nobody asked
+        for, see ``CARET_KEEP``). The card is then in exactly the state a
+        multi-select is always in from the composer — it owns no key the composer
+        can spare — so it falls into the same ladder for free: the footer names Tab
+        ("answer here") instead of a digit range, and ``_prompt_wants_the_keyboard``
+        lets Tab hand it the caret. The alternative, routing digits to a card the
+        user has not engaged with, answers questions by accident (see ``_passive``).
         """
-        if self.question.multi or not self.visible_rows:
+        if self._passive or self.question.multi or not self.visible_rows:
             return frozenset()
         return frozenset(
             str(index + 1) for index in self._window() if index < 9 and index != self.other_row
         )
+
+    @property
+    def passive(self) -> bool:
+        """Whether the card is up, un-engaged, and NOT holding the caret (``CARET_KEEP``).
+
+        Both halves matter. ``_passive`` alone would call a card passive while the user
+        is typing into it (they Shift+Tabbed there), which would let a composer-focus
+        gesture take the caret off a card they are answering; focus alone would call a
+        card engaged for the one frame Textual lends it the caret. Together: a card is
+        passive exactly when it was auto-mounted, has not been engaged, and is not
+        where the keyboard is.
+        """
+        return self._passive and not self.has_focus
+
+    def engage(self) -> None:
+        """The user chose this card: end its passivity and give it the caret.
+
+        The ONE way a passive card becomes an ordinary one — the Tab handover from the
+        composer and a click both come through here — so "the user engaged" is a
+        statement about a gesture, never about which widget happened to be focused.
+        """
+        self._passive = False
+        self.focus()
 
     def routed_hint(self) -> tuple[str, str] | None:
         """How the footer names the keys that still work from the composer.
@@ -2999,7 +3099,12 @@ class AskPickerScreen(Container):
     def _row_ground(self, index: int) -> Style:
         """The row's background: selection by HUE, hover additive on top of it.
 
-        The same three steps the ``/resume`` picker paints on the same ``overlay``
+        A PASSIVE card marks no row (design+UX round 1, D1/U1): the tint is the
+        selection's fill and the keyboard is elsewhere, so the selected row keeps
+        the plain ground exactly like every other row — the list gates its own
+        selection paint on the same property.
+
+        Otherwise the same three steps the ``/resume`` picker paints on the same ``overlay``
         card, and for the reason recorded on ``tint-select`` in ``theme.py``: pure
         elevation cannot carry selection here (surface->raised measures 1.096:1),
         so a bare caret left a mouse user with almost nothing saying which row a
@@ -3009,7 +3114,7 @@ class AskPickerScreen(Container):
         user reached for the mouse.
         """
         hovered = index == self._hovered
-        if index == self.state.selected:
+        if index == self.state.selected and not self.passive:
             token = "tint-select-hi" if hovered else "tint-select"
         elif hovered:
             token = "tint-select"
@@ -3086,8 +3191,18 @@ class AskPickerScreen(Container):
         1.096:1), and the caret sits two columns to its left. The caret is
         ``muted`` and not the accent for the reason the command picker records:
         a second green glyph beside a green label reads as a duplicated caret.
+
+        A PASSIVE card paints none of that ink (design+UX round 1, D1/U1): a card
+        the open-by-default policy mounted while the caret is elsewhere
+        (:attr:`passive`) owns no key the composer can spare, and the accent's own
+        rule — "what Enter will take" — is a claim about a keyboard that is not
+        here. The walk showed the strongest reading of the caret is "press 1", and
+        that key lands in the composer instead, so the caret, the bright ordinal
+        and the accent all yield together (the list gates the same three). The
+        ``recommended`` badge is untouched: it is a statement about the options,
+        not about the keys, and it never depended on ``selected``.
         """
-        selected = index == self.state.selected
+        selected = index == self.state.selected and not self.passive
         accent = ground + Style(color=theme_mod.semantic_color("accent"))
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(

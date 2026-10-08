@@ -72,6 +72,13 @@ from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 policy.NONBLOCKING_ASK = True
+# These frames are about a surface a user opens or an ask arriving in a conversation
+# that is already on screen, and the fixture rows are dated before the view; the
+# open-by-default policy would read them as "pending on open" and put the surface up
+# before the state under test. The policy's own frames come from ``ask_open_shot.py``.
+from local_operator.tui import ask_open_policy  # noqa: E402
+
+ask_open_policy.AUTO_OPEN = False
 
 NOW = time.time()
 
