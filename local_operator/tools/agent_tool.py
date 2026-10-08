@@ -1474,7 +1474,12 @@ def _effort_pin_description(
     not "no tiers are configured" — the operator owns the choice, so the enum
     is ``inherit`` even where tiers exist. Saying "no tiers are configured"
     there would be FALSE, which is why this takes the flag rather than reading
-    ``configured_effort_tiers()`` for its zero-tier arm.
+    ``configured_effort_tiers()`` for its zero-tier arm. The flag is still the
+    arm: the only live config read besides the tier list is
+    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`, which
+    picks the WORDING for a subagent (depth, not the key, closed the picker
+    under ``model_choice=model``; under ``operator`` the key did) and never
+    changes which arm renders.
     """
     if not model_choice and depth_closed_the_tier_choice(delegation_depth):
         # A subagent is refused for who it is, not for the key, so the operator

@@ -897,7 +897,10 @@ def _session_lineage(session: "Session") -> tuple[str, ...]:
 
 def _session_depth(session: "Session") -> int:
     depth = getattr(session, "_delegation_depth", 0)
-    return depth if isinstance(depth, int) and depth >= 0 else 0
+    # ``type(...) is int``: a bool is an int, and ``True`` would be depth 1. The
+    # tool-side readers (``effort_validation_context``/``_delegation_depth``)
+    # apply the same rule, so every reader of a depth agrees on what one is.
+    return depth if type(depth) is int and depth >= 0 else 0
 
 
 def lookup_team(session: "Session", name: str) -> Any:
