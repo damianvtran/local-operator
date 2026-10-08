@@ -4,11 +4,12 @@ Status: PROPOSED — gate for the implementation PRs. Base: `origin/main` @ `302
 (v0.64.10). Author: architect, 2026-09-30. **AMENDED 2026-10-03 — see §10**
 (in-flight answer revision, #1936): §10 is binding on §2.2's event table, §2.4, the §4
 ops line and §5's copy contract; read it beside those sections.
-**§5.0 AMENDED 2026-10-08 — see §10's pattern** (the composer-routing invariant is
-reversed: the composer never answers an ask on any surface; the answer is given in the ask
-surface, whose explicit free-text door is its trailing `Other` row with its own input).
-Where §5.0, R7 or a per-surface bullet below still describes composer routing, the
-amended §5.0 rule governs and the old text is history, kept for provenance.
+**§5.0 and R7 (§7) AMENDED 2026-10-08, in place — see the "Superseded text" note in
+§5.0** (the composer-routing invariant is reversed: on the queued-ask path the composer
+never answers an ask; the answer is given in the ask surface, whose explicit free-text
+door is its trailing `Other` row with its own input — the flag-off blocking gate is out of
+scope, see the rule). Unlike §10 this amendment has no section of its own: the rule, the
+placeholder copy and R7's asserts were rewritten where they stand.
 
 **Provenance.** Every `file:line` is against `origin/main` @ `302a061e5` (verified with
 `git show`/`git grep`) unless tagged **(scout)** = taken from a scout report on the stale
@@ -541,25 +542,36 @@ interaction state: no wire change, §4 is untouched by this section.**
   mounted. This is the state a new ask lands in when the user is already mid-answer or
   mid-draft, and the state the user returns to when they collapse.
 
-**Composer rule (INVARIANT, every surface) — AMENDED 2026-10-08.** The composer **never
-answers an ask**, in any state (expanded, minimized, no ask surface mounted): what is typed
-in it is always an ordinary conversation message, and its draft is never converted into an
-answer. An answer is given **in the ask surface**, whose explicit free-text door is the
-trailing **`Other`** row on every non-secret question, with its own input (paste and image
-attachments follow the shared composer's behaviour; the attachment wire is a separate,
-core-gated change). A free-text-only question shows that input open, with no `Other` row in
-front of it. Toggling the surface preserves the answer draft in the surface and leaves the
-composer's own draft untouched; neither is ever sent into the other's channel. When the ask
-**settles** (answered, timed out, declined, dismissed) the surface's draft is discarded with
-the ask, and the composer is exactly as the user left it. A secret-only ask still refuses a
+**Composer rule (INVARIANT, every surface) — AMENDED 2026-10-08.** On the queued-ask
+path the composer **never answers an ask**, in any state (expanded, minimized, no ask
+surface mounted): what is typed in it is always an ordinary conversation message, and its
+draft is never converted into an answer. (The one carve-out is the flag-off path — the
+`LOP_ASK_NONBLOCKING=0` escape hatch, or a client that predates the queue — where the
+desktop's blocking-gate composer swallow remains; that path is out of scope here and is
+deleted with the blocking gate in PR F.) An answer is given **in the ask surface**, whose
+explicit free-text door is the trailing **`Other`** row on every non-secret question, with
+its own input. Image attachments in that input follow once the core wire lands
+(`ask-attachments-v1`, a separate change); the door is text-only until then. A
+free-text-only question has no `Other` row to open: its input is the question's only
+control and is shown open (on the TUI that is the picker's single free-text row, which is
+itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today; the
+desktop, relay web and app gain the explicit `Other` field with their own `Other` PRs, and
+this section states the target those PRs build to. Neither the ask surface's draft nor the
+composer's draft is ever sent into the other's channel. Where a surface keeps an answer
+draft across collapse (desktop and relay web do; the native app deliberately persists
+nothing — ADR 0005 §2 — and re-expands empty), toggling the surface preserves it. When the
+ask **settles** (answered, timed out, declined, dismissed) its draft is released with it
+(a surface may hold the dead key until it unmounts; nothing offers it again) and the
+composer's own draft is left exactly as the user had it. A secret-only ask still refuses a
 *main-box* send that would carry a credential into the transcript — that is a
 credential-safety rule, not routing.
 
 > *Superseded text.* The first revision of this rule routed the composer to the ask while the
 > answer surface was EXPANDED (separate ask/chat buffers, a swapped placeholder, Enter sends
 > the answer). It is removed because one input with two meanings made a chat message and an
-> answer indistinguishable at the moment of Enter; the `Other` row gives free text a
-> labelled home instead. §12.0's "answered in chat" path (the model records the attribution
+> answer indistinguishable at the moment of Enter, and because nobody could tell that
+> typing in the composer was how a free-text answer was given; the `Other` row gives free
+> text a labelled home instead. §12.0's "answered in chat" path (the model records the attribution
 > with `ask_withdraw(answered_in_chat)`) is now the only way a chat reply settles an ask, and
 > §12.0 is unchanged and stronger for it.
 
@@ -589,9 +601,10 @@ state (§5 header) and it must not read as one.
 
 **Placeholder copy** (AMENDED 2026-10-08). The composer's placeholder is **never** swapped
 for an ask: each app's existing placeholder is shown in every ask state. The ask surface's
-own input carries the copy instead — `Type your answer…` in the `Other` field, `Type your
-answer` on a free-text-only question (one short line per surface; the strings land in that
-surface's PR).
+own input carries its own copy, and the strings are **per surface**, not one string
+everywhere: today the desktop's free-text-only input reads `Type your answer`, the TUI's
+free-text row `Other (type your own)`, the relay web's `your answer` and the native app's
+`Your answer`; the `Other` field's own copy lands in each surface's `Other` PR.
 
 **Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
 opens the list/picker (TUI) or the sheet (others). Answering one advances to the **next
@@ -700,7 +713,7 @@ collapses — there was no list to return to.)
   `attach_client.py:2269` gains `ask_respond`, `daemon.py` `asks_open` on list rows.
 - **Minimized state (§5.0, R7):** the chip/bar above the composer is the default; tap opens
   the sheet. The web composer never routes to the ask (§5.0 amended); the sheet's
-  `Other` row is the free-text door — the
+  `Other` row (landing with the web `Other` PR) is the free-text door. Separately, the
   `forceCollapsed` behaviour must not be used to "minimize" (it hides the panels, which is a
   different promise).
 - **Web (`mobile/web/src`):** session-list row chip (and the outstanding-asks row state,
@@ -875,15 +888,19 @@ A dedicated case, because the composer rule is a *behavioural* claim that stills
   (1) an ask arriving while a chat draft is in the composer leaves the draft intact and the
   ask MINIMIZED; (2) in **every** state — minimized, expanded, no surface mounted — Enter on
   the composer sends a **conversation** message and produces zero answers (the route is
-  never reached from the composer); (3) with the surface expanded, the answer is given only
-  in the ask surface: the `Other` input (or a free-text-only question's input) writes the
-  draft, and Enter *in that input* advances/submits, never in the composer; (4) collapsing
-  preserves the composer's draft and the ask surface's draft, and re-expanding restores
-  the latter; (5) an ask settling while expanded leaves the composer exactly as the user
-  left it (placeholder never swapped, draft kept); (6) the minimized bar is absent at zero
-  asks and shows head + count at 3.
-- **Frames:** minimized bar (1 and 3 asks), expanded with the `Other` row closed and open,
-  and the list/sidebar outstanding-asks state — **light and dark** where the surface has
+  never reached from the composer; the flag-off path of the rule above is the exception and
+  is not asserted here); (3) with the surface expanded, the answer is given only in the ask
+  surface: the `Other` input (or a free-text-only question's input) writes the draft, and
+  nothing typed or pressed there reaches the composer. Each surface states its own submit
+  gesture: the TUI advances/accepts on Enter; the desktop, relay web and native surfaces
+  submit through their own explicit control over the whole draft (one atomic form), not on
+  Enter; (4) collapsing preserves the composer's draft and the ask surface's draft, and
+  re-expanding restores the ask surface's draft on surfaces that keep one (not the native app, which persists
+  nothing, ADR 0005 §2); (5) an ask settling while expanded leaves the composer exactly as
+  the user left it (placeholder never swapped, draft kept); (6) the minimized bar is absent
+  at zero asks and shows head + count at 3.
+- **Frames:** minimized bar (1 and 3 asks), expanded with the `Other` row closed and open
+  (once that surface's `Other` PR lands), and the list/sidebar outstanding-asks state — **light and dark** where the surface has
   both, at phone size for web/app. Before/after against `origin/main`.
 - **No wire assertions:** R7 is client-local interaction state and changes nothing in §4 —
   any PR that touches the wire for R7 is out of scope.
@@ -1271,7 +1288,7 @@ through it:
   nobody will answer is how the operator learns to ignore the set. `dismiss` cannot carry this: it is
   refused unless `timed_out` (queue.py), it is the USER's view action, and its copy is the user's
   voice.
-* **Answered in chat.** §5.0 (now without any composer routing) forbids the composer converting a chat draft into an answer. So
+* **Answered in chat.** §5.0 guarantees the composer never converts a chat draft into an answer. So
   when the operator simply replies in the transcript — the most natural way to answer a question they
   can see — the ask keeps reading "waiting" although the agent HAS the answer, and the surfaced count
   is now a lie with a clock on it. The only safe detector of "that message WAS the answer" is the
