@@ -11,7 +11,8 @@ as the system prompt).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
@@ -149,6 +150,72 @@ DEFAULT_TOOL_NAMES: list[str] = [
 ]
 
 
+_NULL_BRANCH: dict[str, Any] = {"type": "null"}
+
+
+def collapse_optional_nulls(schema: Any) -> Any:
+    """Rewrite pydantic's optional-field shape to the plain type it wraps.
+
+    Every ``x: T | None = None`` field renders as
+    ``{"anyOf": [<T>, {"type": "null"}], "default": null, "description": …}``.
+    The null branch and the ``default: null`` restate what NOT listing the
+    property in ``required`` already says — the model may leave it out — and
+    the default surface carried 123 of them, ~4.2k characters on every
+    request. This rewrites each to ``{<T>, "description": …}``.
+
+    ONLY the optional, single-branch case: a REQUIRED nullable property (where
+    ``null`` is a meaningful value the model must be able to send) and a
+    multi-branch union are left exactly as generated. The loop's validator
+    accepts ``None`` for an optional property (``validate_tool_arguments``), so
+    a model that still sends ``null`` for an omitted field is not refused, and
+    every builtin params model already accepts ``None`` for these fields.
+
+    Builtins only: called from :func:`create_tools`, never on an MCP server's
+    schema, which is the server's contract to state.
+    """
+    if isinstance(schema, list):
+        return [collapse_optional_nulls(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict[str, Any] = {}
+    required = set(schema.get("required") or ())
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, Mapping):
+            out[key] = {
+                name: (
+                    collapse_optional_nulls(_collapse_one(prop))
+                    if name not in required
+                    else collapse_optional_nulls(prop)
+                )
+                for name, prop in value.items()
+            }
+        elif key in ("$defs", "definitions") and isinstance(value, Mapping):
+            out[key] = {name: collapse_optional_nulls(sub) for name, sub in value.items()}
+        elif key in ("items", "anyOf", "oneOf", "allOf", "additionalProperties"):
+            out[key] = collapse_optional_nulls(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _collapse_one(prop: Any) -> Any:
+    if not isinstance(prop, dict):
+        return prop
+    branches = prop.get("anyOf")
+    if not isinstance(branches, list) or len(branches) != 2 or _NULL_BRANCH not in branches:
+        return prop
+    if "default" in prop and prop["default"] is not None:
+        return prop
+    (kept,) = [branch for branch in branches if branch != _NULL_BRANCH]
+    if not isinstance(kept, dict) or set(kept) & set(prop) - {"anyOf"}:
+        # A key on both levels (a description inside the branch AND beside it)
+        # would have to be merged by preference; not a shape pydantic emits, so
+        # leave it rather than guess.
+        return prop
+    collapsed = {key: value for key, value in prop.items() if key not in ("anyOf", "default")}
+    return {**kept, **collapsed}
+
+
 def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> list[AgentTool]:
     """Build the tool list for one session.
 
@@ -177,6 +244,6 @@ def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> 
             # only prepends a property inside `parameters`; the tool list this
             # function returns keeps its order, which the prompt cache depends
             # on (see the module docstring).
-            tool.parameters = apply_intent_schema(tool.parameters)
+            tool.parameters = apply_intent_schema(collapse_optional_nulls(tool.parameters))
             tools.append(tool)
     return tools
