@@ -1,0 +1,17 @@
+  · ⇈ opening Aida, your chief of staff…
+▎ Hi — I'm Aida, your chief of staff here in Local Operator. It's good to meet you.             
+▎                                                                                               
+▎ A couple of quick things to get us started:                                                   
+▎                                                                                               
+▎  1 What should I call you? (And if you'd like an email on file for later, share it — otherwise
+▎    no rush.)                                                                                  
+▎  2 How do you want to use AI? If you're not sure yet, that's completely fine — I can suggest  
+▎    some starting points.                                                                      
+▎                                                                                               
+▎ Where you are right now: Local Operator runs agents on your own machine. You bring whatever   
+▎ model provider you like, work can be split across teams and specialists, and I sit at the     
+▎ front door — you tell me what you need, and I route it or do it myself. Your phone can reach  
+▎ in too.                                                                                       
+▎                                                                                               
+▎ Once I know a bit about what you're after, I can set up your first agent or team in a minute  
+▎ or two.                                                                                       

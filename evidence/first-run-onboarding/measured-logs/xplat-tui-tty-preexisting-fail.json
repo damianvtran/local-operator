@@ -1,0 +1,22 @@
+{
+  "host": {
+    "platform": "darwin",
+    "system": "Darwin",
+    "release": "27.0.0",
+    "machine": "arm64",
+    "python": "3.12.13"
+  },
+  "counts": {
+    "FAIL": 1
+  },
+  "results": [
+    {
+      "name": "tui.tty",
+      "status": "FAIL",
+      "detail": "pty-driven boot did not return in 180s",
+      "extra": {
+        "seconds": 180.0
+      }
+    }
+  ]
+}

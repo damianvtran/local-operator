@@ -1,0 +1,69 @@
+{
+  "conversation_id": "c157f12547f6",
+  "her_session_id": "c157f12547f6",
+  "ledger_timeline": [
+    "327855.6s armed",
+    "327858.0s delivered"
+  ],
+  "ledger_final": "delivered",
+  "greeting_record": {
+    "state": "delivered",
+    "surface": "tui",
+    "requested_at": 1791492236683,
+    "armed_at": 1791492236683,
+    "delivered_at": 1791492239920
+  },
+  "wake_row": [
+    {
+      "id": "aida-cadence",
+      "hidden": false,
+      "message": "Daily proactive check-in. Review the operator's current state \u2014 active and stale sessions, projects and workstreams, scheduled wakes, usage signals, and anything you started earlier that is still in flight \u2014 and report ONLY what needs the operator's action, in a few short lines. If there is nothing actionable, give the one quiet-day tip below in a sentence when this message carries one, otherwise reply with exactly \"(no action needed)\" and nothing else. To schedule a follow-up check, write it to the escalation tray described in your instructions instead of arming wakes directly.\n\nIntegration nudge window: open. If ONE missing integration (an MCP server such as Google Workspace, Linear or Slack, or a similar set-up step) would be concretely useful to something in flight, you may suggest that single integration in this check-in and offer to set it up. Never more than one, and if nothing in flight needs one, do not bring integrations up.\n\nTip for a quiet day (use only if nothing needs action): Phone access is not set up and they are not signed in with Radient. The recommended, least technical route is `/login radient` and then the Radient relay; the alternative is self-hosting a Cloudflare tunnel in front of `lop mobile` (guide: tunnel). Offer whichever suits them."
+    }
+  ],
+  "trigger_in_visible_transcript": false,
+  "trigger_rows_in_file": 4,
+  "trigger_row_hidden_flags": [
+    null,
+    true,
+    null,
+    null
+  ],
+  "raw_row_kinds": [
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "custom",
+    "message",
+    "custom",
+    "message",
+    "custom",
+    "custom",
+    "custom"
+  ],
+  "raw_row_custom_types": [
+    "conversation_name",
+    "aida_session",
+    "wake_schedules",
+    "wake_schedules",
+    "attention_started",
+    "selected_model",
+    "wake_prompt",
+    "system_prefix",
+    null,
+    "session_spend.v1",
+    "frontend_state_checkpoint_v1",
+    "completion_attention"
+  ],
+  "visible_text_head": [
+    "  \u00b7 \u21c8 opening Aida, your chief of staff\u2026",
+    "\u258e Hi \u2014 I'm Aida, your chief of staff here in Local Operator. It's good to meet you.             ",
+    "\u258e                                                                                               ",
+    "\u258e A couple of quick things to get us started:                                                   ",
+    "\u258e                                                                                               ",
+    "\u258e  1 What should I call you? (And if you'd like an email on file for later, share it \u2014 otherwise",
+    "\u258e    no rush.)                                                                                  ",
+    "\u258e  2 How do you want to use AI? If you're not sure yet, that's completely fine \u2014 I can suggest  "
+  ]
+}

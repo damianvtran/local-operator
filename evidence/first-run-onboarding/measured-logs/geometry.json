@@ -1,0 +1,129 @@
+{
+  "note": "Grid geometry behind every frame in this directory. All TUI frames are Textual save_screenshot stills of the REAL app (the one that loads the stylesheet) driven through run_test; the pixel numbers are the SVG's own viewBox, and the cell grid is the size the app was run at.",
+  "captures": {
+    "setup_splash_80": {
+      "viewBox_px": [
+        640.0,
+        544.0
+      ],
+      "cells": [
+        80,
+        32
+      ],
+      "px_per_cell": [
+        8.0,
+        17.0
+      ]
+    },
+    "setup_splash_120": {
+      "viewBox_px": [
+        960.0,
+        544.0
+      ],
+      "cells": [
+        120,
+        32
+      ],
+      "px_per_cell": [
+        8.0,
+        17.0
+      ]
+    },
+    "real_run_attended": {
+      "viewBox_px": [
+        1238.0,
+        879.6
+      ],
+      "cells": [
+        100,
+        34
+      ],
+      "note": "the app was run at 100x34 cells; the still's viewBox is the whole composed screen box (1238x879.6 px), so a per-cell figure is not claimed for these two"
+    },
+    "real_run_signed_in_radient": {
+      "viewBox_px": [
+        1238.0,
+        879.6
+      ],
+      "cells": [
+        100,
+        34
+      ],
+      "note": "the app was run at 100x34 cells; the still's viewBox is the whole composed screen box (1238x879.6 px), so a per-cell figure is not claimed for these two"
+    }
+  },
+  "frame_files": {
+    "01-before-setup-80.png": {
+      "bytes": 39790,
+      "px": null
+    },
+    "02-after-setup-80.png": {
+      "bytes": 43697,
+      "px": null
+    },
+    "03-before-setup-120.png": {
+      "bytes": 41274,
+      "px": null
+    },
+    "04-after-setup-120.png": {
+      "bytes": 45041,
+      "px": null
+    },
+    "05-before-login-picker-120.png": {
+      "bytes": 79024,
+      "px": null
+    },
+    "06-after-login-picker-120.png": {
+      "bytes": 98081,
+      "px": null
+    },
+    "07-before-login-picker-80.png": {
+      "bytes": 76764,
+      "px": null
+    },
+    "08-after-login-picker-80.png": {
+      "bytes": 94026,
+      "px": null
+    },
+    "09-before-radient-login-80.png": {
+      "bytes": 48040,
+      "px": null
+    },
+    "10-after-radient-login-80.png": {
+      "bytes": 49192,
+      "px": null
+    },
+    "11-before-api-key-login-80.png": {
+      "bytes": 31599,
+      "px": null
+    },
+    "12-after-api-key-login-80.png": {
+      "bytes": 38282,
+      "px": null
+    },
+    "13-before-refusal-120.png": {
+      "bytes": 22224,
+      "px": null
+    },
+    "14-after-refusal-120.png": {
+      "bytes": 20383,
+      "px": null
+    },
+    "15-real-run-attended-greeting.png": {
+      "bytes": 182714,
+      "px": null
+    },
+    "16-real-run-signed-in-radient.png": {
+      "bytes": 249961,
+      "px": null
+    }
+  },
+  "measured_by": "scratchpad rigs: shots/onboarding_shot.py (splash/picker/login frames) and rig/attended_greet.py (real provider runs)",
+  "cell_metrics": {
+    "measured_from": "the 80- and 120-column setup stills (640x544 and 960x544)",
+    "px_per_cell": [
+      8.0,
+      17.0
+    ]
+  }
+}

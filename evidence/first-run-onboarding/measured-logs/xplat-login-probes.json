@@ -1,0 +1,32 @@
+{
+  "host": {
+    "platform": "darwin",
+    "system": "Darwin",
+    "release": "27.0.0",
+    "machine": "arm64",
+    "python": "3.12.13"
+  },
+  "counts": {
+    "PASS": 2
+  },
+  "results": [
+    {
+      "name": "login.list",
+      "status": "PASS",
+      "detail": "first=radient, 54 rows",
+      "extra": {
+        "first": "radient",
+        "rows": 54,
+        "seconds": 1.5
+      }
+    },
+    {
+      "name": "login.api_key",
+      "status": "PASS",
+      "detail": "stored=True listed=True getpass_noise=False",
+      "extra": {
+        "seconds": 4.7
+      }
+    }
+  ]
+}
