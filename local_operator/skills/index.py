@@ -254,6 +254,51 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
     return meta
 
 
+#: Ceiling on a selected skill's listing line. The SAME figure the subagent
+#: child cap uses (``harness/subagent._CHILD_KNOWLEDGE_MAX_DESCRIPTION_CHARS``)
+#: so a parent and its child see one line shape.
+SKILL_LISTING_MAX_CHARS = 160
+
+#: A sentence end: terminal punctuation, then whitespace, then something that
+#: opens a sentence. The lookahead keeps "e.g. foo" and "v1.2 bar" (lowercase
+#: or digit after the break) from being read as an end.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(\"'])")
+
+#: Shorter than this, a "sentence" is almost certainly an abbreviation
+#: ("Dr. Foo") rather than the description's real first sentence.
+_MIN_SENTENCE_CHARS = 24
+
+
+def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) -> str:
+    """A selected skill's description cut to its first sentence, or ``limit`` chars.
+
+    Why a short form at all: a selected skill's FULL description is 600-1,300
+    characters, often four at a time, and it rides the knowledge tail of every
+    request — yet the block above it already tells the model to read each
+    selected body immediately, which repeats the description and the
+    procedures. The listing only has to let the model tell the selected skills
+    apart; ``skill://<name>`` carries the rest, unchanged. Selection itself does
+    not read this text (the router embeds the full description), so shortening
+    it cannot change WHICH skills are selected.
+
+    Cut on a word boundary with an ellipsis when no early sentence end exists,
+    so the line never ends mid-word and never reads as complete when it is not.
+    """
+    text = " ".join(description.split())
+    if len(text) <= limit:
+        return text
+    for match in _SENTENCE_END.finditer(text):
+        if match.start() > limit:
+            break
+        if match.start() >= _MIN_SENTENCE_CHARS:
+            return text[: match.start()]
+    clipped = text[: limit - 1]
+    space = clipped.rfind(" ")
+    if space >= _MIN_SENTENCE_CHARS:
+        clipped = clipped[:space]
+    return clipped.rstrip(" ,;:—-") + "…"
+
+
 def render_block(skills: list[Skill]) -> str:
     """Render selected guides and skills without rendering private hints.
 
@@ -296,7 +341,11 @@ def render_block(skills: list[Skill]) -> str:
             ),
             "<skills>",
         ]
-        lines.extend(f"- {skill.name}: {skill.description}" for skill in user_skills)
+        # Short form on purpose; see short_description. The read instruction
+        # above is what carries the skill, not this line.
+        lines.extend(
+            f"- {skill.name}: {short_description(skill.description)}" for skill in user_skills
+        )
         lines.append("</skills>")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

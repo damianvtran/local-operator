@@ -165,7 +165,16 @@ MAX_DIGEST_BYTES = 64 * 1024
 #: every task regardless of subject while cutting ~19.7k billed tokens from a
 #: fresh session. Raising it buys progressively less, since material further
 #: in is increasingly subject-specific — exactly what an index serves well.
-GUIDANCE_HEAD_BYTES = 8 * 1024
+#:
+#: LOWERED 8KiB -> 4KiB (2026-10-08, context-diet slice B). The head rides the
+#: byte-stable HEAD of EVERY request, and on this repository's own AGENTS.md the
+#: second 4KiB was the xdist worker-cap titration narrative (measured RSS
+#: figures, A/B wall times) — reference material, not a rule an agent breaks
+#: without knowing to look. The first 4KiB still carries the environment block,
+#: the isolation rule and the config-guard post-mortem; the rest is one indexed,
+#: MUST-read line range away. Saves ~4,100 chars (~1,470 billed tokens) per
+#: request on a session started in that repo.
+GUIDANCE_HEAD_BYTES = 4 * 1024
 
 #: Deepest heading level the index lists. H3 is a real tuning knob rather than
 #: an arbitrary depth: on this repository's own AGENTS.md it is the difference

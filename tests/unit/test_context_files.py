@@ -802,14 +802,17 @@ def test_head_retains_the_start_of_the_file_that_adherence_depends_on(
 
     repo = _make_repo(tmp_path)
     marker = "NEVER merge without a green pipeline."
-    # The marker sits at a FIXED offset just under 8 KiB -- deliberately not
+    # The marker sits at a FIXED offset just under 4 KiB -- deliberately not
     # derived from GUIDANCE_HEAD_BYTES, because a fixture that scales with the
     # constant shrinks along with a mutant and pins nothing (8K->4K and 8K->6K
     # both left the suite green that way). This asserts the shipped contract:
-    # roughly the first 8 KiB of a guidance file stays resident, so a gate
-    # written there is not silently evicted by a future retuning.
+    # roughly the first 4 KiB of a guidance file stays resident, so a gate
+    # written there is not silently evicted by a future retuning. (The contract
+    # was 8 KiB until the 2026-10-08 context diet lowered it deliberately; see
+    # the constant's comment for what the second 4 KiB held and why it moved
+    # behind the index.)
     preamble = "# Project\n\n## Gates\n\nreference material line\n"
-    target_offset = 8 * 1024 - 200
+    target_offset = 4 * 1024 - 200
     filler = "reference material line\n" * (
         (target_offset - len(preamble.encode())) // len("reference material line\n")
     )

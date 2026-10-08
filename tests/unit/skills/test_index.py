@@ -10,7 +10,12 @@ import pytest
 
 from local_operator.skills.discovery import Skill
 from local_operator.skills.embeddings import EmbeddingError, LocalEmbedder
-from local_operator.skills.index import SkillIndex, render_block
+from local_operator.skills.index import (
+    SKILL_LISTING_MAX_CHARS,
+    SkillIndex,
+    render_block,
+    short_description,
+)
 from local_operator.skills.vectors import deserialize
 
 
@@ -318,6 +323,36 @@ class TestRenderBlock:
 
     def test_empty_list_returns_empty_string(self) -> None:
         assert render_block([]) == ""
+
+    def test_long_descriptions_render_short_but_keep_the_read_instruction(
+        self, tmp_path: Path
+    ) -> None:
+        """A selected skill's line is a short form; the body read is unchanged.
+
+        The full description (600-1,300 chars in practice) rode every request
+        even though the block tells the model to read the body immediately.
+        """
+        long = (
+            "Minerva operational API playbooks for support and tenant administration. "
+            + "Use for smoke tests, batch runs and tenant configuration work. " * 15
+        )
+        skill = _make_skill(tmp_path, "ops", long)
+        block = render_block([skill])
+        line = next(row for row in block.splitlines() if row.startswith("- ops: "))
+        assert line == (
+            "- ops: Minerva operational API playbooks for support and tenant administration."
+        )
+        assert "Read these selected skills immediately before proceeding: `skill://ops`" in block
+
+    def test_short_description_clips_on_a_word_with_an_ellipsis(self) -> None:
+        text = "word " * 100
+        short = short_description(text)
+        assert len(short) <= SKILL_LISTING_MAX_CHARS
+        assert short.endswith("word…")
+        # Already short: untouched (whitespace normalised only).
+        assert short_description("first  skill") == "first skill"
+        # An abbreviation is not taken as the first sentence.
+        assert not short_description("Use e.g. this " + "x " * 200).startswith("Use e.g.…")
 
 
 class ModelBackend(CountingBackend):
