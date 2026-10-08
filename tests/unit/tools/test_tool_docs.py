@@ -228,7 +228,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "secret": 209,
     "send": 728,
     "sessions": 981,
-    "task": 505,
+    "task": 509,
     "team": 540,
     "team_delete": 93,
     "todo": 498,
@@ -248,7 +248,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: 716 -> 855 and 585 -> 668, the same moved-here-on-purpose growth the clean
 #: arm documents (the per-op tables and notes now carry what the wire used
 #: to).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 878, "task": 668}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 878, "task": 672}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
