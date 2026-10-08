@@ -1256,8 +1256,13 @@ class PendingAskState(BaseModel):
     #: REFS to the images attached to the answer, ``{question_id: [{"attachment":
     #: digest, "mime_type", "bytes"}]}`` -- never bytes (the log is one-line
     #: appends and this row rides every frame). ``None`` for every ask that never
-    #: carried one, which keeps the row identical for text-only asks; a reader
-    #: built before the field sees an unknown key (``extra="allow"``) it ignores.
+    #: carried one. That is the SAME convention as ``answers``/``answered_by``/
+    #: ``answered_at`` just above: this model serialises its ``None`` fields, so a
+    #: text-only row on the attach snapshot/delta carries ``"attachments": null``
+    #: (an added key, NOT a byte-identical row -- the ``pending_row`` projection and
+    #: the phone's ``PendingAskWire`` DO omit it when there is none). It is harmless
+    #: to a reader built before the field: the UI row type is open-ended and an
+    #: unknown key is ignored (``extra="allow"``).
     attachments: dict[str, list[dict[str, Any]]] | None = None
 
 

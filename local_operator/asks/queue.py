@@ -568,6 +568,31 @@ class AskQueue:
                 )
         return resolved, missing
 
+    @staticmethod
+    def _images_in_question_order(
+        record: Mapping[str, Any], images: Mapping[str, list[ImageContent]]
+    ) -> list[list[ImageContent]]:
+        """The resolved image groups in the order the ask's QUESTIONS were asked.
+
+        The attachments map is keyed by question id and, after the log round trip,
+        sorted alphabetically (see :meth:`_response_message`), so any consumer that
+        needs question order must walk ``record["questions"]`` rather than the map.
+        A group whose id is not on the ask (a hand-edited log -- the write path
+        refuses such an answer) is kept at the end, in id order, rather than lost:
+        dropping a picture silently is the failure this feature exists to prevent.
+        """
+        ordered: list[list[ImageContent]] = []
+        seen: set[str] = set()
+        for question in record.get("questions") or []:
+            qid = str(question.get("id") or "")
+            if qid in seen:
+                continue
+            seen.add(qid)
+            if images.get(qid):
+                ordered.append(images[qid])
+        ordered.extend(images[qid] for qid in sorted(images) if qid not in seen)
+        return ordered
+
     def revision_refusal(self, ask_id: str, now_ms: int | None = None) -> str:
         """Why a revision of this ask would be REFUSED, or ``""`` if it would be taken.
 
@@ -1240,9 +1265,18 @@ class AskQueue:
             # replay byte-identically. ``CustomMessage`` is ``extra="allow"`` for
             # exactly this. The render hop turns these blocks into the
             # ``ImageContent`` of an ordinary user turn.
+            #
+            # THE ORDER IS THE QUESTIONS', NOT THE MAP'S. ``_ask_report`` points at
+            # the pictures per question ("(+1 image, shown below)") and nothing else
+            # tells the model which image answers which question -- position is the
+            # whole attribution. ``images`` comes from the folded log, and the log
+            # is written ``sort_keys=True``, so its key order is alphabetical by
+            # question id (``a0`` before ``q1``; ``q10`` before ``q2``) whatever order
+            # the questions were asked in. Walking ``record["questions"]`` is the one
+            # place that restores the order the report text lists them in.
             extra["content"] = [
                 block.model_dump(mode="json", exclude={"marker"})
-                for group in images.values()
+                for group in self._images_in_question_order(record, images)
                 for block in group
             ]
         details_attachments = record.get("attachments")

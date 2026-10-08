@@ -918,8 +918,28 @@ async def test_the_relay_forwards_an_image_answer_to_a_capable_owner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_relay_refuses_rather_than_strips_for_an_owner_without_the_capability() -> None:
+async def test_the_relay_refuses_rather_than_strips_for_an_owner_without_the_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.session.runtime import server as runtime_server
     from local_operator.session.runtime.types import ASK_ATTACHMENTS_UNSUPPORTED
+
+    # PIN THE RELAY'S OWN GATE, not the owner's backstop. The owner refuses an
+    # image answer with the SAME sentence (``_answer_attachment_kwargs``), and a
+    # handle that never saw the call records nothing either way -- so with the
+    # relay gate removed this cell still passed (mutant: ``daemon.py`` gate
+    # condition -> ``False``). What differs is whether the frame REACHED the
+    # owner at all: a real pre-feature owner has no dispatch backstop and would
+    # record the text and ignore the pictures. The spy stands in for "the frame
+    # arrived": it must never be called.
+    reached_owner: list[str] = []
+    real = runtime_server._answer_attachment_kwargs  # noqa: SLF001
+
+    async def spy(op, method, wire_images, answers):  # noqa: ANN001
+        reached_owner.append(op)
+        return await real(op, method, wire_images, answers)
+
+    monkeypatch.setattr(runtime_server, "_answer_attachment_kwargs", spy)
 
     handle = _AskHandle()  # ``ask_respond(ask_id, answers, by)``: no ``attachments``
     reply = await _post_ask_command(
@@ -936,6 +956,7 @@ async def test_the_relay_refuses_rather_than_strips_for_an_owner_without_the_cap
     assert reply.status_code == 422, reply.text
     assert reply.json()["error"] == ASK_ATTACHMENTS_UNSUPPORTED
     assert handle.ask_calls == [], "the text half of the answer must NOT have been recorded"
+    assert reached_owner == [], "the relay must refuse BEFORE a frame is written to the owner"
 
 
 @pytest.mark.asyncio

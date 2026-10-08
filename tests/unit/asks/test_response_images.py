@@ -252,7 +252,9 @@ def test_more_than_eight_images_are_refused_not_truncated(
 ) -> None:
     session, queue, _ = _ask_session(tmp_path)
     ask_id = _enqueue(queue, _questions())
-    images = [_image() for _ in range(queue_module.MAX_ANSWER_IMAGES + 1)]
+    # A LITERAL 9, not ``MAX_ANSWER_IMAGES + 1``: the latter moves with the constant,
+    # so a limit silently raised to 80 would still pass. The wire contract is 8.
+    images = [_image() for _ in range(9)]
 
     outcome = queue.respond(ask_id, {"q1": ["yes"]}, attachments={"q1": images})
 
@@ -274,6 +276,47 @@ def test_a_store_that_will_not_write_refuses_instead_of_recording_text_only(
 
     assert outcome["ok"] is False and "could not be saved" in outcome["error"]
     assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+
+
+def test_a_store_failure_after_the_secret_hop_leaves_a_recoverable_ask(
+    isolated_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one refusal the PROBE cannot see: a store that fails AFTER the secret hop.
+
+    ``attachment_refusal`` (run before the hop) covers every refusal that is a pure
+    function of the answer -- a secret question's image, an unknown question, too
+    many. Whether the AttachmentStore will WRITE is only known by writing, which
+    happens in ``AskQueue.respond`` after ``Session.respond_ask`` has stored the
+    secret value. So "an answer refused for its pictures never stores a credential"
+    holds for the probe-class refusals and NOT for this one; it is the same class
+    ``AskQueue.revision_refusal`` records as deferred (PR #1954) -- recoverable, and
+    no value reaches a durable surface (the value lives in the memory-only store,
+    the log never carries it).
+
+    What this cell pins is the recovery, which is the contract that matters: the
+    refusal records NOTHING, the ask stays open, and the resend with a working
+    store lands with the images. It deliberately does not assert the credential's
+    presence -- that residue is a known limit, not a behaviour to freeze.
+    """
+    from local_operator.session import attachments as attachments_module
+    from local_operator.variables import VariableStore
+
+    session, queue, _ = _ask_session(tmp_path)
+    session._variables = VariableStore(cwd=str(tmp_path))  # noqa: SLF001
+    ask_id = _enqueue(queue, _questions(secret_id="API_KEY"))
+    answers = {"q1": ["yes"], "API_KEY": ["sk-live-do-not-log"]}
+
+    with monkeypatch.context() as broken:
+        broken.setattr(attachments_module.AttachmentStore, "put", lambda self, d, m: None)
+        outcome = session.respond_ask(ask_id, answers, attachments={"q1": [_image()]})
+
+    assert outcome["ok"] is False and "could not be saved" in outcome["error"]
+    assert [e["kind"] for e in store.read_events(queue.session_dir)] == [store.EVENT_QUEUED]
+    assert "sk-live-do-not-log" not in json.dumps(store.read_events(queue.session_dir))
+
+    retry = session.respond_ask(ask_id, answers, attachments={"q1": [_image()]})
+    assert retry["ok"] is True, retry
+    assert "q1" in queue.find(ask_id)["attachments"]
 
 
 def test_an_image_only_answer_is_a_legal_answer(isolated_config: Path, tmp_path: Path) -> None:
@@ -471,6 +514,79 @@ def test_the_report_points_at_the_pictures_per_question() -> None:
     assert "answer: see this (+2 images, shown below)" in text
     assert "answer: (image attached, shown below)" in text
     assert "answer: (not answered)" in text  # c has neither text nor a picture
+
+
+def _two_questions(first: str, second: str) -> list[dict[str, Any]]:
+    out = []
+    for qid in (first, second):
+        question = dict(_questions()[0])
+        question["id"] = qid
+        question["question"] = f"Question {qid}?"
+        out.append(question)
+    return out
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("q1", "a0"), ("q2", "q10"), ("b", "a")],
+    ids=["q1-then-a0", "q2-then-q10", "b-then-a"],
+)
+def test_the_images_follow_the_questions_not_the_alphabet(
+    isolated_config: Path, tmp_path: Path, first: str, second: str
+) -> None:
+    """R1 (review round 1): position is the model's only attribution of image to question.
+
+    ``asks.jsonl`` is written ``sort_keys=True``, so the folded attachments map is
+    alphabetical by id. The report text lists questions in ASK order and points at
+    "the image below" for each, so the blocks must follow ASK order too -- or the
+    model reads the second question's picture as the first's. The ids are chosen to
+    sort AGAINST the ask order (``q1``/``a0``; ``q2``/``q10`` is the lexicographic
+    trap a numeric-looking id falls into). The dict is passed in reverse ask order
+    on purpose, so insertion order cannot be what makes this pass.
+    """
+    session, queue, _ = _ask_session(tmp_path)
+    ask_id = _enqueue(queue, _two_questions(first, second))
+    pictures = {first: _image(), second: _image()}
+    assert pictures[first].data != pictures[second].data
+
+    outcome = session.respond_ask(
+        ask_id,
+        {first: ["one"], second: ["two"]},
+        attachments={second: [pictures[second]], first: [pictures[first]]},
+    )
+    assert outcome["ok"] is True, outcome
+
+    record = queue.find(ask_id)
+    assert record is not None
+    assert list(record["attachments"]) == sorted([first, second]), "the fold is alphabetical"
+    message = queue._response_message(record)  # noqa: SLF001
+    content = (message.model_extra or {})["content"]
+    assert [block["data"] for block in content] == [
+        pictures[first].data,
+        pictures[second].data,
+    ]
+    text = message.details["text"]
+    assert text.index(f"{first} \u2014") < text.index(f"{second} \u2014")
+
+
+def test_several_images_per_question_keep_question_then_attachment_order(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    session, queue, _ = _ask_session(tmp_path)
+    ask_id = _enqueue(queue, _two_questions("q1", "a0"))
+    q1_images = [_image(), _image()]
+    a0_images = [_image()]
+
+    assert session.respond_ask(
+        ask_id,
+        {"q1": ["x"], "a0": ["y"]},
+        attachments={"a0": a0_images, "q1": q1_images},
+    )["ok"]
+
+    record = queue.find(ask_id)
+    assert record is not None
+    content = (queue._response_message(record).model_extra or {})["content"]  # noqa: SLF001
+    assert [b["data"] for b in content] == [i.data for i in q1_images + a0_images]
 
 
 def test_the_report_is_unchanged_without_images() -> None:
