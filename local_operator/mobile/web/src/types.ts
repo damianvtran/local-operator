@@ -272,6 +272,38 @@ export interface CompletionAttention {
 	revision: [number, number];
 }
 
+/** One conversation with an unseen completion, as the unread badge
+    (``GET /api/attention/unread``) enumerates it.
+
+    THE TOKEN IS WHY THIS READ EXISTS, and the comment says so because a reader
+    of the list payload will look for it there: a summary carries the ``unseen``
+    FLAG and ``completion_kind`` but never the completion token, so a gesture
+    that must name the completions it rendered (the mark-all clear) can only
+    read them here. ``completion_token`` is null on a store row the daemon could
+    not name, and such a row is simply not postable. */
+export interface AttentionUnreadConversation {
+	session_id: string;
+	completion_token: string | null;
+	kind: CompletionAttention["kind"];
+	revision: [number, number];
+	/** Push-delivery handle. Its PRESENCE is the capability proxy — absent on an
+	    older daemon — exactly as the route's own docs state. */
+	push_handle?: string;
+}
+
+/** ``GET /api/attention/unread``: the badge count over the same rows the list
+    serves, plus the conversations behind it.
+
+    ``count`` is ABSENT — never 0 — when a read behind the aggregate failed
+    (``degraded`` names the sources): "we could not look" must not be served as
+    "nothing unread". */
+export interface AttentionUnread {
+	count?: number;
+	revision?: [number, number, number];
+	degraded?: string[];
+	conversations?: AttentionUnreadConversation[];
+}
+
 export interface PendingAsk {
 	ask_id: string;
 	/** The conversation the ask belongs to. Absent on the per-session projection
