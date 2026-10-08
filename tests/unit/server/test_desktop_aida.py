@@ -75,6 +75,14 @@ async def test_get_never_creates_the_session(client, isolated_root: Path) -> Non
         # reachable (the greeting needs a turn that can run).
         "first_run_pending": False,
         "operator": None,
+        # The same word the POST answers with, on the READ (Lane B round 1):
+        # step 3 of the desktop's wizard promises "she will say hello first"
+        # BEFORE the press, and ``greeted`` cannot say it — a pending greeting
+        # and one that will never come are both false there.
+        "greeting_state": "owed",
+        # The live-owner flag, on the read for shape parity; a GET performs no
+        # operation, so nobody else is carrying one out.
+        "held": False,
     }
 
 
@@ -153,6 +161,9 @@ async def test_the_read_payload_carries_the_configured_name(
         opened = await http.post("/v1/desktop/aida", json={"op": "open"})
     assert response.status_code == 200
     assert response.json()["result"]["name"] == "Sovereign"
+    # The read's ledger word tracks the ledger, not a constant: this rig has a
+    # provider-less install, so it stays ``owed`` however many opens run.
+    assert response.json()["result"]["greeting_state"] == "owed"
     # The receipts speak the configured name too, not the packaged string.
     assert opened.status_code == 200
     assert "Sovereign" in opened.json()["message"]
@@ -269,3 +280,32 @@ async def test_greet_says_held_when_another_window_owns_her(
     # The request SURVIVED: the owner (or a later resume) still arms it.
     assert result["greeting_state"] == "requested"
     assert "another window" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_greeting_does_not_claim_she_already_said_hello(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, R-5: ``already`` used to cover three different ledgers.
+
+    An install whose greeting was marked ``skipped`` (it already has
+    conversations) is never going to be greeted, so the desktop must not answer
+    "she has already introduced herself" — that sentence reports a pending
+    thing as a done one. The refusal is still a 200 with the same shape: the
+    renderer reads ``greeting_state``, and nothing about the wire changed.
+    """
+    from local_operator.aida import onboarding
+
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    # The engagement signal itself is covered by the onboarding tests; here it
+    # only has to be true so the route reaches the skipped branch.
+    monkeypatch.setattr(onboarding, "_her_conversation_had", lambda root: True)
+    async with client as http:
+        response = await http.post("/v1/desktop/aida", json={"op": "greet"})
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["greeting_state"] == "skipped"
+        assert result["greeted"] is False
+        message = response.json()["message"]
+        assert "already introduced herself" not in message
+        assert "already has conversations" in message

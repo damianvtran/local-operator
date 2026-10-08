@@ -1936,3 +1936,74 @@ def test_the_splash_falls_back_to_the_selector_when_nothing_names_the_model() ->
     info = WelcomeInfo(version="0.15.10", model_label="ollama/qwen3:32b", cwd="/tmp")
     rows = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
     assert "ollama/qwen3:32b" in rows, rows
+
+
+# --- the first-run screen's step reading (design round 1, D1/D11) -------------
+
+
+def _setup_info(aida_name: str | None = "Aida") -> WelcomeInfo:
+    return WelcomeInfo(
+        version="0.15.10",
+        model_label="setup",
+        cwd="/Users/damian/local-operator",
+        missing_credential=None,
+        setup=True,
+        aida_name=aida_name,
+    )
+
+
+def test_the_setup_screen_states_the_steps_it_is_asking_for() -> None:
+    """D1: the table answered "what do I run" and never "what happens".
+
+    The fix the design round supplied: keep the action table, and put the step
+    reading on one line above it. It names HER configured name, so the promise
+    is about the person the screen is for.
+    """
+    lines = _lines(_setup_info("Sovereign"), ROOMY_W, ROOMY_H)
+    step_rows = [row for row in lines if row.strip().startswith("1 connect")]
+    assert len(step_rows) == 1, lines
+    assert "2 sign in or paste a key" in step_rows[0]
+    assert "3 Sovereign says hello" in step_rows[0]
+    # Above the table, which is where the reading belongs.
+    assert lines.index(step_rows[0]) < next(
+        index for index, row in enumerate(lines) if "/login" in row
+    )
+
+
+def test_the_setup_table_has_no_row_whose_first_column_is_not_a_key() -> None:
+    """D1's second half: the old third row put `then` in the KEY column.
+
+    On the one screen built for someone non-technical, every other entry in that
+    column is typeable, so a word that is not a command reads as one. The quit
+    row is dropped while setup is on (D11), which is the row the step line
+    costs — the height budget for the first screen is unchanged.
+    """
+    lines = _lines(_setup_info(), ROOMY_W, ROOMY_H)
+    keys = [
+        row.strip().split(" ")[0]
+        for row in lines
+        if row.strip().startswith("/") or row.strip().startswith("ctrl/cmd+d")
+    ]
+    assert "/login" in keys
+    assert "then" not in [key for key in keys]
+    assert "ctrl/cmd+d" not in lines
+    assert not any("says hello" in row and row.strip().startswith("then") for row in lines)
+
+
+def test_the_step_line_degrades_whole_rather_than_truncated() -> None:
+    """Narrow: the reading sheds a clause, never a word (the table's own rule)."""
+    for width in (77, 60, 44):
+        lines = _lines(_setup_info("Sovereign"), width, ROOMY_H)
+        steps = [row.strip() for row in lines if row.strip().startswith("1 connect")]
+        assert len(steps) <= 1, (width, lines)
+        for row in steps:
+            assert not row.endswith("…"), (width, row)
+            assert "3 Sovereign says hello" in row, (width, row)
+
+
+def test_a_disabled_aida_leaves_the_step_reading_out() -> None:
+    """No third step to promise when she is off: the line is withdrawn whole."""
+    lines = _lines(_setup_info(None), ROOMY_W, ROOMY_H)
+    assert not [row for row in lines if row.strip().startswith("1 connect")], lines
+    # The table itself is still there — that is the screen's whole job.
+    assert any("/login" in row for row in lines)

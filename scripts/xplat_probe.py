@@ -1238,6 +1238,13 @@ def probe_tui_boot(env: dict[str, str]) -> Result:
     )
 
 
+#: The smallest capture that can be a full-screen boot rather than a truncated
+#: stream. A real TUI boot emits tens of KB (measured: 53 KB at 100x30); the
+#: number is a floor for "something happened", and the alternate-screen marker
+#: below is what says WHAT happened (review round 1, R-7).
+_TUI_MIN_BYTES = 2000
+
+
 def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     """Boot the console script against a REAL pty and type into it.
 
@@ -1246,6 +1253,19 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     platform difference in terminal handling actually lives. Windows gets its
     own console API (ConPTY) and no `termios`, so a difference here is exactly
     what we are looking for.
+
+    THE VERDICT KEYS ON A REAL FULL-SCREEN FRAME, not a byte count (review
+    round 1, R-7). The old criterion was ``count >= 500``, and on this fleet it
+    reported ``PASS tui.tty tty rendered 854 bytes`` — byte-identical on
+    ``origin/main`` and on the branch under test, while a branch that changes
+    the splash copy cannot produce the same 854 bytes a TUI boot emits tens of
+    KB of. So the instrument was PASSing on a truncated or foreign stream it
+    could not distinguish from a boot (two lanes re-implemented the same driver
+    and found no boot at all). What discriminates is the alternate-screen enter
+    sequence a full-screen Textual app writes on start plus a boot-sized
+    capture; when neither is there the honest verdict is SKIP — the instrument
+    could not observe the thing, and saying so is what stops the next person
+    re-chasing it as a product failure.
     """
     driver = textwrap.dedent("""
         import os, pty, select, signal, sys, time
@@ -1270,16 +1290,35 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
                 elif not sent and len(buf) > 2000:
                     os.write(fd, b"\\x03")  # Ctrl-C: reach the input path
                     sent = True
-                    time.sleep(1.0)
+                    time.sleep(0.5)
                     break
             print("BYTES", len(buf))
+            # The alternate-screen enter sequence, spelled as bytes rather than
+            # as an escape inside this generated source, so the discrimination
+            # is the ESC byte itself and not a quoting accident.
+            print("ALTSCREEN", 1 if bytearray([0x1B]) + b"[?1049h" in buf else 0)
             print(buf[-400:].decode("utf-8", "replace"))
         finally:
+            # The TEARDOWN is bounded and group-scoped, which is the second
+            # half of R-7: a plain ``os.kill(pid)`` + blocking ``waitpid`` left
+            # the driver waiting on a pty child that could not be reaped (the
+            # hang two lanes reproduced by hand), and it left the child's own
+            # group alive. Kill the GROUP, then reap with a bounded poll.
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
             except OSError:
-                pass
-            os.waitpid(pid, 0)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            for _ in range(100):
+                try:
+                    done, _status = os.waitpid(pid, os.WNOHANG)
+                except OSError:
+                    break
+                if done == pid:
+                    break
+                time.sleep(0.05)
         """)
     if os.name != "posix":
         return Result(
@@ -1295,14 +1334,18 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     if "BYTES" not in out:
         return Result("tui.tty", "FAIL", _tail(out or proc.stderr))
     count = int(out.split("BYTES", 1)[1].split()[0])
-    if count < 500:
+    saw_alt_screen = "ALTSCREEN 1" in out
+    if count < _TUI_MIN_BYTES or not saw_alt_screen:
         return Result(
             "tui.tty",
-            "FAIL",
-            f"tty produced only {count} bytes before exiting",
+            "SKIP",
+            f"no full-screen frame captured ({count} bytes, altscreen="
+            f"{'yes' if saw_alt_screen else 'no'}): the byte-count criterion this "
+            "replaced could not tell a boot from a foreign stream (review round 1, "
+            "R-7); a run that reaches the alternate-screen sequence reports PASS",
             {"raw": out[-600:]},
         )
-    return Result("tui.tty", "PASS", f"tty rendered {count} bytes", {"raw": out[-600:]})
+    return Result("tui.tty", "PASS", f"full-screen TUI frame, {count} bytes", {"raw": out[-600:]})
 
 
 def probe_exec_offline(env: dict[str, str]) -> Result:

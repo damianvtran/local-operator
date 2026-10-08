@@ -17,6 +17,7 @@ import pytest
 from local_operator.harness.types import CustomMessage, StreamEndEvent
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.key_prompt import MASK_CHAR, KeyPromptBlock
+from local_operator.tui.widgets.transcript import TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot, _notice_texts, _submit
 
@@ -236,3 +237,63 @@ async def test_the_credential_receipt_counts_a_value_not_a_key() -> None:
         painted = _painted(app)
     assert "DEPLOY_TOKEN value received (12 chars)" in painted, painted
     assert "key received" not in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_bare_credential_in_setup_refuses_before_it_takes_a_secret() -> None:
+    """D2 (design round 1): the first-run path must refuse BEFORE the capture.
+
+    The refusal existed, but only the ARGUMENT form reached it — the composer
+    arms the masked capture on the keystrokes that precede Enter, so the move a
+    first-run user actually makes (type ``/credential``, press Enter) took a
+    secret into a ``[Credential #1, 5 chars]`` chip first, then looped a remedy
+    that could not work ("Paste the value again after /credential to retry") and
+    left a user row for a credential that was never stored.
+
+    Driven through the REAL keystrokes rather than ``_submit``: the arm happens
+    in the editor's own edit path, so assigning ``editor.text`` would skip
+    exactly the step under test.
+    """
+    from local_operator.session_factory import HostingNotConfiguredError
+    from local_operator.tui.widgets.editor import Editor
+    from tests.unit.tui.test_app_pilot import FakeProviderController, _await_setup_state
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    app = OperatorApp(_no_hosting_factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._setup_state is True and app._session is None
+        editor = app.query_one(Editor)
+        await pilot.press(*"/credential")
+        await pilot.pause()
+        # THE ARM NEVER OPENS: no masked capture is live, so the next paste or
+        # keystroke cannot become a secret the user then has to reason about.
+        assert editor.credential_armed() is False
+        # The space that opens the capture on a real session does nothing here.
+        # The space that opens the capture on a real session — the ONE keystroke
+        # the masked mode is built around — must do nothing here. Before this
+        # gate it armed, and the secret typed after it became a chip.
+        await pilot.press("space")
+        await pilot.pause()
+        assert editor.credential_armed() is False
+        assert not list(app.query(KeyPromptBlock)), "no masked prompt may open in setup"
+        # Enter, as the first-run user presses it. Esc first because a hand-typed
+        # `/credential` opens the command picker, and Enter on an open picker
+        # COMPLETES the highlighted row rather than submitting — measured, and
+        # the reason the bare-form defect survived: the completion is what put
+        # the trailing space in the buffer for the old arming rule to match.
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        notices = _notice_texts(app)
+        blocks = app.query_one(TranscriptView).blocks()
+    assert any("stores secrets for a running session" in n for n in notices), notices
+    assert any("/login radient" in n for n in notices), notices
+    # No secret was handled, so there is no chip and no credential was stored:
+    # the only rows are the refusal notice itself.
+    assert editor.credential_cited() is False, editor.text
+    assert [type(block).__name__ for block in blocks] == ["NoticeBlock"], blocks

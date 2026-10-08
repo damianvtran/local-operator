@@ -8,12 +8,21 @@ the developer's session pointed at that tmpdir. It was observed here:
 ``launchctl print gui/501/com.local-operator.wakes`` reported a live unit whose
 plist lived under ``/private/var/folders/…/pytest-of-damian/``.
 
-``_launchd_is_addressable`` is the guard that makes this file safe: the plist
-is written wherever ``plist_path()`` points, but launchd is only addressed when
-that path is inside the real passwd home. Every test below runs under a
-redirected home, so the file half is exercised in full and the process half
-refuses. A test that needs to assert on ``launchctl`` behaviour must fake the
-subprocess, never call it.
+TWO GUARDS now, and they answer different questions:
+
+* ``shared_label_refusal`` — MAY this process write or bootstrap the SHARED unit
+  for this store? One unit per user, so only the real user's DEFAULT config root
+  may be served (2026-10-08: a scratch store under the real home took the
+  operator's own plist and its launchd domain for ~8 minutes).
+* ``_launchd_is_addressable`` — may launchd be ADDRESSED from this process's own
+  home? A redirected home writes only into itself and never loads.
+
+Every test below runs under a redirected home, so the file half is exercised in
+full and the process half refuses. A test that wants to reach the WRITE half
+takes the ``shared_label_allowed`` fixture, which patches the ownership DECISION
+only — a store that is not the operator's default one can never be written for
+in reality, and a test must not write into the default one. A test that needs to
+assert on ``launchctl`` behaviour must fake the subprocess, never call it.
 """
 
 from __future__ import annotations
@@ -60,6 +69,23 @@ def redirected_home(tmp_path: Path, monkeypatch) -> Path:  # noqa: ANN001
     return home
 
 
+@pytest.fixture
+def shared_label_allowed(monkeypatch) -> None:  # noqa: ANN001
+    """Let a sandbox store reach the shared unit's writer, for tests about the writer.
+
+    ``shared_label_refusal`` answers "may the SHARED unit serve this store", and
+    in reality the answer is yes for exactly one store: the operator's own
+    default config root. A test cannot use that root (it must not write into the
+    live config), so the DECISION is patched here and nothing else: the plist
+    writer, the content comparison, the load refusal and the systemd/systemctl
+    plumbing all stay real, which is what these tests are about. The guard's own
+    behaviour is tested WITHOUT this fixture — see the refusal tests.
+    """
+    from local_operator.wakes import install
+
+    monkeypatch.setattr(install, "_shared_label_refusal", lambda config_dir: None)
+
+
 def test_the_installer_never_touches_the_real_launch_agents_directory(
     redirected_home: Path,
 ) -> None:
@@ -74,7 +100,7 @@ def test_the_installer_never_touches_the_real_launch_agents_directory(
 
 
 def test_install_writes_a_plist_but_declines_to_load_it(
-    redirected_home: Path, tmp_path: Path
+    redirected_home: Path, tmp_path: Path, shared_label_allowed: None
 ) -> None:
     """The file half runs; the half that reaches a live supervisor refuses.
 
@@ -156,7 +182,7 @@ def test_the_plist_lets_a_finished_supervisor_stay_down(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="LaunchAgent plist is macOS-only")
 def test_a_stale_plist_is_rewritten_rather_than_trusted(
-    redirected_home: Path, tmp_path: Path
+    redirected_home: Path, tmp_path: Path, shared_label_allowed: None
 ) -> None:
     """Idempotent by CONTENT, not by existence.
 
@@ -246,30 +272,56 @@ def test_the_guard_accepts_only_the_genuine_home(monkeypatch: pytest.MonkeyPatch
     assert _launchd_is_addressable() is True
 
 
-def test_the_write_guard_refuses_config_dirs_outside_the_real_home(
-    tmp_path: Path,
+def test_the_write_guard_refuses_every_store_but_the_default_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The round-2 escape: real HOME, redirected config dir.
+    """The 2026-10-08 escape: a scratch store INSIDE the real home.
 
-    The round-1 guard covered the `launchctl` call but not the WRITE, and the
-    write is the half that escapes that combination: `plist_path()` is the
-    real `~/Library/LaunchAgents` whenever HOME is real, so a sandbox run
-    planted a supervised unit in the operator's live launchd domain, pointed
-    at a store that dies with the sandbox.
+    Two guards have now fallen to this same corner, and the table below is both
+    of them at once:
 
-    Asserted on the decision predicate rather than by running the installer
-    against the real home: a test that exercises the escape end to end would
-    REPRODUCE the incident on the very machine it guards if the guard ever
-    regressed. The predicate is the whole decision — the branch that consumes
-    it is two lines.
+    * containment (``config_lives_in_real_home``) refused a store OUTSIDE the
+      real home, and that is still the right answer for a store that dies with a
+      sandbox;
+    * it did NOT refuse a store INSIDE it — ``~/local-operator-worktrees/qa-x/
+      config`` passes containment — so a desktop-managed backend with the
+      operator's real HOME and a QA run's ``LOCAL_OPERATOR_CONFIG_DIR`` wrote the
+      operator's own plist and bootstrapped the shared label into the real
+      ``gui/<uid>`` domain, leaving the live supervisor serving a store that was
+      deleted minutes later.
+
+    The shared unit serves ONE store, so the rule is identity, not containment:
+    the real user's default config root and nothing else. Asserted on the
+    decision predicate rather than by running the installer against the real
+    home: a test that exercised the escape end to end would REPRODUCE the
+    incident on the machine it guards if the guard ever regressed.
     """
     import pwd
 
-    from local_operator.wakes.install import _config_lives_in_real_home
+    import local_operator.launchd as launchd
+    from local_operator.wakes.install import _shared_label_refusal
 
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    assert _config_lives_in_real_home(tmp_path / "sandbox-cfg") is False
-    assert _config_lives_in_real_home(real_home / ".local-operator") is True
+    # Outside the home: refused (the old containment case).
+    assert _shared_label_refusal(tmp_path / "sandbox-cfg") is not None
+    # INSIDE the home but not the default root: refused (the new case).
+    scratch = real_home / "local-operator-worktrees" / "qa-x" / "config"
+    refusal = _shared_label_refusal(scratch)
+    assert refusal is not None, "a scratch store inside the real home took the shared unit"
+    assert "not the default one" in refusal
+    # A redirected home serving the real store is refused too: the plist this
+    # process would write belongs to the sandbox, so loading it would load a
+    # unit pointing at a file that vanishes with the sandbox.
+    passwd_home = launchd.real_home()
+    assert passwd_home is not None
+    # The default root is the ONE store that is allowed — the concrete claim.
+    # It needs this process to present BOTH halves of the identity (the passwd
+    # home and its own ``$HOME``), because a redirected home serving the real
+    # store would write a unit into the sandbox and then load it for the real
+    # domain. Patched here rather than assumed: the suite's own HOME isolation
+    # would otherwise make the allowed case unreachable.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: passwd_home))
+    assert _shared_label_refusal(passwd_home / ".local-operator") is None
 
 
 # --- The running probe, and the permanent miss it closes ----------------------
@@ -317,7 +369,7 @@ def _reachable(mod, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
     asserted directly, above and below.
     """
     monkeypatch.setattr(mod, "_launchd_is_addressable", lambda: True)
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: True)
+    monkeypatch.setattr(mod, "_shared_label_refusal", lambda _config: None)
 
 
 class _FakeLaunchctl:
@@ -428,7 +480,7 @@ def test_a_stopped_supervisor_is_kickstarted_rather_than_called_installed(
     # Stand in for the real home so both guards pass; `_launchctl` is faked, so
     # nothing reaches a real launchd domain.
     monkeypatch.setattr(mod, "_launchd_is_addressable", lambda: True)
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: True)
+    monkeypatch.setattr(mod, "_shared_label_refusal", lambda _config: None)
     plist = tmp_path / "agents" / f"{LABEL}.plist"
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_bytes(plistlib.dumps(render_plist(config)))
@@ -460,7 +512,7 @@ def test_a_running_supervisor_is_left_alone(
 
     config = tmp_path / "config"
     monkeypatch.setattr(mod, "_launchd_is_addressable", lambda: True)
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: True)
+    monkeypatch.setattr(mod, "_shared_label_refusal", lambda _config: None)
     plist = tmp_path / "agents" / f"{LABEL}.plist"
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_bytes(plistlib.dumps(render_plist(config)))
@@ -565,9 +617,12 @@ def test_a_repeat_install_in_a_foreign_store_does_not_claim_to_be_installed(
     # must not report as installed, and must say which manager cannot reach
     # it") is asserted for both, instead of one arm asserting nothing.
     assert second.installed is False, "a store the supervisor cannot reach reported as installed"
-    assert "not addressable" in second.reason, second.reason
-    # Both calls answer in the same vocabulary; only the tense differs.
-    assert "not addressable" in first.reason, first.reason
+    # Both calls answer in the same vocabulary, and since 2026-10-08 that is the
+    # OWNERSHIP rule rather than the addressability one: a store the shared unit
+    # does not own is refused before anything is written, so the first and the
+    # second call give the same sentence for the same reason.
+    assert "not the default one" in second.reason, second.reason
+    assert "not the default one" in first.reason, first.reason
 
 
 # ---------------------------------------------------------------------------
@@ -609,18 +664,19 @@ def _systemd(
     monkeypatch: pytest.MonkeyPatch,
     *,
     unit_addressable: bool = True,
-    store_in_real_home: bool = True,
+    store_owned: bool = True,
 ) -> _FakeSystemctl:
     """Point the installer at Linux/systemd with fakes for every process reach.
 
     ``unit_addressable`` (does a ``systemctl --user`` call here address the REAL
-    user manager?) and ``store_in_real_home`` (does the supervised store outlive
-    this process?) are the two INDEPENDENT inputs the write guard decides on,
-    and they are separate parameters because the defect they guard against lives
-    in the mixed corner: a real HOME with a store outside it. This fixture used
-    to set both from ONE ``addressable`` argument, so only ``True/True`` and
-    ``False/False`` could be expressed and the mixed case — the one that
-    overwrote an operator's live systemd unit — was untestable by construction.
+    user manager?) and ``store_owned`` (is this the store the SHARED unit serves
+    — the real user's default config root?) are the two INDEPENDENT inputs the
+    write guard decides on, and they are separate parameters because the defect
+    they guard against lives in the mixed corner: a real HOME with a store that
+    the shared unit does not own. This fixture used to set both from ONE
+    ``addressable`` argument, so only ``True/True`` and ``False/False`` could be
+    expressed and the mixed case — the one that overwrote an operator's live
+    systemd unit — was untestable by construction.
     """
     from local_operator import supervisors
     from local_operator.wakes import install as mod
@@ -630,7 +686,11 @@ def _systemd(
     monkeypatch.setattr(supervisors, "systemctl_user", fake)
     monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: unit_addressable)
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: store_in_real_home)
+    monkeypatch.setattr(
+        mod,
+        "_shared_label_refusal",
+        lambda _config: None if store_owned else "not the store the shared unit serves",
+    )
     monkeypatch.setattr(supervisors, "systemd_version", lambda: 255)
     return fake
 
@@ -673,21 +733,25 @@ def test_the_linux_arm_installs_a_unit_a_timer_and_enables_the_timer(
 def test_the_linux_arm_refuses_to_load_a_unit_from_a_redirected_home(
     redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The file half runs; the half that reaches a LIVE user manager refuses.
+    """A redirected home writes nothing at all, and never reaches the manager.
 
     ``systemctl --user`` addresses the calling user's instance whatever ``$HOME``
-    says, so without this an isolated run would enable a real unit pointed at a
-    store that is deleted when the test ends.
+    says, so an isolated run must not enable a unit. Since 2026-10-08 the guard
+    is upstream of the WRITE as well (a store the shared unit does not own gets
+    no unit file either), so there is nothing on disk to load in the first
+    place — asserted here rather than assumed, because "the file half still ran"
+    was the old contract and it is exactly what let a sandbox store into the
+    operator's live manager.
     """
     from local_operator.wakes import install as mod
 
-    fake = _systemd(monkeypatch, unit_addressable=False, store_in_real_home=False)
+    fake = _systemd(monkeypatch, unit_addressable=False, store_owned=False)
 
     outcome = mod.ensure_supervisor_installed(tmp_path / "config")
 
     assert outcome.installed is False
-    assert "not addressable" in outcome.reason
-    assert mod.plist_path().exists(), "the unit file half must still be testable"
+    assert "not the store the shared unit serves" in outcome.reason
+    assert not mod.plist_path().exists(), "a store the shared unit does not own got a unit file"
     assert fake.calls == [], "the user manager was addressed from a redirected home"
 
 
@@ -698,23 +762,23 @@ def test_the_linux_arm_refuses_a_real_unit_path_with_a_store_outside_the_home(
 
     ``_systemd``'s two flags are independent on purpose, and this is the corner
     they were collapsed over: ``unit_addressable`` True (the unit path is the
-    real ``~/.config/systemd/user``) with ``store_in_real_home`` False. The
-    write guard used to fold the store test into ``addressable``, which made its
-    own refusal — ``addressable and not _config_lives_in_real_home`` —
+    real ``~/.config/systemd/user``) with ``store_owned`` False. The write guard
+    used to fold the store test into ``addressable``, which made its own refusal
     unsatisfiable, so this exact input overwrote an operator's live unit with
-    one pointed at a store that dies with the sandbox (reviewer A A1).
+    one pointed at a store that dies with the sandbox (reviewer A A1); the
+    ownership rule now refuses it before anything is written.
 
     Asserted on the outcome and on the file NOT being written, which is the
     damage; the predicate alone would pass either way.
     """
     from local_operator.wakes import install as mod
 
-    fake = _systemd(monkeypatch, unit_addressable=True, store_in_real_home=False)
+    fake = _systemd(monkeypatch, unit_addressable=True, store_owned=False)
 
     outcome = mod.ensure_supervisor_installed(tmp_path / "sandbox-store")
 
     assert outcome.installed is False
-    assert "outside the real home" in outcome.reason
+    assert "not the store the shared unit serves" in outcome.reason
     unit = mod.plist_path()
     assert not unit.exists(), "a sandbox store was written into the real systemd user dir"
     assert not unit.with_name(mod.SYSTEMD_TIMER).exists()
@@ -971,7 +1035,7 @@ def test_an_unreachable_user_manager_is_not_verifiable_rather_than_absent(
     from local_operator.wakes import install as mod
 
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: True)
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: True)
+    monkeypatch.setattr(mod, "_shared_label_refusal", lambda _config: None)
 
     def no_bus(*args: str, **kwargs: object):  # noqa: ANN202
         import subprocess
@@ -1007,7 +1071,7 @@ def test_the_windows_arm_registers_and_starts_a_task(
     monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
     monkeypatch.setattr(supervisors, "task_scheduler_is_addressable", lambda _c: True)
     monkeypatch.setattr(supervisors, "task_state", lambda _name: (False, False, "not registered"))
-    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _c: True)
+    monkeypatch.setattr(mod, "_shared_label_refusal", lambda _c: None)
 
     def fake_create(name: str, xml: str) -> tuple[bool, str]:
         created.append((name, xml))
@@ -1069,3 +1133,46 @@ def test_the_windows_arm_refuses_a_store_outside_the_real_profile(
     assert outcome.installed is False
     assert "outside the real profile" in outcome.reason
     assert called == [], "a task was registered for a sandbox store"
+
+
+def test_a_server_spool_write_never_reaches_the_shared_unit_for_a_scratch_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ENTRY POINT the incident came through, driven end to end.
+
+    `spooled.note_spooled_turn` is what a server-run session calls when it spools
+    an obligation for a successor, and it raises the supervisor on that path —
+    which is how a desktop-managed backend with a scratch store rewrote the
+    operator's own plist (QA round 2). The guard is what has to refuse, so the
+    test drives the real call with an isolated HOME and a scratch store INSIDE
+    that home, and asserts two things: the operator's real plist is untouched
+    (compared by stat, never read), and no unit file appears for the scratch
+    store either — refusal means no write at all, not a write nobody loads.
+    """
+    from local_operator import launchd
+    from local_operator.wakes import spooled
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    store = home / "worktrees" / "qa-x" / "config"
+    store.mkdir(parents=True)
+
+    passwd_home = launchd.real_home()
+    assert passwd_home is not None
+    real_plist = passwd_home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+    def _stat_key(path: Path) -> tuple[int, int] | None:
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        return (info.st_size, info.st_mtime_ns)
+
+    before = _stat_key(real_plist)
+
+    assert spooled.note_spooled_turn(store, "abcdef123456") is True
+
+    assert _stat_key(real_plist) == before, "the operator's real plist was touched"
+    sandbox_plist = home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    assert not sandbox_plist.exists(), "a store the shared unit does not own got a unit file"

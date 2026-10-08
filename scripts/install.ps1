@@ -4,10 +4,20 @@
 #
 # The Windows twin of scripts/install.sh, kept step-for-step identical so the
 # README can promise one experience (first-run onboarding audit Q6/U8/D9):
-#   1. Getting ready             — install uv if it is missing (astral's installer)
-#   2. Installing Local Operator — `uv tool install local-operator` (uv brings Python 3.12+)
-#   3. Checking it works         — run `lop --version`
+#   1. Getting ready             - install uv if it is missing (astral's installer)
+#   2. Installing Local Operator - `uv tool install local-operator` (uv brings Python 3.12+)
+#   3. Checking it works         - run `lop --version`
 # Each step prints "Step N/3", an ETA and the elapsed total.
+#
+# ASCII ONLY, and that is a hard constraint rather than a style (review
+# round 1, R-6): the header advertises PowerShell 5.1+, and 5.1 decodes a
+# BOM-less script in the machine's ANSI code page -- so the tick and the
+# middle dots this file used to carry printed as mojibake (`OK` where a
+# tick was meant) for anyone running `powershell -File scripts/install.ps1`.
+# The documented `irm ... | iex` path was unaffected (the HTTP charset
+# decides that decode), which is exactly why it went unnoticed. A BOM
+# would fix 5.1 too, but a BOM survives into the string `iex` receives on
+# the documented path; ASCII cannot break either route, and a test pins it.
 #
 # CONSTRAINTS: no admin rights, never touches a system Python or pyenv-win,
 # never edits PATH itself (uv's installer and `uv tool update-shell` are the
@@ -25,8 +35,8 @@ $Clock = [System.Diagnostics.Stopwatch]::StartNew()
 function Get-Elapsed { '{0}s' -f [int]$Clock.Elapsed.TotalSeconds }
 
 function Write-Step([int]$Number, [string]$Label, [string]$Eta) {
-    Write-Host ("Step {0}/{1} · {2} " -f $Number, $TotalSteps, $Label) -NoNewline
-    Write-Host ("(about {0} · {1} elapsed)" -f $Eta, (Get-Elapsed)) -ForegroundColor DarkGray
+    Write-Host ("Step {0}/{1} - {2} " -f $Number, $TotalSteps, $Label) -NoNewline
+    Write-Host ("(about {0} - {1} elapsed)" -f $Eta, (Get-Elapsed)) -ForegroundColor DarkGray
 }
 
 function Stop-Install([string]$Message) {
@@ -51,9 +61,9 @@ Write-Host 'Installing Local Operator' -ForegroundColor White
 # -- 1. uv ---------------------------------------------------------------------
 $Uv = Find-Uv
 if ($Uv) {
-    Write-Step 1 'Getting ready — uv is already installed' '0 s'
+    Write-Step 1 'Getting ready - uv is already installed' '0 s'
 } else {
-    Write-Step 1 'Getting ready — installing uv' '10 s'
+    Write-Step 1 'Getting ready - installing uv' '10 s'
     try {
         $env:UV_NO_MODIFY_PATH = '1'
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression | Out-Null
@@ -78,7 +88,7 @@ $Version = (& $Lop --version | Select-Object -Last 1)
 if ($LASTEXITCODE -ne 0) { Stop-Install 'lop is installed but did not start' }
 
 Write-Host ''
-Write-Host ("✓ Local Operator {0} installed in {1}" -f $Version, (Get-Elapsed)) -ForegroundColor Green
+Write-Host ("Local Operator {0} installed in {1}" -f $Version, (Get-Elapsed)) -ForegroundColor Green
 
 $PathParts = ($env:PATH -split ';') | ForEach-Object { $_.TrimEnd('\') }
 if ($PathParts -notcontains $BinDir.TrimEnd('\')) {

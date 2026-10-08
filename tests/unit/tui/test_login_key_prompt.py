@@ -31,7 +31,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.key_prompt import MASK_CHAR, KeyPromptBlock
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
 
 class _PromptHost(App[None]):
@@ -877,3 +877,50 @@ async def test_a_completed_login_stops_holding_the_pasted_key(
             and value.wait().result() == "sk-real-key"
         ]
         assert reachable == [], f"the app still reaches a block holding the pasted key: {reachable}"
+
+
+@pytest.mark.asyncio
+async def test_the_pending_browser_block_does_not_dump_the_oauth_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 1, D5: the short link is enough when the browser is HERE.
+
+    The block used to end with ``Full link:`` and a ~230-cell URL across three
+    wrapped lines — the largest object on the screen, uncopyable across the
+    wrap, and a second URL to choose between for a flow that already shows the
+    short ``/launch`` link that 302s to it. It stays for a headless display,
+    which is the one case the dump exists for (a browser on another machine
+    cannot follow a loopback link).
+
+    Read through the transcript's own renderable flattening, so the assertion
+    is about presence rather than about how a 130-cell URL wraps at 100 columns.
+    """
+    from local_operator.providers import login_catalog
+
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    long_url = "https://auth.example.com/authorize?" + "x" * 90
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        definition = controller.provider("openai")
+        assert definition is not None
+
+        monkeypatch.setattr(login_catalog, "headless_display", lambda *a, **k: False)
+        app._login_callbacks(definition).on_auth_url(
+            long_url, "Didn't open? http://127.0.0.1:5/launch"
+        )
+        await pilot.pause()
+        local = _transcript_text(app)
+
+        monkeypatch.setattr(login_catalog, "headless_display", lambda *a, **k: True)
+        app._login_callbacks(definition).on_auth_url(
+            long_url, "Didn't open? http://127.0.0.1:5/launch"
+        )
+        await pilot.pause()
+        headless = _transcript_text(app)
+
+    assert "Didn't open?" in local and "http://127.0.0.1:5/launch" in local
+    assert long_url not in local, local
+    # Non-zero control: the same call DOES print it when the browser is remote,
+    # so the absence above cannot be a block that prints nothing.
+    assert long_url in headless, headless

@@ -62,3 +62,28 @@ def test_the_status_word_is_case_insensitive_like_the_tui(
     """QA Q2: ``/login STATUS`` worked in the TUI, ``lop login STATUS`` did not."""
     assert auth_cli.run_login(" Status ", None, store) == 0
     assert "No stored credentials." in capsys.readouterr().out
+
+
+def test_the_url_header_matches_the_flow_it_belongs_to(capsys) -> None:
+    """Review round 1, Q3: a paste-key row's URL is where the key is MADE.
+
+    ``on_auth_url`` printed "Open this URL to authorize:" for every login, so a
+    row whose whole flow is "copy a key off a dashboard" told the user to
+    authorize a page that only offers "Create new secret key" — the same
+    mismatch the prompt text was already fixed for ("API key", never "code").
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    url = "https://platform.openai.com/api-keys"
+
+    paste = get_provider_definition("openai-api-key")
+    assert paste is not None and paste.paste_prompt_required is True
+    auth_cli._callbacks_interactive(paste).on_auth_url(url)
+    assert "create a key" in capsys.readouterr().out
+
+    browser = get_provider_definition("openai")
+    assert browser is not None and browser.paste_prompt_required is False
+    auth_cli._callbacks_interactive(browser).on_auth_url(url)
+    out = capsys.readouterr().out
+    assert "authorize" in out
+    assert "create a key" not in out

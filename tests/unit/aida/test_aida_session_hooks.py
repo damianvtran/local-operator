@@ -324,6 +324,7 @@ async def test_a_name_write_reaches_her_live_session(isolated_root: Path) -> Non
 @pytest.mark.asyncio
 async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
     isolated_root: Path,
+    attended_surface: None,
 ) -> None:
     """Her reply is the FIRST VISIBLE row; the trigger reaches only the model.
 
@@ -387,5 +388,89 @@ async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
         kinds = [e.kind for e in entries]
         assert "notice" not in kinds and "user" not in kinds, kinds
         assert entries and entries[0].kind == "assistant"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unattended_fire_withholds_the_greeting_and_keeps_the_request(
+    isolated_root: Path,
+    headless_surface: None,
+) -> None:
+    """A requested greeting must not land in a runtime with nobody attached.
+
+    Review round 1, R-3: the state machine gated the REQUEST, so a person who
+    asked for the greeting and quit before its due time left a due row that the
+    next headless runtime (a wake-supervisor engagement, ``lop exec``, the phone
+    daemon) would take — delivering into a turn nobody can read and stamping
+    ``delivered``, which spends the greeting and starts the cadence it gates.
+
+    What is pinned: the fire is WITHHELD (no turn, no provider request, no
+    transcript row, no receipt), the ledger never reaches ``delivered``, and it
+    returns to ``requested`` so the next attended moment's reconcile arms it
+    again — then that attended fire does land.
+    """
+    from local_operator.aida import onboarding
+    from local_operator.harness.types import WakeDeliveredEvent
+
+    session_id = "ffff88880000"
+    state.update_state(isolated_root, session_id=session_id)
+    onboarding.request_greeting(isolated_root, "tui")
+    onboarding.mark_greeted(isolated_root, 1)
+    session = make_session(isolated_root, session_id)
+    stream = cast(Any, session._stream_fn)
+    events: list[object] = []
+    session.subscribe(events.append)
+    try:
+        row = WakeSchedule(
+            id=onboarding.GREETING_WAKE_ID,
+            message=onboarding.greeting_message(isolated_root, surface="tui"),
+            next_due_at=1,
+            hidden=True,
+        )
+        await session._deliver_wake(DueWake(schedule=row, occurrence=1, final=True))
+        for _ in range(40):
+            if session.history():
+                break
+            await asyncio.sleep(0.01)
+
+        # Nothing reached the model, the transcript or a front end.
+        assert not stream.requests, "a withheld greeting must not run a turn"
+        assert not session.history(), session.history()
+        assert not [e for e in events if isinstance(e, WakeDeliveredEvent)]
+        # And the ledger still owes the person who asked for it: not delivered,
+        # not spent, ready for the next attended moment to arm.
+        assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
+        assert onboarding.greeted_at(isolated_root) is None
+        # ``requested`` is the only state ``proactive.reconcile``/resume arm from
+        # (``greeting_armable`` = requested AND a resolvable provider); the
+        # provider half is not modelled here — this root has no provider config,
+        # so the arm gate's other term is covered by the reconcile tests.
+        assert onboarding.greeting_record(isolated_root)["state"] == onboarding.GREETING_REQUESTED
+
+        # The next ATTENDED fire does land — the withholding cost no greeting.
+        session_attended = make_session(isolated_root, session_id)
+        attended_stream = cast(Any, session_attended._stream_fn)
+        try:
+            from local_operator.aida import activation
+
+            original = activation.human_surface_present
+            activation.human_surface_present = lambda: True
+            try:
+                await session_attended._deliver_wake(
+                    DueWake(schedule=row, occurrence=2, final=True)
+                )
+                for _ in range(200):
+                    if any(
+                        getattr(m, "role", "") == "assistant" for m in session_attended.history()
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
+            finally:
+                activation.human_surface_present = original
+            assert attended_stream.requests, "the attended fire must reach the provider"
+            assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_DELIVERED
+        finally:
+            await session_attended.dispose()
     finally:
         await session.dispose()

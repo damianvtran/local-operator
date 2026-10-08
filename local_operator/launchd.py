@@ -1038,6 +1038,10 @@ def config_lives_in_real_home(config_dir: Path) -> bool:
     the sandbox shape (``/tmp``, a throwaway home). A unit pointed at one of
     those is a live launchd job watching a store that is deleted when the
     sandbox ends.
+
+    NOT SUFFICIENT ON ITS OWN for the SHARED label — see
+    :func:`shared_label_refusal`. A store under the real home but not the
+    default one passes this test and still must not be handed the shared unit.
     """
     home = real_home()
     if home is None:
@@ -1046,6 +1050,94 @@ def config_lives_in_real_home(config_dir: Path) -> bool:
         return Path(config_dir).resolve().is_relative_to(home)
     except (OSError, ValueError):
         return False
+
+
+def default_config_root() -> Path | None:
+    """The config root the SHARED supervised label serves, or ``None``.
+
+    The real passwd home, not ``$HOME``: this answers "which store does the
+    user's one live supervisor watch", and an isolated run must never mistake
+    its own redirected home for the operator's (see :func:`real_home`).
+    """
+    home = real_home()
+    if home is None:
+        return None
+    # Function-local, like every other ``paths`` import in this module: launchd
+    # is loaded by the CLI's cheapest paths, and this module's contract is
+    # stdlib-at-import.
+    from local_operator.paths import DEFAULT_CONFIG_DIRNAME
+
+    return home / DEFAULT_CONFIG_DIRNAME
+
+
+def shared_label_refusal(config_dir: Path) -> str | None:
+    """Why the SHARED supervised label must not serve ``config_dir``, or ``None``.
+
+    ONE unit per user (``com.local-operator.wakes``, the systemd unit, the
+    Windows task), so exactly one config root can be the store it watches: the
+    real user's DEFAULT one. Every other root — a sandbox, a worktree fixture,
+    a QA scratch dir, an alternate store — must be refused rather than
+    repointed, because the label is shared: installing for it hijacks whatever
+    the operator already had running.
+
+    WHY CONTAINMENT WAS NOT ENOUGH (the incident this exists for, 2026-10-08).
+    :func:`config_lives_in_real_home` refuses a store OUTSIDE the real home, and
+    that caught the earlier sandbox escapes. It does not catch a scratch store
+    INSIDE it — ``~/local-operator-worktrees/qa-x/config`` is under the home, so
+    containment passed, the desktop-managed backend (real ``$HOME``, the QA
+    run's ``LOCAL_OPERATOR_CONFIG_DIR``) wrote the operator's own
+    ``~/Library/LaunchAgents`` plist pointed at the throwaway store, and
+    launchd was bootstrapped into the REAL ``gui/<uid>`` domain. The operator's
+    live supervisor then served a config dir that was deleted minutes later,
+    until another session re-pointed it by hand. Two independent facts had to
+    hold for that, and the fix tests BOTH: the store must be the default one,
+    and the unit path must live under the same home as that store.
+
+    ANSWER SHAPE: a sentence to log and to return as an ``InstallOutcome``
+    reason, or ``None`` when this process may act. Never raises: a caller that
+    cannot read the home must decline, not crash the persist that called it.
+    """
+    try:
+        expected = default_config_root()
+        if expected is None:
+            return (
+                "the real user's home cannot be verified on this host; "
+                "the shared unit is left alone"
+            )
+        try:
+            root = Path(config_dir).resolve()
+        except (OSError, ValueError):
+            return f"the config dir {config_dir} cannot be resolved; the shared unit is left alone"
+        expected = expected.resolve()
+        if root != expected:
+            return (
+                f"the config dir {root} is not the default one the shared unit serves "
+                f"({expected}); not repointing the shared unit at it"
+            )
+        if not Path.home().resolve().is_relative_to(expected.parent):
+            # A redirected $HOME with the REAL default config root: the unit file
+            # this process would write is the sandbox's, while the bootstrap
+            # would reach the operator's live domain and load it there — a unit
+            # pointing at a plist that vanishes with the sandbox.
+            return (
+                f"this process's home ({Path.home()}) is not the real one ({expected.parent}); "
+                "the shared unit is left alone"
+            )
+        return None
+    except Exception:  # noqa: BLE001 — a guard that cannot read its facts declines
+        logger.debug("shared-label guard could not read its facts", exc_info=True)
+        return "the shared unit's ownership could not be verified; leaving it alone"
+
+
+def plist_path_for(label: str) -> Path:
+    """The plist path launchd would read for ``label`` under THIS process's home.
+
+    ``Path.home()``, so an isolated run writes into its own home rather than the
+    operator's — which is how the writers themselves can be exercised without
+    touching the real ``~/Library/LaunchAgents`` (the guard is what decides
+    WHETHER to write; this function decides WHERE).
+    """
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
 def load(path: Path) -> dict[str, object] | None:

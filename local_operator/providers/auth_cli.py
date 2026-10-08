@@ -66,7 +66,17 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     """
 
     def on_auth_url(url: str, instructions: str | None = None) -> None:
-        print(f"\nOpen this URL to authorize:\n  {url}")
+        # THE VERB MATCHES THE FLOW (review round 1, Q3). An OAuth URL is one
+        # you authorize; a paste-key row's URL is a dashboard page where the key
+        # is CREATED, and telling the user to "authorize" it sent them looking
+        # for a sign-in button on a page that only has "Create new secret key".
+        # Same reason the prompt below says "API key" and not "code".
+        header = (
+            "Open this page to create a key:"
+            if definition.paste_prompt_required
+            else "Open this URL to authorize:"
+        )
+        print(f"\n{header}\n  {url}")
         if instructions:
             print(instructions)
 
