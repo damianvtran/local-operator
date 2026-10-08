@@ -1260,6 +1260,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: and the selected-skills short form (``skills.index.short_description``);
 #: their real-input figures are in the PR. Headroom is ~2% (683 tokens), as
 #: the context-diet brief asked, inside the 1,200 tighten band.
+#:
+#: Review round 1 restored rules the first trim dropped rather than moved (the
+#: wake/monitor triggers, "don't notify", no lettered options, never
+#: force-activate a tab, MCP before local-config discovery, the guide rule's
+#: why): +360 chars = ~+129 billed, measured head 95,232 chars = ~34,256. The
+#: ceiling is NOT raised for it — the 554 tokens left (~1.6%) are the headroom.
 BUDGET_BILLED_TOKENS = 34_810
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

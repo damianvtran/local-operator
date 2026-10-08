@@ -268,6 +268,15 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(\"'])")
 #: ("Dr. Foo") rather than the description's real first sentence.
 _MIN_SENTENCE_CHARS = 24
 
+#: A break whose preceding token is one of these is an abbreviation, not a
+#: sentence end, even when a capital follows ("e.g. Slack", "vs. Snowflake",
+#: "v0.61. Tags" — the version case is the digit-dot arm). The length floor
+#: above only catches abbreviations near the START; these can sit anywhere.
+_ABBREVIATION_TAIL = re.compile(
+    r"(?:\b(?:e\.g|i\.e|vs|etc|cf|approx|Inc|Ltd|Co|Dr|Mr|Ms|Mrs|St|No)\.|\d\.)$",
+    re.IGNORECASE,
+)
+
 
 def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) -> str:
     """A selected skill's description cut to its first sentence, or ``limit`` chars.
@@ -290,7 +299,9 @@ def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) ->
     for match in _SENTENCE_END.finditer(text):
         if match.start() > limit:
             break
-        if match.start() >= _MIN_SENTENCE_CHARS:
+        if match.start() >= _MIN_SENTENCE_CHARS and not _ABBREVIATION_TAIL.search(
+            text[: match.start()]
+        ):
             return text[: match.start()]
     clipped = text[: limit - 1]
     space = clipped.rfind(" ")

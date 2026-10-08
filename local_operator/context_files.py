@@ -176,6 +176,22 @@ MAX_DIGEST_BYTES = 64 * 1024
 #: request on a session started in that repo.
 GUIDANCE_HEAD_BYTES = 4 * 1024
 
+#: How far past :data:`GUIDANCE_HEAD_BYTES` the head may run to finish the
+#: SECTION it would otherwise cut in half.
+#:
+#: The 4KiB figure above was justified on this repository's file, where the
+#: bytes it gave up were narrative. On ``~/minervaai/AGENTS.md`` (review round
+#: 1, F6) the same cut landed one line into "Model Classification Output
+#: Contract" — three MUST/Never rules — leaving the heading resident and its
+#: body index-only, which reads as an empty section. So the head is a SECTION
+#: boundary where one is near: when the 4KiB cut falls inside a section and the
+#: next heading (H1-H3, outside a code fence) starts within this cap, the head
+#: runs to just before that heading. Past the cap it falls back to the plain
+#: line cut, so a file with one enormous section still costs at most the cap.
+#: Measured: minervaai's next heading is at 6,102 B (kept whole); this repo's
+#: (23,208 B) and pergamon-labs' (6,755 B) are past it, so both stay at 4KiB.
+GUIDANCE_HEAD_MAX_BYTES = 6 * 1024
+
 #: Deepest heading level the index lists. H3 is a real tuning knob rather than
 #: an arbitrary depth: on this repository's own AGENTS.md it is the difference
 #: between 11 rows and 33, and the H3s are where the individually actionable
@@ -454,6 +470,39 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
     return found
 
 
+def _next_heading_offset(data: bytes, cut: int) -> int | None:
+    """Byte offset of the first indexable heading at or after ``cut`` in ``data``.
+
+    ``None`` when no such heading starts inside ``data`` (the caller passes at
+    most :data:`GUIDANCE_HEAD_MAX_BYTES`), when ``cut`` already sits on a heading
+    (nothing would be split), or when the text before the cut has no heading at
+    all (there is no section to finish). Headings follow
+    :func:`_scan_sections`' rules — H1-H3 with a space, outside ``` / ~~~
+    fences — so the head ends exactly where an index row begins.
+    """
+    offset = 0
+    fence: bytes | None = None
+    seen_heading = False
+    for line in data.split(b"\n"):
+        end = offset + len(line) + 1
+        if end > len(data):
+            # The last piece has no newline inside ``data``: a partial line
+            # whose heading-ness cannot be judged. Treat it as not found.
+            return None
+        stripped = line.lstrip()
+        if stripped.startswith(b"```") or stripped.startswith(b"~~~"):
+            marker = stripped[:3]
+            fence = None if fence == marker else (fence or marker)
+        elif fence is None and line.startswith(b"#"):
+            level = len(line) - len(line.lstrip(b"#"))
+            if level <= INDEX_MAX_HEADING_LEVEL and line[level : level + 1] == b" ":
+                if offset >= cut:
+                    return offset if seen_heading and offset > cut else None
+                seen_heading = True
+        offset = end
+    return None
+
+
 def _read_head(path: Path) -> tuple[str, int, bool]:
     """Leading text cut on a LINE boundary, its line count, and whether more
     of the file remains.
@@ -464,10 +513,18 @@ def _read_head(path: Path) -> tuple[str, int, bool]:
     incomplete.
     """
     with _open_nofollow(path) as stream:
-        probe = stream.read(GUIDANCE_HEAD_BYTES + 1)
+        probe = stream.read(GUIDANCE_HEAD_MAX_BYTES + 1)
     if len(probe) <= GUIDANCE_HEAD_BYTES:
         text = probe.decode("utf-8", errors="replace")
         return text, len(_split_lines_like_read(probe)), False
+    section_end = _next_heading_offset(probe, GUIDANCE_HEAD_BYTES)
+    if section_end is not None:
+        # Finish the section the plain cut would split; see
+        # GUIDANCE_HEAD_MAX_BYTES. The heading itself starts the index.
+        # Counted as the lines BEFORE the heading (blank separators included),
+        # so the finished section never reappears as a one-blank-line index row.
+        head = probe[:section_end]
+        return head.decode("utf-8", errors="replace"), head.count(b"\n"), True
     head = probe[:GUIDANCE_HEAD_BYTES]
     # ``cut > 0``, not ``>= 0``: a file whose FIRST byte is a newline has its
     # only boundary at 0, and cutting there would empty the head entirely. In

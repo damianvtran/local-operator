@@ -351,8 +351,37 @@ class TestRenderBlock:
         assert short.endswith("word…")
         # Already short: untouched (whitespace normalised only).
         assert short_description("first  skill") == "first skill"
-        # An abbreviation is not taken as the first sentence.
-        assert not short_description("Use e.g. this " + "x " * 200).startswith("Use e.g.…")
+
+    @pytest.mark.parametrize(
+        ("description", "wrong_cut"),
+        [
+            # Review round 1, F3: each was cut AT the abbreviation. A capital
+            # follows each one, which is the only case the guard exists for
+            # (F4: a lowercase follower never matches the sentence regex at all).
+            (
+                "Playbooks for support replies, e.g. Slack threads and Gmail drafts. "
+                + "More detail. " * 20,
+                "Playbooks for support replies, e.g.",
+            ),
+            (
+                "Compare the ingestion paths vs. Snowflake loaders for tenants. "
+                + "More detail. " * 20,
+                "Compare the ingestion paths vs.",
+            ),
+            (
+                "Covers the release process for v0.61. Tags are cut by one owner. "
+                + "More detail. " * 20,
+                "Covers the release process for v0.61.",
+            ),
+        ],
+    )
+    def test_short_description_never_cuts_at_an_abbreviation(
+        self, description: str, wrong_cut: str
+    ) -> None:
+        short = short_description(description)
+        assert short != wrong_cut
+        # It falls through to the next real sentence end instead.
+        assert short.endswith(".") and len(short) > len(wrong_cut)
 
 
 class ModelBackend(CountingBackend):

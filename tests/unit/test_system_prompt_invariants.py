@@ -64,6 +64,40 @@ def test_a_browserless_session_still_may_not_install_an_engine() -> None:
     assert "guide://browser" in text
 
 
+def test_safety_rules_survive(queued: str) -> None:
+    """Review round 1, F2: each of these deletions left every suite green."""
+    assert "require explicit user approval before you run them" in queued
+    assert "If an approval request is declined, stop that action and say so" in queued
+    assert "Treat unknown files as the user's work" in queued
+    assert "never print credentials, tokens or keys" in queued
+    assert "Respect denials of a prompted write or command" in queued
+    assert "never end a turn with pending items" in queued
+
+
+def test_ask_triggers_stay_an_exhaustive_last_resort_list(queued: str) -> None:
+    """F2(e): "only when:" is the brake. "whenever unsure, e.g. when:" keeps both
+    headline sentences and inverts the rule, so the brake itself is pinned."""
+    assert "Reach for `ask` only when: the action is destructive or irreversible" in queued
+
+
+def test_a_consoleless_session_may_not_fake_a_terminal() -> None:
+    text = _flat({"has_console": False, "no_console": True})
+    assert "never script a terminal emulator or treat another window's terminal as this one" in text
+
+
+def test_rules_restored_in_review_round_one(queued: str) -> None:
+    """F5/N1/minor: rules the first trim dropped instead of moving."""
+    assert "when the user asks to be reminded" in queued
+    assert "arm one when the user asks you to watch, poll, or be told" in queued
+    assert "end it with no reply, and don't notify" in queued
+    assert "Never write lettered options into your reply; ask everything in one call" in queued
+    assert "for an urgent one, delegate the question to a `task` subagent" in queued
+    assert "before browser, generic API, or local-config discovery" in queued
+    assert "never force-activate a tab or raise a window" in queued
+    assert "NEVER find or inspect skills with bash" in queued
+    assert "grepping code instead is how you end up editing a file nothing reads" in queued
+
+
 def test_peer_messaging_never_shells_out(queued: str) -> None:
     assert "never shell out to `lop send`, cmux, or another multiplexer" in queued
 
@@ -71,7 +105,7 @@ def test_peer_messaging_never_shells_out(queued: str) -> None:
 def test_guides_skills_and_mcp_are_read_through_their_schemes(queued: str) -> None:
     assert "you MUST `read guide://<name>` BEFORE acting" in queued
     assert "`skill://<name>`" in queued and "`skill://<name>/<relpath>`" in queued
-    assert "never locate skills with bash, glob or grep" in queued
+    assert "NEVER find or inspect skills with bash (`find`, `ls`), glob or grep" in queued
     assert "`mcp://<server>`" in queued and "`mcp://<server>/<tool>`" in queued
     assert "`tool://<name>`" in queued
 

@@ -847,3 +847,44 @@ def test_scan_ceiling_is_disclosed_rather_than_silently_dropping_sections(
     (repo / "AGENTS.md").write_text(f"# P\n\n## Head\n\n{filler}\n\n## Way past the scan\n\nx\n")
     rendered = load_repo_guidance(repo)
     assert "index scan stopped at" in rendered
+
+
+def test_the_head_finishes_a_section_the_byte_cut_would_split(tmp_path: Path) -> None:
+    """Review round 1, F6: the 4 KiB cut landed one line into minervaai's
+    "Model Classification Output Contract", shipping the heading with none of
+    its MUST rules. A section that ends within GUIDANCE_HEAD_MAX_BYTES ships
+    whole, and the index starts at the next heading with no empty row."""
+    from local_operator.context_files import (
+        GUIDANCE_HEAD_BYTES,
+        GUIDANCE_HEAD_MAX_BYTES,
+    )
+
+    repo = _make_repo(tmp_path)
+    filler = "reference material line\n" * ((GUIDANCE_HEAD_BYTES - 300) // 24)
+    contract = "## Contract\n\n" + "".join(
+        f"- Models MUST obey rule {n} of the contract.\n" for n in range(40)
+    )
+    tail = "## Later\n\n" + "later reference line\n" * 2000
+    body = "# Project\n\n## Intro\n\n" + filler + contract + "\n" + tail
+    (repo / "AGENTS.md").write_text(body)
+    assert body.index("## Contract") < GUIDANCE_HEAD_BYTES < body.index("## Later")
+    assert body.index("## Later") < GUIDANCE_HEAD_MAX_BYTES
+
+    rendered = load_repo_guidance(repo)
+    head, index = rendered.split("\nThe rest of this file is NOT included")
+    assert "rule 39 of the contract" in head
+    assert "## Later" not in head
+    later_line = body[: body.index("## Later")].count("\n") + 1
+    assert f"- L{later_line}-" in index
+    assert ": Contract" not in index
+
+
+def test_a_section_past_the_cap_falls_back_to_the_plain_cut(tmp_path: Path) -> None:
+    """One enormous section must not drag the head past its cap."""
+    from local_operator.context_files import GUIDANCE_HEAD_MAX_BYTES
+
+    repo = _make_repo(tmp_path)
+    body = "# Project\n\n## Huge\n\n" + "huge reference line\n" * 3000 + "## Next\n\nx\n"
+    (repo / "AGENTS.md").write_text(body)
+    head = load_repo_guidance(repo).split("\nThe rest of this file is NOT included")[0]
+    assert len(head.encode()) < GUIDANCE_HEAD_MAX_BYTES
