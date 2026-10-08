@@ -44,10 +44,11 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.network import identity, relay, types
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
-# The flag-level fact leads, then the SESSION's sentence verbatim — the exact
+# The flag-level fact leads, then the SESSION's sentence verbatim, then the shell
+# remedy the composer APPENDS after it (design round 1, D5) — the exact
 # construction ``lop exec`` uses (``exec_startup.resolve_startup``), because it is
 # the same pair and the same rule; the shared tail is what the desktop's header
-# lane keys on.
+# lane keys on, and the appended clause follows it rather than rewording it.
 SESSION_SENTENCE_TAIL = (
     "team release owns this session: manager is the speaker, so /agent is closed. "
     "Run /team clear to detach the team first."
@@ -55,6 +56,7 @@ SESSION_SENTENCE_TAIL = (
 PROFILE_PAIR_SENTENCE = (
     "--profile cannot be combined with --team: a team owns the session's agent slot. "
     + SESSION_SENTENCE_TAIL
+    + " Drop --profile or --team to create the session."
 )
 
 
@@ -105,10 +107,18 @@ def _make_team(root: Path, name: str = "release") -> None:
     )
 
 
-def _make_agent(root: Path, name: str, *, tags: list[str]) -> None:
+def _make_agent(
+    root: Path, name: str, *, tags: list[str], model: str = "", hosting: str = ""
+) -> None:
     """One registered agent row; ``tags=["role"]`` makes it attachable."""
     AgentRegistry(root).create_agent(
-        _edit_fields(name=name, description=f"Use when {name} work is needed.", tags=tags)
+        _edit_fields(
+            name=name,
+            description=f"Use when {name} work is needed.",
+            tags=tags,
+            model=model,
+            hosting=hosting,
+        )
     )
 
 
@@ -193,6 +203,7 @@ def test_the_owning_half_refuses_an_attachable_agent_row_beside_a_team(root: Pat
     assert str(refused.value) == (
         "--agent cannot be combined with --team: a team owns the session's agent slot. "
         + SESSION_SENTENCE_TAIL
+        + " Drop --agent or --team to create the session."
     )
     assert not (root / "sessions").exists(), "a refused create leaves nothing on disk"
 
@@ -200,13 +211,16 @@ def test_the_owning_half_refuses_an_attachable_agent_row_beside_a_team(root: Pat
 def test_the_requesting_half_refuses_the_pair_before_it_mirrors_definitions(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refuse-before-push ordering, asserted structurally.
+    """The refuse-before-push BOUNDARY, asserted against a resolvable peer.
 
     ``_ctl_peer_create`` reconciles the names onto the peer BEFORE the create
     frame travels; a create that can never be honoured must not leave that side
-    effect behind, so the refusal is raised ahead of the push. The manager is
-    resolved best-effort from THIS device's registry — this device may
-    legitimately not hold the team ("run it where it lives").
+    effect behind, so the refusal is raised ahead of the push. The peer resolves
+    here on purpose (agent review F8): with an unknown peer, a refusal correctly
+    moved to after ``_resolve_peer`` but before the push would redden the cell on
+    the WRONG assertion, and the one that discriminates — the push recorder
+    staying empty — would never execute. Placed anywhere before ``push_to_peer``
+    the refusal passes; moved past it, the recorder is the failure.
     """
     _mint(root)
     _make_team(root)
@@ -219,6 +233,9 @@ def test_the_requesting_half_refuses_the_pair_before_it_mirrors_definitions(
 
     monkeypatch.setattr(definitions_mod, "push_to_peer", _push)
     server = _server(root)
+    # Resolvable, so what the cell measures is the refusal's POSITION relative
+    # to the push rather than the peer's absence.
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: object())
 
     with pytest.raises(types.MeshRefusal) as refused:
         server._ctl_peer_create({"peer": "cloud-node-1", "profile": "reviewer", "team": "release"})
@@ -226,6 +243,108 @@ def test_the_requesting_half_refuses_the_pair_before_it_mirrors_definitions(
     assert pushed == [], "a refused create must not mirror definitions"
     assert refused.value.code == "bad_request"
     assert str(refused.value) == PROFILE_PAIR_SENTENCE
+
+
+def test_the_requesters_sentence_names_the_team_canonically_when_it_holds_it(
+    root: Path,
+) -> None:
+    """A case/alias spelling resolves to the registry row's name, as exec's does.
+
+    ``lop exec --team RELEASE`` prints ``team release`` (the lookup casefolds);
+    the requesting half used to print the TYPED token, so the two seats' "same
+    sentence" claim held only for the author's spelling (F5/D3). Same lookup,
+    same canonical name, and the cell pins the sentence byte-for-byte.
+    """
+    _mint(root)
+    _make_team(root)
+    server = _server(root)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        server._ctl_peer_create({"peer": "cloud-node-1", "profile": "reviewer", "team": "RELEASE"})
+
+    assert str(refused.value) == PROFILE_PAIR_SENTENCE
+
+
+def test_the_requesting_half_refuses_a_held_attachable_row_before_it_mirrors(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``--agent`` door is pre-refused when THIS device holds the row.
+
+    Whether a row is attachable is settled by the same
+    ``resolve_create_identity`` the owning device runs, so for a HELD row it is a
+    fact, not a guess — and the refusal lands before the push exactly like the
+    ``--profile`` form (agent review F3 / QA Q-2). A row this device does NOT
+    hold stays the owning device's call, after the push.
+    """
+    _mint(root)
+    _make_team(root)
+    _make_agent(root, "auditor", tags=["role"])
+    pushed: list[Any] = []
+    from local_operator.network import definitions as definitions_mod
+
+    monkeypatch.setattr(
+        definitions_mod,
+        "push_to_peer",
+        lambda *args, **kwargs: pushed.append((args, kwargs)) or {"ok": True},
+    )
+    server = _server(root)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        server._ctl_peer_create(
+            {"peer": "cloud-node-1", "agent_name": "auditor", "team": "release"}
+        )
+
+    assert pushed == [], "a held attachable row must be refused before the push"
+    assert refused.value.code == "bad_request"
+    assert str(refused.value) == (
+        "--agent cannot be combined with --team: a team owns the session's agent slot. "
+        + SESSION_SENTENCE_TAIL
+        + " Drop --agent or --team to create the session."
+    )
+
+
+def test_a_held_routing_only_row_beside_a_team_is_not_prerefused_and_travels(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carve-out stays open, pinned so the new refusal cannot over-reach.
+
+    The same local resolver answering False for a legacy conversational row is
+    what keeps ``--agent my-chat --team X`` — the pair the guide calls allowed —
+    from being pre-refused (mutation F3(a): "complete" the half symmetrically
+    and, before this cell, nothing reddened). The push records the frame's own
+    names and the create frame travels; the owner's reply is its own cell below.
+    """
+    _mint(root)
+    _make_team(root)
+    _make_agent(root, "my-chat", tags=[])
+    pushed: list[Any] = []
+    sent: list[Any] = []
+    from local_operator.network import definitions as definitions_mod
+
+    monkeypatch.setattr(
+        definitions_mod,
+        "push_to_peer",
+        lambda *args, **kwargs: pushed.append((args, kwargs)) or {"ok": True},
+    )
+    server = _server(root)
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: object())
+    monkeypatch.setattr(
+        server,
+        "_local_peer_call",
+        lambda op, peer, **fields: sent.append((op, peer, fields))
+        or {"session_id": "s1", "agent": None, "team": {"name": "release"}},
+    )
+
+    detail = server._ctl_peer_create(
+        {"peer": "cloud-node-1", "agent_name": "my-chat", "team": "release"}
+    )
+
+    assert pushed and pushed[0][1]["names"] == {
+        "agents": ["my-chat"],
+        "teams": ["release"],
+    }, "the frame's own names are the push's selector"
+    assert sent and sent[0][0] == "net_session_create", "the frame travels"
+    assert detail["session_id"] == "s1"
 
 
 def test_the_requesters_sentence_does_not_require_holding_the_team(
@@ -254,7 +373,7 @@ def test_the_requesters_sentence_does_not_require_holding_the_team(
     assert str(refused.value) == (
         "--profile cannot be combined with --team: a team owns the session's agent slot. "
         "team release owns this session: its manager is the speaker, so /agent is closed. "
-        "Run /team clear to detach the team first."
+        "Run /team clear to detach the team first. Drop --profile or --team to create the session."
     )
 
 
@@ -311,18 +430,84 @@ def test_every_created_reply_stays_honest_about_the_slot(root: Path) -> None:
     """The invariant, quoted as the defect saw it: no receipt claims an applied
     profile beside a team, because no create that could produce one is accepted.
 
-    (The two singles are covered above; this cell states the property the pair
+    The singles are covered above; this cell states the PROPERTY the pair
     refusal exists to guarantee, so a future relaxation that re-admits the pair
-    without a truthful reply fails HERE.)
+    without a truthful reply fails HERE. The PAIRS are in the loop on purpose
+    (agent review F4): without them, deleting the owning guard left this cell
+    green while only the refusal cells reddened — the invariant now fails when
+    the guard goes away, for the ``--profile`` and ``--agent`` doors both.
     """
     _mint(root)
     _make_team(root)
+    _make_agent(root, "auditor", tags=["role"])
     server = _warmed_server(root)
 
-    for fields in ({"team": "release"}, {"profile": "reviewer"}):
-        detail = server._op_session_create(_link(), _frame(**fields))
+    for fields in (
+        {"team": "release"},
+        {"profile": "reviewer"},
+        {"profile": "reviewer", "team": "release"},
+        {"agent_name": "auditor", "team": "release"},
+    ):
+        try:
+            detail = server._op_session_create(_link(), _frame(**fields))
+        except types.MeshRefusal as refusal:
+            assert refusal.code == "bad_request", refusal
+            continue
         agent = detail.get("agent") or {}
         assert not (detail.get("team") and agent.get("instructions_applied")), detail
+
+
+def test_the_dropped_model_sentence_names_the_pin_owner_not_the_profile(root: Path) -> None:
+    """When both halves are named, the receipt must not credit the profile (F1/D1).
+
+    ``--model`` is dropped because the identity pins one; with the fold, a
+    ``--profile X --agent Y`` create's pin is Y's routing — saying "the agent
+    'X' pins …" named a definition that pinned nothing (and for a pinning X,
+    contradicted X's own row). The sentence now names ``birth_owner``, and the
+    profile-alone control still says "the agent …" — the wording did not move
+    for the single-half shape.
+    """
+    _mint(root)
+    _make_agent(root, "auditor", tags=["role"], model="m-1", hosting="openai")
+    _make_agent(root, "my-chat", tags=[], model="m-2", hosting="anthropic")
+    server = _warmed_server(root)
+
+    both = server._op_session_create(
+        _link(),
+        _frame(
+            profile="auditor",
+            agent_name="my-chat",
+            model={"provider": "openai", "model_id": "gpt-explicit"},
+        ),
+    )
+    assert both["model"]["detail"] == (
+        "the --agent row 'my-chat' pins anthropic/m-2, and an agent outranks a flag on "
+        "its own device too, so the requested model was not applied"
+    )
+
+    # The QA acceptance probe: a seed profile pins NOTHING, so it must never be
+    # credited with the row's pin either (the reviewer/auditor misattribution).
+    seed = server._op_session_create(
+        _link(),
+        _frame(
+            profile="reviewer",
+            agent_name="my-chat",
+            model={"provider": "openai", "model_id": "gpt-explicit"},
+        ),
+    )
+    assert seed["model"]["detail"] == (
+        "the --agent row 'my-chat' pins anthropic/m-2, and an agent outranks a flag on "
+        "its own device too, so the requested model was not applied"
+    )
+
+    alone = server._op_session_create(
+        _link(),
+        _frame(profile="auditor", model={"provider": "openai", "model_id": "gpt-explicit"}),
+    )
+    assert alone["model"]["detail"] == (
+        "the agent 'auditor' pins openai/m-1, and an agent outranks a flag on its own "
+        "device too, so the requested model was not applied"
+    )
 
 
 def test_the_reply_for_a_team_names_no_attached_profile(root: Path) -> None:

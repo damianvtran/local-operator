@@ -62,11 +62,17 @@ def flag_with_team_refusal_message(flag: str, team: str, manager: str) -> str:
 
     ``flag`` is the user's own spelling (``--profile``, ``--agent``); ``team`` and
     ``manager`` reach :func:`team_owns_the_agent_slot_message` unchanged, empty
-    manager included.
+    manager included. The remedy clause is APPENDED after the shared sentence
+    (``Drop … to create the session.`` — design round 1, D5): the shared sentence
+    ends on ``/team clear``, which needs a session a refused create never made and
+    ``lop exec`` never started, so the shell caller gets the way out that exists
+    for them. Appended, never woven in, because the desktop lane keys on the
+    shared sentence's exact words.
     """
     return (
         f"{flag} cannot be combined with --team: a team owns the session's agent slot. "
         + team_owns_the_agent_slot_message(team, manager)
+        + f" Drop {flag} or --team to create the session."
     )
 
 

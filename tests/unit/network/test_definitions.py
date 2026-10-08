@@ -523,9 +523,12 @@ def test_both_halves_combine_the_profiles_persona_and_the_rows_routing(tmp_path:
     assert identity.agent_name == "reviewer"
     assert identity.agent_kind == "seed"
     assert identity.instructions_attachable is True
-    # The routing half: the row's birth sample travels with the engage.
+    # The routing half: the row's birth sample travels with the engage — and the
+    # OWNER names the row, so the receipt's dropped-``--model`` sentence can say
+    # whose pin it was (F1/D1).
     assert identity.birth is not None
     assert (identity.birth.provider, identity.birth.model_id) == ("anthropic", "m-2")
+    assert identity.birth_owner == "my-chat", "the sample is the row's, and says so"
 
 
 def test_a_row_named_beside_a_profile_must_still_resolve(tmp_path: Path) -> None:
@@ -563,6 +566,7 @@ def test_an_attachable_row_beside_a_profile_stays_routing_only(tmp_path: Path) -
     assert identity.agent_name == "reviewer", "the profile names the identity"
     assert identity.instructions_attachable is True
     assert identity.birth is not None and identity.birth.model_id == "m-3"
+    assert identity.birth_owner == "auditor", "the row pinned; the sentence will say so"
 
 
 def test_a_profiles_own_model_stands_when_the_named_row_carries_no_routing(tmp_path: Path) -> None:
@@ -581,6 +585,78 @@ def test_a_profiles_own_model_stands_when_the_named_row_carries_no_routing(tmp_p
     assert refusal == ""
     assert identity is not None
     assert identity.birth is not None and identity.birth.model_id == "m-1"
+    assert identity.birth_owner == "auditor", "the profile kept the pin, and says so"
+
+
+def test_the_rows_routing_outranks_the_profiles_own_pin(tmp_path: Path) -> None:
+    """The precedence itself, pinned: a pinning row beats the profile's pin.
+
+    Flipping the precedence (``if (hosting or model) and birth is None`` — the
+    profile's own pin wins) left every cell green although it is observable:
+    ``--profile auditor --agent my-chat`` would run ``openai/m-role`` instead of
+    ``anthropic/m-legacy``. No other cell names a profile that PINS and a row
+    that pins DIFFERENTLY — the only shape that can see the difference (F2).
+    """
+    root = _root(tmp_path)
+    _make_agent(root, "auditor", tags=["role"], model="m-role", hosting="openai")
+    _make_agent(root, "my-chat", tags=[], model="m-legacy", hosting="anthropic")
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="auditor", agent_name="my-chat"
+    )
+    assert refusal == ""
+    assert identity is not None
+    assert identity.birth is not None
+    assert (identity.birth.provider, identity.birth.model_id) == ("anthropic", "m-legacy")
+    assert identity.birth_owner == "my-chat", "the pin sentence names the row, not the profile"
+
+
+def test_a_half_routing_row_never_replaces_the_profiles_complete_pin(tmp_path: Path) -> None:
+    """A one-field row must not swap the profile's pin for a half pair (F6).
+
+    The gate used to be any-of, so a model-only (or host-only) row replaced
+    ``openai/m-role`` with ``<config-host>/m-x`` (or ``google/<config-model>``) —
+    the missing half falling to the device config, or (completed from the
+    profile) pairing a provider with a model id present in neither definition.
+    Only a COMPLETE pair takes the pin; a half pair with no pin to keep still
+    stands, exactly as it does for the row alone.
+    """
+    root = _root(tmp_path)
+    _make_agent(root, "auditor", tags=["role"], model="m-role", hosting="openai")
+    _make_agent(root, "model-only", tags=[], model="m-x")
+    _make_agent(root, "host-only", tags=[], hosting="google")
+
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="auditor", agent_name="model-only"
+    )
+    assert refusal == ""
+    assert identity is not None and identity.birth is not None
+    assert (identity.birth.provider, identity.birth.model_id) == ("openai", "m-role")
+    assert identity.birth_owner == "auditor"
+
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="auditor", agent_name="host-only"
+    )
+    assert refusal == ""
+    assert identity is not None and identity.birth is not None
+    assert (identity.birth.provider, identity.birth.model_id) == ("openai", "m-role")
+
+
+def test_a_half_routing_row_still_stands_when_there_is_no_pin_to_keep(tmp_path: Path) -> None:
+    """The other side of F6's rule: nothing to keep, so the half is the pin.
+
+    A seed pins nothing, so the row's half is the only routing in play and it
+    applies exactly as it does for the row alone — the fix must not turn a
+    half-specified row into a silent drop.
+    """
+    root = _root(tmp_path)
+    _make_agent(root, "host-only", tags=[], hosting="google")
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="reviewer", agent_name="host-only"
+    )
+    assert refusal == ""
+    assert identity is not None and identity.birth is not None
+    assert (identity.birth.provider, identity.birth.model_id) == ("google", "")
+    assert identity.birth_owner == "host-only"
 
 
 def test_check_expected_refuses_a_revision_that_moved(tmp_path: Path) -> None:
