@@ -104,6 +104,7 @@ from local_operator.session.frontend_state import (
     job_trajectory_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.page_cache import load_transcript_page
 
@@ -5503,6 +5504,26 @@ class DraftAlreadyMaterialised(ValueError):
         super().__init__(message)
 
 
+#: The status codes whose rows the desktop UI files under RUNNING, and the
+#: ONLY rows this listing computes ``last_user_at`` for.
+#:
+#: THE SAME FIVE THE RENDERER USES (local-operator-ui's ``RUNNING_CODES``:
+#: busy, delegating, approval, answer, wedged), spelled here rather than
+#: derived from the wire because the projection decides what to PAY for: the
+#: tracker's cold scan is a real read, and a row the section will not order
+#: must not buy one. ``live_state or pending`` (the shape the design memo
+#: weighed) is a strict SUPERSET — every running code implies a non-empty
+#: live_state or a pending gate, including ``delegating``, whose counts come
+#: from a live record — and is rejected here for exactly that reason: it also
+#: covers ``attached`` and ``idle`` rows, which the UI files under Today, so
+#: it would pay a scan per resident session for a value no reader consumes.
+#: Both halves — the coverage of ``delegating`` and the exclusion of ``idle``
+#: — are pinned in tests/unit/server/test_desktop_sessions.py.
+RUNNING_STATUS_CODES: frozenset[str] = frozenset(
+    {"busy", "delegating", "approval", "answer", "wedged"}
+)
+
+
 class DesktopSessions:
     """Bounded adapter cache; canonical identity lives in the session directory."""
 
@@ -6747,6 +6768,28 @@ class DesktopSessions:
                             "team": stored.team or None if stored else None,
                         },
                         "preview": session_preview(self.root / "sessions" / entry.id),
+                        # WHEN THE PERSON LAST SENT THIS SESSION A MESSAGE, for
+                        # the Running section's order — and computed ONLY for
+                        # the rows that section will order (see
+                        # ``RUNNING_STATUS_CODES``): the scan is a real read
+                        # (cold: up to the module's cap; warm: the appended
+                        # bytes), and paying it for a Today/Older row would buy
+                        # nothing a renderer reads. The value is a fact about
+                        # the transcript, so it moves when the person types and
+                        # NOT when a response streams — which is the whole
+                        # point: `mtime` advances on every append, so activity
+                        # re-sorted the section under the cursor (9 of 47
+                        # transitions on the operator's store over 235 s).
+                        #
+                        # This runs in the SAME worker thread as the preview
+                        # read beside it (``asyncio.to_thread`` at the bottom of
+                        # this method), and after the first poll it is cheaper
+                        # than that uncached preview read.
+                        "last_user_at": (
+                            last_user_at(self.root / "sessions" / entry.id)
+                            if entry.status_code in RUNNING_STATUS_CODES
+                            else None
+                        ),
                         # ALWAYS PRESENT, BOTH VALUES. See `SessionRow.pinned`:
                         # the renderer's merge reads an absent key as "no claim",
                         # so a `false` here is load-bearing and omitting it would

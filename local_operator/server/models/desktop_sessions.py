@@ -164,6 +164,37 @@ class SessionRow(BaseModel):
     subagents_running: int | None = None
     subagents_queued: int | None = None
 
+    #: When the PERSON last sent this conversation a message: epoch SECONDS
+    #: (the same unit as ``mtime``/``created_at``), or ``null``.
+    #:
+    #: WHY IT EXISTS. The desktop sidebar's Running section orders by this
+    #: clock instead of activity: ``mtime`` advances when ANY row lands, so a
+    #: response streaming in re-sorts the section under the cursor (measured on
+    #: the operator's store: 9 of 47 Running reorders under ``mtime`` over
+    #: 235 s against 0 of 47 under this clock). The value is computed by
+    #: ``session.last_user`` for exactly the rows the UI files under Running
+    #: (``server.utils.desktop_sessions.RUNNING_STATUS_CODES``).
+    #:
+    #: ALWAYS PRESENT, BOTH VALUES — `pinned`'s rule and `pinned`'s reason: the
+    #: renderer's merge is ``{...current, ...incoming}`` under "an absent key is
+    #: not a claim", so a row that stopped carrying it would leave a stale value
+    #: standing. Unlike `pinned` it is DEFAULTED rather than required, because
+    #: ``null`` is a real answer ("unknown"), not a missed fill: it means no
+    #: live runtime on the row, no typed user row found, or the reader's scan
+    #: cap was hit — never "they never sent anything", and never a claim this
+    #: build can always make (the transcript read is best-effort by design).
+    #: Same shape as its mesh siblings (``opened_by``/``placement``/``origin``):
+    #: a row this build cannot answer for carries the null rather than an
+    #: omission.
+    #:
+    #: REMOTE ROWS carry no VALUE in this build — the mesh lane owns the
+    #: producer half and adds the same name and unit later; until then the
+    #: key holds the declared default on those rows like every other field only
+    #: the local half fills, and an older daemon omits it entirely. A client
+    #: reads null/absent as "fall back to the row's creation time", which is
+    #: also what it does before the first user message of a session exists.
+    last_user_at: float | None = None
+
     @field_validator("subagents_running", "subagents_queued", mode="before")
     @classmethod
     def _a_reported_count(cls, value: Any) -> int | None:
