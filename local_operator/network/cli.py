@@ -2245,7 +2245,7 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     The same document the listing's segments read, so the receipt and the
     listing cannot disagree about whether a copy is outstanding. An unreadable
     ledger confirms nothing — the closed direction, and the receipt then says
-    "no confirmed copy" rather than inventing one.
+    "no copy ... is recorded" rather than inventing one.
     """
     from local_operator.network.credentials.sync import SyncState
 
@@ -2332,10 +2332,13 @@ def _credential_mark(args: argparse.Namespace, record: Any, identity: Any) -> in
     from local_operator.network.types import MeshRefusal
 
     raw = str(args.key).strip()
-    if not raw:
-        raise MeshRefusal("bad_request", "give the secret to mark by name")
     key = raw if is_secret_key(raw) else credential_key_for_secret(raw)
     name = secret_name_from_key(key)
+    if not name:
+        # A bare ``secret:`` (or nothing at all) has no name to mark: refuse by name,
+        # because the no-such-secret arm below would print ``named ''`` and a
+        # ``lop secret set `` remedy that cannot run (O-1, the S4 follow-up).
+        raise MeshRefusal("bad_request", "give the secret to mark by name")
     if not offers_mod.credential_here(key, _config_dir()):
         raise MeshRefusal(
             "no_local_credential",
