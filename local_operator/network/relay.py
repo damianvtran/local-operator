@@ -311,7 +311,8 @@ STOP_BYE_SETTLE_S = 0.05
 #: not settle then the close has not happened either, and this join is what gives
 #: up: the determinism above is conditional on the collect settling, exactly as it
 #: was already conditional on ``run_forever`` returning. The collect is a cancel
-#: plus one drained iteration, which settles in microseconds for the only two
+#: plus one drain (``run_until_complete(sleep(0))`` — three loop iterations, not
+#: one, measured on 3.12.13), which settles in microseconds for the only two
 #: tasks this loop ever carries (a stored-page decode and its shield); a
 #: cancellation handler that blocked would instead cost a lingering loop and its
 #: descriptors for that generation — the fd leak F1/Q2-1 closed — but never a
@@ -7240,8 +7241,15 @@ class RelayServer:
             # ``close()`` clears that queue, so guarding the drain behind
             # ``if pending:`` skipped it in exactly that case: the reader parked
             # out the bound and was told the read failed, with its page already
-            # decoded and thrown away. One drained iteration is the whole
-            # difference, so it runs whether or not anything was pending.
+            # decoded and thrown away. One drain is the whole difference, so it
+            # runs whether or not anything was pending. ``run_until_complete(
+            # sleep(0))`` is THREE ``_run_once`` iterations, not one (measured on
+            # 3.12.13: the wrapper task's first step, its resume after the bare
+            # yield, then ``_run_until_complete_cb`` that stops the loop), which
+            # is why it also covers a short re-arming ``call_soon`` chain — the reachable
+            # chain here is depth 1 (``_call_set_state``) — and is not a general
+            # quiescence guarantee. The deterministic pin is
+            # ``test_the_page_loop_teardown_delivers_a_completion_still_queued_behind_the_stop``.
             try:
                 pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
                 for task in pending:

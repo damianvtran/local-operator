@@ -10984,10 +10984,7 @@ class OperatorApp(App[None]):
             dict[str, int],
         ]:
             from local_operator.paths import config_dir
-            from local_operator.session.peer_rows import (
-                peer_session_rows,
-                unanswered_peers,
-            )
+            from local_operator.session.peer_rows import read_listing
             from local_operator.tui.session_catalog import (
                 load_catalog,
                 subagent_population,
@@ -11016,18 +11013,19 @@ class OperatorApp(App[None]):
             # The tuple is returned WHOLE as well as painted: the app's park
             # detector (`_note_remote_parks`) reads edges off these same rows,
             # which is what makes the notice cost no second read (design note §1).
-            peer_rows = peer_session_rows(root)
-            unanswered = unanswered_peers(root)
+            peer_rows, unanswered = read_listing(root)
             entries = [*entries, *(CatalogEntry(row) for row in peer_rows)]
             # The peers that said NOTHING are read but NOT painted: the
             # per-device (and heading-only) sections retired with the operator's
             # convergence, and §8.3 still drops a silent peer's ROWS — so the
             # read rides the tuple for the PARK DETECTOR alone
             # (`_note_remote_parks`), which needs the roster to tell "the park
-            # cleared" from "nobody answered". `unanswered_peers` reads the
-            # cache entry `peer_session_rows` just filled, so this is not a
-            # second fan-out and the two halves cannot disagree about a mesh
-            # that moved between them.
+            # cleared" from "nobody answered". Both halves come from the ONE
+            # `read_listing` call above, so they are one relay answer by
+            # construction: a pair of calls is only the same read while the first
+            # finishes inside the cache TTL, and a silent peer is exactly the
+            # listing that spends it (agent review R-1 / R2-1), which re-dials and
+            # can pair rows from one read with the silence of another.
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -33416,13 +33414,10 @@ class OperatorApp(App[None]):
 
         def collect() -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
             from local_operator.paths import config_dir
-            from local_operator.session.peer_rows import (
-                peer_session_rows,
-                unanswered_peers,
-            )
+            from local_operator.session.peer_rows import read_listing
 
             root = config_dir()
-            return peer_session_rows(root), unanswered_peers(root)
+            return read_listing(root)
 
         try:
             rows, unanswered = await asyncio.to_thread(collect)
