@@ -1364,7 +1364,7 @@ async def test_a_listing_names_what_it_lists() -> None:
     assert "stored credentials" in painted, painted
     # `/login` bare lists the SAME set as `/provider`, so its caption is the
     # one carrying the whole distinction between two adjacent identical trees.
-    assert "providers with interactive login" in painted, painted
+    assert "connect an AI account" in painted, painted
 
 
 def _first_text_styles(block) -> list[tuple[str, Style]]:
