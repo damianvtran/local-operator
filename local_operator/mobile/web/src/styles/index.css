@@ -217,6 +217,29 @@ html[data-view="wide"] {
 	--lo-column-max: 100%;
 }
 
+/* THE FOCUS-ZOOM FLOOR (issue #2017). iOS zooms to `16 / font-size` (as an
+   absolute page scale) when a field with a smaller font gets focus, so every
+   text field is held at a real 16px — `max(16px, 1em)`, so a field inside
+   larger text keeps the larger size. UNLAYERED ON PURPOSE: the fields' own
+   classes (`text-body` 14px, `text-mono-sm` 12px) are utilities, and only an
+   unlayered rule outranks a utility without `!important`. */
+:is(input, textarea, select) {
+	font-size: max(16px, 1em);
+}
+
+/* In wide view the page sits at the fit scale (~0.76 on a 390pt phone), so the
+   16px floor is divided by that scale: the field's CSS font grows until its
+   focus-zoom TARGET scale equals the scale the page already sits at — no
+   movement on focus, and the text still shows at 16 physical px. The scale is
+   published by `lib/viewport.ts` (`applyWideView`, and recomputed on rotation
+   and resize); `wideFitScale` carries the rounding margin. `max(…, 1em)` is the
+   same guard the floor above keeps, so a field inside larger text is not shrunk
+   by the wide rule — its target then sits at or under the current scale, so the
+   guard cannot reintroduce a zoom-in. */
+html[data-view="wide"] :is(input, textarea, select) {
+	font-size: max(calc(16px / var(--lo-fit-scale)), 1em);
+}
+
 html :focus-visible {
 	outline-width: 2px;
 	outline-style: var(--tw-outline-style, solid);
