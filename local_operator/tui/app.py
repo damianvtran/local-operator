@@ -20158,7 +20158,7 @@ class OperatorApp(App[None]):
         from local_operator.teams import replaced_profile_clause
 
         dropped = (
-            replaced_profile_clause(replaced, team.manager, prior_team=prior_team)
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
             if replaced
             else ""
         )
@@ -50384,7 +50384,7 @@ class OperatorApp(App[None]):
         from local_operator.teams import replaced_profile_clause
 
         dropped = (
-            replaced_profile_clause(replaced, team.manager, prior_team=prior_team)
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
             if replaced
             else ""
         )

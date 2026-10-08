@@ -390,7 +390,7 @@ async def test_the_local_detach_verb_paints_both_segments(tmp_path) -> None:
         assert app._status._team == "lopdev"
         assert app._status._agent_profile == "manager"
 
-        app._cmd_team("clear", lambda _text: None)
+        app._cmd_team("clear", app._notice)
         for _ in range(6):
             await pilot.pause()
 
@@ -465,7 +465,7 @@ async def test_the_team_listing_footer_advertises_the_detach_verb(tmp_path) -> N
 
         assert app._team_listing_footer() == "Send: /team <name> <message> · Detach: /team clear"
 
-        app._cmd_team("clear", lambda _text: None)
+        app._cmd_team("clear", app._notice)
         for _ in range(6):
             await pilot.pause()
 

@@ -7658,7 +7658,7 @@ class ServingSessionHandle(SessionHandle):
         # the dropped speaker a "profile" would name something that never
         # existed (design round 1, D5).
         dropped = (
-            replaced_profile_clause(replaced, team.manager, prior_team=prior_team)
+            replaced_profile_clause(str(replaced), team.manager, prior_team=prior_team)
             if replaced
             else ""
         )
