@@ -8,6 +8,9 @@ test failure.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -75,6 +78,7 @@ def _edit_fields(**overrides: Any):
 
     base: dict[str, Any] = dict(
         name=None,
+        label=None,
         description=None,
         tags=None,
         categories=None,
@@ -639,7 +643,11 @@ def test_an_edited_copy_refuses_and_force_replaces_it(scratch_seeds, tmp_path) -
     assert verdict.verdict == "outdated-diverged"
     assert verdict.applied is False
     assert verdict.diverged_fields == ("instructions",)
-    assert "force" in verdict.detail
+    # The remedy names the flag pair the CLI actually honours: "re-run with
+    # force" sent users to a hidden deprecated flag whose own warning points at
+    # --replace (finding F2 of #2060).
+    assert "--replace --yes" in verdict.detail
+    assert "force" not in verdict.detail
     # The refusal is a real one: the edit is still there.
     assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
 
@@ -1034,3 +1042,678 @@ def test_the_fingerprint_covers_the_class_field() -> None:
         action_class=PROACTIVE if seed.action_class == REACTIVE else REACTIVE,
     )
     assert seed_fingerprint(flipped) != baseline
+
+
+# ---------------------------------------------------------------------------
+# #2060: the revision ledger, the narrow writer, and the startup pass
+# ---------------------------------------------------------------------------
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` by relative path: for byte-level write-nothing cells."""
+
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _legacy_fingerprint_of(registry: AgentRegistry, agent: Any) -> str:
+    """The v0.63.5..v0.64.8 five-field stamp for a row, computed inline.
+
+    Deliberately NOT ``agent_profiles._legacy_fingerprint``: this cell has to
+    keep working - and keep FAILING against the pre-fix tree - as a statement
+    about the wire, and the pre-fix tree has no private helper to borrow. The
+    formula is the one those releases shipped: ``json.dumps`` of the five
+    values with pinned separators, sha256 over the UTF-8 bytes.
+    """
+
+    from local_operator.agent_profiles import profile_from_agent
+
+    profile = profile_from_agent(registry, agent)
+    values = [
+        (profile.instructions or "").strip(),
+        (profile.when_to_use or profile.description or "").strip(),
+        tuple(profile.tools) if profile.tools else None,
+        profile.effort or None,
+        bool(profile.may_delegate),
+    ]
+    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _append_published_revision(seeds_dir: Path, name: str) -> None:
+    """Append the CURRENT scratch seed text to its scratch ledger.
+
+    The real release flow changes the seed file and regenerates the ledger in
+    one commit (``scripts/gen_agent_seed_revisions.py``), so a scratch move
+    that skips the ledger is the DRAFT case - exercised deliberately by the
+    stamp-fallback cells - and every "a published update applies" cell must
+    publish BOTH halves. ``make_seed_revision``/``render_seed_revisions`` are
+    the generator's own constructor and serialiser, so a scratch entry cannot
+    drift from a generated one.
+    """
+
+    import local_operator.agent_profiles as agent_profiles
+
+    revisions = agent_profiles.load_seed_revisions(seeds_dir)
+    profile = agent_profiles.load_seed(name)
+    assert profile is not None
+    version = agent_profiles.load_seed_version(name)
+    digest = hashlib.sha256(f"{name}:{version}:{profile.instructions}".encode("utf-8"))
+    sha = digest.hexdigest()[:40]
+    updated = {key: list(entries) for key, entries in revisions.items()}
+    updated.setdefault(name, []).append(
+        agent_profiles.make_seed_revision(
+            profile,
+            sha=sha,
+            version=version,
+            declared_class=agent_profiles.load_seed_class(name),
+        )
+    )
+    (seeds_dir / agent_profiles.SEED_REVISIONS_NAME).write_text(
+        agent_profiles.render_seed_revisions(updated), encoding="utf-8"
+    )
+
+
+def publish_seed(
+    seeds_dir: Path,
+    name: str,
+    *,
+    version: str,
+    body: str,
+    tools: str | None = None,
+) -> None:
+    """Move the packaged seed AND append the matching ledger entry.
+
+    The one helper every "a published update" cell goes through: it rewrites
+    the scratch seed (version + body, optionally the ``tools:`` line) and then
+    records the new text in the scratch ledger, exactly as a release does.
+    """
+
+    path = seeds_dir / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    assert len(parts) == 3, f"{name}.md has no frontmatter"
+    parts[1] = re.sub(r"^version:.*$", f"version: {version}", parts[1], flags=re.M)
+    if tools is not None:
+        if re.search(r"^tools:", parts[1], flags=re.M):
+            parts[1] = re.sub(r"^tools:.*$", f"tools: {tools}", parts[1], flags=re.M)
+        else:
+            parts[1] = parts[1].rstrip("\n") + f"\ntools: {tools}\n"
+    parts[2] = f"\n\n{body}\n"
+    path.write_text("---".join(parts), encoding="utf-8")
+    _append_published_revision(seeds_dir, name)
+
+
+def test_a_legacy_stamp_row_on_a_published_revision_is_clean_and_applies(
+    scratch_seeds, tmp_path
+) -> None:
+    """#2060 defect 3, in the reporter's exact shape (finding F1).
+
+    v0.63.5-v0.64.8 wrote ``seed_sha256:`` under a five-field formula; the
+    class feature (v0.64.9) appended a sixth field and changed EVERY hash, so
+    those rows could never again recompute to their stamp - however untouched -
+    and a plain sync answered "outdated-diverged". The stamp-FAMILY check
+    (either era's formula) re-proves the row: it still holds exactly what was
+    installed, so a plain sync applies the update.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    legacy = _legacy_fingerprint_of(registry, row)
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            tags=[tag for tag in row.tags if not tag.startswith(SEED_SHA256_PREFIX)]
+            + [f"{SEED_SHA256_PREFIX}{legacy}"]
+        ),
+    )
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_a_row_with_no_install_record_is_re_proven_by_the_ledger(scratch_seeds, tmp_path) -> None:
+    """Pre-stamp rows have no fingerprint; the LEDGER is what re-proves them.
+
+    A row whose text is a published revision is clean by construction once the
+    ledger can position both ends of the move - the case that used to need
+    ``--force`` or a reinstall. The package is PUBLISHED here (ledger entry
+    appended), because the proof depends on the packaged text being a real
+    revision too: an unpublished draft stays unprovable, by design.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    before_prompt = registry.get_agent_system_prompt(row.id)
+    # Strip the install record entirely: a pre-stamp row's exact shape.
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            tags=[
+                tag
+                for tag in row.tags
+                if not tag.startswith((SEED_VERSION_PREFIX, SEED_SHA256_PREFIX))
+            ]
+        ),
+    )
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    assert verdict.behind_by == 1
+    assert verdict.replaced_instructions == before_prompt
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_read_only_sync_reports_available_and_writes_nothing(scratch_seeds, tmp_path) -> None:
+    """``apply=False`` is write-nothing, byte-level (the F2 trap).
+
+    ``lop agents sync --dry-run`` used to APPLY clean seed updates while
+    promising "Show what would change; write nothing", and a read-only
+    classification that still rendered "updated" would be the same over-claim
+    on the other side. Both halves are pinned here: the verdict is
+    ``outdated-clean`` with ``applied=False`` and the ``behind_by`` distance,
+    and every byte under the config dir is untouched.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    before = _tree_bytes(tmp_path)
+
+    (verdict,) = sync_installed_seeds(registry, apply=False)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is False
+    assert verdict.behind_by == 1
+    assert verdict.replaced_instructions is None
+    assert _tree_bytes(tmp_path) == before
+    assert registry.get_agent_system_prompt(row.id).strip() != "REVIEWER v2 GUIDANCE"
+
+
+def test_the_narrow_writer_preserves_user_owned_row_data(scratch_seeds, tmp_path) -> None:
+    """F4: the old clean apply reset the label and dropped user tags.
+
+    The narrow writer exists for exactly this: an update nobody asked for
+    replaces only what the seed owns - instructions, routing description,
+    seed-owned tags and the stamps - and leaves the label, the model pin and
+    any non-seed tag alone.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            label="My Reviewer",
+            model="gpt-test-pin",
+            tags=[*row.tags, "favourite"],
+        ),
+    )
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean" and verdict.applied is True
+    after = registry.get_agent_by_name("reviewer")
+    assert after is not None
+    assert after.label == "My Reviewer"
+    assert after.model == "gpt-test-pin"
+    assert "favourite" in after.tags
+    assert "seed_version:2.0.0" in after.tags
+    assert registry.get_agent_system_prompt(after.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_a_switched_class_survives_an_update_and_reset_restores_it(scratch_seeds, tmp_path) -> None:
+    """A switched ``class:`` is user data like the label (ADR Q2).
+
+    The narrow writer preserves a class that matches NO ledger entry for the
+    row's identity - the row was deliberately switched - and the packaged
+    class reaching a switched row stays ``reset``'s job. Both halves are
+    asserted so the trade cannot silently become a loss.
+    """
+
+    from local_operator.action_class import PROACTIVE, REACTIVE
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    assert "class:reactive" in row.tags
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            tags=[tag for tag in row.tags if not tag.lower().startswith("class:")]
+            + [f"class:{PROACTIVE}"]
+        ),
+    )
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean" and verdict.applied is True
+    after = registry.get_agent_by_name("reviewer")
+    assert after is not None
+    assert f"class:{PROACTIVE}" in after.tags
+    assert registry.get_agent_system_prompt(after.id).strip() == "REVIEWER v2 GUIDANCE"
+
+    install_seed("reviewer", registry=registry, overwrite=True)
+    reset = registry.get_agent_by_name("reviewer")
+    assert reset is not None
+    assert f"class:{REACTIVE}" in reset.tags
+
+
+def test_a_row_ahead_of_the_packaged_starter_is_left_alone(scratch_seeds, tmp_path) -> None:
+    """F6: an older build must not flip a newer text back (no ping-pong).
+
+    Build the shape directly: publish a newer revision, install it, then roll
+    the PACKAGE back to an older published text. The row now holds a revision
+    NEWER than the package ships, and sync must report it without downgrading
+    - the direction the version strings cannot express.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    original = load_seed("reviewer")
+    assert original is not None
+    original_body = original.instructions
+    original_version = load_seed_version("reviewer")
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    row = _install(registry)
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+    move_seed(scratch_seeds, "reviewer", version=original_version, body=original_body)
+    before = registry.get_agent_system_prompt(row.id)
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "up-to-date"
+    assert "newer than this build ships" in verdict.detail
+    assert registry.get_agent_system_prompt(row.id) == before
+
+
+def test_the_legacy_stamp_formula_matches_the_shipped_era() -> None:
+    """``_legacy_fingerprint`` is the OLD formula, digit for digit.
+
+    The re-proof above rides on this agreeing with what v0.63.5-v0.64.8
+    actually wrote; a silent drift here would re-break every legacy stamp.
+    """
+
+    from local_operator.agent_profiles import _legacy_fingerprint
+
+    seed = load_seed("reviewer")
+    assert seed is not None
+    # Same five fields, same canonicalisation, computed independently.
+    values = [
+        (seed.instructions or "").strip(),
+        (seed.when_to_use or seed.description or "").strip(),
+        tuple(seed.tools) if seed.tools else None,
+        seed.effort or None,
+        bool(seed.may_delegate),
+    ]
+    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    assert _legacy_fingerprint(seed) == expected
+
+
+# -- the startup pass, straight through its public entry point -----------------
+
+
+def _drift_reviewer(seeds_dir: Path, config_dir: Path, **publish: Any) -> AgentRegistry:
+    """An installed, PUBLISHED-behind reviewer row over one config dir.
+
+    The shared set-up of every startup cell: install the starter, publish a
+    move (seed file + ledger entry), and hand back the registry. ``publish``
+    flows to :func:`publish_seed` (``version``/``body``/``tools``), so a cell
+    varies only the delta under test.
+    """
+
+    registry = AgentRegistry(config_dir)
+    assert _install(registry) is not None
+    publish.setdefault("version", "2.0.0")
+    publish.setdefault("body", "REVIEWER v2 GUIDANCE")
+    publish_seed(seeds_dir, "reviewer", **publish)
+    return registry
+
+
+def _uv_tool_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this interpreter is a real updatable install.
+
+    The worktree venv is EDITABLE, and the pass is report-only there BY
+    DESIGN (F6: worktree venvs share the operator's real config dir) - so
+    every cell that expects a WRITE must patch the install kind through the
+    same lazy seam a QA wrapper uses.
+    """
+
+    from local_operator.update import InstallKind
+
+    monkeypatch.setattr("local_operator.update.install_kind", lambda **kw: InstallKind.UV_TOOL)
+
+
+def test_the_startup_pass_applies_a_published_update_once_and_notices_once(
+    scratch_seeds, tmp_path, monkeypatch, caplog
+) -> None:
+    """The #2060 headline: upgrade lop, and an untouched starter moves by itself.
+
+    One pass, three properties: the update lands through the narrow writer
+    (F4 - everything the seed does not own is preserved), the user gets ONE
+    notice, and the SECOND launch is silent: the row is current and the
+    notice's de-dup key is recorded, so neither a write nor a repeat happens.
+    """
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    row = _install(registry, "aida")
+    registry.update_agent(
+        row.id,
+        _edit_fields(label="My Aida", model="gpt-test-pin", tags=[*row.tags, "favourite"]),
+    )
+    refreshed = registry.get_agent_by_name("aida")
+    assert refreshed is not None
+    legacy = _legacy_fingerprint_of(registry, refreshed)
+    registry.update_agent(
+        refreshed.id,
+        _edit_fields(
+            tags=[t for t in refreshed.tags if not t.startswith(SEED_SHA256_PREFIX)]
+            + [f"{SEED_SHA256_PREFIX}{legacy}"]
+        ),
+    )
+    publish_seed(scratch_seeds, "aida", version="9.9.9", body="AIDA v9.9.9 GUIDANCE")
+    _uv_tool_install(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="local_operator.agent_profiles"):
+        outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ("aida",)
+    assert len(outcome.announced) == 1
+    assert "updated to the packaged starter" in outcome.announced[0]
+    assert any("updated to the packaged starter" in record.message for record in caplog.records)
+
+    after = AgentRegistry(config_dir).get_agent_by_name("aida")
+    assert after is not None
+    assert after.label == "My Aida"
+    assert after.model == "gpt-test-pin"
+    assert "favourite" in after.tags
+    assert "class:proactive" in after.tags
+    assert (
+        AgentRegistry(config_dir).get_agent_system_prompt(after.id).strip()
+        == "AIDA v9.9.9 GUIDANCE"
+    )
+
+    state = json.loads((config_dir / ".seed-notices.json").read_text(encoding="utf-8"))
+    assert len(state["announced"]) == 1
+    # The CLI surface logs; it does not queue for a TUI that is not there.
+    assert state["pending"] == []
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="local_operator.agent_profiles"):
+        second = startup_seed_update_pass(config_dir)
+    assert second.applied == ()
+    assert second.announced == ()
+    assert not any("updated to the packaged starter" in record.message for record in caplog.records)
+
+
+def test_the_startup_pass_holds_a_capability_change_and_says_why(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """A delta touching ``tools:`` is NEVER applied unattended (F5).
+
+    Two of 33 historical updates changed a capability field, and a widened
+    allowlist is a fail-open boundary a person should see before it moves. The
+    row is held with a notice naming what changes; the agent store stays
+    byte-identical.
+    """
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    _drift_reviewer(scratch_seeds, config_dir, tools="bash, read")
+    _uv_tool_install(monkeypatch)
+    before = _tree_bytes(config_dir / "agents")
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.held == ("reviewer",)
+    assert len(outcome.announced) == 1
+    assert "tool access" in outcome.announced[0]
+    assert _tree_bytes(config_dir / "agents") == before
+
+
+def test_the_startup_pass_reports_only_when_the_setting_is_off(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """``agents.auto_update.seeds: false`` stops the write, not the report.
+
+    Absent means the shipped default (on); an explicit off turns every
+    eligible row into an "available" notice the person can act on - the
+    setting says "only tell me", so the pass must still TELL.
+    """
+
+    import yaml
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    _drift_reviewer(scratch_seeds, config_dir)
+    (config_dir / "config.yml").write_text(
+        yaml.safe_dump({"values": {"agents": {"auto_update": {"seeds": False}}}}),
+        encoding="utf-8",
+    )
+    _uv_tool_install(monkeypatch)
+    before = _tree_bytes(config_dir / "agents")
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.available == ("reviewer",)
+    assert len(outcome.announced) == 1
+    assert "update to the packaged starter is available" in outcome.announced[0]
+    assert _tree_bytes(config_dir / "agents") == before
+
+
+def test_the_startup_pass_reports_only_on_an_editable_install(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """A dev venv shares the operator's store and must never self-write (F6)."""
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+    from local_operator.update import InstallKind
+
+    config_dir = tmp_path / "config"
+    _drift_reviewer(scratch_seeds, config_dir)
+    monkeypatch.setattr("local_operator.update.install_kind", lambda **kw: InstallKind.EDITABLE)
+    before = _tree_bytes(config_dir / "agents")
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.available == ("reviewer",)
+    assert len(outcome.announced) == 1
+    assert _tree_bytes(config_dir / "agents") == before
+
+
+def test_the_startup_pass_is_silent_for_an_edited_row(scratch_seeds, tmp_path, monkeypatch) -> None:
+    """A row a person edited is never nagged about and never touched (Q1).
+
+    The refusal to place an edited row is the whole direction-of-update
+    argument: without proof of what the row was, no unattended write. Silence
+    is the deliberate part - a dev build with drafts must not pop notices.
+    """
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    row = _install(registry)
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    _uv_tool_install(monkeypatch)
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.announced == ()
+    assert not (config_dir / ".seed-notices.json").exists()
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+
+def test_the_startup_pass_is_silent_for_a_row_ahead(scratch_seeds, tmp_path, monkeypatch) -> None:
+    """A row holding a NEWER revision than the package ships stays put (F6)."""
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    original = load_seed("reviewer")
+    assert original is not None
+    original_body = original.instructions
+    original_version = load_seed_version("reviewer")
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    row = _install(registry)
+    move_seed(scratch_seeds, "reviewer", version=original_version, body=original_body)
+    _uv_tool_install(monkeypatch)
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.announced == ()
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_the_startup_pass_is_silent_with_no_readable_ledger(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """Corrupt/missing ledger ends the pass silently - no positions, no proof."""
+
+    from local_operator.agent_profiles import (
+        SEED_REVISIONS_NAME,
+        startup_seed_update_pass,
+    )
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    _install(registry)
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    (scratch_seeds / SEED_REVISIONS_NAME).write_bytes(b"\xff\xfe not json")
+    _uv_tool_install(monkeypatch)
+    before = _tree_bytes(config_dir / "agents")
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.announced == ()
+    assert _tree_bytes(config_dir / "agents") == before
+
+
+def test_the_startup_pass_queues_pending_notices_for_the_tui_surface(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """The TUI has no console at the seam's time, so the pass QUEUES there.
+
+    ``surface="tui"`` writes the notice to ``.seed-notices.json`` ``pending``
+    (announced also recorded) instead of logging; the TUI boot hook drains it.
+    The cli surface is asserted elsewhere to leave ``pending`` empty.
+    """
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+    _drift_reviewer(scratch_seeds, config_dir)
+    _uv_tool_install(monkeypatch)
+
+    outcome = startup_seed_update_pass(config_dir, surface="tui")
+
+    assert outcome.applied == ("reviewer",)
+    state = json.loads((config_dir / ".seed-notices.json").read_text(encoding="utf-8"))
+    assert state["pending"] == list(outcome.announced)
+    assert len(state["announced"]) == 1
+
+
+def test_the_startup_pass_leaves_a_storeless_machine_storeless(tmp_path) -> None:
+    """No ``agents/`` store means the pass returns before constructing anything.
+
+    ``AgentRegistry.__init__`` would mkdir the store this machine deliberately
+    does not have; the storeless guard is what keeps a machine that never
+    installed a starter from growing one because it ran ``lop --version``'s
+    neighbours. Pinned at the pass AND at the seam (test_config.py).
+    """
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+
+    config_dir = tmp_path / "config"
+
+    outcome = startup_seed_update_pass(config_dir)
+
+    assert outcome.applied == ()
+    assert outcome.announced == ()
+    assert not config_dir.exists()
+
+
+def test_the_startup_seam_skips_the_pass_for_agents_sync(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """D3: the whole ``agents sync`` command skips the startup pass.
+
+    ``lop agents sync --check`` promises "change nothing"; a startup
+    auto-apply under the same invocation would break the promise AND change
+    the state being checked. The control run right after proves the setup
+    would otherwise have written - a skip test without one could pass on a
+    broken fixture.
+    """
+
+    from local_operator.config_migrations import run_startup_migrations
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    row = _install(registry)
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    _uv_tool_install(monkeypatch)
+    before = _tree_bytes(config_dir / "agents")
+
+    run_startup_migrations(config_dir, surface="cli", command="agents sync")
+
+    assert _tree_bytes(config_dir / "agents") == before
+    assert not (config_dir / ".seed-notices.json").exists()
+
+    run_startup_migrations(config_dir, surface="cli")
+
+    assert (
+        AgentRegistry(config_dir).get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+    )
+
+
+def test_the_startup_pass_skips_silently_when_the_lock_is_held(
+    scratch_seeds, tmp_path, monkeypatch
+) -> None:
+    """Several ``lop`` processes start at once; a held lock defers, silently."""
+
+    from local_operator.agent_profiles import startup_seed_update_pass
+    from local_operator.wakes.lock import WakeWriteLock
+
+    config_dir = tmp_path / "config"
+    registry = AgentRegistry(config_dir)
+    _install(registry)
+    publish_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    _uv_tool_install(monkeypatch)
+    before = _tree_bytes(config_dir / "agents")
+
+    holder = WakeWriteLock(config_dir, name=".seed-sync.lock", timeout_s=0.1)
+    holder.acquire()
+    try:
+        outcome = startup_seed_update_pass(config_dir)
+    finally:
+        holder.release()
+
+    assert outcome.applied == ()
+    assert outcome.announced == ()
+    assert outcome.skipped == ("reviewer",)
+    assert _tree_bytes(config_dir / "agents") == before

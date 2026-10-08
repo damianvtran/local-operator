@@ -9686,12 +9686,16 @@ def agents_sync_command(
 ) -> int:
     """Update installed starters, then merge hub updates into pulled agents.
 
-    The seed arm is unchanged (an unedited starter updates in place). The hub arm
-    is now a THREE-WAY MERGE (design B2) instead of refuse-or-clobber: your edits
-    and deliberate deletions survive, the hub's changes land, and a genuine
-    conflict is left for you (`--prefer`). Rendering comes from
-    ``hub_sync.report`` so this surface cannot grow a second opinion about what a
-    verdict means.
+    The seed arm updates in place when the row is provably unedited — a
+    revision-ledger match, or the recorded install fingerprint under either
+    shipped formula — and REFUSES an edited row without ``--replace --yes``
+    (the pair the refusal copy names). Under ``--check``/``--dry-run`` the arm
+    classifies read-only and reports "update available" without writing
+    anything. The hub arm is a THREE-WAY MERGE (design B2) instead of
+    refuse-or-clobber: your edits and deliberate deletions survive, the hub's
+    changes land, and a genuine conflict is left for you (``--prefer``).
+    Rendering comes from ``hub_sync.report`` so this surface cannot grow a
+    second opinion about what a verdict means.
     """
 
     # Lazy: the sync machinery pulls the agent registry module (dill, yaml) and the
@@ -9703,11 +9707,28 @@ def agents_sync_command(
     # ``--all`` is READ, not decorative: it names "every installed row" — the same
     # set the absence of --name selects (agent review round 1, n1).
     names = None if getattr(args, "all", False) or not getattr(args, "name", None) else [args.name]
-    seed_verdicts = []
-    if not getattr(args, "check", False):
-        seed_verdicts = sync_installed_seeds(
-            agent_registry, names=names, force=bool(getattr(args, "force", False))
-        )
+
+    # The seed arm now honours the whole flag surface it is documented with.
+    # ``--replace --yes`` is the pair the divergence copy names (``--force`` is
+    # hidden and deprecated); ``--check``/``--dry-run`` are READ-ONLY at the
+    # byte level, so this arm runs for them too, classified with ``apply=False``
+    # — a behind starter is REPORTED instead of silently skipped ("nothing to
+    # sync" was the reported lie, F2 of #2060), and ``--dry-run`` stops writing
+    # (it wrote until this change).
+    #
+    # An UNCONFIRMED ``--replace`` (no ``--yes``) must still change nothing:
+    # the seed arm runs BEFORE ``_hub_sync_run`` validates the pair, so a force
+    # derived from ``replace`` alone would overwrite edited rows moments before
+    # the hub arm refuses the invocation. Deriving from ``replace AND yes``
+    # (or the deprecated ``--force``, which _hub_sync_run itself translates)
+    # is the guard; no second deprecation warning is added here.
+    seed_force = bool(getattr(args, "force", False)) or (
+        bool(getattr(args, "replace", False)) and bool(getattr(args, "yes", False))
+    )
+    read_only = bool(getattr(args, "check", False)) or bool(getattr(args, "dry_run", False))
+    seed_verdicts = sync_installed_seeds(
+        agent_registry, names=names, force=seed_force, apply=not read_only
+    )
     from local_operator.teams import TeamRegistry
 
     outcome = _hub_sync_run(
@@ -13629,6 +13650,57 @@ def _process_label(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _tui_requested(args: argparse.Namespace) -> bool:
+    """Whether this launch is headed for the full-screen TUI.
+
+    ONE definition, shared by the startup seam's surface tag
+    (:func:`_startup_surface`) and the ``use_tui`` decision in :func:`main`,
+    so the two cannot drift into disagreeing about which surface is running.
+    The arms are the historical expression verbatim: ``--tui`` forces the TUI
+    (CL-13), ``--no-tui`` disarms it, and otherwise it is a tty question. A
+    ``--tui`` launch whose build lacks the app falls back to the REPL after
+    this answers True; that one accept is documented on ``_startup_surface``.
+    """
+
+    return bool(getattr(args, "tui", False)) or (
+        not getattr(args, "no_tui", False) and sys.stdout.isatty()
+    )
+
+
+def _startup_surface(args: argparse.Namespace) -> str:
+    """The surface the startup seam tags its notices for: "tui" or "cli".
+
+    Every SUBCOMMAND returns above the interactive fall-through in
+    :func:`main` (and none of them can open the TUI), so only the bare launch
+    — ``lop``, ``lop --resume ID`` — can be a TUI, and there the
+    ``use_tui`` gate decides. A ``--tui`` launch that turns out to lack the
+    app falls back to the REPL with its notices already routed for the TUI;
+    that is the single accepted drift: a build without the TUI has no notice
+    consumer either way, and the file queue is the safe side of the accept.
+    """
+
+    if getattr(args, "subcommand", None) is not None:
+        return "cli"
+    return "tui" if _tui_requested(args) else "cli"
+
+
+def _seed_sync_command(args: argparse.Namespace) -> str | None:
+    """The canonical command spelling the startup seam must recognise.
+
+    Currently only ``agents sync``: its ``--check``/``--dry-run`` promise
+    "change nothing", which a startup auto-apply under the same invocation
+    would break — and would race the very state the command is checking. No
+    other command promises no-write, so nothing else is carved out.
+    """
+
+    if (
+        getattr(args, "subcommand", None) == "agents"
+        and getattr(args, "agents_command", None) == "sync"
+    ):
+        return "agents sync"
+    return None
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -13834,7 +13906,17 @@ def main() -> int:
         # construction — see ``local_operator.config_migrations``.
         from local_operator.config_migrations import run_startup_migrations
 
-        run_startup_migrations(base_dir)
+        # ``surface``/``command`` feed the startup seam's seed-update arm only:
+        # the surface picks its notice channel and the command spelling skips
+        # the arm for `agents sync`, whose own body owns read-only/apply work.
+        # The surface comes from the SAME helper the ``use_tui`` decision below
+        # reads, so a launch the app runs as a TUI can never be tagged "cli"
+        # here (see ``_startup_surface`` for the one accepted drift).
+        run_startup_migrations(
+            base_dir,
+            surface=_startup_surface(args),
+            command=_seed_sync_command(args),
+        )
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never
@@ -14592,7 +14674,7 @@ def main() -> int:
         # preflight now needs the answer: only the TUI path may open in a
         # first-run setup state instead of failing, so ``use_tui`` gates that.
         force_tui = bool(getattr(args, "tui", False))
-        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
+        use_tui = _tui_requested(args)
         run_tui = None
         if use_tui:
             try:

@@ -1,0 +1,904 @@
+{
+  "schema_version": 1,
+  "seeds": {
+    "aida": [
+      {
+        "sha": "8b24f2b47715c74f866203900c660cb6e8893ded",
+        "version": "1.0.0",
+        "instructions_sha256": "77accc42a6d5f52d13e1d690bef0a4216adbf1818f9a33cfdddf9c648bd0e6ba",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "26fbd695beccdf380be9b51637f0ea2b5d272f91",
+        "version": "1.0.0",
+        "instructions_sha256": "6f323773a42bced225e1a9ef85c9aee859aed3367019feb98abcdb5e20c4b89b",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "7a30322544f24a9696d24bf376809f79ee99d957",
+        "version": "1.0.0",
+        "instructions_sha256": "16829feed9ccec7a2b647f61a61183144657862687cc26e0f907a03181a250bd",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "c7dd1f26fdeba7eacd3cca24ca4813e1a8ffc8ff",
+        "version": "1.0.0",
+        "instructions_sha256": "068ba5cb51d0973ecbf3291cc94e7589248387a5e58ba99253c5cb44fa9e0f94",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "b1ef007242ad017edcc1e10397d8dc19c6cf9a43",
+        "version": "1.1.0",
+        "instructions_sha256": "ab600f8e3aba6ef91742bf16ffff97d8e7227ca1aa8bc39b95164c09ddb68ccf",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "e0534bc5361744d18033d9f81cc140da898730e3",
+        "version": "1.1.0",
+        "instructions_sha256": "d5534205b9e478966370591393d3496256bc24c209fc7d87a87b70450e93f084",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.2.0",
+        "instructions_sha256": "a9631cbc846ac47cee1164c8bb20624490520bb6e3dac5bf124cb7c17f78e278",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "68617db9fdf36c5e6fb0c4cfc30548865cd7a3e7",
+        "version": "1.2.0",
+        "instructions_sha256": "1db276f805891a95a310ae03f5aa125f95cf4bc2334dcdf0e0e1e5e097d8ff1e",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "0b2dc18debf23ed4b9f25f6fdbb170d5ef596a30",
+        "version": "1.2.0",
+        "instructions_sha256": "77223a53302c1600e2a97a122893d83a36950289140c7693da37cd4ca27bdc9f",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "ede55b1fed1ab758c95b642faed9a1ac764ad629",
+        "version": "1.2.0",
+        "instructions_sha256": "b42b5b69eeb18f5609cafb98a98d4989addade914f80aaedc25d4c6c450d56af",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "dd4c27cf978feb20329c93c39b0d5f603e1e6c37",
+        "version": "1.3.0",
+        "instructions_sha256": "eb5e2e0da923f7b2695f3d6029ed4334717b98da5119a9d989fe8be43d151833",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "51e353eda135d4c591aab1d6aafd579b1d921f5f",
+        "version": "1.3.1",
+        "instructions_sha256": "c37c5f78a84d00fa17f990c209f3a742c0c19b4f0a139633182ca5deadaf660a",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "5684318928b3252ef11de662ed0f559aec840170",
+        "version": "1.3.2",
+        "instructions_sha256": "22510a135f4d5f4cc236514f7bfd04f0fa0de39172dd837e396c3383f0dd4030",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "29394860eb800682660941eeb2f98309abe18ed7",
+        "version": "1.3.3",
+        "instructions_sha256": "afa626e95ce0afc67ef9d146fb2ceb4cf7b136740a312af0348ff241e52b0051",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.4.0",
+        "instructions_sha256": "8874cb4abbdac0b1f0784cda0249de3b2c599220cc74e6435f4913f0bf927439",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      }
+    ],
+    "architect": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "f952bcf03353ba5b4818f1c9d85e9cd0b34c381ed30961103172441774a36e5c",
+        "description": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "write",
+          "web_search"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9c3abe9b737cc67120efc8cd9246ac6280421b37",
+        "version": "",
+        "instructions_sha256": "f952bcf03353ba5b4818f1c9d85e9cd0b34c381ed30961103172441774a36e5c",
+        "description": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "write",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "e1d61daf8a0349820eb968f1a6afb8790adb21e26f0bf22d5eec9cebc6e23df3",
+        "description": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "write",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "3ada24d78edc9e61991e04f4d40683860ec319e2216cab76dc915958f7ffe3f6",
+        "description": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "write",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "coder": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "f31386a42563a315d3cdc697fcdd62f4adf47fe7563561ca9a139edd28229ecc",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "a73698c48c1fd927362c32fb7e12ee67a7e1a782",
+        "version": "",
+        "instructions_sha256": "b3334f8aca596d32089f28f80109e9f50f3b09f22ac35dfa2d93d6acacd35a0c",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "a8d31569be7b04cea0ea964e3e30905bfc9a82660f051bb75a61dc97e2471f8a",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "b1a8bb3ecedcb5ae81e37e718545d83192b0ddb77609557ad6a6ae96410e4853",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "copy-reviewer": [
+      {
+        "sha": "065d4e089b7e2127ff6ebb3d940d940806ae33d0",
+        "version": "1.0.0",
+        "instructions_sha256": "957ac82b7e7594321bff4d29da3b4f073d7d76a942f66a5eb7c6f573a249be8f",
+        "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "b5855b757ede3707ba12ef0c3ef2f310aeba89528fb73f20941963e9b378cbd8",
+        "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "c3d13ea4a2ce60d616cdbee7b0a48ec13424ebb9bd9b545fe2d1ca6d4842c01f",
+        "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "designer": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "509d26c94d121623f2d9c0d3961f26383bcb75495256e4db8b4f478b91375ed4",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "a73698c48c1fd927362c32fb7e12ee67a7e1a782",
+        "version": "",
+        "instructions_sha256": "293b75020f80b0c6879a992f4331a5eaf011f2a0411c39384060148e8ad9fb50",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "63605edfba7fb8f20c1d727280d2930e989d3e51",
+        "version": "",
+        "instructions_sha256": "fc49cf44d9395658904f8e15636059ab0957cec192c4a12b46ec97820569d948",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "065d4e089b7e2127ff6ebb3d940d940806ae33d0",
+        "version": "1.1.0",
+        "instructions_sha256": "6a7d4505d24fd1133d14e3c3dbcc215f8c18fda54573cc551528de3e9640a4f1",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.2.0",
+        "instructions_sha256": "12d559921f1e39bb433f93eeaeddc9b70b1164e33e253a2cd42beb15b678f21c",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "83f983c44f3651ff5b9b1c8d257dc37a0e046aed",
+        "version": "1.3.0",
+        "instructions_sha256": "c8652bf56916c637515b92fd4d1c46fdc32d7b230d890112aefb7885a7e96c65",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.4.0",
+        "instructions_sha256": "b3aa687a34a703b51f2d04174a858261675854954d73ebfb0de8d40d7e10590a",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "595883adc43dcca4281e8bf315c393dab7624b2d",
+        "version": "1.4.0",
+        "instructions_sha256": "7bc7b8fb84cd561dd0ccc5c067093ff0bd4f80c3ad9e1bc98ef43521d4fd2a39",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "manager": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "ba38d5f4ecad7f01d0baba489fac06766e5d83eba10e9265f5fc0d88a8e7df19",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo"
+        ],
+        "effort": "lo",
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "cf1ab6d29a8eed9763829f021daf4dd068d3bde2",
+        "version": "",
+        "instructions_sha256": "ba38d5f4ecad7f01d0baba489fac06766e5d83eba10e9265f5fc0d88a8e7df19",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "9c3abe9b737cc67120efc8cd9246ac6280421b37",
+        "version": "",
+        "instructions_sha256": "ba38d5f4ecad7f01d0baba489fac06766e5d83eba10e9265f5fc0d88a8e7df19",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "63605edfba7fb8f20c1d727280d2930e989d3e51",
+        "version": "",
+        "instructions_sha256": "29c38ffb2f19fc05ac40bb7877ad39b509e17b64a50090a59b10ffdf6781ce72",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "49bc743cbd593430e32aea333320556bd3cd5a9e",
+        "version": "1.1.0",
+        "instructions_sha256": "b786dabba22f0a33179701fce905306413ff115bfc7beece98109516b80c686e",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "ee55f2dcd6bfc120d6f2d60baff0ed682a93d765",
+        "version": "1.2.0",
+        "instructions_sha256": "f79547c1607de3a2cc3ba4cc1cec2072e203482a3162a26fd3af1bdc29e4b933",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "b1ef007242ad017edcc1e10397d8dc19c6cf9a43",
+        "version": "1.3.0",
+        "instructions_sha256": "7b78585df8ba2c85a33d0231edfbdd8e7d40ea7355613e006d6a5de54db3678d",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.4.0",
+        "instructions_sha256": "881f8208ca68eedc487171c20d4b50bafd10234cd48df79a8b46fd9f12018b1d",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "51e353eda135d4c591aab1d6aafd579b1d921f5f",
+        "version": "1.5.0",
+        "instructions_sha256": "2a9576c31337cd34693e395caec6a7797b783d860ae2db88422731979e191602",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.6.0",
+        "instructions_sha256": "a225a310403bcae3d809d7d4be4a4684a59aa70e11e93b189bcf6ca6523c0789",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      }
+    ],
+    "reviewer": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "b9b5ce0147a7addb70629ea8b08b3f2e1e73c581e16f194400a08df8e93d9b44",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9c3abe9b737cc67120efc8cd9246ac6280421b37",
+        "version": "",
+        "instructions_sha256": "b9b5ce0147a7addb70629ea8b08b3f2e1e73c581e16f194400a08df8e93d9b44",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "63605edfba7fb8f20c1d727280d2930e989d3e51",
+        "version": "",
+        "instructions_sha256": "72449cac50f090d066c086db372d8bded7071f0a19beada5354696b94e664b15",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "f7c3b9d9c829a41a7cc064a5c0c7e3d8b109e9da55ed953494661d78d5afacf4",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "e21896e30bcdadf501bbdad1c50c294319f81b40e952e9fe8262d8782fe4146e",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "scout": [
+      {
+        "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",
+        "version": "",
+        "instructions_sha256": "259d00eee7dc1dd9c9374539e3fa69b0a8a0cb873928ca276f16171283e1dcb8",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable"
+        ],
+        "effort": "lo",
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "cf1ab6d29a8eed9763829f021daf4dd068d3bde2",
+        "version": "",
+        "instructions_sha256": "259d00eee7dc1dd9c9374539e3fa69b0a8a0cb873928ca276f16171283e1dcb8",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9c3abe9b737cc67120efc8cd9246ac6280421b37",
+        "version": "",
+        "instructions_sha256": "84c304894e36c0c018f306070527f10f2a788f75c52702cdac8e6fa0b9044fc9",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "c01cb57207220873d4968e012375667397dc66231eafc78dab05f6f3f21f0758",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "8cc5708e6983e5dff010daf95f48b3790f3a62901a072a477f0ba83bd28318d6",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "tui-designer": [
+      {
+        "sha": "065d4e089b7e2127ff6ebb3d940d940806ae33d0",
+        "version": "1.0.0",
+        "instructions_sha256": "cd11db9ec3c49b5433b3f0f77cd1bd0de315dffcf35383bbeac55e991ab41379",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "5c32d8723c8c197dd57b70cab812961173402888",
+        "version": "1.0.0",
+        "instructions_sha256": "e357f49bc28753ed22c48805dbce19a39ec3d08598471db1f8598129d9f37ddc",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "c7cb53cd731fadabefbf12841c4357c3d5cae2bf92f547e45a4e48a3d4368118",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "68617db9fdf36c5e6fb0c4cfc30548865cd7a3e7",
+        "version": "1.1.0",
+        "instructions_sha256": "fbb5a6e44e6fdf7e93a53b56366e5fa8ae3a9456127c19a5de2eb30630ad2a52",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.2.0",
+        "instructions_sha256": "45a688b16ade1d88465af88be6a14ef6e08da123444439cdac1692cfd79807ca",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "595883adc43dcca4281e8bf315c393dab7624b2d",
+        "version": "1.2.0",
+        "instructions_sha256": "614a9470f3de13917a56f016309c516ef1affe2d6423b98f58adb9439be2431a",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ],
+    "ux-reviewer": [
+      {
+        "sha": "065d4e089b7e2127ff6ebb3d940d940806ae33d0",
+        "version": "1.0.0",
+        "instructions_sha256": "582ae249d28813bec24d85fdc817d8f0bc75269c0ea014c637e6511191abc8eb",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "5c32d8723c8c197dd57b70cab812961173402888",
+        "version": "1.0.0",
+        "instructions_sha256": "4a364377817af9a035c0372945cd40f16d0048bf80066f99678209134710acee",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "df70de74eafa4717e9c3e570f1a657783aa5116d",
+        "version": "1.1.0",
+        "instructions_sha256": "69ca515db14e1a9f62959a654a320d0b01a59ca3b8e4396a8079d718801f338b",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "83f983c44f3651ff5b9b1c8d257dc37a0e046aed",
+        "version": "1.2.0",
+        "instructions_sha256": "c655665b2130c21fb89f3090142f0e180dd3103eb9439359788a619d46b56916",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "f309b1cb960cd01172c80b4670a51c4734d275d3",
+        "version": "1.3.0",
+        "instructions_sha256": "dbe306f5921f1334f488e3abdf9ff1ca2a13b6c52a2840fb84fbd8666f97d1e7",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      }
+    ]
+  }
+}

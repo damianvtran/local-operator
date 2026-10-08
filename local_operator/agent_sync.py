@@ -60,17 +60,29 @@ class SyncReport:
     entries: tuple[SyncEntry, ...] = ()
 
     def counts(self) -> dict[str, int]:
-        """Entry counts by outcome, for summaries."""
+        """Entry counts by outcome, for summaries.
+
+        ``updated`` counts WRITES only: an ``outdated-clean`` seed row that was
+        classified read-only (``--check``/``--dry-run``/the startup pass's
+        classification) is an update AVAILABLE, not an update applied —
+        counting it as updated was this report's own over-claim, the trap F2
+        of #2060 names. ``available`` is additive: the desktop reads summary
+        keys by name and unknown keys are the safe direction, while three
+        renderers consume the entries themselves.
+        """
         counts = {
             "up-to-date": 0,
             "updated": 0,
+            "available": 0,
             "diverged": 0,
             "unavailable": 0,
             "not-installed": 0,
         }
         for entry in self.entries:
-            if entry.applied or entry.verdict in ("outdated-clean", "updated"):
+            if entry.applied or entry.verdict == "updated":
                 counts["updated"] += 1
+            elif entry.verdict == "outdated-clean":
+                counts["available"] += 1
             elif entry.verdict == "up-to-date":
                 counts["up-to-date"] += 1
             elif entry.verdict == "unavailable":
@@ -126,7 +138,16 @@ def _render_entry(entry: SyncEntry) -> str:
                     transition = f" ({entry.installed_version} -> {entry.packaged_version})"
             else:
                 transition = ""
-            line = f"{entry.name}: updated to the packaged starter{transition}"
+            if entry.applied:
+                line = f"{entry.name}: updated to the packaged starter{transition}"
+            else:
+                # READ-ONLY classification (``--check``/``--dry-run``/the
+                # startup pass's report half): claiming "updated" for a
+                # non-write is the over-claim this branch exists to stop.
+                line = (
+                    f"{entry.name}: update available{transition} — "
+                    "run 'lop agents sync' to apply it"
+                )
         else:
             fields = ", ".join(entry.diverged_fields) or "unknown fields"
             if entry.applied:
