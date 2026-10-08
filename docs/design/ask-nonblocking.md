@@ -534,11 +534,12 @@ Every surface presents the open ask set in one of **two states**. Both are **cli
 interaction state: no wire change, §4 is untouched by this section.**
 
 - **EXPANDED** — the answer surface is active (TUI picker/list row, desktop `QuestionDock` or
-  sheet, phone/app sheet). **Entered by the user** (click the minimized bar, Enter on a
-  focused row, or the explicit `/asks` / header action), **or ONCE by the open-by-default
-  policy** when a conversation is opened with asks already pending (the shared six-clause
-  contract the TUI, desktop drawer, relay sheet and app sheet keep — `tui/ask_open_policy.py`
-  states it). **Never automatic on ask arrival** — §5.1's no-arrival-mount, no-focus-steal rule
+  sheet, phone/app sheet). **Entered by the user** (the f4 toggle, click the minimized bar,
+  Enter on a focused row, or the explicit `/asks` / header action), **or ONCE by the
+  open-by-default policy** when a conversation is opened with asks already pending (the shared
+  six-clause contract `tui/ask_open_policy.py` states, in review with the TUI/relay change
+  (#2067); the desktop drawer and app sheet arrive with their own PRs). **Never automatic on
+  ask arrival** — §5.1's no-arrival-mount, no-focus-steal rule
   is unchanged for an ask that lands while the conversation is already on screen. Left by Esc,
   the collapse control, or a click on the bar/chevron.
 - **MINIMIZED** — a compact, persistent single-line affordance; the answer surface is *not*
@@ -553,8 +554,9 @@ draft is never converted into an answer. (The one carve-out is the flag-off path
 desktop's blocking-gate composer swallow remains; that path is out of scope here and is
 deleted with the blocking gate in PR F.) An answer is given **in the ask surface**, whose
 explicit free-text door is the trailing **`Other`** row on every non-secret question, with
-its own input. Image attachments in that input follow once the core wire lands
-(`ask-attachments-v1`, a separate change); the door is text-only until then. A
+its own input. The wire half of image attachments on that input has landed
+(`ask-attachments-v1`, #2058, released in v0.68.8); each surface's attachment UI follows in
+its own repo, so the door is text-only until then. A
 free-text-only question has no `Other` row to open: its input is the question's only
 control and is shown open (on the TUI that is the picker's single free-text row, which is
 itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today; the
@@ -637,12 +639,12 @@ collapses — there was no list to return to.)
 - **Entry/badge:** a count chip in the working line/status band (`◆ 2 asks`), sidebar/`/resume`
   catalog badge (`tui/session_catalog.py` `pending` ranking, scout `188/287`), OS notification via
   the existing `tui/notify.py` map (scout `177/237`). **No auto-mount on ask ARRIVAL and no focus
-  steal** — the open-by-default mount (§5.0, amended 2026-10-08; `tui/ask_open_policy.py`)
-  happens ONCE when a conversation is opened with asks already pending, is not an arrival mount,
-  and takes no caret. A new ask must not displace a card the user is mid-answer on or their
-  composer draft (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). The
-  **§5.0 minimized bar is what names the first question** — it replaces the ad-hoc one-line
-  notice, so there is one affordance, not two.
+  steal** — the open-by-default mount (in review with #2067; `tui/ask_open_policy.py`, §5.0
+  amended 2026-10-08) happens ONCE when a conversation is opened with asks already pending, is
+  not an arrival mount, and takes no caret. A new ask must not displace a card the user is
+  mid-answer on or their composer draft (`docs/design/composer-focus-default.md`; #1315
+  machinery `app.py:7715/7810`). The **§5.0 minimized bar is what names the first question** —
+  it replaces the ad-hoc one-line notice, so there is one affordance, not two.
 - **List:** `/asks` (+ keybinding) opens a list in `#prompt-host`; per row: status glyph,
   first question, age/expiry. Enter mounts that ask in the **existing** `AskPickerScreen`
   (`ask_picker.py:537`); the single-mounted-card widget model stays — the *queue* is a store,
