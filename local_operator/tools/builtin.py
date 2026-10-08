@@ -24467,7 +24467,11 @@ def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str
     say which state it is in. One sentence either way — prompt text is paid on
     every turn. ``model_choice`` is the flag the accompanying schema was
     rendered from, passed in rather than re-read so the description and the
-    schema cannot disagree about which arm they are in.
+    schema cannot disagree about which arm they are in. The one live read is
+    ``configured_effort_tiers()`` (the tier list) and, for a subagent,
+    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`
+    (which reads ``subagents.model_choice``): both are consulted only to pick
+    WORDING within the arm the flag already fixed, never to change the arm.
     """
     if not model_choice:
         # The whole field is gone from this schema, so the description is the

@@ -419,9 +419,14 @@ async def test_a_subagent_cannot_update_a_role_pin_to_a_tier(tmp_path, config):
         child._build_tool_context(),
     )
     assert result.is_error and "cannot pin a role" in text_of(result)
-    # ...and the stored profile did not move.
-    profile = registry.get_agent_by_name("rev") if hasattr(registry, "get_agent_by_name") else None
-    assert profile is None or not getattr(profile, "effort", None)
+    # ...and the stored pin did not move. Read through ``resolve_profile`` (the
+    # reader a launch uses), because the pin is a ``tag`` on ``AgentData`` and
+    # not an attribute of it: an ``AgentData.effort`` probe can never fail.
+    from local_operator.agent_profiles import resolve_profile
+
+    stored = resolve_profile("rev", registry=registry, strict_registry=True)
+    assert stored is not None, "the role must still exist"
+    assert stored.effort is None
     await child.dispose()
     await root.dispose()
 
@@ -550,3 +555,16 @@ def test_a_bool_in_the_tool_context_is_not_a_delegation_depth():
     assert effort_validation_context(flagged)[ADVERTISED_DELEGATION_DEPTH_KEY] == 0
     flagged.delegation_depth = 2
     assert effort_validation_context(flagged)[ADVERTISED_DELEGATION_DEPTH_KEY] == 2
+
+
+def test_session_depth_ignores_a_bool():
+    """``_session_depth`` reads depth with the same ``type(x) is int`` rule (R2-2)."""
+    from types import SimpleNamespace
+
+    from local_operator.harness.subagent import _session_depth
+
+    assert _session_depth(SimpleNamespace(_delegation_depth=2)) == 2  # type: ignore[arg-type]
+    assert _session_depth(SimpleNamespace(_delegation_depth=0)) == 0  # type: ignore[arg-type]
+    assert _session_depth(SimpleNamespace(_delegation_depth=True)) == 0  # type: ignore[arg-type]
+    assert _session_depth(SimpleNamespace(_delegation_depth=-1)) == 0  # type: ignore[arg-type]
+    assert _session_depth(SimpleNamespace()) == 0  # type: ignore[arg-type]
