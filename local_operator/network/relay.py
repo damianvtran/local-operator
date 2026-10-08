@@ -5954,7 +5954,17 @@ class RelayServer:
                     "busy": record.busy,
                     "pending": record.pending,
                     "detached": record.detached,
-                    "started": record.started,
+                    # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
+                    # report). ``record.started`` is "has run at
+                    # least one real turn"; a consumer reading it as a TIME
+                    # minted ``float(True)`` = 1.0 — an epoch second into 1970
+                    # — so the desktop sidebar dated a live session "56y" and
+                    # filed it under "Older". This key is an EPOCH on the two
+                    # sibling halves below (``_mesh_hosted_rows`` /
+                    # ``_stored_rows``) and on every consumer's read of it; the
+                    # bool's own readers read the RECORD, not a federated row
+                    # (the unengaged send gate, the broadcast/steer admission).
+                    "started": float(record.started_at or 0.0),
                     "pid": record.pid,
                     "kind": record.kind,
                     "capabilities": list(record.capabilities),

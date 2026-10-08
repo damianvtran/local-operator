@@ -1328,6 +1328,49 @@ def test_the_federated_listing_carries_locality_and_peer_for_both_halves(
         _stop_all(served)
 
 
+def test_a_live_rows_started_is_the_records_epoch_not_its_bool(root: Path) -> None:
+    """The wire's ``started`` is a TIME — a bool must never leak onto it.
+
+    Operator report: the live half published
+    ``SessionRecord.started`` — the "has run a real turn" BOOL — under this
+    key, while the stored and mesh-hosted halves published epochs; a consumer
+    reading the key as a time minted ``1.0`` from a session that had merely run
+    a prompt, and the desktop sidebar dated the row "56y" and filed it under
+    "Older". The row now carries the record's own epoch (``started_at``) — the
+    ONE meaning this key has on the wire, because nothing that reads a
+    federated row wants the bool: the bool's own readers (the unengaged send
+    gate, the broadcast/steer admission) read the RECORD.
+    """
+    import os
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION,
+            conversation_name="live one",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            # A session that HAS run a turn: this bool is the value that leaked.
+            started=True,
+            started_at=1789400000.0,
+        ),
+        root,
+    )
+    row = next(item for item in server.local_session_rows() if item["session_id"] == SESSION)
+    assert row["state"] == "live", "the record must classify live for the cell to mean anything"
+    assert not isinstance(row["started"], bool), "no consumer needs the bool on the wire"
+    assert row["started"] == 1789400000.0
+
+
 def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

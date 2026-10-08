@@ -21,10 +21,12 @@ What these pin, in the order the design cares about:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.network import store
+from local_operator.network.projection import PeerRow
 from local_operator.resume import SessionRow
 from local_operator.session import peer_rows as peer_rows_mod
 from local_operator.session.peer_rows import (
@@ -68,7 +70,10 @@ class _Row:
         busy: bool = False,
         detached: bool = False,
         pending: str | None = None,
-        started: float = 1000.0,
+        # ``Any`` rather than ``float``: this double stands in for a PEER's wire
+        # value, and a non-number under ``started`` (the bool the live half used
+        # to publish) is exactly the hazard the reader's own cells exercise.
+        started: Any = 1000.0,
     ) -> None:
         self.session_id = session_id
         self.device_id = device_id
@@ -82,9 +87,14 @@ class _Row:
 
 
 class _Catalog:
-    """A ``PeerCatalog`` stand-in that counts the calls made to it."""
+    """A ``PeerCatalog`` stand-in that counts the calls made to it.
 
-    def __init__(self, peers: list[_Facts], rows: list[_Row], *, boom: bool = False) -> None:
+    ``rows`` stays ``list[Any]`` rather than ``list[_Row]``: the real-path cells
+    feed REAL ``PeerRow`` objects (built by ``PeerRow.from_json``), and the seam
+    a catalogue implements is the row-object shape, not this double.
+    """
+
+    def __init__(self, peers: list[_Facts], rows: list[Any], *, boom: bool = False) -> None:
         self._peers = peers
         self._rows = rows
         self._boom = boom
@@ -233,6 +243,130 @@ def test_a_remote_row_orders_by_the_peers_started_claim() -> None:
     row = peer_session_rows(catalog=catalog)[0]
     assert row.created_at == 4242.0
     assert row.mtime == 4242.0
+
+
+@pytest.mark.parametrize("claim", [True, False, None, "1700000000.0"])
+def test_a_started_claim_that_is_not_a_number_is_no_claim(claim: object) -> None:
+    """A non-numeric ``started`` must not be minted into an epoch — ``True`` least of all.
+
+    OPERATOR REPORT: the live half of the federated listing
+    published ``SessionRecord.started`` — a BOOL — under this key, and this
+    reader's bare ``float(...)`` turned ``True`` into ``1.0``: an epoch second
+    into 1970, rendered by the desktop sidebar as "56y" and filed under
+    "Older". A claim that is not a number is NO claim: it lands where a
+    missing key lands (``0.0`` — "an unknown start sorts last") and never at
+    ``1.0``. The string cases ride along for BOTH failures a bare ``float()``
+    had here: it raised for a non-numeric claim (into the sidebar's poll — this
+    reader's contract is "nothing raises") and silently minted a plausible
+    epoch for a numeric-looking one.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", started=claim)],
+    )
+    row = peer_session_rows(catalog=catalog)[0]
+    assert row.mtime == 0.0
+    assert row.mtime != 1.0, "a bool is an int subclass: float(True) is the 1970+1s epoch"
+    assert row.created_at == 0.0
+
+
+def test_a_real_epoch_earns_today_while_a_missing_claim_sorts_last() -> None:
+    """The sidebar's calendar rule over the row time: Today needs a real epoch.
+
+    ``chat-list-sections.ts`` — the desktop sidebar's rule — derives its
+    section from the row's time and reads a non-finite value as "no time", so
+    the value this producer stamps is what decides the bin: a real epoch lands
+    at or after the local day's start (Today), and a genuinely missing claim
+    is the no-claim ``0.0`` — it cannot earn Today, and it is not a minted
+    tiny epoch a renderer would date as "56y". The last mile — refusing
+    ``<= 0`` on the sidebar's ACTIVE basis so the no-claim side prints no year
+    at all — lives in that UI module (it already refuses zero on the Created
+    basis) and is routed in the PR rather than testable from here.
+    """
+    import time as time_mod
+
+    t = time_mod.localtime()
+    local_midnight = time_mod.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+    now = time_mod.time()
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [
+            _Row("s_1", "d_aa", started=now),
+            _Row("s_2", "d_aa", started=None),
+        ],
+    )
+    by_id = {row.id: row for row in peer_session_rows(catalog=catalog)}
+    assert by_id["s_1"].mtime >= local_midnight, "a real epoch earns Today"
+    assert by_id["s_2"].mtime == 0.0, "a missing claim is no claim — sorted last"
+    assert by_id["s_2"].mtime < local_midnight
+
+
+#: "The peer did not send this key at all" — the ABSENT case for the real-path
+#: cells below, which must go through ``PeerRow.from_json`` rather than a double.
+_NO_KEY = object()
+
+
+def _parsed_peer_row(claim: object = _NO_KEY) -> PeerRow:
+    """A REAL ``PeerRow`` — through ``PeerRow.from_json``, no double.
+
+    The first version of the guard cells fed ``_Row`` doubles whose ``.started``
+    carried the raw claim, but production never hands a consumer a raw claim:
+    ``PeerRow.from_json`` parses first, and that is where the bad shapes were
+    being decided (QA round 1, Q1 — the doubles bypassed it).
+    """
+    fields: dict[str, object] = {
+        "session_id": "s_1",
+        "conversation_name": "Some conversation",
+    }
+    if claim is not _NO_KEY:
+        fields["started"] = claim
+    return PeerRow.from_json(fields, device_id="d_aa", device_name="pixel")
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [True, False, None, "abc", pytest.param(_NO_KEY, id="absent")],
+)
+def test_a_bad_started_never_mints_an_epoch_through_the_real_parse_path(claim: object) -> None:
+    """``PeerRow.from_json`` → the session-row producer, for every bad shape.
+
+    QA round 1 on #2044 (Q1): the guard sat DOWNSTREAM of the parse, whose
+    ``peer_number(..., default=STARTED_UNKNOWN_S)`` had already turned a
+    bool/absent/garbage claim into the float ``1.0`` — so the guard's
+    non-number refusal could not fire on the real path, old peers kept arriving
+    as ``mtime = 1.0`` ("56y", "Older"), and the poll disagreed with the seed.
+    The parse now refuses first: every bad shape arrives as the no-claim
+    ``0.0``, and the guard stays as the belt for shapes no parse produced.
+    """
+    peer = _parsed_peer_row(claim)
+    assert peer.started == 0.0, f"{claim!r} was minted into {peer.started!r}"
+    produced = peer_session_rows(
+        catalog=_Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [peer])
+    )[0]
+    assert produced.mtime == 0.0
+    assert produced.created_at == 0.0
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [True, False, None, "abc", pytest.param(_NO_KEY, id="absent")],
+)
+def test_the_sidebars_arithmetic_cannot_receive_an_epoch_class_value(claim: object) -> None:
+    """No bad shape hands the sidebar's date arithmetic an epoch-class value.
+
+    The sidebar dates a finite POSITIVE time and (with the routed UI refusal)
+    blanks ``<= 0``; an epoch-class value is exactly what slips that refusal —
+    the old ``1.0`` was dated "56y". Through the real path, every unreadable
+    shape arrives as the no-claim ``0.0``: there is nothing for the arithmetic
+    to date.
+    """
+    produced = peer_session_rows(
+        catalog=_Catalog([_Facts("d_aa", "radiant-m4", reachable=True)], [_parsed_peer_row(claim)])
+    )[0]
+    # The sidebar's own terms: ``at = mtime * 1000``, refused when ``at <= 0``.
+    at_ms = produced.mtime * 1000
+    assert at_ms <= 0, f"{at_ms!r} is an epoch-class value the refusal lets through"
+    assert produced.created_at <= 0
 
 
 def test_the_membership_name_rides_the_row_for_the_tooltips_device_clause(

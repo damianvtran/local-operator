@@ -101,12 +101,20 @@ def test_a_bad_age_never_looks_fresh(value: Any) -> None:
 
 
 @pytest.mark.parametrize("value", BAD_VALUES)
-def test_a_bad_started_never_reads_as_just_now(value: Any) -> None:
-    """``started`` is rendered through ``to_record``, which spells 0 as ``time.time()``."""
+def test_a_bad_started_is_no_claim_never_an_epoch_class_value(value: Any) -> None:
+    """A claim that cannot be read is NO claim — not ``1.0``, not "just now", not a date.
+
+    The sentinel used to be ``1.0`` ("the epoch plus a second", chosen so
+    ``to_record`` could not spell the value as ``time.time()``) — but ``1.0`` is
+    a REAL-looking epoch the desktop sidebar dates "56y", it slips every
+    ``<= 0`` refusal, and the create-reply seed spelled the same claim ``0.0``
+    (QA round 1 on #2044). The no-claim is ``0.0`` — the spelling the renderers
+    refuse — and ``to_record`` keeps it instead of re-spelling it as "just now".
+    """
     row = _row(started=value)
-    assert row.started == projection.STARTED_UNKNOWN_S, row.started
-    assert row.started, "a falsy started is rendered as 'just now' by to_record"
-    assert row.to_record().started_at == projection.STARTED_UNKNOWN_S
+    assert row.started == 0.0, row.started
+    assert not row.started, "a claim that cannot be read is not a claim"
+    assert row.to_record().started_at == 0.0, "and it must not become 'just now'"
 
 
 def test_a_fractional_age_and_start_are_ordinary_values() -> None:
