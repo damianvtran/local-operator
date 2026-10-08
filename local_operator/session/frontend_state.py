@@ -2808,7 +2808,9 @@ def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
     return frozen.model_copy(update=updates)
 
 
-def effective_identity_for(*, active_agent: str, team: str, manager: str = "") -> dict[str, str]:
+def effective_identity_for(
+    *, active_agent: str, team: str, manager: str = "", team_in_force: bool | None = None
+) -> dict[str, str]:
     """WHO is answering this session, from its two slots — THE rule (#2014).
 
     One implementation for every producer of the field: the live session
@@ -2819,15 +2821,27 @@ def effective_identity_for(*, active_agent: str, team: str, manager: str = "") -
     differently from the warm session it is about to attach to is the same
     confusion one frame later.
 
-    ``team`` is the name of a team IN FORCE, not merely a name on disk: a
-    carried unresolved team name is deliberately not passed, because it is not
-    a team anything is speaking as (the sentinel that means "a host older than
+    ``team_in_force`` is the AUTHORITY, and it is a bool rather than the name on
+    purpose (design round 1, D7): a team whose name reads ``""`` — a reduced
+    double, a malformed registry row — is still a team in force, and deciding on
+    the name would publish it as a plain profile attach while ``/agent`` is
+    still refused. ``None`` means "the caller only has the name" and falls back
+    to ``bool(team)``; the live session and the cold restore both pass the bool.
+    ``team`` is the name of that team in force, never merely a name on disk: a
+    carried unresolved team name is deliberately not passed, because it is not a
+    team anything is speaking as (the sentinel that means "a host older than
     this field" is the empty dict, which no producer here emits).
+
     ``manager`` is the team's manager role, and may be empty — a nameless team,
     or a cold open whose registry lookup was best-effort — in which case the
     TEAM names itself as the speaker rather than nothing naming it.
+
+    ``role_of_speaker`` is ``"manager"`` exactly when a team is in force, so it
+    is the key a client reads to tell a team's manager from an attached profile;
+    nothing attached is the explicit empty statement.
     """
-    if team:
+    in_force = bool(team) if team_in_force is None else team_in_force
+    if in_force:
         return {"speaker": manager or team, "team": team, "role_of_speaker": "manager"}
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
 
@@ -2893,6 +2907,15 @@ class FrontendSessionState(BaseModel):
     #: Bounded by its own shape: three short identifiers, replaced (never
     #: appended) on every refresh, so it cannot grow with conversation length
     #: or child count — the classification this frame guard asks for.
+    #:
+    #: ONE CAVEAT a client must read rather than infer (design round 1, D9): the
+    #: session CATALOGUE row (``cold_model.synthesise_cold_state``) publishes the
+    #: empty statement deliberately, because that frame reports no attachment at
+    #: all — it sets neither ``active_team`` nor ``active_agent``. A client that
+    #: needs the stored binding before a runtime engages reads the row's own
+    #: ``team``/``agent`` pair, then switches to this field on the first frame
+    #: from a session (attached or cold-pane), which always carries all three
+    #: keys.
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None

@@ -524,22 +524,28 @@ def role_word_set(registry: "TeamRegistry | None") -> dict[str, tuple[str, ...]]
     return {word: tuple(names) for word, names in out.items()}
 
 
-def replaced_profile_clause(profile: str, manager: str) -> str:
-    """The clause a team attach appends when it REPLACED an earlier profile.
+def replaced_profile_clause(profile: str, manager: str, *, prior_team: str = "") -> str:
+    """The clause a team attach appends when it REPLACED the speaker in the slot.
 
-    Issue #2014: attaching a team claims the agent slot, so a profile the user
-    had chosen is dropped. The drop is announced rather than silent — a persona
-    that vanishes without a word is the confusion this rule exists to remove,
-    and the merged desktop half of this change tells users the runtime does say
-    so — and every seam that paints the receipt (the TUI-local handler, its
-    follower seam, the routed runtime) appends THIS sentence, so the three
-    cannot drift. Empty ("") when nothing was replaced, so a caller appends it
-    unconditionally and only a real replacement is announced.
+    Issue #2014: attaching a team claims the agent slot, so whatever was there is
+    dropped. The drop is announced rather than silent — a persona that vanishes
+    without a word is the confusion this rule exists to remove, and the merged
+    desktop half of this change tells users the runtime does say so — and every
+    seam that paints the receipt (the TUI-local handler, its follower seam, the
+    routed runtime) appends THIS clause, so the three cannot drift. Empty ("")
+    when nothing was replaced, so a caller appends it unconditionally and only a
+    real replacement is announced.
 
-    ``manager`` may be empty on a reduced team double; the clause then names the
-    profile without claiming a speaker.
+    TWO displaced KINDS, because the slot holds either (design round 1, D5):
+    ``prior_team`` names the team that was in force for ``/team a`` → ``/team b``,
+    where the displaced speaker is that team's MANAGER and calling it a profile
+    would name something that never existed. ``manager`` may be empty on a reduced
+    team double; the clause then names what was displaced without claiming a
+    speaker.
     """
     who = f"; {manager} now speaks" if manager else ""
+    if prior_team:
+        return f" Replaced team {prior_team}'s manager{who}."
     return f" Replaced profile {profile}{who}."
 
 

@@ -93,9 +93,13 @@ def test_a_team_and_a_profile_are_refused_at_preflight(tmp_path):
     )
     with pytest.raises(ValueError) as refusal:
         resolve_startup(ExecArgs(team="release", profile="reviewer"))
+    # The flag-level fact leads, then the SESSION's sentence verbatim (design
+    # round 1, D6 — a shell user needs to hear which pair is wrong first, and
+    # the desktop lane keys on the second sentence's exact words).
     assert str(refusal.value) == (
-        "team release owns this session: manager is the speaker, so /agent is "
-        "closed. Run /team clear to detach the team first."
+        "--profile cannot be combined with --team: a team owns the session's "
+        "agent slot. team release owns this session: manager is the speaker, so "
+        "/agent is closed. Run /team clear to detach the team first."
     )
     # No manager carve-out: naming the team's own manager is refused too, since
     # the manager is already the speaker the team attached.

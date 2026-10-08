@@ -7466,14 +7466,20 @@ class ServingSessionHandle(SessionHandle):
         did the user actually send" stays in one place.
         """
         registry = getattr(session, "team_registry", None)
+        if arg:
+            # Routed BEFORE the availability guard below (agent review round 1,
+            # NIT-3): the DETACH verb needs the SESSION (``attach_team(None)``)
+            # and not the registry, so a session whose registry read is
+            # unavailable must still be able to free the slot it is holding.
+            # The attach path applies the same guard itself, for the lookup it
+            # actually needs.
+            return self._team_attach_slash(session, arg, SlashResult)
         if registry is None or not hasattr(registry, "list_teams"):
             return SlashResult(
                 kind="notice",
                 text="teams are unavailable in this session. Ask the agent to create one.",
                 style="warning",
             )
-        if arg:
-            return self._team_attach_slash(session, arg, SlashResult)
         try:
             teams = list(registry.list_teams())
         except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
@@ -7556,22 +7562,53 @@ class ServingSessionHandle(SessionHandle):
                     text="this session cannot run a team, so there is no team to detach",
                     style="warning",
                 )
+            # Read BEFORE the call: `attach_team(None)` releases the agent slot
+            # only when a team was in force, and with none the verb is a true
+            # no-op — so the receipt may not claim anything moved (agent review
+            # + design round 1, D1).
+            attached_before = str(getattr(session, "active_team_name", "") or "")
             try:
                 detach(None)
             except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
                 return SlashResult(
                     kind="notice", text=f"could not detach the team: {exc}", style="warning"
                 )
+            self._notify()
+            if not attached_before:
+                profile = str(getattr(session, "active_agent", "") or "")
+                return SlashResult(
+                    kind="notice",
+                    text=(
+                        f"no team is attached; {profile} is still this session's speaker, "
+                        "so nothing was detached. Run /agent clear to drop it."
+                        if profile
+                        else "no team is attached, so nothing was detached."
+                    ),
+                    style="info",
+                    # Same data the follower seam returns (MINOR-1/NIT-1): the
+                    # two are documented mirrors, and the TUI's receipt
+                    # consumer keys band sync on ``data["type"]``.
+                    data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+                )
             # Both segments move: the team NAME and the manager NAME the team
             # claimed (see ``Session._release_team_agent_slot``).
-            self._notify()
             return SlashResult(
                 kind="notice",
                 text="no team active; this session uses its base instructions.",
                 style="info",
+                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
+        registry = getattr(session, "team_registry", None)
+        if registry is None or not hasattr(registry, "get_team_by_name"):
+            # The ATTACH half does need the registry, and refusing here keeps
+            # the "unavailable" answer to the form that requires it (NIT-3).
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
             )
         try:
-            team = registry_team = session.team_registry.get_team_by_name(name)
+            team = registry_team = registry.get_team_by_name(name)
         except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
             return SlashResult(
                 kind="notice", text=f"could not load team {name!r}: {exc}", style="warning"
@@ -7597,6 +7634,9 @@ class ServingSessionHandle(SessionHandle):
                 text="this session cannot run a team. /team chart <name> shows a roster",
                 style="warning",
             )
+        # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
+        # after the claim this session's name is the new one (D5).
+        prior_team = str(getattr(session, "active_team_name", "") or "")
         try:
             replaced = attach(team)
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
@@ -7609,12 +7649,19 @@ class ServingSessionHandle(SessionHandle):
 
         self._notify()
         shown = display_form(team.name, team.label)
-        # Issue #2014: attaching a team REPLACES a profile the user had chosen,
+        # Issue #2014: attaching a team REPLACES the speaker in the agent slot,
         # and a silent replacement is a state change nobody can account for. The
         # attach reports what it dropped (its return value), so the receipt can
         # — the ONE clause builder the TUI-local and follower seams share, so
-        # those three surfaces cannot word it differently.
-        dropped = replaced_profile_clause(replaced, team.manager) if replaced else ""
+        # those three surfaces cannot word it differently. ``prior_team`` names
+        # the team that was displaced when this was a TEAM SWITCH, where calling
+        # the dropped speaker a "profile" would name something that never
+        # existed (design round 1, D5).
+        dropped = (
+            replaced_profile_clause(replaced, team.manager, prior_team=prior_team)
+            if replaced
+            else ""
+        )
         return SlashResult(
             kind="notice",
             text=(
@@ -7737,7 +7784,7 @@ class ServingSessionHandle(SessionHandle):
             self._notify()
             return SlashResult(
                 kind="notice",
-                text="this session uses its base instructions",
+                text="no agent active; this session uses its base instructions",
                 style="info",
                 data={"type": "agent_attached", "agent": "", "request": ""},
             )

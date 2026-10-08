@@ -1818,7 +1818,7 @@ class AttachedSession:
         self._cold_painted_ids = set(self._history_ids)
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
-        state = self._restore_cold_details(state)
+        state = await self._restore_cold_details(state)
         self._cold_checkpoint = None
         self._cold_seed_usage = None
         # NOT cleared, unlike its two neighbours: the spend details row is ~200
@@ -1857,7 +1857,7 @@ class AttachedSession:
             return ""
         return str(getattr(team, "manager", "") or "")
 
-    def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
+    async def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
         """Fold the durable turn-end checkpoint over synthesised cold state.
 
         A cold viewer synthesises canonical state because there is no owner to
@@ -1982,7 +1982,12 @@ class AttachedSession:
                 "effective_identity": effective_identity_for(
                     active_agent=durable.active_agent,
                     team=durable.active_team,
-                    manager=self._cold_team_manager(durable.active_team),
+                    # Threaded: it reads the machine's team registry (directory
+                    # + brief files), and every other read this open makes is
+                    # off the loop for the same reason (agent review round 1,
+                    # MINOR-3). Best-effort either way.
+                    manager=await asyncio.to_thread(self._cold_team_manager, durable.active_team),
+                    team_in_force=bool(durable.active_team),
                 ),
                 # Spend and occupancy are the conversation's history, not this
                 # process's: a resumed session that already cost money must not

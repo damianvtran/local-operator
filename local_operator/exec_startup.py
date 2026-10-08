@@ -383,7 +383,14 @@ def resolve_startup(args: Any) -> Any:
         from local_operator.session.errors import team_owns_the_agent_slot_message
 
         raise ValueError(
-            team_owns_the_agent_slot_message(
+            # The flag-level fact FIRST (design round 1, D6): the shared sentence
+            # below speaks to a user of ``/agent`` in a session, and a shell
+            # user who typed two flags needs to be told which pair is wrong
+            # before being told how the SESSION feels about it. The sentence
+            # itself stays VERBATIM — the desktop lane keys on those words.
+            "--profile cannot be combined with --team: a team owns the session's "
+            "agent slot. "
+            + team_owns_the_agent_slot_message(
                 str(getattr(team, "name", "") or args.team),
                 str(getattr(team, "manager", "") or ""),
             )

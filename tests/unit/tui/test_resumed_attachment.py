@@ -357,3 +357,74 @@ async def test_the_stale_notice_does_not_end_the_empty_state(tmp_path) -> None:
         assert app._welcome_visible is True
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
         assert any("could not restore" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_local_detach_verb_paints_both_segments(tmp_path) -> None:
+    """Agent review round 1, MINOR-2: the LOCAL ``/team clear`` branch had no
+    test at all, which is how MINOR-1 (the follower seam skipping the agent-band
+    sync) shipped unnoticed.
+
+    Two facts in one walk. When a team was in force, BOTH segments move — the
+    roster and the manager name the team claimed for the agent slot — so the band
+    cannot disagree with what was released. And with NO team attached the verb is
+    a true no-op that KEEPS an attached profile (design round 1, D1), which the
+    routed cell in ``test_team_agent_precedence.py`` also pins.
+    """
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._team == "lopdev"
+        assert app._status._agent_profile == "manager"
+
+        app._cmd_team("clear", lambda _text: None)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert resumed.active_team_name == ""
+        assert app._status._team == ""
+        # The manager the team claimed leaves with it.
+        assert app._status._agent_profile == ""
+
+
+@pytest.mark.asyncio
+async def test_the_follower_detach_verb_returns_the_same_receipt(tmp_path) -> None:
+    """MINOR-1's seam: a follower's ``/team clear`` runs the SAME implementation
+    as the local handler, so it repaints both segments and returns the same
+    receipt — the two are documented mirrors, and they disagreed."""
+    from local_operator.session.frontend_state import SlashResult
+
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._agent_profile == "manager"
+
+        result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert result.kind == "notice"
+        assert result.text == "no team active; this session uses its base instructions."
+        assert result.data["type"] == "team_attached"
+        assert app._status._team == ""
+        assert app._status._agent_profile == ""

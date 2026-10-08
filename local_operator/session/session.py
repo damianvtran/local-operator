@@ -6011,7 +6011,15 @@ class Session:
         return effective_identity_for(
             active_agent=self.active_agent,
             team=team,
-            manager=self._team_manager_name() if team else "",
+            # Gated on the BOOL, not on the name: a nameless team still has a
+            # manager to name, and passing "" because the team's NAME is empty
+            # would publish a speaker-less team (design round 1, D7).
+            manager=self._team_manager_name() if self.active_team is not None else "",
+            # The BOOL, not the name: a team whose name resolves to "" (a
+            # reduced double, a malformed row) is still a team in force, and
+            # keying on the name would publish it as a plain profile attach
+            # (design round 1, D7).
+            team_in_force=self.active_team is not None,
         )
 
     @property
@@ -6262,7 +6270,17 @@ class Session:
         the mutation says what it did — so the return is the caller's notice
         material, not a status code. Detaching returns ``None``: it takes the
         slot away, it does not replace a profile with another.
+
+        Detaching when NO team is attached is a true no-op (agent-review/
+        design-round 1, F/D1): the slot is released only when a team was
+        actually IN FORCE, or a bare ``/team clear`` would quietly drop an
+        attached profile the user never asked to lose.
         """
+        # Read BEFORE the assignment below: the detach branch needs to know
+        # whether a team was in force, and this is the only place that is still
+        # true. Review round 1 caught a bare ``/team clear`` (no team attached)
+        # wiping an attached profile through ``_release_team_agent_slot``.
+        had_team = self.active_team is not None
         self.active_team = team
         # Either branch is the user acting on the team slot, so a carried
         # unresolved name stops being a recovery hint here (R1): a detach means
@@ -6270,12 +6288,18 @@ class Session:
         self._clear_unresolved("team")
         if team is None:
             self._goal_state.team_brief = ""
-            # Detaching FREES the agent slot the team owned: the manager's
-            # identity arrived with the team, so it leaves with it and the
-            # session is back to its base instructions. Without this a detach
-            # would leave ``active_agent`` naming a manager no team backs —
-            # the same unreconcilable pair this rule exists to remove.
-            self._release_team_agent_slot()
+            if had_team:
+                # Detaching FREES the agent slot the team owned: the manager's
+                # identity arrived with the team, so it leaves with it and the
+                # session is back to its base instructions. Without this a
+                # detach would leave ``active_agent`` naming a manager no team
+                # backs — the same unreconcilable pair this rule exists to
+                # remove.
+                self._release_team_agent_slot()
+            # With NO team in force there is nothing to release: whatever is in
+            # the slot got there through ``/agent`` and only ``/agent clear``
+            # may take it away. The persist/refresh below are unconditional
+            # because the team BRIEF is now empty either way.
             self._persist_attachment()
             self.refresh_frontend_state()
             return None

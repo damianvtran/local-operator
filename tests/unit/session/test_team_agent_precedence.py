@@ -228,6 +228,29 @@ class TestTheSlotIsClosed:
         assert session.attach_agent_profile("scout") == "scout"
         assert "<agent>" in _tail(session)
 
+    def test_clearing_a_team_that_is_not_attached_keeps_the_profile(self, tmp_path, registries):
+        """Agent review + design round 1, D1: the detach verb is a TRUE no-op
+        when no team is attached.
+
+        It released the agent slot unconditionally, so a bare ``/team clear`` —
+        the very command the refusal copy tells a user to run, and the
+        counterpart of ``/agent clear`` — quietly dropped the profile they had
+        attached, under a receipt that then read as if nothing had happened.
+        The slot is released only when a team owned it.
+        """
+        session = _session(tmp_path, registries)
+        assert session.attach_agent_profile("scout") == "scout"
+        brief = session.agent_brief
+        assert brief
+
+        session.attach_team(None)
+
+        assert session.active_agent == "scout"
+        assert session.agent_brief == brief
+        assert session.active_team_name == ""
+        # The identity follows the slot: this is still scout's session.
+        assert session.effective_identity["speaker"] == "scout"
+
 
 class TestTheIdentityIsPublished:
     def test_no_attachment_is_an_empty_statement(self, tmp_path, registries):
@@ -257,6 +280,28 @@ class TestTheIdentityIsPublished:
             "team": "lopdev",
             "role_of_speaker": "manager",
         }
+
+    def test_a_nameless_team_is_still_a_team_in_force(self, tmp_path, registries):
+        """Design round 1, D7: the rule is decided on a team being IN FORCE, not
+        on its name resolving to something.
+
+        A team whose name reads ``""`` (a reduced double, a malformed row) used
+        to fall through to the profile branch, so a client could not tell it from
+        a plain ``/agent`` attach while ``/agent`` was still refused. The
+        authority is the bool, and the team name is only what it is painted as.
+        """
+        session = _session(tmp_path, registries)
+        assert session.attach_agent_profile("scout") == "scout"
+
+        session.attach_team(SimpleNamespace(name="", manager="manager"))
+
+        identity = session.effective_identity
+        assert identity["team"] == ""
+        assert identity["role_of_speaker"] == "manager"
+        assert identity["speaker"] == "manager"
+        # The slot is still closed, which is the fact the triple must express.
+        with pytest.raises(AgentSlotOwnedByTeam):
+            session.attach_agent_profile("scout")
 
     def test_a_nameless_team_still_names_a_speaker(self, tmp_path, registries):
         """A reduced double must not produce a field that reads as "nobody":
@@ -397,6 +442,36 @@ class TestTheRoutedCommands:
         outcome = await handle.run_slash_authoritative("agent", "scout", [])
         assert session.active_agent == "scout"
         assert outcome["kind"] == "notice"
+
+    @pytest.mark.asyncio
+    async def test_slash_team_clear_with_no_team_keeps_the_profile(self, routed) -> None:
+        """The routed half of D1: the receipt names what happened and the profile
+        survives — ``/team clear`` is the verb the refusal copy teaches, so it may
+        not be the one that silently drops the profile."""
+        handle, session = routed
+        await handle.run_slash_authoritative("agent", "scout", [])
+
+        outcome = await handle.run_slash_authoritative("team", "clear", [])
+
+        assert outcome["kind"] == "notice"
+        assert "no team is attached" in outcome["text"]
+        assert "scout" in outcome["text"]
+        assert session.active_agent == "scout"
+
+    @pytest.mark.asyncio
+    async def test_slash_team_switch_names_the_displaced_team(self, routed, registries) -> None:
+        """Design round 1, D5: switching teams displaces a TEAM's manager, not a
+        profile, and the clause must not name a profile that never existed."""
+        handle, session = routed
+        _, teams = registries
+        teams.save_team(_team("pod", manager="lead"))
+        await handle.run_slash_authoritative("team", "lopdev", [])
+
+        outcome = await handle.run_slash_authoritative("team", "pod", [])
+
+        assert outcome["text"].endswith(" Replaced team lopdev's manager; lead now speaks.")
+        assert session.active_agent == "lead"
+        assert session.active_team_name == "pod"
 
     @pytest.mark.asyncio
     async def test_slash_team_clear_with_a_request_is_a_mistyped_attach(self, routed) -> None:
