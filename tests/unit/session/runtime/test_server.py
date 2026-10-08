@@ -6494,3 +6494,33 @@ async def test_the_record_advertises_the_message_id_capability_only_when_held() 
     finally:
         capable.close()
         plain.close()
+
+
+@pytest.mark.asyncio
+async def test_only_a_local_attach_attends_the_greeting() -> None:
+    """``attended_surfaces``: the R-3 fire-time gate, on the real socket.
+
+    A local terminal attach (the TUI) attends, even while displaying another
+    session — focus is not an input, and a TUI reports none. A RELAYED attach
+    (``locality="remote"``, the mobile daemon's and a peer's dial) does not,
+    though ``attached_surfaces`` counts it for the model-facing block: the
+    operator named the phone as a place the first-run greeting must not land.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    remote = AttachClient(lambda _projection: None, lambda _reason: None, locality="remote")
+    local = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _wait_record()
+        assert runtime.attended_surfaces() == frozenset()
+        await remote.connect(record, "s1")
+        assert runtime.attended_surfaces() == frozenset(), "a relayed attach attended"
+        await local.connect(record, "s1")
+        await local.viewer_watch(displaying=False)
+        assert runtime.attended_surfaces() == frozenset({"attach"})
+    finally:
+        await local.detach()
+        await remote.detach()
+        runtime.close()

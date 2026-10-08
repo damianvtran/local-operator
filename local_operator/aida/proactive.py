@@ -517,8 +517,14 @@ def reconcile(
     session_id: str,
     now_ms: int | None = None,
     class_reactive: bool = False,
+    attended: bool = True,
 ) -> ReconcileResult:
     """The in-session full-list reconcile. Pure file side effects: the ledger.
+
+    ``attended`` is whether a local human surface holds this session right now
+    (``Session._aida_greeting_may_land``). It gates ONE thing — arming the
+    greeting — and defaults ``True`` so every caller that predates it keeps its
+    behaviour; the fire-time check stays the authority either way.
 
     Order and content, in one place so the persist seam and the after-turn seam
     cannot diverge:
@@ -675,7 +681,12 @@ def reconcile(
     if not any(row.id == GREETING_WAKE_ID for row in kept):
         from local_operator.aida import onboarding as _onboarding
 
-        if _onboarding.greeting_armable(config_dir):
+        # ``attended`` as well as armable (review round 1, R-3): a fire withheld
+        # in a headless runtime goes back to ``requested``, and without this the
+        # SAME runtime's next persist would arm it again, due now, and withhold
+        # it again — a loop bounded only by the runtime's lifetime. The arm waits
+        # for a person exactly as the fire does.
+        if attended and _onboarding.greeting_armable(config_dir):
             kept.append(
                 WakeSchedule(
                     id=GREETING_WAKE_ID,

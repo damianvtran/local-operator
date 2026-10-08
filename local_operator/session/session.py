@@ -3873,6 +3873,11 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Live "a LOCAL human front end holds this session" probe, installed by
+        #: the serving runtime (``serving._install_interactivity_probe``) from
+        #: the connection table it owns. ``None`` until then, which the greeting
+        #: gate reads as "no runtime to ask" — see :meth:`_aida_greeting_may_land`.
+        self._aida_attended_probe: Callable[[], bool] | None = None
         #: Set by the deliver trampoline, consumed by the next persist, which
         #: is what stamps ``last_fired_at`` on the wake index entry. See
         #: :meth:`_persist_wake_schedules`.
@@ -19282,6 +19287,7 @@ class Session:
                 config_dir=config_dir(),
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
+                attended=self._aida_greeting_may_land(),
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -20856,26 +20862,57 @@ class Session:
         the greeting is spent where no person could engage with her and the
         cadence it gates starts on the strength of it.
 
-        ``human_surface_present`` is the harness's existing answer to "is a
-        human surface attached to THIS process" (``aida/activation.py``): true
-        for the TUI (a real tty) and for a daemon the desktop app governs
-        (``LOCAL_OPERATOR_DESKTOP_TOKEN``, read through the posture module's
-        single-reader invariant), false for ``lop exec`` under pipes, for the
-        wake supervisor's own ``lop serve`` and for the mobile daemon. Residual,
-        stated: a desktop daemon whose window has been closed still reads
-        attended, so the delivery may land in her session and be read at the
-        next open rather than being withheld — the conservative direction, and
-        the one that cannot lose a greeting.
+        THE PREDICATE: "a LOCAL attach or a live desktop pane holds THIS
+        session" — ``RuntimeServer.attended_surfaces``, read through the probe
+        the serving runtime installs. True for a TUI attached to the runtime
+        and for a desktop pane (lease, 45 s memory, or the app's record naming
+        this session); false for ``lop exec`` (no attach at all), the wake
+        supervisor's engagement, a relayed phone or peer attach. Focus is NOT
+        an input: the TUI reports none, and the desktop already decides when to
+        press ``greet`` from its own focus state.
+
+        WHY NOT ``activation.human_surface_present`` (the first version): it
+        asks about THIS PROCESS — a tty, or the desktop token in its env — and a
+        TUI's session runs in a detached runtime child spawned with
+        ``stdin=DEVNULL``, so it answered "nobody" for the one surface the
+        greeting is requested from most. It stays the answer for the one host
+        with no runtime around the session: an in-process session (no probe
+        installed), where the process IS the surface.
         """
         try:
+            probe = self._aida_attended_probe
+            if probe is not None:
+                return bool(probe())
             from local_operator.aida.activation import human_surface_present
 
             return human_surface_present()
         except Exception:  # noqa: BLE001 — a gate that cannot read its signal
             # must withhold: the whole point is that delivery waits for a
-            # person, and the row stays armed for the next attended run.
-            logger.debug("aida: could not read the human-surface signal", exc_info=True)
+            # person, and the request survives for the next attended moment.
+            logger.debug("aida: could not read the attended signal", exc_info=True)
             return False
+
+    def aida_attended(self) -> None:
+        """A local human surface just arrived: re-arm a withheld greeting NOW.
+
+        The doorbell for :meth:`_withhold_aida_greeting`. A withheld greeting
+        goes back to ``requested``, and the engine arms ``requested`` only on a
+        reconcile; a runtime still warm when the person returns would otherwise
+        hold the request until its next persist. Cheap for every session that
+        is not hers (one attribute read) and for hers when nothing is owed (the
+        reconcile is a no-op that persists only when something moved).
+        """
+        if not getattr(self, "_aida_duty", False):
+            return
+        try:
+            from local_operator.aida import onboarding
+
+            if onboarding.greeting_state(self._config_dir) != onboarding.GREETING_REQUESTED:
+                return
+        except Exception:  # noqa: BLE001 — the ledger is observation
+            logger.debug("aida: could not read the greeting ledger", exc_info=True)
+            return
+        self._spawn_background(self._aida_reconcile_now())
 
     def _withhold_aida_greeting(self, due: DueWake) -> None:
         """Put an unattended greeting fire back to ``requested`` (R-3).

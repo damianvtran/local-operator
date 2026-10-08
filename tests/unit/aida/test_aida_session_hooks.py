@@ -321,6 +321,46 @@ async def test_a_name_write_reaches_her_live_session(isolated_root: Path) -> Non
         await session.dispose()
 
 
+async def _wait_for_reply(session: Any) -> None:
+    """Block until the session holds an assistant message — on its EVENTS.
+
+    Re-tested after each event the session publishes, so it waits exactly as
+    long as the turn takes. It replaced a ``range(200)`` x 10 ms poll that went
+    red once in this lane at host load ~17 (AGENTS.md, "Wait on the event, never
+    on the clock"); the ceiling below is a deadlock guard, not a budget.
+    """
+    changed = asyncio.Event()
+    unsubscribe = session.subscribe(lambda *_: changed.set())
+
+    def _replied() -> bool:
+        # BOTH stores, because the assertions read both: ``history()`` is the
+        # in-memory list the turn appends to first, and the desktop's history
+        # window reads the TRANSCRIPT, whose durable append lands a beat later.
+        # Waiting on the first alone left the window empty (measured: the 10 ms
+        # poll this replaced only passed because it gave the writer that beat).
+        in_memory = any(getattr(m, "role", "") == "assistant" for m in session.history())
+        durable = any(
+            (e.payload.get("message") or e.payload).get("role") == "assistant"
+            for e in session._transcript.entries()
+            if isinstance(e.payload, dict)
+        )
+        return in_memory and durable
+
+    async def _loop() -> None:
+        while True:
+            changed.clear()
+            if _replied():
+                return
+            await changed.wait()
+
+    try:
+        await asyncio.wait_for(_loop(), 120.0)
+    except asyncio.TimeoutError:
+        raise AssertionError("no assistant reply was published: wedged, not slow") from None
+    finally:
+        unsubscribe()
+
+
 @pytest.mark.asyncio
 async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
     isolated_root: Path,
@@ -356,10 +396,7 @@ async def test_the_greeting_is_hidden_on_every_surface_and_stamps_delivery(
             id=onboarding.GREETING_WAKE_ID, message=trigger, next_due_at=1, hidden=True
         )
         await session._deliver_wake(DueWake(schedule=row, occurrence=1, final=True))
-        for _ in range(200):
-            if any(getattr(m, "role", "") == "assistant" for m in session.history()):
-                break
-            await asyncio.sleep(0.01)
+        await _wait_for_reply(session)
 
         # The model read the trigger.
         assert stream.requests, "her greeting turn never reached the provider"
@@ -460,12 +497,7 @@ async def test_an_unattended_fire_withholds_the_greeting_and_keeps_the_request(
                 await session_attended._deliver_wake(
                     DueWake(schedule=row, occurrence=2, final=True)
                 )
-                for _ in range(200):
-                    if any(
-                        getattr(m, "role", "") == "assistant" for m in session_attended.history()
-                    ):
-                        break
-                    await asyncio.sleep(0.01)
+                await _wait_for_reply(session_attended)
             finally:
                 activation.human_surface_present = original
             assert attended_stream.requests, "the attended fire must reach the provider"
@@ -474,3 +506,97 @@ async def test_an_unattended_fire_withholds_the_greeting_and_keeps_the_request(
             await session_attended.dispose()
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_probe_decides_and_a_detached_tui_is_attended(
+    isolated_root: Path,
+    headless_surface: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-3, second half: the gate reads the RUNTIME's connection table.
+
+    The first fire-time gate asked ``activation.human_surface_present`` — "does
+    THIS PROCESS have a tty or the desktop token". A TUI's session runs in a
+    detached runtime child spawned with ``stdin=DEVNULL``, so that answered
+    "nobody" for the most common surface the greeting is requested from, and
+    the greeting would have been withheld forever in exactly the case it exists
+    for. The ``headless_surface`` fixture reproduces that process-level answer
+    here; the runtime probe (what ``serving`` installs from
+    ``RuntimeServer.attended_surfaces``) must override it both ways.
+    """
+    from local_operator.aida import onboarding
+
+    session_id = "ffff88881111"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    try:
+        # No probe installed: the in-process fallback, which this fixture says
+        # is headless.
+        assert session._aida_greeting_may_land() is False
+        # A runtime with a LOCAL attach (the TUI) installed its probe: attended,
+        # even though this process has no tty — the case the first gate lost.
+        session._aida_attended_probe = lambda: True
+        assert session._aida_greeting_may_land() is True
+        # A runtime with nobody local (exec, supervisor, phone relay): withheld.
+        session._aida_attended_probe = lambda: False
+        assert session._aida_greeting_may_land() is False
+
+        # The doorbell: a request the withhold put back is re-armed the moment a
+        # local surface arrives, and nothing happens when nothing is owed.
+        calls: list[str] = []
+
+        async def _fake_reconcile() -> None:
+            calls.append("reconcile")
+
+        session._aida_duty = True
+        session._aida_reconcile_now = _fake_reconcile  # type: ignore[method-assign]
+        session.aida_attended()  # owed: nothing to re-arm
+        await asyncio.sleep(0.01)
+        assert calls == []
+        # ``fresh_install`` needs a provider; this root has no provider config,
+        # and the request's precondition is not what this test is about.
+        monkeypatch.setattr(onboarding, "provider_configured", lambda _root: True)
+        onboarding.request_greeting(isolated_root, "tui")
+        assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
+        session.aida_attended()
+        for _ in range(50):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        assert calls == ["reconcile"]
+    finally:
+        await session.dispose()
+
+
+def test_reconcile_does_not_arm_a_requested_greeting_for_nobody(
+    isolated_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without this the withhold is a loop: re-armed due-now, withheld, again.
+
+    ``Session._persist_wake_schedules`` reconciles on every persist, so a
+    headless runtime that withheld the greeting would arm it again on its next
+    write and fire it straight into the same withhold. The arm takes the same
+    attendance answer as the fire.
+    """
+    from local_operator.aida import onboarding, proactive
+
+    session_id = "ffff88882222"
+    state.update_state(isolated_root, session_id=session_id)
+    monkeypatch.setattr(onboarding, "provider_configured", lambda _root: True)
+    onboarding.request_greeting(isolated_root, "tui")
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
+
+    unattended = proactive.reconcile(
+        [], config_dir=isolated_root, session_id=session_id, now_ms=1_000, attended=False
+    )
+    assert not [r for r in unattended.schedules if r.id == onboarding.GREETING_WAKE_ID]
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_REQUESTED
+
+    attended = proactive.reconcile(
+        [], config_dir=isolated_root, session_id=session_id, now_ms=2_000, attended=True
+    )
+    rows = [r for r in attended.schedules if r.id == onboarding.GREETING_WAKE_ID]
+    assert len(rows) == 1 and rows[0].hidden is True
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_ARMED

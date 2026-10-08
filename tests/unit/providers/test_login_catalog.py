@@ -89,6 +89,12 @@ def test_every_shipped_login_row_has_a_picker_description_that_fits() -> None:
     # The recommended tag is one word, spelled once, and it is what the picker
     # and the CLI both say (D10).
     assert catalog.RECOMMENDED_TAG == "recommended"
+    # And the recommended row's PAINTED string fits too: the picker appends the
+    # tag, so the budget applies to short form + suffix. Without this the first
+    # row of the setup picker ellipsized its own recommendation while every
+    # short form passed the check above.
+    painted = f"{catalog.picker_description(catalog.RECOMMENDED_LOGIN)} — {catalog.RECOMMENDED_TAG}"
+    assert len(painted) <= catalog.PICKER_DESCRIPTION_BUDGET, (len(painted), painted)
 
 
 def test_a_row_with_no_short_form_falls_back_to_the_long_one() -> None:

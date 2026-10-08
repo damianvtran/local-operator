@@ -134,7 +134,11 @@ class LoginRow:
 #: Budget: ≤ 36 cells, so the widest of these still fits the picker's description
 #: column at an 80-column terminal alongside the widest name.
 PICKER_DESCRIPTIONS: dict[str, str] = {
-    "radient": "Browser sign-in; no key needed",
+    # Short on purpose: this row also carries `` — recommended`` (14 cells), and
+    # the WHOLE string must fit the budget below. "Browser sign-in; no key
+    # needed" was 30 and lost its tag to an ellipsis on the first row of the
+    # setup picker at 120 columns (round 1 re-capture).
+    "radient": "Sign in; no key needed",
     "radient-key": "Paste a Radient Pass key",
     "openai": "ChatGPT plan sign-in",
     "openai-device": "ChatGPT plan; code, no browser",
@@ -229,6 +233,12 @@ def picker_label(provider_id: str, fallback: str = "") -> str:
 #: designed for): the name column takes the longest label, the state column the
 #: longest state, and what is left is the description column. Enforced by the
 #: catalogue test, so a new row cannot land ellipsized.
+#:
+#: The budget is for what is PAINTED, which on the recommended row includes the
+#: `` — <RECOMMENDED_TAG>`` suffix the picker appends; the test counts it. The
+#: measured column in the real setup state is 41 cells (its state column is
+#: ``configure server``, five cells wider than ``needs login``), so 36 keeps a
+#: margin rather than sitting on the edge.
 PICKER_DESCRIPTION_BUDGET = 36
 
 #: The single spelling of the recommendation tag, so the picker, `lop login`,
