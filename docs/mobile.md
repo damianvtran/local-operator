@@ -281,7 +281,12 @@ serving still has its journal.
 `index.state` carries the honesty: `ready` (possibly with no ticks — a
 conversation with nothing written yet), `building` (a scan is in flight and
 `checkpoints` is the previous scan's; the client polls) or `error` (the last
-refresh failed — an unreadable journal must never render as "no checkpoints").
+refresh failed — a journal that fails to read after a successful stat must
+never render as "no checkpoints"; the mobile suite pins the unreadable
+(`chmod 000`) file → `error`). The bound is exactly that: a journal that
+cannot be `stat`'ed at all still maps to `missing` → `ready` + `[]` in the
+shared derivation — pre-existing, deferred: the fix changes the desktop rail's
+and `find`'s semantics and ships separately (recorded on PR #2068).
 `unsupported` cannot arise here: a conversation this relay cannot see locally
 is a 404, not a state.
 

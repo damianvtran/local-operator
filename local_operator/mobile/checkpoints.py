@@ -17,13 +17,19 @@ tail of the conversation, which is worse than no rail. The manifest is derived
 from the journal and covers EVERY turn, whether or not any frame ever loaded it.
 
 THE EMPTY ANSWER AND THE FAILED ANSWER ARE DIFFERENT CLAIMS, and ``index.state``
-is the manifest's own honest vocabulary — this module never flattens it.
-``ready`` with no checkpoints is a conversation with nothing written yet;
+is the manifest's own honest vocabulary — this module adds no flattening of its
+own. ``ready`` with no checkpoints is a conversation with nothing written yet;
 ``building`` means a scan is in flight and the entries served are the previous
 scan's (the rail paints them and polls — the desktop renderer's own discipline);
-``error`` is a refresh that failed, so an unreadable journal must never render
-as "no checkpoints". ``unsupported`` cannot arise here: a conversation this
-daemon cannot see locally is refused 404 before the derivation runs.
+``error`` is a refresh that failed — a journal that fails to read after a
+successful stat (the case the mobile suite pins: a ``chmod 000`` file) must
+never render as "no checkpoints". The bound is exactly that, and the residual
+is known: a journal that cannot be ``stat``'ed at all still maps to
+``missing`` → ``ready`` + ``[]`` in the shared derivation (``probe_index``
+catches any ``OSError``) — pre-existing, deferred: the fix changes the desktop
+rail's and ``find``'s semantics and ships separately (recorded on PR #2068).
+``unsupported`` cannot arise here: a conversation this daemon cannot see
+locally is refused 404 before the derivation runs.
 
 READ-ONLY, deliberately. Nothing here writes or dials a session, and the naming
 warm (``sessions.checkpoints.warm``) is a desktop-plane spend this route
@@ -59,4 +65,5 @@ async def manifest_payload(config_dir: Path | str, session_id: str) -> dict[str,
     from local_operator.session import transcript_index
 
     view = await transcript_index.checkpoints_view(config_dir, session_id)
-    return CheckpointManifest.model_validate(view).model_dump()
+    # JSON mode: match the desktop serializer for non-JSON-native fields.
+    return CheckpointManifest.model_validate(view).model_dump(mode="json")

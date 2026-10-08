@@ -4887,10 +4887,16 @@ def build_app(daemon: MobileDaemon):
         needed: a conversation nothing is serving still has its journal, which
         is where the manifest comes from.
 
-        The manifest's own states carry the honesty: an unreadable journal
-        answers ``index.state: "error"`` -- never the empty rail a ``ready``
-        manifest with no ticks means; a cold cache answers ``building`` while
-        the background scan runs, and the phone polls like the desktop rail.
+        The manifest's own states carry the honesty: a journal that fails to
+        READ after a successful stat (the case the mobile suite pins: a
+        ``chmod 000`` file) answers ``index.state: "error"`` -- never the empty
+        rail a ``ready`` manifest with no ticks means; a cold cache answers
+        ``building`` while the background scan runs, and the phone polls like
+        the desktop rail. The bound is exactly that: a journal that cannot be
+        STAT'ED at all still maps to ``missing`` → ``ready`` + ``[]`` in the
+        shared derivation -- pre-existing, deferred: the fix changes the
+        desktop rail's and ``find``'s semantics and ships separately (recorded
+        on PR #2068).
         """
         denied = gate(request)
         if denied is not None:

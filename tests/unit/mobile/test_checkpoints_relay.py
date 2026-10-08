@@ -15,9 +15,11 @@ suite and load-bearing on the client:
 * The manifest covers EVERY turn of the journal, derived with NO runtime: the
   phone's own projection is a bounded tail window, so a rail built from the
   frames a phone holds would silently mark only the tail it carries.
-* ``index.state`` keeps the empty answer and the failed answer apart: an
-  unreadable journal answers ``error``, and must never render as "no
-  checkpoints".
+* ``index.state`` keeps the empty answer and the failed answer apart: a
+  journal that fails to read after a successful stat answers ``error``, and
+  must never render as "no checkpoints" (the cell below pins the ``chmod 000``
+  file; the un-``stat``-able case is the shared derivation's -- deferred, see
+  PR #2068).
 * The rows are the desktop rail's own wire models; a declared-field move on
   those models reds the pin below before a phone can read a default the
   desktop never serves.
