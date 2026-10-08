@@ -17,6 +17,13 @@ MODE is one of (one frame per run, so a still is the state its filename claims):
     dismissed-back   ...after a re-render, a new ask, and a switch away and back
                      (clause 4, step 3: it must STILL be closed)
     list-tab         the auto-opened list after Tab handed it the caret
+    secret-refusal   a credential-only ask's card, with a refused chat submitted under it
+                     (the notice's OPEN-CARD copy; D2/U2 round 1)
+    secret-refusal-closed
+                     the same, with the surface closed by f4 first (the DOOR copy)
+    secret-refusal-list
+                     two credential asks: the auto-opened LIST, refused chat (the
+                     Tab-then-open copy)
 
 THE SAME SCRIPT RUNS ON BOTH BUILDS IT CAPTURES, which is why it never imports the
 policy module: the before-frames come from a detached worktree of ``origin/main``,
@@ -43,6 +50,7 @@ its frames looked fine while answering neither question).
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -154,6 +162,24 @@ SETTLED = [
 ]
 
 
+def _secret_row(ask_id: str = "s1") -> dict[str, Any]:
+    """One wire row whose only question is a CREDENTIAL (the D9 refusal's subject)."""
+    return {
+        **_row(ask_id, "unused"),
+        "questions": [
+            {
+                "id": "DEPLOY_KEY",
+                "question": "Paste the deploy key for the cutover",
+                "options": [],
+                "multi": False,
+                "recommended": None,
+                "secret": True,
+                "persist": False,
+            }
+        ],
+    }
+
+
 def _turns() -> list[Any]:
     """Four turns of conversation, so a surface is judged against something to read."""
     out: list[Any] = []
@@ -196,6 +222,9 @@ async def main() -> None:
         "dismissed-open": TWO,
         "dismissed-closed": TWO,
         "dismissed-back": TWO,
+        "secret-refusal": [_secret_row()],
+        "secret-refusal-closed": [_secret_row()],
+        "secret-refusal-list": [_secret_row("s1"), _secret_row("s2")],
     }
     if mode not in target_rows:
         raise SystemExit(f"unknown mode {mode!r}; one of {sorted(target_rows)}")
@@ -219,6 +248,20 @@ async def main() -> None:
             elif mode == "list-tab":
                 await pilot.press("tab")
                 await _pump(pilot, 10)
+            elif mode.startswith("secret-refusal"):
+                if mode == "secret-refusal-closed" and app._ask_mode:
+                    # Close the surface the way the notice's own copy must not
+                    # assume away: f4 TOGGLES, and on the auto-opened card this
+                    # press is the deliberate close (it records the dismissal).
+                    # Guarded like the dismissed modes: on a build that never
+                    # auto-opened, f4 would OPEN and photograph the other state.
+                    await pilot.press("f4")
+                    await _pump(pilot, 10)
+                composer = app._editor()
+                composer.load_text("PASTED-CREDENTIAL-SENTINEL")
+                await _pump(pilot, 4)
+                await pilot.press("enter")
+                await _pump(pilot, 8)
             elif mode.startswith("dismissed"):
                 # Close it the way a user does (the toggle) — but only if something
                 # opened: on a build with no open-by-default the same press would OPEN
@@ -238,9 +281,21 @@ async def main() -> None:
 
             await pilot.pause()
             save_capture(app, out)
+            # `focus` is joined to the geometry JSON beside the frame (round-1
+            # NIT-1): the caret claim in the README used to rest on this stdout
+            # line alone, and a reader auditing the JSON found nothing.
+            geometry = Path(out).with_suffix(".geometry.json")
+            data = json.loads(geometry.read_text())
+            data["focus"] = type(app.focused).__name__
+            geometry.write_text(json.dumps(data, indent=2) + "\n")
+            # The same script runs on trees older than the refusal notice itself (the
+            # feature baseline), so the read degrades to "" rather than crashing there.
+            notice = getattr(app, "_ask_secret_notice", None)
+            notice_text = notice.text() if notice is not None else ""
             print(
-                f"{mode}: ask_mode={app._ask_mode} focus={type(app.focused).__name__} "
+                f"{mode}: ask_mode={app._ask_mode} focus={data['focus']} "
                 f"conversation={app._conversation_id()}"
+                + (f" notice={notice_text!r}" if notice_text else "")
             )
 
 

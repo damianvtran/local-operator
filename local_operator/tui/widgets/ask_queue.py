@@ -870,18 +870,21 @@ class AskQueueList(Widget):
     HEADER_ROWS = 1
 
     #: The header's hints, in the order they are SPENT — earlier entries are
-    #: kept longest, so the irreversible `d` outlives the reversible tips when
-    #: the row runs out of room (UX round 1, U7 asked for `d` to be named
-    #: precisely because it cannot be undone).
+    #: kept longest.
     #:
-    #: `d` LEADS since review round 2 (D3): the spend order is by
-    #: IRREVERSIBILITY, and `enter` already carries its own cue on the row (the
-    #: `❯` caret marks the selected one), so at a width where only one hint fits
-    #: it has to be the hint with no other teacher. The base named `d decline`
-    #: at 100x30 and the first cut of this header had silently stopped doing so.
+    #: `enter` LEADS since the open-by-default round (U3/D4): the auto-opened
+    #: surface teaches `⇥` while passive, and the moment the user pressed it the
+    #: ladder named only `d decline` — the primary action was the first casualty
+    #: at the width the repo assumes. The earlier order spent `d` first by
+    #: IRREVERSIBILITY (review round 2, D3) on the argument that `enter` already
+    #: carries its own cue in the row's `❯` caret; the walk found the caret says
+    #: WHICH row, not that Enter takes it — and on the passive→live handover the
+    #: caret arrives in the same frame the hint is shed, so `enter answer` is
+    #: the hint that cannot be spared. `d` still outlives `x`: a decline cannot
+    #: be undone, and `x` is only ever offered over a timed-out row.
     HEADER_HINTS = (
-        "d decline",
         "enter answer",
+        "d decline",
         "x dismiss",
         PASSIVE_TAB_HINT,
         "esc collapse",
@@ -1381,9 +1384,13 @@ class AskQueueList(Widget):
         * The DRAWER CLAUSE yields next, WHOLE: the segments already carry the
           three counts, so at a narrow width the sentence adds nothing the
           numbers do not say. Dropping it is why this is one line and not two.
-        * The HINTS yield first, left to right, whole and never mid-phrase —
-          design round 2's D12, which is what stops the header wrapping and
-          every pointer hit below it shifting by a row.
+        * The HINTS yield left to right, whole and never mid-phrase — design
+          round 2's D12, which is what stops the header wrapping and every
+          pointer hit below it shifting by a row — with ONE exception: the
+          FIRST hint outbids the drawer clause (U3), which already yields to
+          the numbers at a narrow width and is measured below with the first
+          hint reserved, so the surface that teaches a key is never the
+          surface that names no key at all.
 
         Atoms rather than a string because the segments are PRESSED controls:
         the painter inks them differently and the hit test (``_segment_spans``)
@@ -1431,19 +1438,28 @@ class AskQueueList(Widget):
         # nothing; the drawer count goes first because the three segments below
         # it already carry those numbers.
         head: list[HeaderAtom] = []
+        # THE FIRST HINT OUTBIDS THE DRAWER CLAUSE (U3). The clause's own rung
+        # already argues it is expendable at a narrow width ("the segments carry
+        # the three counts"), but the ladder used to spend it WITHOUT leaving
+        # room for a single hint: at 80 columns — the repo's own default
+        # assumption — the auto-opened surface named no key at all. The rungs
+        # below therefore measure with the first hint RESERVED, so the clause
+        # yields to the hint the way it already yields to the numbers.
+        hints = self.header_hints()
+        reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
-            if _atoms_width([*atoms, *with_clause, *_seg_block(True)]) <= width:
+            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *reserve]) <= width:
                 head = with_clause
         if not head and subject:
             candidate = [HeaderAtom(subject, "fg")]
-            if _atoms_width([*atoms, *candidate, *_seg_block(True)]) <= width:
+            if _atoms_width([*atoms, *candidate, *_seg_block(True), *reserve]) <= width:
                 head = candidate
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
         kept: list[HeaderAtom] = []
-        for hint in self.header_hints():
+        for hint in hints:
             prefix = "  ·  "
             if _atoms_width([*atoms, *kept, HeaderAtom(prefix + hint, "muted")]) > width:
                 break
@@ -1631,7 +1647,7 @@ class AskQueueList(Widget):
 
 
 def expiry_text(row: AskRow, now_ms: int) -> str:
-    """``expires in 42m`` / ``timed out`` / ``urgent`` — one honest word per state.
+    """``expires in 42 m`` / ``timed out`` / ``urgent`` — one honest word per state.
 
     Derived from ``expires_at`` against the client's own clock, which is what
     §5 says the countdown is: the server states a deadline, the client decides
@@ -1650,19 +1666,19 @@ def expiry_text(row: AskRow, now_ms: int) -> str:
     if remaining_s <= 0:
         return "urgent · expiring" if row.urgent else "expiring"
     if remaining_s < 60:
-        left = f"{remaining_s}s"
+        left = f"{remaining_s} s"
     elif remaining_s < 3600:
-        left = f"{remaining_s // 60}m"
+        left = f"{remaining_s // 60} m"
     else:
-        left = f"{remaining_s // 3600}h"
+        left = f"{remaining_s // 3600} h"
     return f"urgent · expires in {left}" if row.urgent else f"expires in {left}"
 
 
 def expiry_room(row: AskRow, expiry: str) -> int:
     """Cells a row's ``  <expiry>`` TAIL may need, over its whole life.
 
-    The tail CHANGES WIDTH as the clock runs — ``10m`` is one cell wider than
-    ``9m``, the words change unit at the hour and minute boundaries, and
+    The tail CHANGES WIDTH as the clock runs — ``10 m`` is one cell wider than
+    ``9 m``, the words change unit at the hour and minute boundaries, and
     ``expiring`` replaces them all — so a question that filled its line got
     RE-CUT by its own countdown: ``…which shard …`` became ``…which shard s…``
     without the user touching anything, on a surface whose whole promise is
@@ -1672,7 +1688,7 @@ def expiry_room(row: AskRow, expiry: str) -> int:
 
     Derived from the row's OWN span (``expires_at - created_at``, the deadline
     the ask was given) rather than a global constant: a constant wide enough
-    for ``expires in 999h`` would eat ten cells of question from every ask
+    for ``expires in 999 h`` would eat ten cells of question from every ask
     forever. ``expiry_text`` prints minutes and seconds below an hour — always
     at most two digits — so only the hours form can be wider, and the digits
     it can reach are the ones the row's own span implies.
@@ -1688,7 +1704,7 @@ def expiry_room(row: AskRow, expiry: str) -> int:
     else:
         prefix = "urgent · expires in " if row.urgent else "expires in "
         span_s = (row.expires_at - row.created_at) // 1000 if row.created_at else 0
-        widest = cell_len(prefix) + max(2, len(str(max(0, span_s) // 3600))) + 1
+        widest = cell_len(prefix) + max(2, len(str(max(0, span_s) // 3600))) + 2
     return 2 + max(widest, cell_len(expiry))
 
 

@@ -3,7 +3,13 @@
 Run from the repository root (it starts its own fixture, on a free port)::
 
     PYTHONPATH=. .venv/bin/python scripts/mobile_asks_open_capture.py OUTDIR LABEL \
-        --expect before|after
+        --expect before|after [--theme localOperatorLight]
+
+``--theme`` (round-1 design D10) pins a palette for the whole run by writing the
+relay's own theme item (``lo-mobile-theme``, ``theme.ts``'s key) before the first
+document script runs; the sheet reads theme tokens, so a light-palette set is the
+single-axis coverage the default dark frames cannot give. Absent, the default
+palette is what every other frame here shows.
 
 THE SAME SCRIPT RUNS ON BOTH BUILDS IT PHOTOGRAPHS, which is why it never imports the
 policy module: the BEFORE set comes from a detached worktree of the pre-change build (whose
@@ -422,6 +428,7 @@ def main() -> None:
     build = sys.argv[sys.argv.index("--expect") + 1]
     if build not in ("before", "after"):
         raise SystemExit("--expect must be 'before' or 'after'")
+    theme = sys.argv[sys.argv.index("--theme") + 1] if "--theme" in sys.argv else ""
     outdir.mkdir(parents=True, exist_ok=True)
     expected = expectations(build)
 
@@ -432,7 +439,12 @@ def main() -> None:
     base = f"http://127.0.0.1:{port}"
     fixture = Fixture(port, password, outdir / f"{label}-fixture.log")
     chrome = Chrome()
-    report: dict[str, Any] = {"build": build, "fixture": fixture.banner, "viewport": VIEWPORT}
+    report: dict[str, Any] = {
+        "build": build,
+        "fixture": fixture.banner,
+        "viewport": VIEWPORT,
+        "theme": theme or "default",
+    }
     failures: list[str] = []
 
     def frame(name: str, **extra: Any) -> dict[str, Any]:
@@ -483,6 +495,19 @@ def main() -> None:
         page = fixture_page
         width, height = VIEWPORT
         page.metrics(width, height)
+        if theme:
+            # The palette is a boot-time read (``theme.ts`` initTheme, before the first
+            # paint), so the item has to exist before the first document script runs; an
+            # on-new-document script is the only hook that early, and it survives the
+            # run's reloads. The key is the app's own (lo-mobile-theme).
+            page.send(
+                "Page.addScriptToEvaluateOnNewDocument",
+                source=(
+                    "try { localStorage.setItem('lo-mobile-theme', "
+                    + json.dumps(theme)
+                    + "); } catch (error) {}"
+                ),
+            )
         page.goto(f"{base}/login")
         page.js(
             "(() => { const f = document.querySelector('form');"

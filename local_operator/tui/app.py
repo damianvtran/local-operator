@@ -2939,7 +2939,7 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 #:
 #: ``expiry_text`` reads ``expires_at`` against the client clock AT PAINT TIME
 #: (§5's copy contract) — and every paint used to be driven by a frontend
-#: snapshot, so a surface the user had left open froze its own "expires in 42m"
+#: snapshot, so a surface the user had left open froze its own "expires in 42 m"
 #: until the next wire event: a deadline could pass while the row still named a
 #: minute that no longer existed. This interval is what re-derives the copy
 #: without an event, at the fine end of the 30-60 s band the audit set.
@@ -3133,11 +3133,25 @@ CREDENTIAL_HELD_NOTICE = "a credential is in this draft — type --forget-all to
 #: Said when a chat message is refused because the ask in front of the user wants
 #: a CREDENTIAL (a secret-only question). The composer is an ordinary chat box, so
 #: whatever is typed there is sent to the model and kept in the transcript; the
-#: card's own hidden field is the only place a secret is masked and handed to the
-#: ask instead. Names the way out in the repo's voice (the dock's own key), and is
-#: kept short for the same ellipsis budget as the sentence above.
-ASK_SECRET_REFUSAL = (
-    "an ask wants a credential — enter it in the ask card's hidden field (f4), not here"
+#: card's own `Value` row (its hidden-as-you-type field) is the only place a
+#: secret is masked and handed to the ask instead.
+#:
+#: THREE SENTENCES, ONE PER STATE (D2/U2, round 1): `f4` TOGGLES, so on a surface
+#: the open-by-default policy already opened — the default state for a first-
+#: timer — "press f4" would CLOSE the very thing it points at, and the frame then
+#: taught both meanings of the key at once. Each sentence names the route the
+#: surface is offering right now: the door while it is closed, the Tab handover
+#: on an open card, Tab-then-open on a list. The field is named as the card names
+#: it ("the Value row" / "hidden as you type"), never as a "hidden field". Kept
+#: to one row at 100 columns, like the sentence above.
+ASK_SECRET_REFUSAL_CLOSED = (
+    "an ask wants a credential — open the card (f4) and type it into the Value row, not here"
+)
+ASK_SECRET_REFUSAL_OPEN_CARD = (
+    "an ask wants a credential — press ⇥ to reach the Value row (hidden as you type), not here"
+)
+ASK_SECRET_REFUSAL_OPEN_LIST = (
+    "an ask wants a credential — press ⇥, open the ask's card, then use its Value row, not here"
 )
 
 #: How long after a terminal resize the floating overlay cards re-measure
@@ -5686,7 +5700,7 @@ class OperatorApp(App[None]):
         #: draft typed into a question survives collapsing and is restored on
         #: re-expand (R7: "collapsing preserves both drafts").
         self._ask_drafts: dict[str, Any] = {}
-        #: The one row that says "a credential belongs in the card's hidden field",
+        #: The one row that says "a credential belongs in the card's Value row",
         #: held so a second refused Enter restates it in place instead of stacking a
         #: second copy (the discipline ``_composer_refusal_notice`` follows for the
         #: reconnect refusal, UX U1). Its OWN slot rather than that one: the two
@@ -26081,7 +26095,7 @@ class OperatorApp(App[None]):
     #   and the timeout is still the queue's, off in the runtime, so the timer
     #   is not a second authority on when an ask dies: it exists because a
     #   derivation that only runs on a frontend snapshot FREEZES when the wire
-    #   goes quiet, which is how "expires in 42m" outlived its own deadline on
+    #   goes quiet, which is how "expires in 42 m" outlived its own deadline on
     #   a surface the user was looking at.
 
     def _sync_ask_surface(
@@ -26158,8 +26172,7 @@ class OperatorApp(App[None]):
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
-        if self._ask_secret_notice is not None and not self._head_ask_wants_a_secret():
-            self._retire_ask_secret_refusal()
+        self._refresh_ask_secret_notice()
         #: The wire's OWN tally and its truncation marker, kept beside the rows so
         #: the list can be MOUNTED with them: a list built from the current
         #: snapshot has to state the same count its next ``set_rows`` would, or
@@ -26633,6 +26646,7 @@ class OperatorApp(App[None]):
             self._unmount_prompt(card)
         if listing is not None:
             self._unmount_prompt(listing)
+        self._refresh_ask_secret_notice()
 
     def _collapse_asks(self, *, by_user: bool = False) -> None:
         """Leave the EXPANDED state: take the surface down, give the composer back.
@@ -26709,7 +26723,7 @@ class OperatorApp(App[None]):
         time from the row's own deadline, so nothing else in the app has to be
         told the clock moved — but a derivation that only ever runs on a
         frontend snapshot freezes when the wire goes quiet, which is how an
-        open list kept saying "expires in 42m" for a deadline that had already
+        open list kept saying "expires in 42 m" for a deadline that had already
         passed. This interval is the missing event. One timer repaints every row
         from one ``now`` (not a timer per row), and it is armed on the ROWS
         being present rather than on the list being mounted: the list can be
@@ -26729,7 +26743,7 @@ class OperatorApp(App[None]):
         # THE ACTIVE SCOPE'S ROWS ARM THE CLOCK (round 2: F14). This read
         # ``self._ask_rows`` — the CURRENT session's rows — so a FLEET list with
         # no current-session asks (the ordinary case at that door: the note
-        # counts OTHER sessions) armed nothing, and its `expires in 41m` stayed
+        # counts OTHER sessions) armed nothing, and its `expires in 41 m` stayed
         # frozen at the ``now_ms`` the rows were mounted with. F1 gave the two
         # teardown checks this same treatment; the clock is the third reader.
         active_rows = self._ask_fleet_rows if self._ask_scope == SCOPE_FLEET else self._ask_rows
@@ -26794,6 +26808,24 @@ class OperatorApp(App[None]):
             return SHELL_PLACEHOLDER
         return "Draft a message…" if connection else editor.resting_placeholder
 
+    def _drawable_questions(self, row: AskRow) -> list[Any] | None:
+        """The row's questions as the CARD would draw them, or ``None`` when it cannot.
+
+        ONE reader for the two seams that must agree about a row (Q-1, round 1):
+        the card mounts only for questions ``AskQuestion`` accepts, and the chat
+        refusal (``_head_ask_wants_a_secret``) may only point at a card that can
+        exist. A row carrying something the validator refuses (a secret question
+        with options, a truncated question) cannot be drawn anywhere, so a
+        refusal would name a door that cannot open while protecting nothing —
+        the row is still declinable from the list.
+        """
+        from local_operator.harness.types import AskQuestion
+
+        try:
+            return [AskQuestion.model_validate(dict(question)) for question in row.questions]
+        except Exception:  # noqa: BLE001 - a malformed row must not break the dock
+            return None
+
     def _head_ask_wants_a_secret(self) -> bool:
         """Whether the ask the user would answer FIRST is a credential-only question.
 
@@ -26809,21 +26841,66 @@ class OperatorApp(App[None]):
         secret row would refuse chat for an ask that is mostly about something
         else. The head is the first ANSWERABLE row, because that is the ask the
         bar names and the f4 key opens.
+
+        A head the card cannot DRAW is not guarded (Q-1, round 1): its Value row
+        exists nowhere, and no text path can answer it, so the refusal would
+        trap the composer behind a door that cannot open — coherence with the
+        mount, which abandons the same row with a system notice.
         """
         head = next((row for row in self._ask_rows if row.answerable), None)
         if head is None or not head.questions:
             return False
+        if self._drawable_questions(head) is None:
+            return False
         return all(bool(question.get("secret")) for question in head.questions)
+
+    def _ask_secret_refusal_text(self) -> str:
+        """The refusal sentence for the route the ask surface offers RIGHT NOW.
+
+        State-aware by construction (D2/U2, round 1): the surface identity IS
+        the state, read from what is mounted rather than from a flag, so the
+        sentence cannot disagree with the frame about whether a card is up.
+        """
+        if self._ask_card is not None:
+            return ASK_SECRET_REFUSAL_OPEN_CARD
+        if self._ask_list is not None:
+            return ASK_SECRET_REFUSAL_OPEN_LIST
+        return ASK_SECRET_REFUSAL_CLOSED
 
     def _say_ask_secret_refusal(self) -> None:
         """Say where a credential goes — ONE row, restated while the state lasts."""
+        text = self._ask_secret_refusal_text()
         held = self._ask_secret_notice
         if held is not None and held.is_attached:
-            held.restate(ASK_SECRET_REFUSAL, "warning")
+            if held.text() != text:
+                held.restate(text, "warning")
             return
-        notice = NoticeBlock(ASK_SECRET_REFUSAL, "warning")
+        notice = NoticeBlock(text, "warning")
         self._ask_secret_notice = notice
         self._append_block(notice)
+
+    def _refresh_ask_secret_notice(self) -> None:
+        """Keep the refusal row's sentence true as the route it names changes.
+
+        The copy is state-aware (D2/U2), so a surface that opens or closes under
+        a standing row must move the row's sentence with it, or the frame again
+        teaches `f4` both ways. Both directions route through here — the row
+        going down when the ask no longer wants a secret is the same question
+        as the sentence moving — so the two can never disagree about when the
+        state ended.
+        """
+        held = self._ask_secret_notice
+        if held is None:
+            return
+        if not held.is_attached:
+            self._ask_secret_notice = None
+            return
+        if not self._head_ask_wants_a_secret():
+            self._retire_ask_secret_refusal()
+            return
+        text = self._ask_secret_refusal_text()
+        if held.text() != text:
+            held.restate(text, "warning")
 
     def _retire_ask_secret_refusal(self) -> None:
         """Take the refusal row down once no head ask wants a credential.
@@ -27217,6 +27294,7 @@ class OperatorApp(App[None]):
         # PASSIVE list (the policy's mount) leaves the caret exactly where it was.
         if not passive:
             widget.focus()
+        self._refresh_ask_secret_notice()
 
     def _mount_ask_card(
         self, row: AskRow, *, from_list: bool = False, caret: str = CARET_TAKE
@@ -27237,13 +27315,10 @@ class OperatorApp(App[None]):
         (the default) takes the caret over a draft; the open-by-default policy mounts
         with ``CARET_KEEP`` and the card leaves the keyboard where it was.
         """
-        from local_operator.harness.types import AskQuestion
-
         # `_clear_ask_surface` and NOT `_collapse_asks`: see `_mount_ask_list`.
         self._clear_ask_surface()
-        try:
-            questions = [AskQuestion.model_validate(dict(q)) for q in row.questions]
-        except Exception:  # noqa: BLE001 - a malformed row must not break the dock
+        questions = self._drawable_questions(row)
+        if questions is None:
             logger.warning("ask %s carries questions this surface cannot draw", row.ask_id)
             self._system_notice(
                 "that question cannot be shown here — answer it from another surface",
@@ -27277,6 +27352,7 @@ class OperatorApp(App[None]):
                 card.restore_state(draft)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("could not restore an ask draft", exc_info=True)
+        self._refresh_ask_secret_notice()
 
     def _abandon_ask_surface(self) -> None:
         """Give up on mounting a card without leaving ask mode stranded.

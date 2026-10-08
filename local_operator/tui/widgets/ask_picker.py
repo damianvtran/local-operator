@@ -3099,7 +3099,12 @@ class AskPickerScreen(Container):
     def _row_ground(self, index: int) -> Style:
         """The row's background: selection by HUE, hover additive on top of it.
 
-        The same three steps the ``/resume`` picker paints on the same ``overlay``
+        A PASSIVE card marks no row (design+UX round 1, D1/U1): the tint is the
+        selection's fill and the keyboard is elsewhere, so the selected row keeps
+        the plain ground exactly like every other row — the list gates its own
+        selection paint on the same property.
+
+        Otherwise the same three steps the ``/resume`` picker paints on the same ``overlay``
         card, and for the reason recorded on ``tint-select`` in ``theme.py``: pure
         elevation cannot carry selection here (surface->raised measures 1.096:1),
         so a bare caret left a mouse user with almost nothing saying which row a
@@ -3109,7 +3114,7 @@ class AskPickerScreen(Container):
         user reached for the mouse.
         """
         hovered = index == self._hovered
-        if index == self.state.selected:
+        if index == self.state.selected and not self.passive:
             token = "tint-select-hi" if hovered else "tint-select"
         elif hovered:
             token = "tint-select"
@@ -3186,8 +3191,18 @@ class AskPickerScreen(Container):
         1.096:1), and the caret sits two columns to its left. The caret is
         ``muted`` and not the accent for the reason the command picker records:
         a second green glyph beside a green label reads as a duplicated caret.
+
+        A PASSIVE card paints none of that ink (design+UX round 1, D1/U1): a card
+        the open-by-default policy mounted while the caret is elsewhere
+        (:attr:`passive`) owns no key the composer can spare, and the accent's own
+        rule — "what Enter will take" — is a claim about a keyboard that is not
+        here. The walk showed the strongest reading of the caret is "press 1", and
+        that key lands in the composer instead, so the caret, the bright ordinal
+        and the accent all yield together (the list gates the same three). The
+        ``recommended`` badge is untouched: it is a statement about the options,
+        not about the keys, and it never depended on ``selected``.
         """
-        selected = index == self.state.selected
+        selected = index == self.state.selected and not self.passive
         accent = ground + Style(color=theme_mod.semantic_color("accent"))
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(

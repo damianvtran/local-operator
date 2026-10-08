@@ -1120,9 +1120,9 @@ async def test_a_passive_list_paints_what_the_keyboard_can_do_and_nothing_it_can
         live = listing.render().plain
         assert "❯" in live
         assert f"{TAB_HINT_KEY} answer here" not in live
-        # The header sheds hints by WIDTH, so which live hint survives at 100 columns is the
-        # shed ladder's business; that it names at least one key that works is this cell's.
-        assert "enter answer" in live or "d decline" in live
+        # `enter answer` leads the shed ladder since U3/D4, so at 100 columns the
+        # hint the user just earned by pressing Tab is the one that survives.
+        assert "enter answer" in live, live
 
         def column(text: str, question: str) -> int:
             return next(line for line in text.splitlines() if question in line).index(question)
@@ -1130,6 +1130,96 @@ async def test_a_passive_list_paints_what_the_keyboard_can_do_and_nothing_it_can
         # The marker column is kept (blank) while passive, so taking the caret moves no row.
         for question in ("Which region?", "Which tier?"):
             assert column(passive, question) == column(live, question), question
+
+
+async def test_a_passive_card_paints_what_the_keyboard_can_do_and_nothing_it_cannot(enabled):
+    """The card mirror of the list's cell (D1/U1): no caret, no accent, no claim.
+
+    The auto-opened card was for one round visually identical to an engaged one —
+    caret, tint band and the accent-green label, all claiming "Enter takes this" —
+    while ``answer_keys()`` was empty and the obvious keys went to the composer.
+    UX walked it: ``1`` then Enter posted an unintended chat message. The ink is
+    gated on passivity exactly as the list's is; this cell replays the walk.
+    """
+    session = _Conversation("conv-a", [_ask("a1", "Which region?")])
+    app = _app(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        assert await _until(pilot, lambda: _surface(app) == "card"), _surface(app)
+        card = _cards(app)[0]
+        assert card.passive is True
+
+        from rich.color import Color
+
+        from local_operator.tui import theme as theme_mod
+
+        def ink_at(text, needle):
+            start = text.plain.index(needle)
+            for span in text.spans:
+                if span.start <= start < span.end:
+                    return span.style.color if span.style else None
+            return None
+
+        label = card.question.options[0].label
+        # ``semantic_color`` hands back the hex; a span's style carries rich's parsed
+        # ``Color``, and the two only compare equal through a common parse.
+        accent = Color.parse(theme_mod.semantic_color("accent"))
+        passive_lines = card.render_lines_for_test()
+        assert all(
+            "❯" not in line for line in passive_lines
+        ), "the card marks a row while the keyboard is elsewhere"
+        assert (
+            ink_at(card._card_text(), label) != accent
+        ), "the accent claims what Enter will take on a card that owns no key"
+        assert card._row_ground(0) == card._row_ground(
+            1
+        ), "the selected row keeps the selection fill while no key can reach it"
+
+        # UX's walk, replayed: the obvious keys go to the composer — where the
+        # footer says the caret is — and no keystroke settles the ask.
+        await pilot.press("1")
+        await _pump(pilot)
+        assert app._editor().text == "1", "the digit did not land in the composer"
+        assert session.answered == [], "a digit answered a question nobody engaged"
+        await pilot.press("enter")
+        await _pump(pilot)
+        assert session.prompts == ["1"], "Enter did not post the composer's text"
+        assert _surface(app) == "card", "a keystroke the card refused settled the ask"
+
+        # Engaged (the Tab handover), every cue comes back.
+        await pilot.press("tab")
+        await _pump(pilot)
+        assert card.passive is False
+        live_lines = card.render_lines_for_test()
+        assert any("❯" in line for line in live_lines), "the caret never came back"
+        assert ink_at(card._card_text(), label) == accent
+        assert card._row_ground(0) != card._row_ground(1)
+
+
+async def test_the_first_hint_outbids_the_drawer_clause_at_80_columns(enabled):
+    """U3: at the repo's own default size the header must still name a key.
+
+    At 80 columns the drawer sentence, the filter chips and any hint cannot fit
+    together. The ladder spent the hints first, so the auto-opened surface named
+    no key at all — the one thing this feature exists to teach. The clause now
+    yields to the FIRST hint the way it already yields to the numbers: ``⇥``
+    while passive, ``enter answer`` after Tab.
+    """
+    session = _Conversation("conv-a", [_ask("a1", "Which region?"), _ask("a2", "Which tier?")])
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        assert await _until(pilot, lambda: _surface(app) == "list"), _surface(app)
+        listing = app.query_one(AskQueueList)
+        passive_header = listing.header_text(80)
+        assert f"{TAB_HINT_KEY} answer here" in passive_header, passive_header
+        await pilot.press("tab")
+        await _pump(pilot)
+        live_header = listing.header_text(80)
+        assert "enter answer" in live_header, live_header
+        assert (
+            "questions waiting" not in live_header
+        ), "the drawer clause should have yielded to the hint, not the other way"
 
 
 async def test_the_surface_that_opened_on_its_own_can_always_be_closed_and_reopened(enabled):
