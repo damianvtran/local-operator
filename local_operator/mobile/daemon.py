@@ -5373,6 +5373,30 @@ def build_app(daemon: MobileDaemon):
             row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
 
+    async def api_schedules(request: Request) -> Response:
+        """What is ARMED on this machine: the machine-wide wake and monitor
+        indexes, in one answer (the phone's Schedules surface reads both).
+
+        The relay half of ``GET /v1/desktop/wakes`` and ``GET /v1/desktop/monitors``,
+        index-backed for the same reason asks is: a schedule outlives the
+        runtime it was armed from, so this answer must not need one — one
+        directory scan per store, no session opened and no owner dialled. The
+        two families share the answer because they share every surface they
+        are drawn on (the TUI paints both into its single wake band,
+        ``wake_panel``), so one fetch feeds the phone's list.
+
+        An unreadable index is NOT an empty list: each listing carries its
+        store's own ``read_error`` — see ``local_operator/mobile/schedules.py``,
+        which mirrors the desktop listings row for row.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile.schedules import list_payload
+        from local_operator.paths import config_dir
+
+        return JSONResponse(await asyncio.to_thread(list_payload, config_dir()))
+
     async def api_commands(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
@@ -6326,6 +6350,12 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
+        # The armed index (mobile parity, read half): one fetch feeds the
+        # phone's Schedules surface — the machine-wide wakes and monitors
+        # listings, straight off the derived indexes. Read-only by design:
+        # arming and cancelling stay on the terminal/desktop until the write
+        # half ships.
+        Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
