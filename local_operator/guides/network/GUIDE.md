@@ -702,8 +702,8 @@ that device still needs), the model and provider logins it serves or borrows
 (`lop network credentials`), a git identity seeded from this device's where the
 node has none (one it already has is never overwritten), and the run's own
 provisioning receipts — `invite`, `pre_read`, `install`, `join`, `anchor`,
-`relay`, `grants`, `verify` — readable in `lop network approvals run <id>
---json`.
+`relay`, `grants`, `provision`, `verify` — readable in
+`lop network approvals run <id> --json`.
 
 Everything else a node must have on its own disk, or borrow per use. The four
 limits below are the ones the live remote-node E2E on `cloud-node-1` paid for.
@@ -714,8 +714,8 @@ the side it runs on.
 ### Credentials are grants with scopes, not blanket copies
 
 A push that the node's git helper cannot serve — a repository outside the
-owner's designation, or any push on a device whose grant carried no list — is
-refused exactly like a missing login: `fatal: could not read Username for
+owner's designation, or any push on a device that holds no list — is refused
+exactly like a missing login: `fatal: could not read Username for
 'https://github.com'`, with git exiting 128, because the helper refuses by
 silence. That was the first wall of the remote-node E2E, and it is the
 fail-closed design, not a broken share. The `github` credential is never copied
@@ -753,10 +753,12 @@ rows rather than as a pass. Build parity is not a nit: the readiness `build`
 row is ADMISSION-class — the class that holds the onboarding verdict — so a
 node behind this device is not "ready, with caveats". Read parity from
 `lop network ready`'s build row: `cloud-node-1 runs the same build as this
-device` when level; otherwise it names which side is behind, and that work
-offloaded there runs the older build. Remedy, on the node side: update it —
-`lop update` on the node, the same updater the onboarding card drives — and
-its supervised relay rolls onto the new build; re-check afterwards.
+device` when level; otherwise it names which side is behind or ahead — work
+offloaded there runs the older build when the node is behind; an ahead node
+means this side may lack capabilities the peer expects — and the remedy runs
+on whichever side is behind: for a behind node, `lop update` there (the same
+updater the onboarding card drives), and its supervised relay rolls onto the
+new build; re-check afterwards.
 
 ### Session capability is wired at session start
 
@@ -847,10 +849,11 @@ Diagnose in this order, and stop at the first answer that explains it:
      the agent's `lop` must be on that release first — `lop-update` moves it
      there.
      Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
-     `relay`, `grants`, `verify`. `join` is satisfied when the node is already
-     an active member: no dial is made, and the step's detail reads "<node> is
-     already an active member of <network> (epoch N); admission is satisfied and
-     no re-join was attempted — the invite goes unused and expires." Read it in
+     `relay`, `grants`, `provision`, `verify`. `join` is satisfied when the
+     node is already an active member: no dial is made, and the step's detail
+     reads "<node> is already an active member of <network> (epoch N); admission
+     is satisfied and no re-join was attempted — the invite goes unused and
+     expires." Read it in
      `lop network approvals run <id> --json`: it is the join receipt's `detail`
      (`steps[] | select(.step == "join") | .detail`) — the human run block shows
      only the card's state, so satisfied and freshly joined read the same there.
