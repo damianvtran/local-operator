@@ -538,8 +538,9 @@ interaction state: no wire change, §4 is untouched by this section.**
   focused row, or the explicit `/asks` / header action), **or ONCE by the open-by-default
   policy** when a conversation is opened with asks already pending (the shared six-clause
   contract the TUI, desktop drawer, relay sheet and app sheet keep — `tui/ask_open_policy.py`
-  states it). **Never automatic on ask arrival** — §5.1's no-auto-mount, no-focus-steal rule
-  is unchanged. Left by Esc, the collapse control, or a click on the bar/chevron.
+  states it). **Never automatic on ask arrival** — §5.1's no-arrival-mount, no-focus-steal rule
+  is unchanged for an ask that lands while the conversation is already on screen. Left by Esc,
+  the collapse control, or a click on the bar/chevron.
 - **MINIMIZED** — a compact, persistent single-line affordance; the answer surface is *not*
   mounted. This is the state a new ask lands in when the user is already mid-answer or
   mid-draft, and the state the user returns to when they collapse.
@@ -635,9 +636,11 @@ collapses — there was no list to return to.)
 ### 5.1 TUI (PR B)
 - **Entry/badge:** a count chip in the working line/status band (`◆ 2 asks`), sidebar/`/resume`
   catalog badge (`tui/session_catalog.py` `pending` ranking, scout `188/287`), OS notification via
-  the existing `tui/notify.py` map (scout `177/237`). **No auto-mount, no focus steal** — a
-  new ask must not displace a card the user is mid-answer on or their composer draft
-  (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). The
+  the existing `tui/notify.py` map (scout `177/237`). **No auto-mount on ask ARRIVAL and no focus
+  steal** — the open-by-default mount (§5.0, amended 2026-10-08; `tui/ask_open_policy.py`)
+  happens ONCE when a conversation is opened with asks already pending, is not an arrival mount,
+  and takes no caret. A new ask must not displace a card the user is mid-answer on or their
+  composer draft (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). The
   **§5.0 minimized bar is what names the first question** — it replaces the ad-hoc one-line
   notice, so there is one affordance, not two.
 - **List:** `/asks` (+ keybinding) opens a list in `#prompt-host`; per row: status glyph,
