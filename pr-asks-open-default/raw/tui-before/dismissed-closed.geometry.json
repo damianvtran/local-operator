@@ -915,5 +915,6 @@
         false
       ]
     }
-  ]
+  ],
+  "focus": "Editor"
 }
