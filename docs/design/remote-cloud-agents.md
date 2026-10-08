@@ -492,7 +492,7 @@ margin (the tunnel doc states an 80% gross margin). For a cloud task:
 
 ---
 
-## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); teardown still needs approval)
+## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6 computed, teardown still needs approval)
 
 ### 9.1 Account, first
 
@@ -604,6 +604,18 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 7. Teardown of the POC stack (only after approval): `pulumi destroy`/`cdk destroy`
    leaves zero tagged resources.
 
+**Where this stands (2026-10-08).** Every item above except 6 and 7 now has a recorded PASS
+on **one** run: `ct_92161251`, a real OpenRouter turn (`anthropic/claude-sonnet-4.5`) on the
+accepted image digest, whose edit to the cloned fixture is verified from the returned bundle
+by `verify` (22 checks, 0 FAIL, 0 BLOCKED). Items 2 and 3 and the real-model half of item 4
+were the ones waiting on a key and are no longer PENDING/BLOCKED. Item 6 is still computed
+from wall-clock × rate rather than reconciled against Cost Explorer; item 7 (teardown) still
+awaits the operator's approval, and the stack is still up. Per-run evidence, the probe
+readings with the real key, the cold start and the cost: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md)
+§ Real-key acceptance run. **Nothing in §7 is relaxed by that run**: the pod still holds no
+key on disk, egress is still 443-only, the task role is still empty and names no policy, and
+the `ps`-dependent residual (SEC-11) is still deferred product work.
+
 **Slice 1 adds:**
 
 8. The pod appears in `lop network peers` as `kind: pool`, `lifecycle: active`.
@@ -677,7 +689,10 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
    `LOCAL_OPERATOR_CONFIG_DIR`, the `XDG_*` variables and `UV_CACHE_DIR` pointed there)
    and probe 4d confirmed the root and `/usr` are read-only while `/workspace` is
    writable. "Usefully" in the sense of a real model turn that edits the cloned repo is
-   still **PENDING** `LOP_POC_MODEL_KEY`; the mock provider produces a turn and no edits.
+   **answered yes** by the real-key run `ct_92161251` (2026-10-08): 10 tool executions
+   (`bash`, `read`, `edit`) against the read-only root, and a commit on `lop/ct_92161251`
+   that `verify` takes from the bundle and passes the fixture's tests on. The mock
+   provider produces a turn and no edits.
 3. Slice 1 (direct path): the pod's relay with `network.listen_address = 0.0.0.0`
    behind a public IPv4. Does the duplicate-link dedupe (transport §6) behave when both
    sides dial? For the blind relay: what framing does the forwarder need so that the
