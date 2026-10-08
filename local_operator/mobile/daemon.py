@@ -4867,6 +4867,43 @@ def build_app(daemon: MobileDaemon):
             }
         )
 
+    async def api_session_checkpoints(request: Request) -> Response:
+        """The checkpoint manifest for one conversation: the rail's ticks.
+
+        The relay half of ``GET /v1/desktop/sessions/{session_id}/checkpoints``
+        (the desktop rail's manifest, design D9), derived from THIS machine's
+        journal by ``session/transcript_index.py`` and served in the desktop's
+        own wire shape through ``local_operator/mobile/checkpoints.py``.
+
+        WHY THE PHONE NEEDS A ROUTE INSTEAD OF FOLDING ITS TRANSCRIPT: the
+        phone's projection is a bounded tail WINDOW -- see
+        ``api_session_history`` above, whose whole reason for existing is that
+        the fold drops older rows -- so a rail built from the frames a phone
+        holds would silently mark only the tail. The manifest covers every
+        turn in the journal, loaded or not.
+
+        Session resolution mirrors the history read beside it (a live
+        generation, else a durable user conversation, else 404). No runtime is
+        needed: a conversation nothing is serving still has its journal, which
+        is where the manifest comes from.
+
+        The manifest's own states carry the honesty: an unreadable journal
+        answers ``index.state: "error"`` -- never the empty rail a ``ready``
+        manifest with no ticks means; a cold cache answers ``building`` while
+        the background scan runs, and the phone polls like the desktop rail.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        from local_operator.mobile.checkpoints import manifest_payload
+        from local_operator.paths import config_dir
+
+        return JSONResponse(await manifest_payload(config_dir(), session_id))
+
     async def api_session_image(request: Request) -> Response:
         """One image attachment's bytes, fetched lazily by the transcript.
 
@@ -6340,6 +6377,15 @@ def build_app(daemon: MobileDaemon):
             api_subagent_history,
         ),
         Route("/api/sessions/{session_id:str}/history", api_session_history),
+        # The checkpoint manifest read (mobile parity, read half): one
+        # conversation's turn ticks for the transcript rail, EVERY turn -- the
+        # phone's own transcript is a bounded tail window, so a rail from
+        # frames would silently mark only the tail. Read-only: the naming warm
+        # stays a desktop-plane spend.
+        Route(
+            "/api/sessions/{session_id:str}/checkpoints",
+            api_session_checkpoints,
+        ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
         Route(
