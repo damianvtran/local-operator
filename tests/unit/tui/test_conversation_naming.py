@@ -1851,6 +1851,35 @@ async def test_a_refresh_retitles_a_session_the_growth_gate_would_decline() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_local_refresh_asks_the_conversations_own_model() -> None:
+    """The TUI-owned path, not only the routed one: ``/title refresh`` on a
+    session the app owns asks the session-model seam, and the cheap-tier
+    ``complete_once`` gets no call from the refresh."""
+
+    app, session = await _boot(title="<title>Houseplant names</title>")
+    on_session_model: list[tuple[str, str]] = []
+
+    async def answer(system: str, prompt: str) -> str:
+        on_session_model.append((system, prompt))
+        return "<title>Autovacuum tuning for orders</title>"
+
+    session.complete_once_on_session_model = answer  # type: ignore[attr-defined]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "name my houseplant")
+        tier_calls = len(session.completions)
+        session.grow_transcript(3)
+
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert len(on_session_model) == 1, "the refresh never asked the session model"
+        assert on_session_model[0][0] == naming.REFRESH_SYSTEM_PROMPT
+        assert len(session.completions) == tier_calls, "the refresh spent a cheap-tier call"
+        assert session.conversation_name == "Autovacuum tuning for orders"
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_releases_a_human_rename_only_when_a_title_lands() -> None:
     """``user_set`` is a one-way latch everywhere else; this is the exception.
 
