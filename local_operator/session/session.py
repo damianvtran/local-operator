@@ -18029,13 +18029,9 @@ class Session:
         and no tier block: the tier is never consulted, so it can neither be
         blamed for a failure here nor rescue one.
 
-        Fast mode is cleared. It buys the TURN a priority lane at a priority
-        price; a title is decoration, and the ``lo`` tier this replaces never
-        paid that premium.
+        Fast mode is cleared, as on every errand (see :meth:`_errand_request`).
         """
         spec = self._lowest_effort(self.effective_model)
-        if spec.fast_mode:
-            spec = spec.model_copy(update={"fast_mode": False})
         return await self._drain_errand(self._errand_request(spec, system, prompt))
 
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
@@ -18046,6 +18042,11 @@ class Session:
         ``isolated``, ``replayable=False``, the token cap and the empty tool
         surface by construction rather than by two field lists staying in sync.
         """
+        # Fast mode buys the TURN a priority lane at a priority price. An errand
+        # is decoration, so it never pays that premium, on whichever route it
+        # lands: the tier, the session model, or the retry after a dead tier.
+        if model.fast_mode:
+            model = model.model_copy(update={"fast_mode": False})
         return ChatRequest(
             model=model,
             purpose="naming",
