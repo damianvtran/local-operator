@@ -16,6 +16,7 @@ it; these tests pin the SHAPES, and that nothing actionable was hidden:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -252,25 +253,95 @@ async def test_a_short_secret_list_is_unchanged(secret_store):
 
 # -------------------------------------------------------------------------- jobs
 
-FRAME = (
-    "Refreshing run status every 60 seconds. Press Ctrl+C to quit.\n\n"
-    "* v1.0 Build · 123\nTriggered via release about {n} minute ago\n\nJOBS\n"
-    "✓ Validate in 9s\n  ✓ Set up job\n  ✓ Complete job\n"
-    "{mark} Publish (ID 7)\n  ✓ Set up job\n  {mark} Publish to npm\n\n"
+#: A TRUE re-render: the same lines written again, which is what the collapse is
+#: allowed to drop. A watcher whose frames EVOLVE (``gh run watch`` marking jobs
+#: done, a timestamp ticking) is deliberately NOT this shape — see
+#: ``test_evolving_frames_are_left_alone``.
+REDRAW_FRAME = "== run 123 status ==\nline a\nline b\nline c\n"
+REDRAW_MARKER = "\x1b[H\x1b[J"
+
+#: The operator's real git-diff-shaped shell output, reproduced in shape: a
+#: repeated filename line becomes a "frame header", and two chunks that share
+#: enough context lines look "similar" while each carries content the other
+#: lacks. The old heuristic elided the first chunk here (105 of 8,380 chars kept,
+#: 114 distinct lines gone — agent review round 1, MAJOR). Containment refuses:
+#: ``+unique added line 1`` is in no later chunk.
+GIT_DIFF_SHAPED = (
+    "iceberg.webp\n"
+    "diff --git a/iceberg.webp b/iceberg.webp\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/iceberg.webp\n"
+    "+++ b/iceberg.webp\n"
+    "@@ -1,3 +1,4 @@\n"
+    " context line\n"
+    "+unique added line 1\n"
+    "iceberg.webp\n"
+    "diff --git a/iceberg.webp b/iceberg.webp\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/iceberg.webp\n"
+    "+++ b/iceberg.webp\n"
+    "@@ -1,3 +1,4 @@\n"
+    " context line\n"
+    "-removed line\n"
+    "+unique added line 2\n"
+)
+
+#: The QA round-1 false positive: an ordinary sequential loop over six hosts. The
+#: old heuristic picked a recurring status line (``ping ok``) as the frame header,
+#: which made 3-line "frames" whose similarity landed exactly on the threshold, so
+#: the loop folded to its last host and hid ``disk FULL (98%)``.
+SIX_HOST_LOOP = "".join(
+    f"== checking host web-{n} ==\nping ok\n"
+    f"{'disk FULL (98%)' if n == 2 else 'disk ok'}\nmem ok\n"
+    for n in (1, 2, 3, 4, 5, 6)
 )
 
 
-def test_refreshing_frames_collapse_to_the_latest():
-    text = "".join(FRAME.format(n=n, mark="*" if n < 3 else "✓") for n in range(1, 4))
+def test_a_verified_redraw_collapses_to_its_latest_frame_and_keeps_the_final_line():
+    text = REDRAW_MARKER + REDRAW_FRAME + REDRAW_MARKER + REDRAW_FRAME
+    text += REDRAW_MARKER + REDRAW_FRAME + "FINAL: run 999 completed with conclusion success\n"
+
     latest, elided = _collapse_refreshing_frames(text)
+
     assert elided == 2
-    assert latest.startswith("Refreshing run status") and "about 3 minute" in latest
-    assert "about 1 minute" not in latest and "about 2 minute" not in latest
+    assert latest == REDRAW_FRAME + "FINAL: run 999 completed with conclusion success"
+    # The `FINAL:` line states the outcome and is written once, after the last
+    # frame: it must never ride an elision (QA round 1, row 4a).
+    assert "FINAL: run 999 completed with conclusion success" in latest
 
 
-def test_a_clear_screen_sequence_marks_a_redraw():
-    latest, elided = _collapse_refreshing_frames("old\nframe\x1b[2Jnew frame\nline")
-    assert (latest, elided) == ("new frame\nline", 1)
+def test_a_repeating_frame_header_collapses_without_escape_sequences():
+    """A watcher on a pipe writes frames with no clear-screen markers."""
+    text = (REDRAW_FRAME + "\n") * 4
+    latest, elided = _collapse_refreshing_frames(text)
+    assert elided == 3
+    assert latest.startswith("== run 123 status ==")
+
+
+def test_a_git_diff_shaped_payload_is_left_alone():
+    """The MAJOR: a diff is not a redraw, whatever repeats inside it."""
+    assert _collapse_refreshing_frames(GIT_DIFF_SHAPED) == (GIT_DIFF_SHAPED, 0)
+
+
+def test_a_six_host_sequential_loop_is_left_alone():
+    """Q1: folding this hid the one host worth reading about."""
+    assert _collapse_refreshing_frames(SIX_HOST_LOOP) == (SIX_HOST_LOOP, 0)
+
+
+def test_evolving_frames_are_left_alone():
+    """The trade the containment rule makes, pinned so it cannot drift back.
+
+    ``gh run watch`` marks jobs done between frames and ticks a timestamp, so an
+    earlier frame carries lines the latest one does not. Eliding those bytes
+    while calling them "repeated frames" is the unverified claim the review
+    rejected, so the whole delta is returned instead.
+    """
+    frames = "".join(
+        f"* v1.0 Build · 123\nTriggered via release about {n} minute ago\nJOBS\n"
+        f"{'* Publish to npm' if n < 3 else '✓ Publish to npm'}\n  ✓ Set up job\n"
+        for n in (1, 2, 3)
+    )
+    assert _collapse_refreshing_frames(frames) == (frames, 0)
 
 
 @pytest.mark.parametrize(
@@ -280,6 +351,8 @@ def test_a_clear_screen_sequence_marks_a_redraw():
         "\n".join("PASS" if i % 5 == 0 else f"test {i} ok" for i in range(40)),
         "a\nb\na\nc\nd\ne",
         "single line",
+        # A "frame" of two lines is below the minimum: too small to be a frame.
+        "hdr\nx\nhdr\ny",
     ],
 )
 def test_ordinary_output_is_left_alone(text):
@@ -291,24 +364,65 @@ async def test_peek_returns_the_latest_frame_and_keeps_the_rest_reachable(isolat
     manager = AsyncJobManager()
     context = ToolContext(cwd=str(isolated_spill), session_id="s", jobs=manager)
     tools = {tool.name: tool for tool in create_tools(context)}
+    started = asyncio.Event()
 
     async def runner(job_id: str, signal: Any, report_progress) -> str:
-        import asyncio
-
+        # Signals that the manager really entered the coroutine: cancelling
+        # before its first step drops it un-awaited and the suite reports the
+        # RuntimeWarning (agent review round 1, NIT 5).
+        started.set()
         await asyncio.sleep(30)
         return "never"
 
     job_id = manager.register("bash", "gh run watch", runner)
-    frames = "".join(FRAME.format(n=n, mark="*") for n in range(1, 6))
+    await asyncio.wait_for(started.wait(), 5)
+    frames = (REDRAW_MARKER + REDRAW_FRAME) * 5
     manager.append_output(job_id, frames)
     peek = await _call(tools, "jobs", {"op": "peek", "job_id": job_id}, context)
     text = _text(peek)
     details = peek.details or {}
-    assert "[4 earlier repeated frame(s) elided; showing the latest" in text
-    assert "about 5 minute" in text and "about 1 minute" not in text
-    assert details["frames_elided"] == 4 and details["new_chars"] == len(frames)
-    stored = get_store().read_lines(details["spill"]["handle"], 1, None)
-    assert stored is not None and any("about 1 minute" in line for line in stored[0])
+    assert (
+        "[4 earlier redraw frame(s) elided — every line they carried is in the frame below" in text
+    )
+    assert "line a" in text and text.count("line a") == 1
+    assert details["frames_elided"] == 4
+    assert details["new_chars"] == len(frames)
+    # The receipt reports the delta AND what the collapse removed from it, and
+    # exposes the frames' handle under its own key, not only in prose.
+    assert details["shown_chars"] < details["new_chars"]
+    assert details["elided_chars"] > 0
+    assert details["frames_spill"]["handle"] in text
+    stored = get_store().read_lines(details["frames_spill"]["handle"], 1, None)
+    assert stored is not None and "line a" in stored[0]
+    await manager.cancel(job_id)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_does_not_collapse_when_the_spill_store_refuses(isolated_spill, monkeypatch):
+    """No handle means no elision: the dropped frames would be unrecoverable."""
+    monkeypatch.setattr(builtin, "_spill", lambda *a, **k: None)
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(isolated_spill), session_id="s", jobs=manager)
+    tools = {tool.name: tool for tool in create_tools(context)}
+    started = asyncio.Event()
+
+    async def runner(job_id: str, signal: Any, report_progress) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    job_id = manager.register("bash", "gh run watch", runner)
+    await asyncio.wait_for(started.wait(), 5)
+    frames = (REDRAW_MARKER + REDRAW_FRAME) * 3
+    manager.append_output(job_id, frames)
+    peek = await _call(tools, "jobs", {"op": "peek", "job_id": job_id}, context)
+    text = _text(peek)
+    details = peek.details or {}
+
+    assert text.count("line a") == 3
+    assert "elided" not in text
+    assert "frames_elided" not in details
     await manager.cancel(job_id)
     await manager.dispose()
 
@@ -333,3 +447,82 @@ async def test_spill_search_is_bounded_even_when_matched_lines_are_huge(isolated
     assert "[\u2026" in text
     # A clipped match list names its next page in match coordinates.
     assert "of 8 match(es)" in text
+
+
+# --------------------------------------------------- read `?q=` paging (Q2, NIT 4)
+
+
+async def _spill_with_matches(tmp_path: Path, count: int = 12):
+    context = ToolContext(cwd=str(tmp_path), session_id="s")
+    tools = {tool.name: tool for tool in create_tools(context)}
+    text = "\n".join(f"hit {i}" if i % 2 else f"filler {i}" for i in range(count * 2))
+    meta = get_store().write(text, tool_name="bash", session_id="s")
+    assert meta is not None
+    return tools, context, meta
+
+
+@pytest.mark.asyncio
+async def test_every_match_page_advertises_the_next_one(isolated_spill, tmp_path):
+    """A page that consumes its slice exactly must still name the next page.
+
+    It used to advertise nothing, so ``range="19-36"`` (page 2 of 90) was a dead
+    end: the model had seen 18 of 90 and was told nothing further (QA round 1, Q2).
+    """
+    tools, context, meta = await _spill_with_matches(tmp_path, count=12)
+    query = f"{meta.handle}?q=hit"
+
+    page = await _call(tools, "read", {"path": query, "range": "1-5"}, context)
+    text = _text(page)
+    assert "5 of 12 match(es)" in text
+    assert 'range="6-10"' in text and "7 more match(es)" in text
+
+    second = await _call(tools, "read", {"path": query, "range": "6-10"}, context)
+    assert 'range="11-12"' in _text(second), "the pointer is clamped to the last match"
+    assert "2 more match(es)" in _text(second)
+
+    last = await _call(tools, "read", {"path": query, "range": "11-12"}, context)
+    assert "that is every match" in _text(last)
+    assert "next page" not in _text(last)
+
+
+@pytest.mark.asyncio
+async def test_a_page_past_the_last_match_is_not_reported_as_no_matches(isolated_spill, tmp_path):
+    """Matches exist; the PAGE does not. The two need different next calls."""
+    tools, context, meta = await _spill_with_matches(tmp_path, count=12)
+
+    past = await _call(tools, "read", {"path": f"{meta.handle}?q=hit", "range": "13-20"}, context)
+    text = _text(past)
+
+    assert "No lines match" not in text
+    assert "That page is past the last match: 12 match(es)" in text
+    assert (past.details or {})["total_matches"] == 12
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_really_matches_nothing_still_says_so(isolated_spill, tmp_path):
+    tools, context, meta = await _spill_with_matches(tmp_path, count=12)
+    none = await _call(tools, "read", {"path": f"{meta.handle}?q=absent"}, context)
+    assert "No lines match 'absent'" in _text(none)
+    assert none.useless is True
+
+
+def test_hub_list_does_not_fold_when_the_spill_store_refuses(isolated_spill, monkeypatch):
+    """No handle means no fold: the folded rows would vanish with no note.
+
+    Their ``transcript <id>`` is what a ``--resume`` needs, so losing them
+    silently is worse than the bytes the fold saves (agent review round 1,
+    MINOR 2).
+    """
+    monkeypatch.setattr(builtin, "_spill", lambda *a, **k: None)
+    rows = [_Row(f"done{i:03d}", "completed", session_id=f"s{i:03d}") for i in range(18)]
+    rows.append(_Row("livejob", "running"))
+
+    result = _hub_list("c", _Comms(rows), None, ToolContext(cwd=str(isolated_spill)))
+    text = _text(result)
+    details = result.details or {}
+
+    assert all(f"(done{i:03d})" in text for i in range(18)), "every completed row is listed"
+    assert "transcript s000" in text
+    assert "not shown" not in text
+    assert details["count"] == 19
+    assert "folded_completed" not in details and "spill" not in details

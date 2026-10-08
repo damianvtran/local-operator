@@ -5749,6 +5749,8 @@ def _search_spill(
         # could not serve it. Stays `execution`.
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     matches, total_matches, total_lines = found
+    store_has_matches = bool(matches)
+    first_match_index = 1
     if range_spec:
         # Documented in the schema: on a search the range pages through
         # MATCHES. Slicing lines here instead would silently return nothing
@@ -5757,9 +5759,32 @@ def _search_spill(
             start, end = _parse_line_range(range_spec)
         except InvalidToolArgumentsError as exc:
             return _invalid_arguments(tool_call_id, "read", str(exc))
+        first_match_index = start
         matches = matches[start - 1 : end]
-    details = {"url": f"{ref.handle}?q={ref.query}"}
+    # The page the caller asked for decides the NEXT page's width: continuing a
+    # "1-5" page with "6-10" is what they were reading.
+    page_size = max(len(matches), 1)
+    details = {
+        "url": f"{ref.handle}?q={ref.query}",
+        "total_matches": total_matches,
+        "first_match": first_match_index,
+    }
     if not matches:
+        if store_has_matches:
+            # A page PAST the last match says nothing about whether lines match:
+            # the store holds matches, this request asked for a window beyond
+            # them. Answering "No lines match" is a false statement about the
+            # content that sends the model looking elsewhere (agent review
+            # round 1, NIT 4).
+            return _text(
+                tool_call_id,
+                "read",
+                f"That page is past the last match: {total_matches} match(es) for "
+                f"'{ref.query}' exist in {ref.handle}. Ask for a page starting at or "
+                f"before {total_matches}.",
+                useless=True,
+                details={**details, "useless": True},
+            )
         return _text(
             tool_call_id,
             "read",
@@ -5783,20 +5808,27 @@ def _search_spill(
             break
         rows.append(row)
         used += len(row) + 1
-    first_match_index = 1
-    if range_spec:
-        first_match_index = _parse_line_range(range_spec)[0]
     body = "\n".join(rows)
     header = (
         f"{len(rows)} of {total_matches} match(es) for '{ref.query}' in "
         f"{ref.handle} ({total_lines} lines)"
     )
-    if len(rows) < len(matches):
-        following = first_match_index + len(rows)
-        header += f'; next page of matches: range="{following}-{following + len(rows) - 1}"'
-        matches = matches[: len(rows)]
-    elif total_matches > len(matches):
-        header += "; 'range' pages through matches"
+    # THE CONTINUATION IS COMPUTED FROM THE MATCH COUNT, NOT from whether this
+    # slice happened to be clipped. A page that consumes its slice exactly used
+    # to advertise nothing, so page 2 was a dead end for a query with 90 matches
+    # (agent review / QA round 1, Q2). The pointer is exact — clamped to the last
+    # match, so it never names a page that cannot exist.
+    shown_last = first_match_index + len(rows) - 1
+    remaining = total_matches - shown_last
+    if remaining > 0:
+        next_start = shown_last + 1
+        next_end = min(next_start + page_size - 1, total_matches)
+        header += (
+            f"; {remaining} more match(es) \u2014 next page of matches: "
+            f'range="{next_start}-{next_end}"'
+        )
+    else:
+        header += "; that is every match"
     footer = (
         f'\n[read around a hit with read(path="{ref.handle}", '
         f'range="{max(matches[0][0] - 10, 1)}-{matches[0][0] + 30}")]'
@@ -25828,14 +25860,155 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
 #: cursor-home + clear-to-end (``ESC[H ESC[J``) and full reset (``ESC c``).
 _CLEAR_SCREEN_RE = re.compile(r"\x1b\[[23]J|\x1b\[H\x1b\[J|\x1bc")
 
-#: A frame must have at least this many lines to count as a redraw. Below it, a
-#: recurring line is more likely an ordinary repeated log line than a frame.
+#: A frame must carry at least this many non-blank lines to count as a redraw.
+#: Below it, a recurring line is more likely an ordinary repeated log line.
 _FRAME_MIN_LINES = 3
 
-#: How alike (Jaccard over distinct lines) the last two frames must be before
-#: the earlier ones are treated as stale redraws. A watcher's frames differ in
-#: a timestamp and a few status marks; two unrelated log sections do not.
-_FRAME_MIN_SIMILARITY = 0.5
+#: How many distinct recurring lines are tried as frame headers before giving
+#: up. Every candidate is fully validated, so this only bounds the work: the
+#: payload of one peek is at most the job's output tail (~64 KB), and a real
+#: redraw's header is among the most-repeated lines.
+_FRAME_HEADER_CANDIDATES = 12
+
+
+def _verified_redraw_chunks(text: str) -> list[str] | None:
+    """The frames of ``text`` when it is VERIFIABLY one frame redrawn, else ``None``.
+
+    WHY THIS IS NOT A SIMILARITY TEST. The first version of this collapse
+    compared the last two chunks with a Jaccard threshold and treated the first
+    line that happened to recur as a frame header. Measured over the operator's
+    real spill store (2026-10-08, agent review round 1): 16 firings elided
+    155,916 chars and dropped 714 distinct lines that appear in NO kept frame —
+    a shell result whose body was a git diff was reduced to 105 of 8,380 chars
+    under a note calling the missing part "earlier repeated frames" — and, in
+    the other direction, an ordinary six-host shell loop folded to its last
+    three lines, hiding the one anomalous row. A threshold a normal log can hit
+    cannot license a claim about what was dropped.
+
+    So the rule here is containment, and it is checked against EVERY chunk:
+
+    * the payload must split into frames at a repeating boundary — an explicit
+      clear-screen sequence, or a line that starts at least two frames; and
+    * the kept (last) frame must be at least :data:`_FRAME_MIN_LINES` distinct
+      lines long, and every distinct non-blank line of every earlier chunk must
+      appear in it.
+
+    Containment is what makes the elision free rather than lossy: nothing that
+    was dropped is absent from what is returned. The caller additionally
+    refuses to collapse when the original could not be spilled, so an elided
+    frame is always one ``read`` away even when containment is the only thing
+    standing between the model and the bytes.
+
+    WHAT THIS DELIBERATELY DOES NOT DO: a watcher whose frames EVOLVE (``gh run
+    watch`` marking jobs done, a timestamp ticking) differs by real content, so
+    containment fails and the whole delta is returned. That is the trade the
+    review asked for — an unverifiable nine-fold cut of live output is worse
+    than the bytes — and it keeps the note's claim true when it does fire.
+    """
+    spans = _clear_screen_spans(text)
+    if spans is None:
+        spans = _repeating_header_spans(text)
+    if spans is None:
+        return None
+    chunks = [text[spans[i][1] : spans[i + 1][0]] for i in range(len(spans) - 1)]
+    chunks.append(text[spans[-1][1] :])
+    leading = text[: spans[0][0]]
+    if leading.strip():
+        chunks.insert(0, leading)
+    if not _chunks_are_one_frame_redrawn(chunks):
+        return None
+    return chunks
+
+
+def _clear_screen_spans(text: str) -> list[tuple[int, int]] | None:
+    """The span of each clear-screen marker, or ``None`` when there is none.
+
+    A span, not an offset, because the marker is the boundary BETWEEN frames:
+    the chunk before it ends where it starts and the chunk after it begins where
+    it ends, which is what keeps one frame's escape out of its neighbour's line
+    set (they differ by exactly those bytes, and containment then fails).
+    """
+    marks = list(_CLEAR_SCREEN_RE.finditer(text))
+    if not marks:
+        return None
+    return [mark.span() for mark in marks]
+
+
+def _repeating_header_spans(text: str) -> list[tuple[int, int]] | None:
+    """Zero-width spans at the best VERIFIED frame header's occurrences.
+
+    A watcher not attached to a TTY writes whole frames with no escape
+    sequences, so the boundary is the frame's first line. Every recurring line
+    is tried as a candidate and the split is validated as a whole
+    (:func:`_chunks_are_one_frame_redrawn`); candidates whose occurrences
+    already look like frame starts (preceded by a blank line) are tried first,
+    because that is the shape a frame-at-a-time writer produces.
+    """
+    positions: dict[str, list[int]] = {}
+    for offset, line in _iter_lines_with_offsets(text):
+        if line.strip():
+            positions.setdefault(line, []).append(offset)
+    candidates = [(line, at) for line, at in positions.items() if len(at) >= 2]
+    if not candidates:
+        return None
+
+    def frame_start_shaped(at: int) -> bool:
+        # A frame start sits at the top of the text or just past a blank line,
+        # which is where a frame-at-a-time writer puts it.
+        before = text[:at]
+        return not before.strip() or before.rstrip("\n").endswith(("\n\n", "\n\r\n"))
+
+    candidates.sort(
+        key=lambda item: (
+            -sum(1 for at in item[1] if frame_start_shaped(at)),
+            -len(item[1]),
+            item[1][0],
+        )
+    )
+    for _line, offsets in candidates[:_FRAME_HEADER_CANDIDATES]:
+        spans = [(offset, offset) for offset in offsets]
+        chunks = [text[spans[i][1] : spans[i + 1][0]] for i in range(len(spans) - 1)]
+        chunks.append(text[spans[-1][1] :])
+        leading = text[: spans[0][0]]
+        if leading.strip():
+            chunks.insert(0, leading)
+        if _chunks_are_one_frame_redrawn(chunks):
+            return spans
+    return None
+
+
+def _iter_lines_with_offsets(text: str) -> list[tuple[int, str]]:
+    """``(char offset, line)`` per line, offsets counted the way ``split`` is."""
+    out: list[tuple[int, str]] = []
+    offset = 0
+    for line in text.split("\n"):
+        out.append((offset, line))
+        offset += len(line) + 1
+    return out
+
+
+def _chunks_are_one_frame_redrawn(chunks: list[str]) -> bool:
+    """The containment rule, applied to EVERY chunk (never only the last two).
+
+    ``True`` only when the last chunk is a real frame and every earlier chunk
+    carries no line the kept frame lacks — so eliding them drops no content.
+    """
+    if len(chunks) < 2:
+        return False
+
+    def body_set(chunk: str) -> set[str]:
+        return {line.strip() for line in chunk.split("\n") if line.strip()}
+
+    kept = body_set(chunks[-1])
+    if len(kept) < _FRAME_MIN_LINES:
+        return False
+    elided_any = False
+    for chunk in chunks[:-1]:
+        lines = body_set(chunk)
+        if not lines <= kept:
+            return False
+        elided_any = elided_any or bool(lines)
+    return elided_any
 
 
 def _collapse_refreshing_frames(text: str) -> tuple[str, int]:
@@ -25843,66 +26016,19 @@ def _collapse_refreshing_frames(text: str) -> tuple[str, int]:
 
     ``gh run watch``, ``watch``, progress UIs and the like print the same frame
     over and over when they are not on a TTY: one measured peek was 8.5k chars of
-    the same ``gh run watch`` frame repeated, of which only the last copy was
-    news. Only the latest frame is worth returning; ``(text, 0)`` means nothing
-    was recognised as a redraw and the text is returned untouched.
+    the same frame repeated, of which only the last copy was news. Only the
+    latest frame is worth returning; ``(text, 0)`` means the payload was not
+    VERIFIABLY a redraw (see :func:`_verified_redraw_chunks` for the rule and
+    the measurements behind it) and the text is returned untouched.
 
-    Two shapes are recognised, both conservatively:
-
-    * an explicit clear-screen sequence — everything before the last one is a
-      frame the terminal would already have wiped;
-    * a frame HEADER line that recurs (see the body for how it is chosen), and
-      the collapse fires only when the last two frames are similar
-      (:data:`_FRAME_MIN_SIMILARITY`) and at least :data:`_FRAME_MIN_LINES`
-      long, so an ordinary log with a repeated line is left alone.
-
-    The caller spills the original, so an elided frame stays one ``read`` away.
+    A trailing status line added once after the last frame — ``FINAL: …`` in the
+    QA rig's watcher — rides the kept frame, because the kept frame runs from
+    its boundary to the end of the text.
     """
-    cleared = list(_CLEAR_SCREEN_RE.finditer(text))
-    if cleared:
-        tail = text[cleared[-1].end() :]
-        if tail.strip():
-            return tail, len(cleared)
-    lines = text.split("\n")
-    positions: dict[str, list[int]] = {}
-    for index, line in enumerate(lines):
-        if line.strip():
-            positions.setdefault(line, []).append(index)
-    recurring = {line: at for line, at in positions.items() if len(at) >= 2}
-    if not recurring:
+    chunks = _verified_redraw_chunks(text)
+    if chunks is None:
         return text, 0
-    # The frame HEADER. A watcher writes whole frames, so a peek cursor almost
-    # always sits on a frame boundary and the text's first line IS the header
-    # (it is in the measured ``gh run watch`` peek). Failing that, the header is
-    # taken among the lines that recur exactly as often as most recurring lines
-    # do (once per frame), earliest first: a line repeated WITHIN a frame
-    # recurs more often, and a line that changed between frames (``* job`` ->
-    # ``✓ job``) recurs less. The similarity check below is the real guard; a
-    # wrong header fails it and nothing collapses.
-    first = next((line for line in lines if line.strip()), "")
-    if first in recurring:
-        header = first
-    else:
-        counts = Counter(len(at) for at in recurring.values())
-        per_frame = counts.most_common(1)[0][0]
-        header = min(
-            (line for line, at in recurring.items() if len(at) == per_frame),
-            key=lambda line: recurring[line][0],
-        )
-    starts = recurring[header]
-    last = lines[starts[-1] :]
-    previous = lines[starts[-2] : starts[-1]]
-    if len(last) < _FRAME_MIN_LINES or len(previous) < _FRAME_MIN_LINES:
-        return text, 0
-    last_set = {line for line in last if line.strip()}
-    previous_set = {line for line in previous if line.strip()}
-    union = last_set | previous_set
-    if not union or len(last_set & previous_set) / len(union) < _FRAME_MIN_SIMILARITY:
-        return text, 0
-    # Every frame before the last, plus a partial frame ahead of the first
-    # header (a peek cursor that landed mid-frame), is stale.
-    elided = len(starts) - 1 + (1 if starts[0] > 0 and "\n".join(lines[: starts[0]]).strip() else 0)
-    return "\n".join(last), elided
+    return chunks[-1].strip("\n"), len(chunks) - 1
 
 
 def _peek_job(
@@ -25953,13 +26079,18 @@ def _peek_job(
     frame, elided = _collapse_refreshing_frames(text) if text else (text, 0)
     collapsed_meta = None
     if elided:
-        # The ORIGINAL delta is spilled first, so the elided frames stay
-        # addressable; the result carries only the latest frame.
+        # THE ORIGINAL MUST BE SPILLED BEFORE ANYTHING IS ELIDED. Without a
+        # handle the elided frames are unrecoverable, and the note would promise
+        # an expansion that does not exist — so a failed store write falls
+        # through to the untouched output instead (agent review round 1, MAJOR).
         collapsed_meta = _spill(text, "jobs", context)
-        note = f"[{elided} earlier repeated frame(s) elided; showing the latest"
-        if collapsed_meta is not None:
-            note += f' \u2014 all of them: read(path="{collapsed_meta.handle}")'
-        parts.append(note + "]")
+    if collapsed_meta is not None:
+        # The note states the fact the containment rule actually verified:
+        # every line the dropped frames carried is in the frame below.
+        parts.append(
+            f"[{elided} earlier redraw frame(s) elided \u2014 every line they carried "
+            f'is in the frame below; the full delta: read(path="{collapsed_meta.handle}")]'
+        )
         parts.append(frame)
     elif text:
         parts.append(text)
@@ -25972,17 +26103,27 @@ def _peek_job(
     summary, spill_details = _capped_list_body(
         body, body[:TOOL_OUTPUT_LIMIT_CHARS], "jobs", context
     )
-    if collapsed_meta is not None and not spill_details:
-        spill_details = {"spill": _spill_detail(collapsed_meta)}
     details: dict[str, Any] = {
         "job_id": job.id,
         "status": status,
         "seq": seq,
+        # The delta the job produced, and what the collapse removed from it. Both
+        # numbers are reported because they differ exactly when frames were
+        # elided, and a receipt that showed only the first looked like the
+        # collapse had returned everything (agent review round 1, NIT 3).
         "new_chars": len(text),
         "gap": gap,
     }
-    if elided:
+    if collapsed_meta is not None:
         details["frames_elided"] = elided
+        details["elided_chars"] = len(text) - len(frame)
+        details["shown_chars"] = len(frame)
+        # A SECOND handle, under its own key: the frames' full delta and the
+        # body-cap's spill are different spans, and a structural consumer (the
+        # mobile/desktop projection, a TUI expand affordance) can only reach the
+        # second one through `spill` — leaving the frames handle in prose alone
+        # hid it from every non-prose reader.
+        details["frames_spill"] = _spill_detail(collapsed_meta)
     if spill_details:
         details.update(spill_details)
     return _text(tool_call_id, "jobs", summary, details=details)
@@ -26612,19 +26753,25 @@ def _hub_list(
     shown_completed = set(completed_ids[-HUB_LIST_COMPLETED_SHOWN:])
     folded = len(completed_ids) - len(shown_completed)
     all_lines = _hub_roster_lines(rows)
-    if folded:
+    # A FOLD NEEDS SOMEWHERE TO PUT WHAT IT FOLDS. The handle is what keeps the
+    # older rows \u2014 and the ``transcript <id>`` a ``--resume`` needs \u2014 reachable,
+    # so a store that refused the write means NO fold: every row renders, exactly
+    # as before this slice. Folding anyway deleted those rows from both the text
+    # and ``details`` with no note at all (agent review round 1, MINOR 2).
+    meta = _spill("\n".join(all_lines), "hub", context) if folded else None
+    if folded and meta is not None:
         visible = [
             row for row in rows if row.status != "completed" or row.job_id in shown_completed
         ]
         lines = _hub_roster_lines(visible)
         lines[0] = f"{len(rows)} subagent(s), {len(visible)} shown:"
-        meta = _spill("\n".join(all_lines), "hub", context)
-        summary = f"+ {folded} older completed subagent(s) not shown"
-        if meta is not None:
-            summary += f' \u2014 the full roster is at read(path="{meta.handle}")'
-        lines.insert(1, summary)
+        lines.insert(
+            1,
+            f"+ {folded} older completed subagent(s) not shown \u2014 the full "
+            f'roster is at read(path="{meta.handle}")',
+        )
     else:
-        meta = None
+        folded = 0
         lines = all_lines
     if any(row.resumable for row in rows):
         lines.append("")
