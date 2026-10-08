@@ -100,6 +100,7 @@ from local_operator.harness.secret_sinks import refusal_text as _secret_sink_ref
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
+    depth_closed_the_tier_choice,
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
@@ -23949,12 +23950,15 @@ def effort_validation_context(tool_context: ToolContext | None = None) -> dict[s
     subagent, and the gate is closed by the larger of the two.
     """
     call_depth = getattr(tool_context, "delegation_depth", 0) if tool_context is not None else 0
+    # ``type(...) is int``, not ``isinstance``: a bool is an int, and ``True``
+    # would count as depth 1. Harmless (the depth can only be raised) but it
+    # would make the gate's answer depend on a value that is not a depth.
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
         SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
         ADVERTISED_DELEGATION_DEPTH_KEY: max(
-            _ADVERTISED_DELEGATION_DEPTH.get(), call_depth if isinstance(call_depth, int) else 0
+            _ADVERTISED_DELEGATION_DEPTH.get(), call_depth if type(call_depth) is int else 0
         ),
     }
 
@@ -23990,7 +23994,7 @@ def _delegation_depth(info: ValidationInfo) -> int:
     """Hops above the calling session; ``0`` when unrecorded (an operator-side caller)."""
     context = info.context if isinstance(info.context, dict) else None
     depth = context.get(ADVERTISED_DELEGATION_DEPTH_KEY) if context else None
-    return depth if isinstance(depth, int) and depth > 0 else 0
+    return depth if type(depth) is int and depth > 0 else 0
 
 
 def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
@@ -24206,10 +24210,12 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     if advertised_choice is None and depth == 0:
         return None
     label = _advertised_session_model(info)
-    if depth >= 1:
-        # Below the top the refusal is about WHO is asking, not the key, so the
-        # operator-arm copy (which names ``subagents.model_choice`` as the
-        # remedy) would send the model to a setting that is not the cause.
+    if depth_closed_the_tier_choice(depth):
+        # Below the top, under ``model_choice=model``, the refusal is about WHO
+        # is asking, not the key, so the operator-arm copy (which names
+        # ``subagents.model_choice`` as the remedy) would send the model to a
+        # setting that is not the cause. Under ``operator`` the key IS the cause
+        # at every depth, so the operator-arm copy below is the true one.
         message = _nested_pin_rejection(value) if pin else _nested_task_rejection(value)
     else:
         message = (
@@ -24468,7 +24474,9 @@ def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str
         # only place left to say so — and it must, or a model that remembers
         # `effort` from another session's prompt has nothing telling it no.
         effort = (
-            _NESTED_EFFORT_SENTENCE if delegation_depth >= 1 else _OPERATOR_CHOICE_EFFORT_SENTENCE
+            _NESTED_EFFORT_SENTENCE
+            if depth_closed_the_tier_choice(delegation_depth)
+            else _OPERATOR_CHOICE_EFFORT_SENTENCE
         )
     else:
         tiers = configured_effort_tiers()

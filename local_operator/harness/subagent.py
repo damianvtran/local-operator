@@ -456,6 +456,21 @@ def model_may_choose_tier(delegation_depth: int = 0) -> bool:
     return read_model_choice() == MODEL_CHOICE_MODEL
 
 
+def depth_closed_the_tier_choice(delegation_depth: int) -> bool:
+    """Is the picker closed BY DEPTH, i.e. would the key alone have left it open?
+
+    True only for a subagent under ``model_choice=model``. Under ``operator``
+    the key already closes the picker for everyone, so a nested session is
+    refused for the same reason the top level is, and the copy it is shown must
+    say so: telling it "only the top-level session may pick a tier" would be
+    false there (nobody on the model side can), and would drop the operator's
+    route (``subagents.model_choice``) that the operator-arm copy carries. The
+    nested wording exists for exactly the case where the key says "model" and a
+    reader would otherwise be told the picker is open to it.
+    """
+    return delegation_depth >= 1 and read_model_choice() == MODEL_CHOICE_MODEL
+
+
 def configured_effort_tiers() -> dict[str, str]:
     """``{tier: selector}`` for every tier a launch could honour.
 
