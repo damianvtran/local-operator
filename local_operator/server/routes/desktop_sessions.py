@@ -4387,10 +4387,12 @@ def _work_is_running(remote: Any) -> bool:
     LIMIT, STATED RATHER THAN HIDDEN: the owner's ``_turn_lock`` flush window is
     not visible from a follower at all, so a prompt admitted but not yet started
     cannot be told from an idle session by reading canonical state. The activity
-    phase narrows that window to the admission-to-first-work gap, and the residue
-    is not reachable from the desktop: the button and Esc are both offered on the
-    same ``streaming`` flag this reads, so a press cannot exist in a window where
-    this predicate is false.
+    phase narrows that window to the admission-to-first-work gap, and a press CAN
+    land in the gap: the desktop's liveness rides the live-event feed, which can
+    outrun this predicate (the 2026-10-07 incident is that measurement), so this
+    paragraph's old closing claim — "the residue is not reachable from the
+    desktop" — is withdrawn rather than restated. The mitigation is the CALL
+    SITE's, not this predicate's: see the RACE paragraph below.
 
     RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
     delta. A stale ``True`` at worst reaches the abort a moment after the turn
