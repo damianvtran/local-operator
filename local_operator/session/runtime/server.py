@@ -957,9 +957,7 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: lands (ADMISSION), this one decides what may run without waiting for an
 #: earlier op to finish (ORDERING).
 #:
-#: ``ping`` and ``abort``.
-#:
-#: ``ping``: its answer cannot depend on session state: it reports that the
+#: ``ping`` and ``abort``. ``ping``: its answer cannot depend on session state: it reports that the
 #: runtime's loop is alive and serving. Chaining it made it report something
 #: else entirely — measured over a real socket (review round 1, UX U3), a
 #: ``ping`` sent after a parked ``steer`` on the SAME connection went unanswered
@@ -980,14 +978,27 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: at admission; exempting ``abort`` here extends the same promise to ordering.
 #: Controls on the same daemon: an abort on a fresh connection took 4 ms, on the
 #: same connection with nothing parked 11 ms — so the chain, not the abort, was
-#: the whole delay. Not a loss of ordering that matters: ``abort`` acts on the
-#: turn that is running NOW and is idempotent, so there is no earlier-admitted
-#: mutation whose effect it must wait to observe.
+#: the whole delay.
 #:
-#: ``steer``, ``stop`` and ``cancel`` are deliberately NOT exempt: they are
-#: mutations whose meaning depends on arrival order (a ``steer`` must not
-#: overtake the ``steer`` before it), and widening this set further is a
-#: separate decision from the measured abort stall.
+#: What the exemption changes, stated plainly: an earlier-admitted ``prompt``
+#: whose turn has NOT begun is no longer waited for. The abort stops the turn
+#: running now — exactly what it does on a fresh connection — and the queued
+#: prompt then runs, unaborted. That is deliberate (a Stop pressed before the
+#: owner has a turn answers ``idle``, and the message the user typed is not
+#: eaten by it); the alternative is the deferred-abort bug above. ``abort`` is
+#: repeat-safe only while it targets the same turn, not idempotent: each press
+#: re-runs the gate and subagent teardown, and two Stops can now overlap within
+#: ``_ABORT_SETTLE_BUDGET_S`` where the chain used to serialise them, so both
+#: may report stopping the same children (harmless).
+#:
+#: ``steer`` is order-dependent (it must not overtake the ``steer`` before it),
+#: so it stays chained. ``stop`` and ``cancel`` are left chained because no
+#: surface sends them on a shared connection (supervisors and ``lop stop`` dial
+#: afresh per request), NOT because they are order-dependent: ``cancel`` with
+#: ``mode="immediate"`` routes straight to ``abort`` and stalls identically
+#: behind a parked op, so it would deserve this same exemption if a surface
+#: ever sends it on a shared connection. The cut is pinned by test so widening
+#: it is a visible choice.
 #:
 #: Everything else keeps its place in the chain, because ordering is what stops
 #: two mutations interleaving. An exempt op never becomes the chain head — see
