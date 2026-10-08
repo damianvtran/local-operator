@@ -152,14 +152,6 @@ class ProjectionRefusal(Exception):
 #: the peer made a claim, and an unreadable claim falls to that field's fail-safe.
 _ABSENT = object()
 
-#: The ``started`` a peer row carries when its own value could not be read: the epoch plus
-#: a second, NOT zero (QA round 2 / review round 2 m1, one slice over). ``started`` is
-#: rendered through ``as_record``, which spells an absent value as ``time.time()`` — "just
-#: now" — and ``0.0`` is falsy, so a garbled ``started`` used to make a peer of unknown age
-#: look BRAND NEW. A real epoch is a value the renderer cannot reinterpret, and it can only
-#: read as an old peer.
-STARTED_UNKNOWN_S = 1.0
-
 #: The ``age_s`` a peer row carries when its own value could not be read. The age is a
 #: LOWER BOUND on staleness, so the fallback is the largest number this protocol accepts
 #: (``PEER_NUMBER_CEILING``) rather than 0: a garbled age must not read as "seen seconds
@@ -231,6 +223,13 @@ class PeerRow:
     pending: str | None = None
     detached: bool = False
     capabilities: tuple[str, ...] = ()
+    #: The peer's claim, as an epoch; ``0.0`` is NO claim (unreadable / absent /
+    #: non-numeric) — the codebase's unknown-timestamp spelling, which every
+    #: renderer's ``<= 0`` rule refuses. NOT the epoch-plus-a-second ``1.0`` it
+    #: used to carry: that tested as "an old peer", but it was a REAL-looking
+    #: epoch — the desktop sidebar dated it "56y", it slipped the ``<= 0``
+    #: refusals, and the create-reply seed spelled the same claim ``0.0``, so
+    #: the two readers disagreed about one claim (QA round 1 on #2044).
     started: float = 0.0
     age_s: float = 0.0
     reachable: bool = True
@@ -266,7 +265,12 @@ class PeerRow:
             model_label=self.model_label,
             control_port=0,
             control_key="",
-            started_at=self.started or time.time(),
+            # The no-claim STAYS a no-claim (``0.0``), NOT ``time.time()``: "just
+            # now" is the one reading that makes an unreadable claim look BRAND
+            # NEW, and it was this spell that once forced the field's sentinel to
+            # be a truthy epoch — which the sidebar then dated "56y" (QA round 1
+            # on #2044). Zero here is the facade's own "no time" answer.
+            started_at=self.started,
             capabilities=list(self.capabilities),
             busy=self.busy,
             pending=self.pending,
@@ -295,8 +299,15 @@ class PeerRow:
             # THE FALLBACK DIRECTION IS THE POINT: a pid that could not be read becomes 0
             # ("no pid this device can dial"), never a value that looks live; an ``age_s``
             # becomes the stalest number this protocol can carry, never a fresh-looking 0;
-            # a ``started`` becomes a real epoch rather than 0 (which the record facade
-            # turns into "just now").
+            # a ``started`` that cannot be read becomes NO claim — ``0.0`` — never ``1.0``
+            # and never a minted epoch. The old default here was ``1.0`` ("the epoch plus
+            # a second", so the record facade could not spell it as "just now"), and it
+            # was wrong for the reason it looked safe: the desktop sidebar DATES any
+            # real-looking value, so ``1.0`` read "56y" and slipped every ``<= 0`` refusal,
+            # while the create-reply seed spelled the same claim ``0.0`` (QA round 1 on
+            # #2044). ``to_record`` below keeps the no-claim instead of re-spelling it,
+            # which is what makes zero safe here again; a claim that IS a number stays the
+            # peer's claim, even an implausibly old one.
             pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
@@ -304,7 +315,7 @@ class PeerRow:
             pending=normalise_pending(data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
-            started=peer_number(data.get("started"), default=STARTED_UNKNOWN_S),
+            started=peer_number(data.get("started"), default=0.0),
             age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),

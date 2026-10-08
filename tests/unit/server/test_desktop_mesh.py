@@ -1173,20 +1173,38 @@ async def test_a_create_on_a_peer_seeds_the_id_every_route_resolves(
     assert relay.ops() == ["peer_session_create"], relay.ops()
 
 
-@pytest.mark.asyncio
-async def test_a_bool_created_row_is_no_claim_never_a_1970_epoch(
-    mesh_api, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An OLD peer's bool must not become ``1.0`` through the seed either.
+#: "The reply's record carried no ``started`` key at all" for the seed cell below.
+_SEED_ABSENT = object()
 
-    Operator report: the create reply's ``record`` is a
-    ``local_session_rows``-shaped row, and a peer that has not updated yet
-    still answers with the BOOL this side used to publish under ``started``.
-    ``float(True)`` is ``1.0`` — the epoch second into 1970 the sidebar dates
-    "56y" — so a bool is read as NO claim (``0.0``), the same reading
-    ``session/peer_rows`` applies to the federated row that carries this claim
-    on the next poll: the seed and the poll must not disagree about the same
-    claim.
+
+@pytest.mark.parametrize(
+    ("claim", "expected"),
+    [
+        pytest.param(True, 0.0, id="bool-true"),
+        pytest.param(False, 0.0, id="bool-false"),
+        pytest.param(None, 0.0, id="null"),
+        pytest.param("abc", 0.0, id="garbage-string"),
+        pytest.param(_SEED_ABSENT, 0.0, id="absent"),
+        pytest.param("1700000000.0", 1700000000.0, id="numeric-string"),
+        pytest.param(1789400999.0, 1789400999.0, id="epoch-float"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_seed_reads_started_exactly_as_the_poll_does(
+    mesh_api, monkeypatch: pytest.MonkeyPatch, claim: object, expected: float
+) -> None:
+    """ONE boundary rule for the claim, on BOTH the seed and the poll (QA round 1, #2044).
+
+    The create reply's ``record`` is a ``local_session_rows``-shaped row, and a
+    peer that has not updated yet still answers with the BOOL this side used to
+    publish under ``started``. The seed used to hand-roll its own reading while
+    the poll's ``PeerRow.from_json`` sent the same claim to its own default —
+    two spellings of one rule, which is how an old peer's bool became ``1.0``
+    (an epoch second into 1970 the sidebar dates "56y") on one path and
+    ``0.0`` on the other. Both now read the claim with ``peer_number``: bools,
+    nulls, garbage, negatives and over-long numbers are the no-claim ``0.0``;
+    a real epoch passes — including the numeric-string spelling the peer
+    boundary documents.
     """
     client, root = mesh_api
     record = network_types.NetworkRecord(
@@ -1196,12 +1214,15 @@ async def test_a_bool_created_row_is_no_claim_never_a_1970_epoch(
         network_types.MemberRecord(device_id=PEER, name="build-box", role="drive")
     )
     network_store.save(record, root)
+    reply_record: dict[str, object] = {"conversation_name": "from an old peer"}
+    if claim is not _SEED_ABSENT:
+        reply_record["started"] = claim
     relay = FakeRelay(
         {
             "peer_session_create": {
                 "session_id": OTHER,
                 "admitted": False,
-                "record": {"started": True, "conversation_name": "from an old peer"},
+                "record": reply_record,
             }
         }
     )
@@ -1216,8 +1237,8 @@ async def test_a_bool_created_row_is_no_claim_never_a_1970_epoch(
     assert response.status_code == 200, response.text
     row = peer_session_row(OTHER, root)
     assert row is not None, "the seeded id must still resolve"
-    assert row.created_at == 0.0, "a bool is no claim — never minted into 1.0"
-    assert row.mtime == 0.0
+    assert row.created_at == expected, f"the seed read {claim!r} as {row.created_at!r}"
+    assert row.mtime == expected
 
 
 @pytest.mark.asyncio

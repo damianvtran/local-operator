@@ -482,8 +482,14 @@ def _started_epoch(peer_row: object) -> float:
     ``isinstance(True, int)`` is True: a claim that is not a number is NO
     claim, and it lands where a missing key lands — ``0.0``, "an unknown start
     sorts last" — never minted into an epoch. The type check is also what
-    keeps this reader's "nothing here raises" contract for a string claim,
-    where a bare ``float()`` would have raised into the sidebar's poll.
+    keeps this reader's "nothing here raises" contract for a string claim: a
+    bare ``float()`` here raised for a non-numeric claim and silently minted
+    an epoch for a numeric-looking one.
+
+    THE PARSE IS THE FIRST REFUSAL NOW (``PeerRow.from_json`` reads an
+    unreadable claim as the no-claim ``0.0``); this is the belt for the shapes
+    no parse produced — a raw row-object from another catalogue implementation,
+    or a test double (QA round 1 on #2044: doubles were all this guard saw).
     """
     value = getattr(peer_row, "started", 0.0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):

@@ -2443,6 +2443,7 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     admission in the route.
     """
     from local_operator.network.peers import resolve_peer
+    from local_operator.network.types import peer_number
     from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
     from local_operator.session.peer_rows import seed_peer_row
 
@@ -2452,18 +2453,15 @@ def _seed_created_peer_row(root: pathlib.Path, peer: str, reply: Mapping[str, An
     record = reply.get("record")
     record = record if isinstance(record, Mapping) else {}
     started_raw = record.get("started")
-    # A bool is an int subclass and ``float(True)`` is 1.0 — an epoch second
-    # into 1970, the value the desktop sidebar dates "56y". A claim that is
-    # not a number is NO claim and lands where a missing one lands (0.0) — the
-    # same reading ``session/peer_rows._started_epoch`` applies to the
-    # federated row that carries this claim on the next poll: the seed and the
-    # poll must not disagree about the same claim, and an OLD peer's create
-    # reply is exactly the case that still sends the bool.
-    started = (
-        0.0
-        if isinstance(started_raw, bool) or not isinstance(started_raw, (int, float))
-        else float(started_raw)
-    )
+    # THE SAME BOUNDARY RULE THE POLL READS THE CLAIM WITH (``PeerRow.from_json``
+    # calls this same ``peer_number``), so the seed and the next federated poll
+    # cannot disagree about one claim: a bool (an int subclass — ``float(True)``
+    # is 1.0, the epoch second into 1970 the sidebar dates "56y"), a null, a
+    # garbage string, a negative or an over-long number all become the no-claim
+    # ``0.0``, and a real epoch — including the numeric-string spelling the peer
+    # boundary documents — passes. QA round 1 on #2044: the hand-rolled
+    # ``isinstance`` reading here was a second spelling of the poll's rule.
+    started = peer_number(started_raw, default=0.0)
     name_raw = record.get("conversation_name")
     name = name_raw if isinstance(name_raw, str) and name_raw else UNTITLED_CONVERSATION
     matches = resolve_peer(peer, root)
