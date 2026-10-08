@@ -1684,9 +1684,14 @@ def resolve_create_identity(
     ``profile`` and ``agent_name``/``agent_id`` are the two halves of "who the
     session is" the local product has: an attachable persona (a role, a
     specialist or a packaged seed — ``/agent``'s vocabulary) and a legacy named
-    agent row (``--agent NAME``'s vocabulary). Both are resolved here because both
-    are carried on the frame; see ``relay._op_session_create`` for what each half
-    contributes.
+    agent row (``--agent NAME``'s vocabulary), which supplies the ROUTING (its
+    model and hosting). Both are resolved here because both are carried on the
+    frame — and they COMBINE when a create names both, exactly as the create's
+    own comment promises ("the profile's instructions and the agent's
+    routing"): the profile owns the instructions slot (one persona per session),
+    the row contributes the birth sample, and a name the frame mentions must
+    RESOLVE either way — a row this device cannot resolve is a refusal, never a
+    silent drop.
     """
     from local_operator.agent_profiles import resolve_profile_or_specialist
 
@@ -1729,7 +1734,14 @@ def resolve_create_identity(
                 digest = _agent_digest(root, resolved_name)
         elif kind == "specialist" and specialist_prompt is not None:
             digest = _agent_digest(root, resolved_name)
-    elif agent_name or agent_id:
+    # THE ROUTING HALF, RESOLVED EVEN BESIDE A PROFILE — this was an ``elif``,
+    # and that dropped the row ENTIRELY whenever a profile was also named: the
+    # row's routing (its whole documented contribution) never applied, a row
+    # this device does not hold never refused, and the requesting half had
+    # already PUSHED and PINNED the name — so the receipt listed it while
+    # nothing of it ran. The frame's two halves are not alternatives; they are
+    # the persona and the routing of one identity.
+    if agent_name or agent_id:
         from local_operator.agents import AgentRegistry
 
         registry = AgentRegistry(root)
@@ -1749,29 +1761,43 @@ def resolve_create_identity(
                 "was run under that name. Send its definition first (from the device that has it: "
                 "`lop network definitions push`)."
             )
-        resolved_name = str(row.name)
-        resolved_id = str(row.id)
-        agent_kind = "agent"
         hosting = str(getattr(row, "hosting", "") or "")
         model = str(getattr(row, "model", "") or "")
+        if not profile:
+            # AGENT-ALONE: the row IS the identity — its name is what the session
+            # runs under, and whether its instructions travel is the probe below.
+            # Beside a profile neither of those applies: the profile owns the
+            # instructions slot (one persona per session), so the row is its
+            # routing and nothing else — the division of labour the create's own
+            # comment states: "the profile's instructions and the agent's
+            # routing".
+            resolved_name = str(row.name)
+            resolved_id = str(row.id)
+            agent_kind = "agent"
+            digest = _agent_digest(root, resolved_name)
+            # Whether the row can carry its own instructions into a running session is
+            # the product's question, not this module's: ``attach_agent_profile``
+            # resolves roles and specialists only, and a legacy conversational row is
+            # deliberately not attachable (an agent's private chat prompt must not be
+            # pulled in by a coincidental name). Asking the ONE resolver rather than
+            # re-deriving the rule here is what keeps the two answers equal.
+            try:
+                attach_kind, _row, prompt, _display = resolve_profile_or_specialist(
+                    agent_name or resolved_name, registry=registry
+                )
+                attachable = attach_kind is not None and (
+                    attach_kind == "specialist" or prompt is not None
+                )
+            except Exception:  # noqa: BLE001 — "cannot attach" is the safe answer
+                attachable = False
         if hosting or model:
+            # THE ROW'S ROUTING WINS over a profile's own row model when both are
+            # named: ``--agent`` is the explicit routing selector ("whose model
+            # and hosting that device will use" — the network guide), while a
+            # profile's row carrying a model is a convenience of its definition.
+            # An empty row keeps the profile's birth standing: the caller asked to
+            # drop nothing.
             birth = BirthModel(provider=hosting, model_id=model, reasoning_effort=effort or None)
-        digest = _agent_digest(root, resolved_name)
-        # Whether the row can carry its own instructions into a running session is
-        # the product's question, not this module's: ``attach_agent_profile``
-        # resolves roles and specialists only, and a legacy conversational row is
-        # deliberately not attachable (an agent's private chat prompt must not be
-        # pulled in by a coincidental name). Asking the ONE resolver rather than
-        # re-deriving the rule here is what keeps the two answers equal.
-        try:
-            attach_kind, _row, prompt, _display = resolve_profile_or_specialist(
-                agent_name or resolved_name, registry=registry
-            )
-            attachable = attach_kind is not None and (
-                attach_kind == "specialist" or prompt is not None
-            )
-        except Exception:  # noqa: BLE001 — "cannot attach" is the safe answer
-            attachable = False
 
     team_id = ""
     team_digest = ""
