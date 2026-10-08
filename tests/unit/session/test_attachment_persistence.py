@@ -114,18 +114,40 @@ def _sidecar(tmp_path: Path) -> dict[str, Any]:
     return json.loads(raw)
 
 
+def _store_sidecar(tmp_path: Path, *, team: str = "", agent: str = "", goal: str = "") -> None:
+    """Write the sidecar DIRECTLY, the way a build that predates the team rule did.
+
+    Issue #2014 made ``/team`` + ``/agent`` unreachable through the mutators (a
+    team owns the agent slot), so a fixture that needs a STORED PAIR — the
+    legacy shape this file has to keep reading, and the widest miss notice —
+    writes the file instead of reaching for the two attaches that would now
+    raise. This is not a workaround around the rule: the pair on disk is exactly
+    what an older build left behind, which is the input the restore must define
+    behaviour for.
+    """
+    (tmp_path / "sess").mkdir(parents=True, exist_ok=True)
+    write_session_attachment(tmp_path / "sess", team=team, agent=agent, goal=goal)
+
+
 class TestTheRoundTrip:
-    def test_an_attached_team_and_agent_come_back_after_a_resume(self, tmp_path, registries):
-        """THE bug: a resumed session opened with the persona gone."""
+    def test_an_attached_team_comes_back_with_its_manager_as_the_speaker(
+        self, tmp_path, registries
+    ):
+        """THE bug: a resumed session opened with the persona gone.
+
+        A team is the ONE persona a session carries now (issue #2014): attaching
+        it claims the agent slot for its manager, so what a resume has to bring
+        back is the team, its brief, and that claim — not a team/agent pair that
+        was never a state this session could hold.
+        """
         _, teams = registries
         first = _session(tmp_path, registries)
         first.attach_team(teams.get_team_by_name("lopdev"))
-        first.attach_agent_profile("auditor")
         first.set_goal("keep the band honest")
 
         resumed = _session(tmp_path, registries)
         assert resumed.active_team_name == "lopdev"
-        assert resumed.active_agent == "auditor"
+        assert resumed.active_agent == "manager"
         assert resumed.goal == "keep the band honest"
 
     def test_the_team_brief_is_back_in_the_prompt_tail(self, tmp_path, registries):
@@ -204,15 +226,28 @@ class TestNamesNotBriefs:
         assert (stored.team, stored.agent, stored.goal) == ("lopdev", "a  b", "g")
 
     def test_only_names_are_stored(self, tmp_path, registries):
-        """Briefs are large and go stale; the sidecar holds names."""
+        """Briefs are large and go stale; the sidecar holds names.
+
+        A team's stored agent slot is the MANAGER it claimed (issue #2014), not
+        a second profile: the slot is the team's, so the name on disk is the
+        identity the team put there. The brief itself never reaches the file —
+        only the two names and the goal.
+        """
         _, teams = registries
         session = _session(tmp_path, registries)
         session.attach_team(teams.get_team_by_name("lopdev"))
-        session.attach_agent_profile("auditor")
 
         payload = _sidecar(tmp_path)
-        assert payload == {"team": "lopdev", "agent": "auditor", "goal": ""}
+        assert payload == {"team": "lopdev", "agent": "manager", "goal": ""}
         assert "Ship reviewed work." not in json.dumps(payload)
+
+    def test_an_agent_only_session_stores_its_profile_name(self, tmp_path, registries):
+        """The other half of the same contract, and the shape a session keeps
+        when no team is attached: the display name, nothing else."""
+        session = _session(tmp_path, registries)
+        session.attach_agent_profile("auditor")
+
+        assert _sidecar(tmp_path) == {"team": "", "agent": "auditor", "goal": ""}
 
     def test_an_edited_team_resumes_with_its_current_briefs(self, tmp_path, registries):
         """Why re-resolving by NAME is the deliberate choice: the operator edits
@@ -324,11 +359,12 @@ class TestTheStaleName:
 
     def test_the_notice_fits_one_line_on_a_standard_terminal(self, tmp_path, registries):
         """It wrapped to two lines at 100 columns, which is where it is read."""
-        _, teams = registries
         agents, _ = registries
-        first = _session(tmp_path, registries)
-        first.attach_team(teams.get_team_by_name("lopdev"))
-        first.attach_agent_profile("auditor")
+        # The stored PAIR, written the way a pre-#2014 build left it: both
+        # slots failing is the longest form this notice can take, and the team
+        # rule does not shorten it — with the team unresolvable there is no team
+        # in force, so the agent half is still attempted and still missed.
+        _store_sidecar(tmp_path, team="lopdev", agent="auditor")
 
         resumed = Session(
             model=MODEL,
@@ -352,12 +388,11 @@ class TestTheStaleName:
         persist ``team=""`` for a team that was only momentarily unresolvable
         (registry not wired on this host, a team directory not yet synced),
         turning a recoverable miss into permanent data loss."""
-        _, teams = registries
-        first = _session(tmp_path, registries)
-        first.attach_team(teams.get_team_by_name("lopdev"))
-        first.attach_agent_profile("auditor")
-
         agents, _ = registries
+        # A stored pair whose TEAM is the half that cannot resolve. The agent
+        # half resolves, and that is the point: a restore that wrote back
+        # through ``attach_agent_profile`` would journal the empty team slot.
+        _store_sidecar(tmp_path, team="lopdev", agent="auditor")
         Session(
             model=MODEL,
             stream_fn=ScriptedStream([[]]),
@@ -387,9 +422,9 @@ class TestTheStaleName:
         """
         _, teams = registries
         agents, _ = registries
-        first = _session(tmp_path, registries)
-        first.attach_team(teams.get_team_by_name("lopdev"))
-        first.attach_agent_profile("auditor")
+        # The stored pair, because the R1 scenario is a session that was carrying
+        # one when the team registry went away mid-life.
+        _store_sidecar(tmp_path, team="lopdev", agent="auditor")
 
         # Transient miss: the team registry is not wired on this host yet.
         resumed = Session(
@@ -635,8 +670,14 @@ class TestLateAdoptionBeforeTheFirstTurn:
         swallows failures by contract), so a live ``/team`` / ``/agent`` /
         ``/goal`` made before the first turn can sit beside a file still
         holding the PREVIOUS life's values. The late adoption must not revert
-        those live slots: per slot, a stored value that DIFFERS from a
-        non-empty live one is skipped, and the live value stays.
+        those live slots.
+
+        This is the CROSS-SLOT case (issue #2014): the stale file names a team
+        AND an agent, the live session has an agent attached and no team, and
+        the two slots are mutually exclusive now. "The live value wins" may not
+        mean "adopt the stored team and let it claim the slot" — that would drop
+        the profile this life just attached, the precise revert F1 forbids. The
+        stored team is skipped with the rest of the stale half.
         """
         from local_operator import resume as resume_module
 
@@ -652,18 +693,18 @@ class TestLateAdoptionBeforeTheFirstTurn:
         resume_module.write_session_attachment(
             tmp_path / "sess", team="architects", agent="scribe", goal="the stale goal"
         )
-        # ...and the live attaches below run with the journal write failing
+        # ...and the live attach below runs with the journal write failing
         # SILENTLY (a no-op writer is the observable end state of the real
         # best-effort contract), so the file keeps those old values.
         monkeypatch.setattr(resume_module, "write_session_attachment", lambda *a, **k: None)
-        session.attach_team(teams.get_team_by_name("lopdev"))
         session.attach_agent_profile("auditor")
         session.set_goal("the live goal")
 
         await session.prompt("first")
         try:
-            # Per slot: the live value survives.
-            assert session.active_team_name == "lopdev"
+            # Per slot: the live value survives, and the stored team does not
+            # engage at all — there is no pair to form, which is the rule.
+            assert session.active_team_name == ""
             assert session.active_agent == "auditor"
             assert session.goal == "the live goal"
             # The stale values never engaged at all — no carries, no notice.

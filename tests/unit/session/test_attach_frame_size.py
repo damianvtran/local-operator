@@ -541,6 +541,12 @@ _BOUNDED_COLLECTION_FIELDS = {
     # bounded conversation/token/anchor/kind plus a two-integer SQLite watermark.
     "attention": "fixed-shape latest outcome and read watermark, not accumulated history",
     "context_breakdown": "one entry per tool; bounded by the tool inventory",
+    # Issue #2014: three short identifiers (speaker / team / role_of_speaker),
+    # REBUILT from the session on every refresh rather than appended to. It can
+    # therefore neither grow with conversation length nor accumulate across
+    # turns, and its size is fixed by the name rules the values come from (a
+    # no-space role or team slug), not by what the user typed into the chat.
+    "effective_identity": "one speaker/team/role triple, replaced every refresh",
     "child_costs": "one float per job; O(1) bytes each",
     "queued_steering": "drains every turn",
     # Was "explicitly bounded by _fold_live_event", which stopped being true the
@@ -992,6 +998,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         ],
         "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
         "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
+        # Issue #2014: the identity triple at its WIDEST honest shape. The keys
+        # are fixed by the contract and the values are names, so this is three
+        # fields of a slug-sized string rather than a sample of a range — a
+        # sample here would understate nothing, which is why the entry is the
+        # worst case the field can hold rather than a round number.
+        "effective_identity": {
+            "speaker": "a-reviewer-role-name-at-its-longest-allowed-length",
+            "team": "a-team-name-at-its-longest-allowed-length-here",
+            "role_of_speaker": "manager",
+        },
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
         # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
         # 200 `message_update`s, which `_fold_live_event` dedupes to a single
@@ -1170,7 +1186,27 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     state = FrontendSessionState(
         session_id="s1",
         epoch="e1",
-        conversation_title="a" * 500,
+        # 500 -> 323 for issue #2014, and the arithmetic is the whole point:
+        # ``effective_identity`` is a fixed-shape state field (three short
+        # identifiers, replaced on every refresh) and it is charged HERE rather
+        # than by raising ``_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES``.
+        #
+        # Both figures, because they are not the same measurement: the arm's own
+        # CI arithmetic shows 177 B of new excess (1,050,930 - 1,050,753), while
+        # the same field serialized on a bare frame through the real
+        # ``sync_wire_payload`` measures 151 B (key, separators and value, with
+        # this fixture's widest slug pair). The trim takes the LARGER of the
+        # two, so the arm's total lands at or under the worst case it has always
+        # asserted instead of a strictly larger one — the property the ``jobs``
+        # fixture's own comment states for its per-row text.
+        #
+        # Prefer this direction over raising the constant: that number's comment
+        # says raising it IS the ceiling decision a human owns, and this change
+        # is not a capability anyone asked for — the guard's worst-case TOTAL is
+        # what must not grow. The field's own size-policy review is its entry in
+        # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
+        # either number.
+        conversation_title="a" * 323,
         goal="g" * 2_000,
         cwd="/" + "d" * 500,
         **populated,

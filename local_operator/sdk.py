@@ -560,7 +560,17 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
     runner_args = spec.to_runner_args()
     # Resolves the team/profile names against the SCOPED config dir, so a
     # scratch root cannot resolve the operator's teams by accident.
-    team = resolve_startup(runner_args)
+    try:
+        team = resolve_startup(runner_args)
+    except ValueError as error:
+        # The preflight is SHARED with the CLI, so it refuses in the CLI's
+        # exception type — a plain ``ValueError``, e.g. ``--profile`` combined
+        # with ``--team`` since issue #2014, or a name that does not resolve.
+        # The SDK promises its OWN type for invalid input (``SessionSpecError``,
+        # what a caller writes ``except`` for), so it is re-raised here rather
+        # than changed at the shared seam, which would move the CLI's contract
+        # too (agent review round 1, NIT-2).
+        raise SessionSpecError(str(error)) from error
 
     config_manager = ConfigManager(config_dir=roots.config_path)
     agent_registry = AgentRegistry(config_dir=roots.config_path)

@@ -247,8 +247,6 @@ def test_exec_team_count_loop_and_resume(exec_server):
         "Initial task",
         "--team",
         "release",
-        "--profile",
-        "reviewer",
         "--goal",
         "Ship safely",
         "--loop",
@@ -305,6 +303,36 @@ def test_exec_team_count_loop_and_resume(exec_server):
     assert '"status": "completed"' in json.dumps(
         [json.loads(line) for line in persisted.splitlines()]
     )
+
+
+def test_exec_team_with_a_profile_is_refused_at_preflight(exec_server):
+    """Issue #2014: a team OWNS the agent slot, so ``--team X --profile Y`` can
+    never be honoured — and it is refused BEFORE anything is constructed.
+
+    The refusal lives in ``resolve_startup`` for exactly this: a pair that can
+    never run must not leave a session directory behind to explain itself, and
+    must not reach a provider. Both halves are asserted here rather than
+    inferred from the return code. This cell replaced the ``--profile reviewer``
+    from the team cell above, which exercised the legacy combination the rule
+    removes (there is no manager carve-out: naming the team's own manager is
+    refused too, since the manager is already the speaker).
+    """
+    run, requests, root = exec_server
+    sessions = root / "sessions"
+    before = set(sessions.glob("*")) if sessions.is_dir() else set()
+
+    result = run("exec", "task", "--team", "release", "--profile", "reviewer", stdin="")
+
+    assert result.returncode != 0
+    # The refusal is the SESSION's own sentence (one builder,
+    # ``team_owns_the_agent_slot_message``), so the CLI, the TUI and the
+    # desktop cannot word the same rule differently.
+    assert "team release owns this session" in result.stderr
+    assert "/team clear" in result.stderr
+    # A REFUSED run reaches no provider at all.
+    assert not requests
+    after = set(sessions.glob("*")) if sessions.is_dir() else set()
+    assert after == before, "a preflight refusal leaves no session directory behind"
 
 
 def test_exec_goal_over_a_settled_goal_is_judged_again(exec_server):

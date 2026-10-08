@@ -396,9 +396,11 @@ _DROP_LADDER: tuple[str, ...] = (
     # watches — so they belong in this static-settings band ahead of the live
     # numbers, never spending width a compaction reading or a cost could use.
     #
-    # Two rungs, not one: a session may carry a team, a profile, both, or
-    # neither (each segment is empty and drops for free when its setting is
-    # unset), and splitting them lets a tight band keep the more specific one.
+    # Two rungs, not one, and since issue #2014 their occupants are MUTUALLY
+    # EXCLUSIVE: a team owns the agent slot, so a session carries a team (and
+    # its manager speaks), or a profile, or neither — never both. Each segment
+    # is still empty and drops for free when its setting is unset, and the
+    # split still lets a tight band keep the more specific one.
     # They shed AFTER `effort` — later here means kept longer — because both
     # NAME an identity the user just deliberately attached (`◉ auditor`,
     # `◫ lopdev`), which is higher-information than the `high`/`low` level word
