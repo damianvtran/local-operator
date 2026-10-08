@@ -392,3 +392,112 @@ async def test_a_multi_change_sequence_ships_far_fewer_bytes_than_whole_blocks(t
     assert sent_whole > 0 and sent_sections > 0
     assert sent_sections < sent_whole * 0.5, (sent_sections, sent_whole)
     await session.dispose()
+
+
+# --- the compaction re-anchor and the interactivity latch ---------------------
+#
+# Measured 2026-10-08 over 1,142 transcripts: every byte-identical re-send of a
+# state section followed a compaction marker, because the re-anchor shipped
+# EVERY section whenever the last state record was compacted away — although the
+# frozen prefix never leaves the request and later records survive in context.
+# Separately, the interactivity section flipped three times inside one manager
+# turn as the control socket blinked.
+
+
+async def _compact_after(session: Session, keep: CustomMessage | None = None) -> None:
+    """Compact so that only ``keep`` (and what follows it) survives the cut."""
+    from local_operator.harness.types import Message
+
+    kept = Message.user("retained task")
+    await session._transcript.append_message(kept)
+    first_kept = keep.id if keep is not None else kept.id
+    await session._transcript.append_compaction("summary", first_kept, 100)
+    session._context.messages = session._transcript.build_llm_history()
+
+
+@pytest.mark.asyncio
+async def test_a_reanchor_reships_only_sections_the_model_cannot_see(tmp_path) -> None:
+    state = _initial_state()
+    state["team"] = "the roster"
+    stream = RecordingStream()
+    session = _make_session(tmp_path / "sess", stream, state, [])
+    await session.prompt("freeze the prefix")  # team rides the frozen prefix
+
+    state["goal"] = "a changed goal"
+    await session.prompt("move the goal")
+    assert len(_state_records(session)) == 1
+
+    # The record carrying the new goal is compacted away; the prefix is not.
+    await _compact_after(session)
+    await session._prepare_system_blocks()
+
+    records = _state_records(session)
+    reanchor = records[-1].details["blocks"]
+    # The goal the model can no longer see is re-shipped...
+    assert "goal" in reanchor["3"] and "a changed goal" in reanchor["3"]["goal"]
+    # ...and nothing it can still see in the frozen prefix rides along.
+    assert set(reanchor) == {"3"}
+    assert set(reanchor["3"]) == {"goal"}
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_reanchor_skips_sections_a_surviving_record_still_carries(tmp_path) -> None:
+    state = _initial_state()
+    stream = RecordingStream()
+    session = _make_session(tmp_path / "sess", stream, state, [])
+    await session.prompt("freeze the prefix")
+    state["team"] = "the roster"
+    await session.prompt("attach the team")
+    team_record = _state_records(session)[-1]
+
+    # The cut lands ON the team record, so it survives in context, but the
+    # compaction id still moves past the session's last-published marker.
+    await _compact_after(session, keep=team_record)
+    before = len(_state_records(session))
+    await session._prepare_system_blocks()
+    # Nothing changed that the model cannot see: no record at all.
+    assert len(_state_records(session)) == before
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interactivity_moves_only_at_a_turn_boundary(tmp_path) -> None:
+    state = _initial_state()
+    attached = {"value": True}
+    stream = RecordingStream()
+    session = _make_session(tmp_path / "sess", stream, state, [])
+
+    # The provider reads the session's holder, as the real factory does.
+    provider = session._system_blocks_provider
+
+    def live_provider(model_label: str = "") -> list[str]:
+        state["interactive"] = session._goal_state.interactivity()
+        return provider(model_label)
+
+    for name in ("append_only_state", "host_has_browser", "host_has_console"):
+        setattr(live_provider, name, getattr(provider, name))
+    session._system_blocks_provider = live_provider
+    session._goal_state.interactive_probe = lambda: attached["value"]
+
+    await session.prompt("freeze the prefix")
+    # A blink INSIDE a turn: every provider call in it must read the latched
+    # answer, so no record is journalled however many calls the turn makes.
+    attached["value"] = False
+    for _ in range(3):
+        await session._prepare_system_blocks()
+    attached["value"] = True
+    await session._prepare_system_blocks()
+    assert _state_records(session) == []
+    # Decisions that act NOW still see the present.
+    attached["value"] = False
+    assert session._goal_state.is_interactive() is False
+
+    # A real detach reaches the model at the next turn — exactly once.
+    await session.prompt("next turn")
+    records = _state_records(session)
+    assert len(records) == 1
+    assert "No interface is attached" in records[0].details["blocks"]["3"]["interactivity"]
+    await session.prompt("and another")
+    assert len(_state_records(session)) == 1
+    await session.dispose()

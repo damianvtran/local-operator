@@ -5699,6 +5699,30 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     return _text(tool_call_id, "read", f"{header}\n{body}", details=details)
 
 
+#: Chars of context kept on each side of a hit when a ``spill://?q=`` match
+#: line is longer than :data:`_SPILL_MATCH_LINE_CHARS`.
+_SPILL_MATCH_CONTEXT_CHARS = 200
+
+#: A matched line longer than this is cut to a window around its first hit.
+_SPILL_MATCH_LINE_CHARS = 2 * _SPILL_MATCH_CONTEXT_CHARS + 100
+
+
+def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
+    """``line``, or a window around its first hit when the line is very long.
+
+    The window says how much it dropped on each side, so the model knows the
+    line continues and can read the whole line with a ``range`` on its number.
+    """
+    if len(line) <= _SPILL_MATCH_LINE_CHARS:
+        return line
+    hit = regex.search(line)
+    start = max((hit.start() if hit else 0) - _SPILL_MATCH_CONTEXT_CHARS, 0)
+    end = min((hit.end() if hit else 0) + _SPILL_MATCH_CONTEXT_CHARS, len(line))
+    before = f"[\u2026{start} chars] " if start else ""
+    after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
+    return f"{before}{line[start:end]}{after}"
+
+
 def _search_spill(
     tool_call_id: str,
     store: SpillStore,
@@ -5744,12 +5768,34 @@ def _search_spill(
             details={**details, "useless": True},
         )
     width = len(str(matches[-1][0]))
-    body = "\n".join(f"{number:>{width}}| {line}" for number, line in matches)
+    # THE SEARCH PATH HAD NO OUTPUT BOUND. A match is a whole stored LINE, and
+    # the payloads this store holds are often one enormous line (an MCP JSON
+    # result, minified JS): measured on the fleet, every ``read`` result over
+    # 20k chars since 2026-09-29 came from here, up to 382k chars for one call.
+    # So each matched line is cut to a window around its hit, and the match list
+    # stops at the same budget a ranged spill read uses, with the next page named.
+    regex = re.compile(ref.query)
+    rows: list[str] = []
+    used = 0
+    for number, line in matches:
+        row = f"{number:>{width}}| {_spill_match_window(line, regex)}"
+        if rows and used + len(row) + 1 > READ_OUTPUT_LIMIT_CHARS:
+            break
+        rows.append(row)
+        used += len(row) + 1
+    first_match_index = 1
+    if range_spec:
+        first_match_index = _parse_line_range(range_spec)[0]
+    body = "\n".join(rows)
     header = (
-        f"{len(matches)} of {total_matches} match(es) for '{ref.query}' in "
+        f"{len(rows)} of {total_matches} match(es) for '{ref.query}' in "
         f"{ref.handle} ({total_lines} lines)"
     )
-    if total_matches > len(matches):
+    if len(rows) < len(matches):
+        following = first_match_index + len(rows)
+        header += f'; next page of matches: range="{following}-{following + len(rows) - 1}"'
+        matches = matches[: len(rows)]
+    elif total_matches > len(matches):
         header += "; 'range' pages through matches"
     footer = (
         f'\n[read around a hit with read(path="{ref.handle}", '
@@ -11607,6 +11653,37 @@ def _todo_progress(current: list[dict[str, str]]) -> str:
     return f"{resolved}/{len(current)}"
 
 
+#: Per-item cap in a mutation receipt (``done``/``add``/``block``/``drop``).
+#: The model just SENT those texts, so echoing them back in full re-bills
+#: what it already holds; a measured session paid up to 16k chars per receipt.
+#: 40 chars is enough to recognise the item, and ``view`` stays complete.
+_TODO_RECEIPT_ITEM_CHARS = 40
+
+#: How many item names a mutation receipt lists before folding the rest into a
+#: ``+N more`` count. The count, not the names, is what the receipt is for.
+_TODO_RECEIPT_MAX_NAMES = 8
+
+
+def _todo_receipt_names(texts: list[str]) -> str:
+    """``N item(s): a, b, …`` — truncated names for a compact mutation receipt.
+
+    Only receipts use this. The partial-match error keeps the full text of the
+    still-open items, because the model must echo those texts EXACTLY to act on
+    them, and ``view`` keeps every open row in full for the same reason.
+    """
+    names = [
+        (
+            text
+            if len(text) <= _TODO_RECEIPT_ITEM_CHARS
+            else text[: _TODO_RECEIPT_ITEM_CHARS - 1].rstrip() + "\u2026"
+        )
+        for text in texts[:_TODO_RECEIPT_MAX_NAMES]
+    ]
+    rest = len(texts) - len(names)
+    listed = ", ".join(names) + (f", +{rest} more" if rest else "")
+    return f"{len(texts)} item(s): {listed}"
+
+
 def _todo_rows(items: list[dict[str, str]]) -> list[str]:
     """One ``- [mark] text`` row per item, blocked rows carrying their reason."""
     rows: list[str] = []
@@ -11642,7 +11719,15 @@ def _todo_view_text(phases: list[TodoPhase]) -> str:
     blocks: list[str] = []
     for phase in phases:
         items = phase["items"]
-        blocks.append(f"{phase['name']} · {_todo_progress(items)}")
+        header = f"{phase['name']} · {_todo_progress(items)}"
+        # A FULLY RESOLVED phase folds to its header line. Its rows carry no
+        # work left to do, and a long phased list re-sent them on every view
+        # (one measured view reached 131k chars). Any phase with an open or
+        # blocked item still renders every row, so nothing actionable is hidden.
+        if items and all(item.get("status") in _TODO_RESOLVED for item in items):
+            blocks.append(f"{header} — all resolved")
+            continue
+        blocks.append(header)
         blocks.extend(_todo_rows(items))
     return "\n".join(blocks)
 
@@ -11703,7 +11788,9 @@ def _todo_miss_error(
     """
     lines = []
     if applied:
-        lines.append(f"Applied '{op}' to: {', '.join(item['text'] for item in applied)}.")
+        lines.append(
+            f"Applied '{op}' to {_todo_receipt_names([item['text'] for item in applied])}."
+        )
     lines.append(f"No todo matching: {', '.join(repr(text) for text in missing)}.")
     still_open = [item for item in current if item.get("status") in ("pending", "blocked")]
     if still_open:
@@ -11818,8 +11905,7 @@ async def execute_todo(
         return _text(
             tool_call_id,
             "todo",
-            f"Added {len(added)} item(s): {', '.join(added)} "
-            f"({_todo_progress(current)} resolved).",
+            f"Added {_todo_receipt_names(added)} ({_todo_progress(current)} resolved).",
         )
 
     if params.op in ("done", "block", "drop"):
@@ -11869,7 +11955,7 @@ async def execute_todo(
                     f"No open items in phase {params.phase!r} "
                     f"({_todo_progress(current)} resolved).",
                 )
-            text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+            text = f"{verb} {_todo_receipt_names([item['text'] for item in matched])}"
             if target == "blocked":
                 text += f" — reason: {reason}"
             changed()
@@ -11890,7 +11976,7 @@ async def execute_todo(
             changed()
         if missing:
             return _todo_miss_error(tool_call_id, params.op, matched, missing, current)
-        text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+        text = f"{verb} {_todo_receipt_names([item['text'] for item in matched])}"
         if target == "blocked":
             text += f" — reason: {reason}"
         return _text(tool_call_id, "todo", f"{text} ({_todo_progress(current)} resolved).")
@@ -25738,6 +25824,87 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+#: ANSI sequences a full-screen redraw starts with: clear-screen (``ESC[2J``),
+#: cursor-home + clear-to-end (``ESC[H ESC[J``) and full reset (``ESC c``).
+_CLEAR_SCREEN_RE = re.compile(r"\x1b\[[23]J|\x1b\[H\x1b\[J|\x1bc")
+
+#: A frame must have at least this many lines to count as a redraw. Below it, a
+#: recurring line is more likely an ordinary repeated log line than a frame.
+_FRAME_MIN_LINES = 3
+
+#: How alike (Jaccard over distinct lines) the last two frames must be before
+#: the earlier ones are treated as stale redraws. A watcher's frames differ in
+#: a timestamp and a few status marks; two unrelated log sections do not.
+_FRAME_MIN_SIMILARITY = 0.5
+
+
+def _collapse_refreshing_frames(text: str) -> tuple[str, int]:
+    """``(latest_frame, frames_elided)`` for output that REDRAWS one frame.
+
+    ``gh run watch``, ``watch``, progress UIs and the like print the same frame
+    over and over when they are not on a TTY: one measured peek was 8.5k chars of
+    the same ``gh run watch`` frame repeated, of which only the last copy was
+    news. Only the latest frame is worth returning; ``(text, 0)`` means nothing
+    was recognised as a redraw and the text is returned untouched.
+
+    Two shapes are recognised, both conservatively:
+
+    * an explicit clear-screen sequence — everything before the last one is a
+      frame the terminal would already have wiped;
+    * a frame HEADER line that recurs (see the body for how it is chosen), and
+      the collapse fires only when the last two frames are similar
+      (:data:`_FRAME_MIN_SIMILARITY`) and at least :data:`_FRAME_MIN_LINES`
+      long, so an ordinary log with a repeated line is left alone.
+
+    The caller spills the original, so an elided frame stays one ``read`` away.
+    """
+    cleared = list(_CLEAR_SCREEN_RE.finditer(text))
+    if cleared:
+        tail = text[cleared[-1].end() :]
+        if tail.strip():
+            return tail, len(cleared)
+    lines = text.split("\n")
+    positions: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        if line.strip():
+            positions.setdefault(line, []).append(index)
+    recurring = {line: at for line, at in positions.items() if len(at) >= 2}
+    if not recurring:
+        return text, 0
+    # The frame HEADER. A watcher writes whole frames, so a peek cursor almost
+    # always sits on a frame boundary and the text's first line IS the header
+    # (it is in the measured ``gh run watch`` peek). Failing that, the header is
+    # taken among the lines that recur exactly as often as most recurring lines
+    # do (once per frame), earliest first: a line repeated WITHIN a frame
+    # recurs more often, and a line that changed between frames (``* job`` ->
+    # ``✓ job``) recurs less. The similarity check below is the real guard; a
+    # wrong header fails it and nothing collapses.
+    first = next((line for line in lines if line.strip()), "")
+    if first in recurring:
+        header = first
+    else:
+        counts = Counter(len(at) for at in recurring.values())
+        per_frame = counts.most_common(1)[0][0]
+        header = min(
+            (line for line, at in recurring.items() if len(at) == per_frame),
+            key=lambda line: recurring[line][0],
+        )
+    starts = recurring[header]
+    last = lines[starts[-1] :]
+    previous = lines[starts[-2] : starts[-1]]
+    if len(last) < _FRAME_MIN_LINES or len(previous) < _FRAME_MIN_LINES:
+        return text, 0
+    last_set = {line for line in last if line.strip()}
+    previous_set = {line for line in previous if line.strip()}
+    union = last_set | previous_set
+    if not union or len(last_set & previous_set) / len(union) < _FRAME_MIN_SIMILARITY:
+        return text, 0
+    # Every frame before the last, plus a partial frame ahead of the first
+    # header (a peek cursor that landed mid-frame), is stale.
+    elided = len(starts) - 1 + (1 if starts[0] > 0 and "\n".join(lines[: starts[0]]).strip() else 0)
+    return "\n".join(last), elided
+
+
 def _peek_job(
     tool_call_id: str,
     jobs: Any,
@@ -25783,7 +25950,18 @@ def _peek_job(
             "[warning: output between your cursor and this window was dropped "
             "from the buffer — this excerpt is not contiguous with your last peek]"
         )
-    if text:
+    frame, elided = _collapse_refreshing_frames(text) if text else (text, 0)
+    collapsed_meta = None
+    if elided:
+        # The ORIGINAL delta is spilled first, so the elided frames stay
+        # addressable; the result carries only the latest frame.
+        collapsed_meta = _spill(text, "jobs", context)
+        note = f"[{elided} earlier repeated frame(s) elided; showing the latest"
+        if collapsed_meta is not None:
+            note += f' \u2014 all of them: read(path="{collapsed_meta.handle}")'
+        parts.append(note + "]")
+        parts.append(frame)
+    elif text:
         parts.append(text)
     elif status == "running":
         parts.append("(no new output since last peek)")
@@ -25794,6 +25972,8 @@ def _peek_job(
     summary, spill_details = _capped_list_body(
         body, body[:TOOL_OUTPUT_LIMIT_CHARS], "jobs", context
     )
+    if collapsed_meta is not None and not spill_details:
+        spill_details = {"spill": _spill_detail(collapsed_meta)}
     details: dict[str, Any] = {
         "job_id": job.id,
         "status": status,
@@ -25801,6 +25981,8 @@ def _peek_job(
         "new_chars": len(text),
         "gap": gap,
     }
+    if elided:
+        details["frames_elided"] = elided
     if spill_details:
         details.update(spill_details)
     return _text(tool_call_id, "jobs", summary, details=details)
@@ -26380,13 +26562,32 @@ _ACTOR_LABELS: dict[str, str] = {
 }
 
 
-def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolResult:
+#: How many COMPLETED children ``hub op='list'`` renders in full, newest last.
+#: A long-lived manager keeps its whole ``MAX_RECORDS`` history in the roster,
+#: and one measured call (2026-10-08) returned 33,935 chars for 256 children of
+#: which 254 had completed days earlier — every row re-billed on every later
+#: turn for a fact nobody acts on. Children in any OTHER state (running, queued,
+#: paused, failed, cancelled) are always listed: those are the rows a parent
+#: does something about. The older completed rows are summarised as a count and
+#: kept, rendered, behind a ``spill://`` handle, so nothing becomes unreachable.
+HUB_LIST_COMPLETED_SHOWN = 10
+
+
+def _hub_list(
+    tool_call_id: str,
+    comms: Any,
+    scope: str | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
     """Render the subagent roster for ``op='list'``.
 
     Every row states the one thing the caller acts on \u2014 whether the child can
     be resumed \u2014 rather than leaving it to be inferred from the status, since
     ``completed``, ``failed``, ``cancelled`` and ``paused`` are all resumable
     while ``running`` is not, which is the opposite of the intuitive reading.
+
+    Only the newest :data:`HUB_LIST_COMPLETED_SHOWN` completed rows are shown;
+    the full roster is spilled (see the constant for why).
     """
     rows = comms.roster()
     if scope:
@@ -26405,6 +26606,66 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             details={"op": "list", "count": 0, "useless": True},
             useless=True,
         )
+    # The newest completed rows survive the fold (the roster is newest-launch-
+    # last); every non-completed row is kept whatever its age.
+    completed_ids = [row.job_id for row in rows if row.status == "completed"]
+    shown_completed = set(completed_ids[-HUB_LIST_COMPLETED_SHOWN:])
+    folded = len(completed_ids) - len(shown_completed)
+    all_lines = _hub_roster_lines(rows)
+    if folded:
+        visible = [
+            row for row in rows if row.status != "completed" or row.job_id in shown_completed
+        ]
+        lines = _hub_roster_lines(visible)
+        lines[0] = f"{len(rows)} subagent(s), {len(visible)} shown:"
+        meta = _spill("\n".join(all_lines), "hub", context)
+        summary = f"+ {folded} older completed subagent(s) not shown"
+        if meta is not None:
+            summary += f' \u2014 the full roster is at read(path="{meta.handle}")'
+        lines.insert(1, summary)
+    else:
+        meta = None
+        lines = all_lines
+    if any(row.resumable for row in rows):
+        lines.append("")
+        # ONE footer for the whole roster. It used to be a two-line
+        # ``transcript <id> (read it with lop --resume <id>)`` block under EVERY
+        # resumable row \u2014 the same instruction 254 times in the measured call.
+        lines.append(
+            "Resume one with hub op='resume' and its JOB id, plus an instruction for "
+            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
+            "one call. A 'transcript <id>' is not a job id: `lop --resume <id>` "
+            "opens that child's history for reading and starts no agent."
+        )
+    details: dict[str, Any] = {
+        "op": "list",
+        "count": len(rows),
+        # Every child, folded or not: ``details`` never reaches the provider,
+        # and the mobile/desktop projection reads the whole roster from here.
+        "children": [
+            {
+                "job_id": row.job_id,
+                "label": row.label,
+                "status": row.status,
+                "resumable": row.resumable,
+                "session_id": row.session_id,
+                # Mirrored into the details payload too (not only the
+                # rendered line) so the mobile/desktop projection can show
+                # WHO stopped a child without re-deriving it from prose.
+                "ended_by": row.ended_by,
+            }
+            for row in rows
+        ],
+    }
+    if folded:
+        details["folded_completed"] = folded
+    if meta is not None:
+        details["spill"] = _spill_detail(meta)
+    return _text(tool_call_id, "hub", "\n".join(lines), details=details)
+
+
+def _hub_roster_lines(rows: list[Any]) -> list[str]:
+    """The roster rows for ``hub op='list'``: a count line, then one block per child."""
     lines = [f"{len(rows)} subagent(s):"]
     # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary (see the note
     # above); the module is stdlib-only and cheap.
@@ -26426,6 +26687,14 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             if clause:
                 idle = f", {clause}"
         extras = "resumable" if row.resumable else (row.detail or "not resumable")
+        # The session id only where it can be acted on. It is the id
+        # ``--resume`` takes (NOT the job id beside the label), and this roster
+        # is the only surface that shows it now that children are kept out of
+        # the ``/resume`` picker. Printed for resumable rows alone: on a row that
+        # cannot be resumed it is a string to mistake for the job id rather than
+        # something to type. Inline, with the how-to stated ONCE in the footer.
+        if row.resumable and row.session_id:
+            extras += f", transcript {row.session_id}"
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age}{idle} — {extras}")
         # WHO ended it, and why. The field the old ``del reason`` discarded:
         # without this line a cancelled child read as a bare ``cancelled`` with
@@ -26465,47 +26734,7 @@ def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolRe
             from local_operator.incidents import render_cut_off_reason
 
             lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
-        # The session id only where it can be acted on. It is the id
-        # ``--resume`` takes (NOT the job id on the line above), and this
-        # roster is the only surface that shows it now that children are kept
-        # out of the ``/resume`` picker. Printed for resumable rows alone: on a
-        # row that cannot be resumed it is a string to mistake for the job id
-        # rather than something to type.
-        if row.resumable and row.session_id:
-            lines.append(
-                f"    transcript {row.session_id} (read it with lop --resume {row.session_id})"
-            )
-    if any(row.resumable for row in rows):
-        lines.append("")
-        lines.append(
-            "Resume one with hub op='resume' and its JOB id, plus an instruction for "
-            "what to do next \u2014 or name several JOB ids to resume a whole batch in "
-            "one call. The transcript id above is not a job id: it opens the "
-            "child's history for reading and starts no agent."
-        )
-    return _text(
-        tool_call_id,
-        "hub",
-        "\n".join(lines),
-        details={
-            "op": "list",
-            "count": len(rows),
-            "children": [
-                {
-                    "job_id": row.job_id,
-                    "label": row.label,
-                    "status": row.status,
-                    "resumable": row.resumable,
-                    "session_id": row.session_id,
-                    # Mirrored into the details payload too (not only the
-                    # rendered line) so the mobile/desktop projection can show
-                    # WHO stopped a child without re-deriving it from prose.
-                    "ended_by": row.ended_by,
-                }
-                for row in rows
-            ],
-        },
-    )
+    return lines
 
 
 async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) -> ToolResult:
@@ -26645,7 +26874,7 @@ async def _execute_hub_parent(
         return _validation_error(tool_call_id, "hub", exc)
 
     if params.op == "list":
-        return _hub_list(tool_call_id, comms, scope)
+        return _hub_list(tool_call_id, comms, scope, context)
 
     if scope and params.to and "parent" in params.to:
         # A lead still reports up through the same tool it drives its pod with.
