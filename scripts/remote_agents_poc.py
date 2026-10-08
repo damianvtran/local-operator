@@ -770,6 +770,42 @@ def _transcript_lines(path: Path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+#: The ambient names a fixture runner gets from the driver, and nothing else. PATH so
+#: the interpreter it is invoked with can find anything it shells out to, and the locale
+#: family so its own output is decoded as the caller's was. Deliberately an allowlist:
+#: see `_fixture_runner_environment` for why nothing else may cross.
+_FIXTURE_RUNNER_PASSTHROUGH = ("PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE")
+
+
+def _fixture_runner_environment() -> dict[str, str]:
+    """The environment a fixture runner is given: built, never inherited.
+
+    WHY: the recorded run's agent committed `__pycache__/calc.cpython-312.pyc` beside
+    its fix, so the fixture's merge base TRACKS a bytecode file the runner regenerates
+    the moment it imports `calc`. Importing writes nothing only while bytecode writing
+    is off, and that switch has to reach the CHILD — which is what this builds. A run
+    that relied on the ambient `PYTHONDONTWRITEBYTECODE` answered a question about the
+    host rather than about the artifact: with it unset, the fixture-SHA run drops an
+    untracked `__pycache__/` into a tree whose branch tracks that exact path, the
+    branch checkout then refuses to overwrite an untracked file, and
+    `acceptance2.checkout_branch` FAILs on a run that is itself correct (observed: 21
+    PASS / 1 FAIL, nothing else moved). Setting the switch here is what makes `verify`
+    host-independent; `PYTHONPYCACHEPREFIX` is likewise not forwarded, so a host that
+    redirects bytecode elsewhere cannot mask the same defect.
+
+    Credentials are the other half: the driver holds an assumed controller session
+    while `verify` runs, so inheriting `os.environ` would hand a fixture command the
+    operator's AWS/`lop` material for no reason it has. An allowlist gives it nothing
+    it did not need — which is the same rule `_verify_session`'s `env -i`-style mapping
+    follows for the transplanted session.
+    """
+    environment = {
+        name: os.environ[name] for name in _FIXTURE_RUNNER_PASSTHROUGH if name in os.environ
+    }
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+
+
 def _fixture_test_command(clone: Path) -> list[str]:
     """The fixture ships a pytest-free runner so the container needs no pytest; use
     it when present so verify tests the same thing the agent was asked to fix."""
@@ -851,12 +887,15 @@ def _verify_bundle(verifier: Verifier, clone: Path, bundle: Path, fixture_sha: s
 def _verify_fixture_tests(verifier: Verifier, clone: Path, fixture_sha: str, branch: str) -> None:
     """Acceptance 2: the test FAILS at the fixture SHA and PASSES on the branch."""
     command = _fixture_test_command(clone)
+    # BOTH runs get the built environment, not just the second: the FIRST one is the one
+    # that lays the untracked bytecode the branch checkout collides with.
+    env = _fixture_runner_environment()
     checkout = _run(["git", "checkout", "--quiet", fixture_sha], cwd=clone)
     if not verifier.check(
         "acceptance2.checkout_fixture_sha", checkout.returncode == 0, fixture_sha
     ):
         return
-    before = _run(command, cwd=clone)
+    before = _run(command, cwd=clone, env=env)
     verifier.check(
         "acceptance2.test_fails_at_fixture_sha",
         before.returncode != 0,
@@ -865,7 +904,7 @@ def _verify_fixture_tests(verifier: Verifier, clone: Path, fixture_sha: str, bra
     checkout = _run(["git", "checkout", "--quiet", branch], cwd=clone)
     if not verifier.check("acceptance2.checkout_branch", checkout.returncode == 0, branch):
         return
-    after = _run(command, cwd=clone)
+    after = _run(command, cwd=clone, env=env)
     verifier.check(
         "acceptance2.test_passes_on_branch",
         after.returncode == 0,
