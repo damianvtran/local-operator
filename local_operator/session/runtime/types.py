@@ -187,6 +187,38 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
 
+#: Additive attach capability: this owner's ``ask_respond`` accepts IMAGES on a
+#: queued-ask answer (``images`` on the frame: a flat list of
+#: ``{question_id, data_b64, mime_type}``; design
+#: ``docs/design/ask-nonblocking.md`` §5.0 amendment / the Other-door change).
+#:
+#: WHY A CAPABILITY, AND WHY THE SENDER REFUSES INSTEAD OF STRIPPING. The frame
+#: validator does not reject unknown keys and the owner dispatch reads only the
+#: keys it knows, so an owner that predates this feature would accept an
+#: ``images`` list and silently ignore it: the answer would be recorded as text
+#: only and the user would never learn their screenshot did not reach the agent.
+#: ``INPUT_MODE_CAPABILITY`` above STRIPS for an old owner because what it carries
+#: is metadata; an image is CONTENT, and an answer is terminal (the first
+#: ``answered`` event wins, there is no second try), so the one outcome the user
+#: cannot see and cannot repair is the one this string exists to prevent. A
+#: sender that does not see it must refuse the answer in words and let the user
+#: choose to send it as text.
+#:
+#: Advertised only by an owner whose handle's ``ask_respond`` takes the keyword
+#: (``server._takes_ask_images``), on the same fail-closed argument as its
+#: siblings: a handle that would swallow the images must not claim it keeps them.
+ASK_ATTACHMENTS_CAPABILITY = "ask-attachments-v1"
+
+#: The refusal for an image answer sent to an owner that did not advertise
+#: :data:`ASK_ATTACHMENTS_CAPABILITY`. Worded for the person looking at the answer
+#: card: what happened, and the one move that still works. ONE constant because
+#: two senders gate on the same record — the attach client and the phone relay —
+#: and the tests quote it rather than a copy that could drift.
+ASK_ATTACHMENTS_UNSUPPORTED = (
+    "this session's runtime predates image answers; update the runtime or send "
+    "the answer as text"
+)
+
 #: Additive discovery capability: this session's receive path understands a
 #: SENDER-MINTED ``message_id`` on a ``peer_message`` op. It names its transcript
 #: row with that id and answers a RE-SEND of the same id as a duplicate instead

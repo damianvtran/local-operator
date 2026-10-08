@@ -1331,6 +1331,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         *,
         decline: bool = False,
         revise: bool = False,
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
         """Answer, decline or REVISE a QUEUED ask; returns the owner's receipt.
 
@@ -1345,6 +1346,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ``revise`` selects a DIFFERENT op on the wire (``ask_revise``) rather than
         a flag the far side interprets: design §10 requires the intent to be
         explicit, because value equality is never the marker.
+
+        ``images`` are a FIRST answer's attachments (flat ``{question_id,
+        data_b64, mime_type}`` dicts). An owner that cannot keep them REFUSES the
+        answer in words (``ask-attachments-v1``) rather than recording the text
+        and dropping the pictures.
 
         Declared here because ``server/routes/desktop_sessions.py`` reaches it
         through a duck-typed ``bridge.remote`` binding, where a rename would be

@@ -17,7 +17,9 @@ them would test the stub.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -1237,3 +1239,46 @@ def test_the_yield_measures_the_real_payload_not_a_rebuilt_envelope() -> None:
     fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
     assert "asks" not in snapshot and "asks_open" not in snapshot
     assert "asks_truncated" not in snapshot, "the flag goes with the rows it describes"
+
+
+# ---------------------------------------------------------------------------
+# Image answers: refs on the wire row, absent for a text-only ask
+# ---------------------------------------------------------------------------
+
+
+def test_the_wire_row_omits_attachments_while_none_and_publishes_refs_once_present(
+    tmp_path: Path,
+) -> None:
+    from local_operator.harness.types import ImageContent
+
+    _session, queue = _live_session(tmp_path)
+    ask_id = queue.enqueue(
+        [
+            {
+                "id": "q1",
+                "question": "Which?",
+                "options": [],
+                "multi": False,
+                "secret": False,
+                "persist": False,
+                "recommended": None,
+            }
+        ],
+        600,
+    )["details"]["ask_id"]
+    (open_row,) = queue.projection(BASE)
+    assert "attachments" not in open_row
+
+    image = ImageContent(data=base64.b64encode(os.urandom(2048)).decode(), mime_type="image/png")
+    assert queue.respond(ask_id, {"q1": ["see this"]}, attachments={"q1": [image]})["ok"]
+
+    (answered_row,) = queue.projection(BASE)
+    refs = answered_row["attachments"]["q1"]
+    assert len(refs) == 1 and set(refs[0]) == {"attachment", "mime_type", "bytes"}
+    assert refs[0]["bytes"] == 2048
+    # Refs ride every wire model without loss, and a text-only row still validates.
+    assert PendingAskState(**answered_row).attachments == {"q1": refs}
+    assert PendingAskWire(**answered_row).to_json()["attachments"] == {"q1": refs}
+    assert "attachments" not in PendingAskWire(**open_row).to_json()
+    # NEVER the bytes: the whole published row is small however large the image was.
+    assert len(json.dumps(answered_row)) < 1500

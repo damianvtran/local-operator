@@ -575,3 +575,51 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     assert default.context_tokens is None
     assert default.context_window is None
     assert default.context_is_estimate is None
+
+
+# --- images on an ask answer (ask-attachments-v1) ---------------------------
+
+
+def _ask_frame(op: str = "ask_respond", **extra: Any) -> dict[str, Any]:
+    frame: dict[str, Any] = {"op": op, "ask_id": "a-1", "answers": {"q1": ["x"]}}
+    frame.update(extra)
+    return frame
+
+
+def _img(question_id: Any = "q1") -> dict[str, Any]:
+    return {"question_id": question_id, "data_b64": "QUJD", "mime_type": "image/png"}
+
+
+def test_an_ask_answer_frame_without_images_validates_exactly_as_before() -> None:
+    validate_control_frame(_ask_frame())
+    validate_control_frame(_ask_frame("ask_revise"))
+    validate_control_frame(_ask_frame(images=[]))
+
+
+def test_an_ask_answer_frame_with_well_formed_images_validates() -> None:
+    validate_control_frame(_ask_frame(images=[_img(), _img()]))
+
+
+@pytest.mark.parametrize(
+    "images",
+    [
+        "not a list",
+        [None],
+        ["str"],
+        [{"data_b64": "QUJD", "mime_type": "image/png"}],  # no question_id
+        [_img(question_id=3)],  # non-string question_id
+        [_img(question_id="")],
+        [_img(question_id="q-other")],  # not a question this answer answers
+    ],
+)
+def test_a_malformed_images_list_is_refused_at_the_wire(images: Any) -> None:
+    with pytest.raises(ValueError):
+        validate_control_frame(_ask_frame(images=images))
+
+
+@pytest.mark.parametrize("op", ["ask_revise", "ask_decline", "ask_dismiss"])
+def test_only_a_first_answer_may_carry_images(op: str) -> None:
+    """A revision is text-only (D5); a decline/dismissal has nothing to attach."""
+    with pytest.raises(ValueError, match="does not carry images"):
+        validate_control_frame(_ask_frame(op, images=[_img()]))
+    validate_control_frame(_ask_frame(op, images=[]))

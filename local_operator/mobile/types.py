@@ -355,6 +355,34 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
                     raise ValueError("answers keys must be strings")
                 if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                     raise ValueError("answers values must be lists of strings")
+        if "images" in frame:
+            # IMAGES ON AN ANSWER (``ask-attachments-v1``). A flat list tagged by
+            # question, one shape from the HTTP body to this frame so the socket
+            # guard's refit (``fit_request_frame`` rewrites ``frame["images"]``)
+            # needs no second path. Validated at the wire, not trusted to the
+            # dispatch, because an answer is TERMINAL: a malformed entry that the
+            # owner skipped would lose a picture with nothing to say so.
+            #
+            # Only ``ask_respond`` carries them: a revision is text-only (design
+            # D5 — an answer's images are immutable once sent) and a decline or a
+            # dismissal has nothing to attach, so on those ops the key is a
+            # refusal rather than a field to ignore.
+            images = frame["images"]
+            if op != "ask_respond":
+                if images:
+                    raise ValueError(f"{op} does not carry images")
+                images = []
+            if not isinstance(images, list):
+                raise ValueError("images must be a list of image objects")
+            answered = frame.get("answers") or {}
+            for image in images:
+                if not isinstance(image, dict):
+                    raise ValueError("images must be a list of image objects")
+                qid = image.get("question_id")
+                if not isinstance(qid, str) or not qid:
+                    raise ValueError("every image needs a string question_id")
+                if qid not in answered:
+                    raise ValueError("every image must name a question the answers body answers")
     elif op in ("slash", "slash_result"):
         if not isinstance(frame.get("command"), str) or not frame["command"]:
             raise ValueError("command must be a non-empty string")
@@ -779,6 +807,10 @@ class PendingAskWire:
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: Refs to the images attached to the answer (``{qid: [{"attachment",
+    #: "mime_type", "bytes"}]}``); never bytes. Absent for a text-only ask --
+    #: ``to_json`` drops ``None`` -- so the phone wire is unchanged for them.
+    attachments: dict[str, list[dict[str, Any]]] | None = None
     #: Question ids the LEGACY incremental path (design §4, A2 addendum) has
     #: already taken in THIS runtime for a still-open ask. They are not settled
     #: answers — the log holds none of them until the last question lands — and

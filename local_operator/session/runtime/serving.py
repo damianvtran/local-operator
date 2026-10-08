@@ -31,7 +31,7 @@ import time
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -5007,7 +5007,13 @@ class ServingSessionHandle(SessionHandle):
         return "answered"
 
     @_on_session_loop
-    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        by: str = "",
+        attachments: Mapping[str, Sequence["ImageContent"]] | None = None,
+    ) -> str:
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
 
@@ -5019,7 +5025,14 @@ class ServingSessionHandle(SessionHandle):
         revision window stays open until it does (design §10, the consumption
         bound).
         """
-        outcome = self._session.respond_ask(ask_id, answers, by=by or "remote")
+        # ``attachments`` is passed ONLY when present, so a text-only answer calls
+        # the session exactly as it always did (a reduced session double keeps
+        # working). The keyword's presence on THIS signature is also what the
+        # runtime advertises ``ask-attachments-v1`` from (``_takes_ask_attachments``):
+        # a handle that takes it keeps the pictures, one that does not is
+        # refused-not-stripped by every sender.
+        kwargs: dict[str, Any] = {"attachments": attachments} if attachments else {}
+        outcome = self._session.respond_ask(ask_id, answers, by=by or "remote", **kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         await self._session.reconcile_asks()

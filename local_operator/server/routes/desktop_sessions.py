@@ -1068,6 +1068,24 @@ class Image(Input):
         return value
 
 
+class AnswerImage(Image):
+    """One image on a QUEUED-ASK answer, tagged with the question it answers.
+
+    A flat list tagged by ``question_id`` rather than a nested ``{qid: [Image]}``
+    map, deliberately: the HTTP body IS the attach-socket frame (one shape end to
+    end), and ``attach_client.fit_request_frame`` refits ONLY a top-level
+    ``frame["images"]`` list when a line exceeds the socket's 1 MiB read limit. A
+    nested map would need a second refit path; the flat list reuses the existing
+    one unchanged (and ``_refit_images`` keeps extra keys, so ``question_id``
+    survives the re-encode).
+
+    ``extra="forbid"`` is inherited from :class:`Input` — an unknown key on an
+    image is a 422, not a silently ignored field.
+    """
+
+    question_id: str = Field(min_length=1, max_length=128)
+
+
 class Audio(Input):
     """One recorded-audio block on the wire (see ``harness.types.AudioContent``).
 
@@ -1228,9 +1246,51 @@ class Answer(Input):
     #: runtime has to interpret. Accepted while the answer is undelivered, refused
     #: once the response row exists; the runtime decides, not this schema.
     revise: StrictBool | None = None
+    #: IMAGES attached to the answer, each tagged with the question it answers
+    #: (``AnswerImage.question_id``). OMITTED by every client that has none —
+    #: ``Answer`` is ``extra="forbid"``, so a client built before this field must
+    #: be able to keep sending the exact body it always sent (absent ⇒ empty ⇒ a
+    #: text-only answer whose frame is byte-identical to today's), and a client
+    #: that sends it to a BACKEND built before it gets a 422 ``extra forbidden``
+    #: rather than a silent drop; the renderer gates the attach affordance on
+    #: ``capabilities.features.ask_attachments`` so that 422 is the stale-read
+    #: backstop, not the normal path.
+    #:
+    #: v1 limits, all enforced HERE at the door rather than discovered at the
+    #: owner: at most 8, only on a FIRST ``answers`` body (a decline has no
+    #: content to attach; a revision carries text only — an answer's images are
+    #: immutable once sent, design D5), each naming a question the body answers,
+    #: and the whole body under the same 900,000-byte cap ``Prompt.nonempty``
+    #: enforces. SECRET questions are refused later, at the session, because
+    #: whether a question is secret is the ASK's fact and not this body's.
+    images: list[AnswerImage] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def one_answer(self):
+        if self.images:
+            # Checked FIRST and for every shape: the gate shapes (approval / ask
+            # picker) have no use for images either, and a field a shape cannot
+            # honour must be refused in words, never ignored (§10's no-op rule).
+            if self.ask_id is None:
+                raise ValueError("images apply to a queued ask answer")
+            if self.decline is True or not self.answers:
+                raise ValueError("images need answers; a decline carries none")
+            if self.revise is True:
+                raise ValueError(
+                    "a revision carries text only: an answer's images cannot be changed once sent"
+                )
+            unknown = sorted({img.question_id for img in self.images} - set(self.answers))
+            if unknown:
+                raise ValueError(
+                    "images must name a question the answers body answers (unknown: "
+                    + ", ".join(unknown)
+                    + ")"
+                )
+            # The same cap and the same measure as ``Prompt.nonempty``: a body
+            # the control frame cannot carry is refused at the door as a 422 the
+            # client can show, not as a dropped socket line.
+            if len(self.model_dump_json().encode()) > 900_000:
+                raise ValueError("Answer exceeds the canonical control-frame limit")
         if self.ask_id is not None:
             if not self.ask_id:
                 raise ValueError("ask_id must be a non-empty string")
@@ -3890,11 +3950,20 @@ async def answer(session_id: str, body: Answer, request: Request):
             # gate the ask is still there and the user's next move depends on
             # which of those it is.
             try:
+                # ``images`` is passed ONLY when the body carries some, so a
+                # text-only answer calls the facade exactly as it always did —
+                # which keeps every duck-typed ``bridge.remote`` that predates
+                # the keyword (test doubles, an older facade) working, and is the
+                # route-level half of "text-only frames stay byte-identical".
+                image_kwargs: dict[str, Any] = (
+                    {"images": [image.model_dump() for image in body.images]} if body.images else {}
+                )
                 detail = await bridge.remote.ask_respond(
                     body.ask_id,
                     body.answers,
                     decline=bool(body.decline),
                     revise=bool(body.revise),
+                    **image_kwargs,
                 )
             except (ValueError, RuntimeError) as error:
                 # BOTH classes, and the second is not defensive padding: a refusal

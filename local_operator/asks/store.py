@@ -427,6 +427,33 @@ def _last(events: Sequence[Mapping[str, Any]], ask_id: str, kind: str) -> dict[s
     return found
 
 
+def _attachment_refs(raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """The ``attachments`` map of an ``answered`` event, normalised, or ``{}``.
+
+    Reader tolerance, like every reader in this module: a hand-edited or newer
+    row whose entries are not the documented shape contributes nothing rather
+    than failing the fold -- the fold runs for EVERY ask on every refresh, so one
+    malformed cell must not blank the whole surface. A ref without a digest is
+    unusable and is dropped; unknown keys on a ref are kept (additive growth).
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for qid, refs in raw.items():
+        if not isinstance(refs, (list, tuple)):
+            continue
+        kept = [
+            dict(ref)
+            for ref in refs
+            if isinstance(ref, Mapping)
+            and isinstance(ref.get("attachment"), str)
+            and ref["attachment"]
+        ]
+        if kept:
+            out[str(qid)] = kept
+    return out
+
+
 def fold(
     events: Sequence[Mapping[str, Any]],
     now: int,
@@ -517,6 +544,17 @@ def fold(
             if isinstance(by, Mapping):
                 record["answered_by"] = dict(by)
             record["answered_at"] = answered_at
+            # IMAGE ANSWERS (design: the Other door's attachments). Refs
+            # ``{qid: [{"attachment": digest, "mime_type", "bytes"}]}`` into the
+            # session's AttachmentStore -- never bytes, because this log is
+            # one-line O_APPEND rows that ``fold`` reads whole. Taken from the
+            # FIRST ``answered`` event ONLY: a revision (below) replaces the
+            # answer TEXT, never the pictures, which are immutable once sent
+            # (D5) -- and a ``revised`` event carries no ``attachments`` key at
+            # all, so there is nothing to copy from it even by mistake.
+            refs = _attachment_refs(answered.get("attachments"))
+            if refs:
+                record["attachments"] = refs
             if revised is not None:
                 # The status, the stamp and the attribution stay the FIRST
                 # answer's (design §10: a revision does not rewrite who answered
@@ -617,6 +655,15 @@ def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -
     answers = record.get("answers")
     if answers:
         row["answers"] = {str(k): list(v) for k, v in dict(answers).items()}
+    refs = record.get("attachments")
+    if refs:
+        # ABSENT, not empty, for a text-only ask: the row stays byte-identical
+        # for every ask that never carried an image, and an older reader that
+        # has never heard of the key never sees it. Refs only -- a surface
+        # fetches the pixels through the existing digest route.
+        row["attachments"] = {
+            str(qid): [dict(ref) for ref in group] for qid, group in dict(refs).items()
+        }
     by = record.get("answered_by")
     if by:
         row["answered_by"] = dict(by)

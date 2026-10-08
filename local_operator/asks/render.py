@@ -127,7 +127,13 @@ def receipt_text(record: Mapping[str, Any], reach: str | None) -> str:
     )
 
 
-def response_text(record: Mapping[str, Any], *, secret_lost: bool = False) -> str:
+def response_text(
+    record: Mapping[str, Any],
+    *,
+    secret_lost: bool = False,
+    image_counts: Mapping[str, int] | None = None,
+    images_missing: int = 0,
+) -> str:
     """The text for an ``ask_response`` row — answered, declined, or late.
 
     All three are the SAME custom type and the same id (design §2.3): a decline
@@ -161,7 +167,15 @@ def response_text(record: Mapping[str, Any], *, secret_lost: bool = False) -> st
             else ASK_UNANSWERED_TEXT
         )
     else:
-        text = _ask_report(_question_models(questions), answers)
+        # ``image_counts``/``images_missing`` are passed through only when the
+        # answer carried pictures; for every text-only ask the call is the one it
+        # always was, so the text the model reads is unchanged.
+        text = _ask_report(
+            _question_models(questions),
+            answers,
+            image_counts=image_counts,
+            images_missing=images_missing,
+        )
     if secret_lost:
         # The key name is not repeated here and the QUESTION TEXT is not quoted:
         # a secret question's prompt may itself describe the credential, so this
