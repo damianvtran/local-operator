@@ -26,7 +26,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
-from local_operator.network.credentials.types import BrokerError
+from local_operator.network.credentials.types import (
+    BrokerError,
+    is_secret_key,
+    secret_name_from_key,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.session.credential_binding import CredentialBinding
@@ -34,6 +38,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 def _owner_name(error: BrokerError, fallback: str) -> str:
     return error.owner_device_name or error.owner_device or fallback
+
+
+def render_key_name(key: str) -> str:
+    """The NAME a person reads for a placement key: one spelling per secret.
+
+    A store secret's placement key is ``secret:<NAME>`` (the prefix keeps it from
+    colliding with a provider placement of the same name, ``types.SECRET_KEY_PREFIX``),
+    but what the person typed, and what ``lop secret list`` prints, is ``<NAME>`` — and
+    ``credential mark|share|revoke`` all accept it. PROSE therefore says ``<NAME>``
+    (design review round 1, D5: ``mark`` said ``CRM_API_KEY`` while the receipt beside
+    it said ``secret:CRM_API_KEY``, and the operator had to recognise one as the other).
+    An IDENTIFIER — a listing row, a ``--json`` field, an audit detail — keeps the
+    placement key, because those are matched on rather than read. Every other key comes
+    out as typed: a provider name, ``mcp:<url>``, ``github``.
+    """
+    return secret_name_from_key(key) if is_secret_key(key) else key
 
 
 def render_last_seen(seconds: float | None) -> str:
@@ -95,6 +115,10 @@ def render_broker_error(
     """
     owner = _owner_name(error, owner_name)
     label = provider or key or "that credential"
+    # The bare NAME a person reads for a store secret (design review round 1, D5). Only
+    # the two copy-path arms below use it: their subject is always a store secret, and
+    # every other arm keeps ``label`` exactly as it was.
+    shown = render_key_name(label)
     is_mcp = key.startswith("mcp:")
     login = f"/mcp login {key[4:]}" if is_mcp else f"lop login {label}"
     is_github = provider == GITHUB_KEY or key == GITHUB_KEY
@@ -256,6 +280,27 @@ def render_broker_error(
             f"{owner} refused this request: this device is not allowed to ask for '{label}'. "
             "Nothing was changed on either device."
         )
+    if error.code == "local_only":
+        # §4.2's kill switch, said where a would-be borrower meets it: the mark
+        # is the operator's, on the owning device, and the remedy is named
+        # there rather than here.
+        return (
+            f"'{shown}' is marked local-only on {owner}, so it never crosses to another "
+            "device. Nothing was copied; if it should travel, remove the mark on "
+            f"{owner} ('lop network credential mark {shown} default')."
+        )
+    if error.code == "copy_stale":
+        # THE COPY PATH'S ONE ADDED CODE (design §6.1): the value this device
+        # holds is older than the owner's and the provider refused it. The
+        # remedy is the owner's own next contact; the ending, if it never
+        # heals, is the §2.3 ceiling sentence — a copied secret ends at its
+        # source, not at the device.
+        return (
+            f"the stored copy of '{shown}' is older than {owner}'s, and the provider "
+            f"refused it. {owner} announces the current value on its next contact — "
+            "nothing is blocked meanwhile; if it keeps failing, rotate the secret at "
+            "its source."
+        )
     if error.code == "identity_mismatch":
         return (
             f"{owner} refused this request because it named a different sending device than "
@@ -378,6 +423,131 @@ def render_repair_notice(peer_name: str, key: str) -> str:
         f"{peer_name} needs '{repair_command(key)}' here — "
         "its borrowed credential cannot be refreshed"
     )
+
+
+#: THE ONE COMMITMENT THE DESIGN MAKES ABOUT ENDING A COPY (§2.3). These exact lines close
+#: ``credential revoke`` on a stored secret, every ``member rm`` ending, and the network
+#: guide's credentials section. Two surfaces say the same thing in their own words instead:
+#: the ``mark`` receipt (it only SETS a policy, so it speaks of a holder that never
+#: reconnects) and ``credential revoke`` on a provider key, whose pre-S4 closing sentence
+#: ("a copy of the key taken out of that device never expires ...") carries the second half
+#: for THAT credential. A test pins that boundary, so the day it prints these lines too the
+#: guide and the design doc that scope the claim fail with it. It is not a disclaimer: it
+#: states the actual limit of a wipe (a copy the owner can still reach ends; one that has
+#: left the owner's control does not) and the only effective ending (rotation at the source).
+#:
+#: TENSE-FREE, AND NEVER THE TOMBSTONE'S VERB (design review round 1, D2). It is printed
+#: after states in which nothing has been removed yet ("a wipe notice … is queued", "…
+#: could NOT be confirmed deleted"), where the first draft's "This removed the copies it
+#: could reach" claimed a completed action on exactly the arms that say nothing completed;
+#: and on the ``member rm`` receipt it re-used "removed" — the tombstone's verb, printed a
+#: line above it — for the wipe. "Ends" is the design's own word for the ending and is true
+#: in every state.
+#:
+#: TWO LINES, ONE FACT EACH: every neighbouring receipt appends one fact per line, and the
+#: joined sentence was a single 132-column line carrying two claims. ``COPY_CEILING_SENTENCE``
+#: is the same words joined by a space — the form the guide and the design quote — and a
+#: test reads both documents back through it, so the three places the commitment lives
+#: cannot drift apart unnoticed.
+COPY_CEILING_LINES: tuple[str, str] = (
+    "This ends the copies the owner can still reach.",
+    (
+        "A copy that has left the owner's control can only be ended by rotating the secret "
+        "at its source."
+    ),
+)
+COPY_CEILING_SENTENCE = " ".join(COPY_CEILING_LINES)
+
+
+def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: bool) -> list[str]:
+    """What a revoke says about the COPY half, per state (§4.3, "which happened"), as lines.
+
+    ``copied`` — the owner's ack ledger holds a row for this member's copy of ``key``;
+    ``wiped`` — that row has since been confirmed deleted. Both come from the same ledger
+    the owner's listing reads, so the receipt and the listing cannot disagree about whether
+    a copy is outstanding.
+
+    A RECEIPT SAYS WHAT THE LEDGER HOLDS, NEVER WHAT THE WORLD HOLDS (design review round 1,
+    D1). A row is written from the member's REPLY — the channel the removal path itself
+    documents as losable — so "no row" means "not confirmed", not "not there": a copy whose
+    confirmation never arrived looks exactly like this state. The first draft ("… was
+    confirmed on <peer>, so there is nothing to wipe there") turned an absent row into a
+    guarantee about the device, and its caller then withheld the ceiling in this one state.
+    The second line names what the ledger cannot see; the stored-secret caller prints the
+    ceiling after EVERY arm (the provider-key caller keeps its own closing sentence).
+
+    ``key`` is the placement key; a store secret is named by its bare name
+    (:func:`render_key_name`) and any other key as typed.
+    """
+    name = render_key_name(key)
+    if not copied:
+        return [
+            f"no copy of '{name}' is recorded on {peer_name}, so there is no wipe to send",
+            "a copy whose confirmation never arrived is not tracked here",
+        ]
+    if wiped:
+        return [f"the copy of '{name}' on {peer_name} was already wiped"]
+    return [
+        f"a wipe notice for '{name}' is queued for {peer_name}: the copy is deleted on "
+        "its next contact"
+    ]
+
+
+def render_removal_endings(
+    peer_name: str, *, copies: int, wiped: int, timed_out: int = 0
+) -> list[str]:
+    """What a ``member rm`` receipt says about the copies that member holds.
+
+    §2.3's discipline, applied to the removal path (review round 1, Q1): an
+    ending that cannot complete must SAY SO rather than read as done. A removed
+    member is never contacted again, so there is no "next contact" to defer to —
+    whatever the removal exchange confirmed is final, and every unconfirmed copy
+    is the operator's to end by rotation. The counts come from the same ledger
+    the listing reads, so receipt and ledger cannot disagree.
+
+    THREE CLASSES, because they mean different things (review round 2, F1):
+    ``wiped`` is confirmed by the member's own answer; ``timed_out`` is an
+    attempt whose answer did not arrive inside the frame bound — the member MAY
+    still be completing the delete (measured: it finished ~2 s after the owner
+    gave up) — and the remainder were never contacted at all (no link, an error
+    answer, or the budget ran out), where the copy is certainly still there.
+    The timeout line must not be the unreachable line: an operator told
+    "could NOT be confirmed deleted" about a copy that was deleted reads the
+    ledger as still holding material it does not hold.
+
+    ONE NOUN, IN THE RIGHT NUMBER, AND THE CEILING ON EVERY ARM (design review round 1,
+    D8 and D1's shape). "copied secret(s)" was a third noun for what the whole family
+    calls a copy, and the all-confirmed arm was the one removal state without the
+    ceiling — the state that claims the most withholding the sentence about what it did
+    not do. The noun agrees with the TOTAL (``2 of 3 copies``, ``1 of 1 copy``); the
+    ``mark`` receipt next door already pluralises the same way.
+    """
+    if copies <= 0:
+        return []
+    noun = "copy" if copies == 1 else "copies"
+    unconfirmed = max(0, copies - wiped)
+    if unconfirmed == 0:
+        verb = "was" if copies == 1 else "were"
+        return [
+            f"{copies} {noun} on {peer_name} {verb} deleted (the ending is confirmed)",
+            *COPY_CEILING_LINES,
+        ]
+    lines: list[str] = []
+    timed = min(max(0, timed_out), unconfirmed)
+    missed = unconfirmed - timed
+    if timed:
+        lines.append(
+            f"{timed} of {copies} {noun} on {peer_name} timed out — the member "
+            "may still complete the deletion; it is never contacted again, so it cannot "
+            "be re-checked"
+        )
+    if missed:
+        lines.append(
+            f"{missed} of {copies} {noun} on {peer_name} could NOT be confirmed "
+            "deleted; a removed member is never contacted again"
+        )
+    lines.extend(COPY_CEILING_LINES)
+    return lines
 
 
 #: The head every account-change notice carries. The '[session …]' form is this

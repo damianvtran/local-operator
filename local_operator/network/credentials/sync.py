@@ -49,16 +49,20 @@ THE NON-STALL PROPERTIES (§5.4), each pinned by a test:
    first, delete second: a reader sees the old value or the new one, never
    neither).
 
-WHAT COPIES AT S3, AND WHAT IS DELIBERATELY NOT HERE. Copies flow for keys
-whose class is copy-eligible (``COPY_KINDS``: the static classes; class 4 today)
-AND where the member is an ACTIVE HOLDER — the same authorisation the broker
-reads, never a parallel one (§8.3: ``copy_requires_active_holder``). The
-selection POLICY of §4.2 (``sync``/``local-only`` marks, the needs-list default,
-the card's reduce step), the node-side provenance formalisation, wipe/revoke and
-the ``copy_stale`` repair code are S4's. The seams S4 builds on are here: the
-``applied`` map is the receiving-side sidecar §4.2 bound 4 allows, and
-``MESH_ORIGIN_KEY`` is the minimal marker the replace-sweep needs so copies of
-one key cannot accumulate rows.
+WHAT COPIES, AND WHAT EACH SELECTION LAYER DOES. Copies flow for keys whose
+class is copy-eligible (``COPY_KINDS``: the static classes — class 4's
+``api-key-static`` and class 2's ``store-secret``, the encrypted store) AND
+where the member is an ACTIVE HOLDER — the same authorisation the broker reads,
+never a parallel one (§8.3: ``copy_requires_active_holder``). On top of that,
+S4's selection POLICY (§4.2) decides which class-2 keys are SHARED BY DEFAULT:
+the union of the ``ref:<NAME>`` names the pushed bundles declare
+(:func:`needs_names`) and the keys the operator marked ``sync``; keys marked
+``local-only`` never cross at all; everything else the device holds is OFFERED
+— visible on the join list, not copied — and the card's reduce step trims the
+served set (§1.1's pairing path). The receiving side re-seals class-2 copies
+under its OWN key with a provenance marker, and wipe notices (announces with
+``value_state: absent``) delete by that marker. The listing's freshness check
+at use stays S5's, per the S3 PR's handoff note.
 
 THE RESET EDGE, HANDLED RATHER THAN PAPERED OVER. If the owner's sync state is
 lost, its counters restart BELOW what a member holds. The monotonically safe
@@ -87,7 +91,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
 
-from local_operator.network.credentials.types import BrokerError, peer_int
+from local_operator.network.credentials.types import (
+    SECRET_KIND,
+    BrokerError,
+    peer_int,
+    secret_name_from_key,
+)
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
@@ -135,22 +144,65 @@ ANNOUNCE_CAP = 8
 ANNOUNCE_TIMEOUT_S = 10.0
 COPY_TIMEOUT_S = 30.0
 
+#: The member-removal ending exchange's bounds (review round 1, Q1; re-sized
+#: after review round 2, F1). One bounded dial, then bounded frames, and every
+#: give-up is REPORTED. The sizes are not free choices:
+#:
+#: - ``REMOVAL_FRAME_TIMEOUT_S`` matches the tick's ``ANNOUNCE_TIMEOUT_S``
+#:   because the member work is the SAME local delete: under load the member's
+#:   store open alone measured 5.02 s, so the original 3 s bound returned
+#:   ``None`` at exactly 3.00 s while the member finished the delete ~2 s
+#:   later — the confirmed arm of the removal was unreachable exactly when the
+#:   fleet needed it, and the row stayed open forever (F1, 6/6 under load).
+#: - ``REMOVAL_TOTAL_BUDGET_S`` bounds the WHOLE frame loop, so the relay's
+#:   answer (and the CLI's wait) stays bounded even when every frame burns its
+#:   full bound; the loop CLAMPS each frame's wait by the remaining budget
+#:   (review round 3, F2), so it can never outrun this number. Rows the budget
+#:   never reaches were NOT sent, which is why they count as not-confirmed
+#:   rather than timed-out.
+#: - The CLI's ``net_member_rm`` call passes ``timeout=REMOVAL_CLI_TIMEOUT_S``,
+#:   which must exceed probe + budget — the loop's true envelope, now that the
+#:   clamp exists — or the CLI would fall back to the local write while the
+#:   relay is still mid-exchange (the double-write the allow_no_answer comment
+#:   warns about). test_wipe_notice.py pins the inequality.
+REMOVAL_PROBE_TIMEOUT_S = 3.0
+REMOVAL_FRAME_TIMEOUT_S = ANNOUNCE_TIMEOUT_S
+REMOVAL_TOTAL_BUDGET_S = 25.0
+REMOVAL_CLI_TIMEOUT_S = 35.0
+
 #: ``value_state`` on an announce/copy: whether the owner holds a value for the
-#: key. Only ``present`` is produced at S3 — a deleted value is the S4 wipe path,
-#: and a member holds its copy until that notice arrives (§5.5a: catch-up, never
-#: invalidate). The field exists on the wire now so the shape does not change
-#: when the wipe lands.
+#: key. ``absent`` is the WIPE NOTICE (§5.5c, §4.3): the member deletes its
+#: copy by provenance and acks the deletion — the one ending the copy path has
+#: short of rotation, and the shape that makes a delete "just another announce
+#: recomputed on the next contact" (offline members get it on reconnect, never
+#: a queued frame that can be lost).
 VALUE_STATE_PRESENT = "present"
 VALUE_STATE_ABSENT = "absent"
 
+#: The selection marks of §4.2, owner-side and per (network, key), kept in the
+#: sync document beside the generations they serve. ``sync`` — the operator's
+#: standing "send this to approved nodes" mark, joined to every approved
+#: device's copy-set by default. ``local-only`` — never crosses; the one mark a
+#: candidate list must not soften, so the offer drops such keys ENTIRELY rather
+#: than offering them off-by-default, and the serve paths refuse a grant that
+#: raced the mark (§4.2's kill switch, enforced where the value would move).
+MARK_SYNC = "sync"
+MARK_LOCAL_ONLY = "local-only"
+MARKS: frozenset[str] = frozenset({MARK_SYNC, MARK_LOCAL_ONLY})
+
 #: The classes whose values are COPIED, by the §2.1 mechanism mapping ("classes
 #: 2/4 = copy; 3/5(+6b) = broker; 1/6 = refuse"). ``api-key-static`` is class 4;
-#: class 2 (the ``lop secret`` store) joins here in S4, together with its
-#: selection policy — the store's placement row does not exist before that
-#: slice, so there is nothing for this engine to find. Device-bound providers
-#: are excluded by NAME, not by this table: the placement write refuses them at
-#: the door (``placement.refuse_device_bound``).
-COPY_KINDS: frozenset[str] = frozenset({"api-key-static"})
+#: ``store-secret`` is class 2 — the encrypted ``lop secret`` store, re-sealed
+#: under the receiving device's own key on arrival (§8.2's copy invariant).
+#: Device-bound providers are excluded by NAME, not by this table: the placement
+#: write refuses them at the door (``placement.refuse_device_bound``).
+COPY_KINDS: frozenset[str] = frozenset({"api-key-static", SECRET_KIND})
+
+#: A sanity bound on a class-2 copy's hex-encoded material as it arrives on the
+#: wire. The store itself does not bound value length; a frame carrying megabytes
+#: of "material" is already absurd, and the bound turns it into a dropped reply
+#: rather than a multi-megabyte SQLite write behind one JSON parse.
+_SECRET_HEX_MAX = 2 * 1024 * 1024
 
 #: The provenance marker a received copy carries in its store row's data. It is
 #: what makes the replace-sweep findable WITHOUT the sync state (a lost sidecar
@@ -247,8 +299,17 @@ def _copyable_payload(data: Any) -> dict[str, Any] | None:
     return payload
 
 
-def read_copy_value(store: Any, key: str, entry: Any) -> dict[str, Any] | None:
+def read_copy_value(
+    store: Any, key: str, entry: Any, *, root: Path | None = None
+) -> dict[str, Any] | None:
     """``{"value", "digest", "updated_at"}`` for ``key``, or ``None``.
+
+    TWO CLASSES, ONE SHAPE. A ``store-secret`` key (class 2) reads the key's
+    record from THIS device's encrypted store through
+    :func:`_read_secret_value` — a read that must not create the store (the
+    provider-role namespace is refused on that store's own surface, so a name
+    that cannot be copied cannot be keyed here either). An ``api-key-static``
+    key reads the auth store:
 
     THE ROW PICK IS THE NEWEST ENABLED ROW of the key's class, and the direction
     is deliberate. ``AuthStore`` lets one provider hold several rows ("each key
@@ -257,32 +318,89 @@ def read_copy_value(store: Any, key: str, entry: Any) -> dict[str, Any] | None:
     operator's LATEST answer for the key — a re-login writes a new row, and a
     rotation pool's newest member is the one most recently proven alive — so
     "paste a new key" propagates without a second mechanism, where a first-row
-    pick would pin every copy to the OLDEST row and go stale silently. S4's
-    selection may widen this to the whole set; the wire carries one value per
-    request either way.
+    pick would pin every copy to the OLDEST row and go stale silently.
     """
-    if entry.kind == "api-key-static":
-        provider = str(entry.provider or key)
-        try:
-            rows = store.list_credentials(provider)
-        except Exception:  # noqa: BLE001 — an unreadable store holds nothing to copy
-            logger.debug("credentials sync: value read failed for %s", key, exc_info=True)
-            return None
-        for row in reversed(rows):
-            if str(getattr(row, "credential_type", "")) != "api_key":
-                continue
-            payload = _copyable_payload(getattr(row, "data", None))
-            if payload is None:
-                continue
-            digest = fingerprint(payload)
-            if not digest:
-                continue
-            return {
-                "value": payload,
-                "digest": digest,
-                "updated_at": int(getattr(row, "updated_at", 0) or 0),
-            }
+    if str(entry.kind) == SECRET_KIND:
+        return _read_secret_value(key, root)
+    if str(entry.kind) != "api-key-static":
+        return None
+    provider = str(entry.provider or key)
+    try:
+        rows = store.list_credentials(provider)
+    except Exception:  # noqa: BLE001 — an unreadable store holds nothing to copy
+        logger.debug("credentials sync: value read failed for %s", key, exc_info=True)
+        return None
+    for row in reversed(rows):
+        if str(getattr(row, "credential_type", "")) != "api_key":
+            continue
+        payload = _copyable_payload(getattr(row, "data", None))
+        if payload is None:
+            continue
+        digest = fingerprint(payload)
+        if not digest:
+            continue
+        return {
+            "value": payload,
+            "digest": digest,
+            "updated_at": int(getattr(row, "updated_at", 0) or 0),
+        }
     return None
+
+
+def _secret_copy_payload(name: str, description: str, value: bytes) -> dict[str, Any]:
+    """The copy-able projection of a class-2 record — ONE normalisation, both ends.
+
+    The value is hex-encoded for the same reason the store's own payload is: a
+    secret may be arbitrary binary, and hex round-trips with no padding mode to
+    get wrong. The NAME rides inside the payload so the member can refuse a
+    reply that does not name the key it asked for — defence in depth under the
+    digest pin, never instead of it.
+    """
+    return {
+        "type": SECRET_KIND,
+        "name": name,
+        "value": value.hex(),
+        "description": description,
+    }
+
+
+def _read_secret_value(key: str, root: Path | None) -> dict[str, Any] | None:
+    """The class-2 half of :func:`read_copy_value`, opened through the secrets seam.
+
+    The store is opened WITHOUT ``create``: an announce read must never be the
+    reason a secret store appears on a device, and a device with no store holds
+    nothing to copy. The value comes from ``read_for_copy`` — a value read that
+    does NOT touch ``last_used_at`` or the audit chain, because this runs on
+    every sync tick purely to recompute a digest (see that method's docstring).
+    """
+    try:
+        name = secret_name_from_key(key)
+    except ValueError:
+        return None
+    try:
+        from local_operator.secrets import access
+
+        store = access.open_store(root)
+    except Exception:  # noqa: BLE001 — no store, no readable store: nothing to copy
+        logger.debug("credentials sync: secret store for %s unavailable", key, exc_info=True)
+        return None
+    try:
+        try:
+            record, value = store.read_for_copy(name)
+        except Exception:  # noqa: BLE001 — an absent or damaged record holds nothing
+            logger.debug("credentials sync: secret read for %s failed", key, exc_info=True)
+            return None
+        payload = _secret_copy_payload(name, str(record.description or ""), value)
+        digest = fingerprint(payload)
+        if not digest:
+            return None
+        return {
+            "value": payload,
+            "digest": digest,
+            "updated_at": int(getattr(record, "updated_at", 0) or 0),
+        }
+    finally:
+        _close_quietly(store)
 
 
 def _network_record(root: Path | None, network_id: str) -> Any:
@@ -378,13 +496,13 @@ class SyncState:
 
     NOTHING HERE IS MATERIAL. Generations and digests are fingerprints and
     counters; the ack ledger is who-holds-what-how-fresh; the applied map names a
-    store ROW ID, never a value. The one secret-shaped thing this module must
-    never write down is the value itself, and it never does: the value travels
-    on the authenticated link and lands in this device's own credential
+    store ROW ID (class 4) or RECORD ID (class 2), never a value; the marks are
+    the operator's two selection words. The one secret-shaped thing this module
+    must never write down is the value itself, and it never does: the value
+    travels on the authenticated link and lands in this device's own credential
     storage — for a class-4 copy, the same 0600 ``auth.db`` row a local login
-    writes, which is the existing static-key posture; a class-2 copy's re-seal
-    into ``secrets/`` belongs to S4 (design §8.2, restated per review round 1,
-    Q-6).
+    writes; a class-2 copy is re-sealed into ``secrets/`` under THIS device's
+    own master key (design §8.2), which the S4 copy path now implements.
     """
 
     def __init__(self, network_id: str, *, root: Path | None = None) -> None:
@@ -392,10 +510,19 @@ class SyncState:
         self.root = root
         #: ``{key: {"gen": int, "digest": str, "updated_at": int}}`` — owner side.
         self.generations: dict[str, dict[str, Any]] = {}
-        #: ``{device_id: {key: {"gen": int, "digest": str, "at": float}}}``.
+        #: ``{device_id: {key: {"gen", "digest", "at"[, "wiped": True]}}}``.
+        #: A ``wiped: True`` row is an ENDING, not a copy: the member confirmed
+        #: deleting by provenance, and nothing is owed that member for the key
+        #: until a re-share re-announces it.
         self.acks: dict[str, dict[str, dict[str, Any]]] = {}
-        #: ``{key: {"gen", "digest", "owner_device", "row_id", "at"}}`` — member side.
+        #: ``{key: {"gen", "digest", "owner_device", "row_id", "record_id", "at"}}``.
         self.applied: dict[str, dict[str, Any]] = {}
+        #: ``{key: {"mark": str, "set_at": float}}`` — the §4.2 selection marks,
+        #: owner-side, per (network, key). Kept here rather than in a second
+        #: document because the serve paths that must read a mark (announce,
+        #: copy, wipe) already hold THIS document's lock; a second registry for
+        #: one policy would be a second writer to keep in step with this one.
+        self.marks: dict[str, dict[str, Any]] = {}
         self._dirty = False
 
     # -- persistence ---------------------------------------------------------
@@ -416,6 +543,7 @@ class SyncState:
                 for device, by_key in sorted(self.acks.items())
             },
             "applied": {key: dict(row) for key, row in sorted(self.applied.items())},
+            "marks": {key: dict(row) for key, row in sorted(self.marks.items())},
         }
 
     def save(self) -> Path:
@@ -496,6 +624,7 @@ class SyncState:
                         "gen": gen,
                         "digest": _bounded_digest(row.get("digest")),
                         "at": peer_int(row.get("at"), maximum=GEN_CEILING),
+                        **({"wiped": True} if row.get("wiped") is True else {}),
                     }
         applied = payload.get("applied")
         if isinstance(applied, dict):
@@ -514,7 +643,29 @@ class SyncState:
                     "digest": _bounded_digest(row.get("digest")),
                     "owner_device": str(row.get("owner_device") or ""),
                     "row_id": peer_int(row.get("row_id"), maximum=GEN_CEILING),
+                    # Class 2's record id is a string (the store's primary key),
+                    # and it rides beside the int so one sidecar serves both
+                    # classes. Bounded like every other carried string; the
+                    # wipe does not TRUST it (it scans by provenance) — it is
+                    # the fast path and the audit trail.
+                    "record_id": str(row.get("record_id") or "")[:128],
                     "at": peer_int(row.get("at"), maximum=GEN_CEILING),
+                }
+        marks = payload.get("marks")
+        if isinstance(marks, dict):
+            for key, row in marks.items():
+                name = _bounded_key(key)
+                if not name or not isinstance(row, dict):
+                    continue
+                mark = str(row.get("mark") or "")
+                if mark not in MARKS:
+                    # An unknown mark is dropped toward the SAFE direction: an
+                    # unmarked key is offered, never synced (§4.2's default is
+                    # the needs-list, so dropping a `sync` mark copies LESS).
+                    continue
+                state.marks[name] = {
+                    "mark": mark,
+                    "set_at": peer_int(row.get("set_at"), maximum=GEN_CEILING),
                 }
         state._dirty = False
         return state
@@ -531,8 +682,38 @@ class SyncState:
     def ack_for(self, device: str, key: str) -> dict[str, Any] | None:
         return (self.acks.get(device) or {}).get(key)
 
-    def record_ack(self, device: str, key: str, *, gen: int, digest: str, at: float) -> None:
-        """Record what a member holds. Monotonic by generation, EXCEPT on a reset.
+    # -- selection marks (§4.2) ----------------------------------------------
+
+    def mark_for(self, key: str) -> str:
+        """The operator's mark for ``key``: ``sync``/``local-only``/``""``."""
+        row = self.marks.get(key)
+        return str(row.get("mark") or "") if isinstance(row, dict) else ""
+
+    def record_mark(self, key: str, mark: str | None) -> None:
+        """Set or clear one mark. ``None``/``""`` clears; anything else must be one of ``MARKS``."""
+        if not mark:
+            if self.marks.pop(key, None) is not None:
+                self._dirty = True
+            return
+        if mark not in MARKS:
+            raise ValueError(f"mark must be one of {', '.join(sorted(MARKS))} or absent")
+        self.marks[key] = {"mark": mark, "set_at": time.time()}
+        self._dirty = True
+
+    def clear_applied(self, key: str) -> None:
+        """Forget what this device held for ``key`` (the wipe's sidecar half).
+
+        Safe by construction: a missing ``applied`` row only makes the next
+        announce pull again, and the next contact re-announces anything still
+        served — the same heal a dropped row gets at load.
+        """
+        if self.applied.pop(key, None) is not None:
+            self._dirty = True
+
+    def record_ack(
+        self, device: str, key: str, *, gen: int, digest: str, at: float, wiped: bool = False
+    ) -> None:
+        """Record what a member holds — or, with ``wiped``, that it holds NOTHING.
 
         A late ack for an older generation is normally a reordering, not news —
         keeping it would regress the ledger and buy a pointless announce round.
@@ -545,13 +726,23 @@ class SyncState:
         member down. A lower gen with a DIFFERENT digest is still refused: that
         one can only be a reorder from before a value change, and the announce
         gate converges it.
+
+        ``wiped`` is the wipe-ack form: the member deleted by provenance and is
+        confirming the ENDING. It obeys the same monotonic rule (a late wipe-ack
+        for an older generation must not overwrite a newer live copy that a
+        re-share put back), and it is the only form allowed to REPLACE a live
+        row: nothing is owed a member whose ledger says wiped until a re-share
+        re-announces the key.
         """
         by_key = self.acks.setdefault(device, {})
         existing = by_key.get(key)
         if existing is not None and int(existing.get("gen") or 0) > int(gen):
             if str(existing.get("digest") or "") != str(digest or ""):
                 return
-        by_key[key] = {"gen": int(gen), "digest": digest, "at": float(at)}
+        row: dict[str, Any] = {"gen": int(gen), "digest": digest, "at": float(at)}
+        if wiped:
+            row["wiped"] = True
+        by_key[key] = row
         self._dirty = True
 
     # -- member-side accessors ----------------------------------------------
@@ -568,12 +759,14 @@ class SyncState:
         owner_device: str,
         row_id: int,
         at: float,
+        record_id: str = "",
     ) -> None:
         self.applied[key] = {
             "gen": int(gen),
             "digest": digest,
             "owner_device": owner_device,
             "row_id": int(row_id),
+            "record_id": str(record_id or "")[:128],
             "at": float(at),
         }
         self._dirty = True
@@ -592,6 +785,57 @@ def mutate(network_id: str, root: Path | None = None) -> Iterator[SyncState]:
         state = SyncState.load(network_id, root=root)
         yield state
         state.save()
+
+
+def needs_names(root: Path | None = None) -> frozenset[str]:
+    """The secret names this device's pushed bundles declare — "the keys to set".
+
+    Read through ``mcpdefs.state_rows``, the design's own pointer (§4.2), so the
+    copy-set default and the push cannot disagree about which references exist:
+    every ``ref:<NAME>`` an MCP server row declares is a name the approved node
+    will need to run that row. A device with no MCP rows reports the empty set,
+    and a document that cannot be read is the empty set too — the CLOSED
+    direction, because a wrong needs-list would copy MORE, never less.
+    """
+    try:
+        from local_operator.network import mcpdefs
+
+        if root is None:
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+        rows = mcpdefs.state_rows(root)
+    except Exception:  # noqa: BLE001 — unreadable is empty, the safe direction
+        logger.debug("credentials sync: needs-list read failed", exc_info=True)
+        return frozenset()
+    names: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        for ref in row.get("refs") or []:
+            if isinstance(ref, Mapping):
+                ref_id = str(ref.get("id") or "")
+                if ref_id:
+                    names.add(ref_id)
+    return frozenset(names)
+
+
+def secret_mark_default(mark: str, name: str, needs: frozenset[str]) -> bool:
+    """§4.2's default for one class-2 key: ``sync`` marks win, else the needs-list.
+
+    The three postures, in the operator's own vocabulary: ``sync`` — joins every
+    approved device's copy-set; ``local-only`` — never crosses (callers drop it
+    before defaults apply; this answers False for completeness); unmarked — in
+    the set exactly when the pushed bundles declare it. "Everything else is
+    offered, not copied" is the caller's half: the key still appears on the
+    join list, with ``share`` false, and only the reduce step or a mark changes
+    that.
+    """
+    if mark == MARK_SYNC:
+        return True
+    if mark == MARK_LOCAL_ONLY:
+        return False
+    return name in needs
 
 
 def _ensure_generation(state: SyncState, key: str, meta: Mapping[str, Any]) -> int:
@@ -619,8 +863,13 @@ def _ensure_generation(state: SyncState, key: str, meta: Mapping[str, Any]) -> i
 
 
 def _ack_matches(acked: Mapping[str, Any] | None, gen: int, digest: str) -> bool:
-    """Whether this member's ack already names exactly this generation+value."""
-    if not isinstance(acked, Mapping):
+    """Whether this member's ack already names exactly this generation+value.
+
+    A WIPED row never matches: it says the member holds NOTHING, so the same
+    generation+digest arriving after a re-share must announce and pull again —
+    matching it would leave the re-shared copy silently undelivered forever.
+    """
+    if not isinstance(acked, Mapping) or acked.get("wiped") is True:
         return False
     return int(acked.get("gen") or 0) == int(gen) and str(acked.get("digest") or "") == digest
 
@@ -744,7 +993,12 @@ class SyncEngine:
             and document.entry(key).is_holder(device_id)
         ]
         if not owned:
-            return "in_sync"
+            # THE ENDING HALF OF THE GATE (§5.5c): a member whose grants were
+            # all revoked still owes its wipes, and the owned-keys check above
+            # would skip exactly that member. Read-only and small; the precise
+            # answer is computed under the state lock in ``_pending_announces``.
+            if not self._has_pending_wipes(document, device_id):
+                return "in_sync"
         with self._guard:
             if device_id in self._inflight_members:
                 return "in_flight"
@@ -796,26 +1050,84 @@ class SyncEngine:
                 # whose floors the syncer already owns.
                 logger.debug("credentials sync: announce to %s answered %s", device_id, detail)
                 return
+            if str(item.get("value_state") or "") == VALUE_STATE_ABSENT:
+                self._record_wipe_reply(network_id, device_id, item, detail)
+
+    def _record_wipe_reply(
+        self,
+        network_id: str,
+        device_id: str,
+        item: Mapping[str, Any],
+        detail: Mapping[str, Any],
+    ) -> None:
+        """Record a wipe the member CONFIRMED on the announce's own reply.
+
+        WHY THE REPLY IS THE ACK. An un-approved member cannot open a frame to
+        its owner — the transport gates ``net_broker`` on the sender's
+        ``broker_credential`` capability, which a deactivated member row no
+        longer carries — so the one channel left is the ANSWER to the request
+        this owner dialled, and the member answers it AFTER deleting. A reply
+        that does not claim the wipe (a local delete that failed, an older
+        build) is left to the next tick, which recomputes the notice.
+        """
+        if str(detail.get("action") or "") != "wiped":
+            return
+        key = _bounded_key(item.get("key"))
+        gen = peer_int(item.get("gen"), maximum=GEN_CEILING)
+        digest = _bounded_digest(item.get("digest"))
+        if not key or gen <= 0 or not digest:
+            return
+        try:
+            with mutate(network_id, self._root) as state:
+                if state.ack_for(device_id, key) is not None:
+                    state.record_ack(
+                        device_id, key, gen=gen, digest=digest, at=time.time(), wiped=True
+                    )
+        except Exception:  # noqa: BLE001 — a lost confirmation is retried next tick
+            logger.debug("credentials sync: wipe confirmation for %s lost", key, exc_info=True)
 
     def _pending_announces(self, device_id: str) -> tuple[str, list[dict[str, Any]]]:
-        """The announce frames this member is owed, computed under the lock.
+        """The frames this member is owed, computed under the lock.
 
-        Active-member gate first (§8.1: the sync path withholds from a non-active
-        member exactly as the epoch secret does), then per key: owned here,
-        copy-eligible, held by this member, value readable, and the member's ack
-        does not already name this generation+digest.
+        TWO KINDS, AND THE ENDINGS GO FIRST — BUT ONLY THEIR OWN KEY'S FLOW.
+        A WIPE notice (``value_state`` ``absent``) is owed for every ledger row
+        that is not already ``wiped`` and whose key this owner will no longer
+        serve that member — unshared, value deleted, marked ``local-only``, or
+        the member stopped being active (§5.5c: the ending reaches a removed
+        member, where a copy would be withheld; a wipe is bounded by the marker
+        it deletes, never by the grant it outlives). Positive announces ride
+        the SAME pass for every other key — owned here, copy-eligible, held by
+        this member, value readable, not ``local-only``, and the member's ack
+        does not already name this generation+digest — because one shared cap
+        with a wipes-only return starved every other key's updates indefinitely
+        for any member that cannot confirm a wipe (a pre-S4 build answers
+        receipt-only; review round 1, M2). Each kind carries its OWN cap, so a
+        member owing more wipes than one exchange carries still gets its
+        positives on the same tick, and a wipe is never buried: the wipes lead
+        the frame list.
         """
         document = self._placement()
         if document is None:
             return "", []
         network_id = str(document.network_id)
-        if not _member_is_active(self._root, network_id, device_id):
-            return network_id, []
-        announces: list[dict[str, Any]] = []
+        active = _member_is_active(self._root, network_id, device_id)
         with mutate(network_id, self._root) as state:
+            wipes = self._pending_wipes(document, state, device_id, active=active)
+            if not active:
+                return network_id, wipes
+            announces: list[dict[str, Any]] = list(wipes)
+            wiped_keys = {str(frame.get("key") or "") for frame in wipes}
+            positives = 0
             for key in document.keys_owned_by(self._self_device):
+                if key in wiped_keys:
+                    continue
                 entry = document.entry(key)
                 if not copies_by_class(str(entry.kind)) or not entry.is_holder(device_id):
+                    continue
+                if state.mark_for(key) == MARK_LOCAL_ONLY:
+                    # THE KILL SWITCH, enforced where the value would move: a
+                    # grant that raced the mark (or predates it) cannot copy,
+                    # and the ledger row it left behind turns into a wipe.
                     continue
                 meta = self._read_value(key, entry)
                 if meta is None:
@@ -832,9 +1144,220 @@ class SyncEngine:
                         "value_state": VALUE_STATE_PRESENT,
                     }
                 )
-                if len(announces) >= ANNOUNCE_CAP:
+                positives += 1
+                if positives >= ANNOUNCE_CAP:
                     break
-        return network_id, announces
+            return network_id, announces
+
+    def _pending_wipes(
+        self, document: Any, state: SyncState, device_id: str, *, active: bool
+    ) -> list[dict[str, Any]]:
+        """The wipe frames owed to ``device_id``, in key order, capped.
+
+        A ledger row is owed a wipe unless this owner would still SERVE the key
+        to this member right now: still owned here, still copy-eligible, still
+        held, value readable, not marked ``local-only``. The serveability check
+        costs one store read per candidate key, bounded by the ledger and only
+        for keys the positive path is not already serving.
+        """
+        rows = state.acks.get(device_id) or {}
+        wipes: list[dict[str, Any]] = []
+        for key in sorted(rows):
+            row = rows[key]
+            if not isinstance(row, dict) or row.get("wiped"):
+                continue
+            digest = str(row.get("digest") or "")
+            gen = int(row.get("gen") or 0)
+            if gen <= 0 or not digest:
+                continue
+            if active:
+                entry = document.entry(key)
+                if (
+                    entry is not None
+                    and str(entry.owner_device) == self._self_device
+                    and copies_by_class(str(entry.kind))
+                    and entry.is_holder(device_id)
+                    and state.mark_for(key) != MARK_LOCAL_ONLY
+                    and self._read_value(key, entry) is not None
+                ):
+                    continue
+            wipes.append(
+                {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
+            )
+            if len(wipes) >= ANNOUNCE_CAP:
+                break
+        return wipes
+
+    def _has_pending_wipes(self, document: Any, device_id: str) -> bool:
+        """Cheap gate half: does this member's ledger owe an ENDING (§5.5c)?
+
+        Any non-``wiped`` ledger row answers yes, because this is only reached
+        when the owned-keys check found nothing to SERVE — every remaining row
+        is by definition a key that cannot be served to this member anymore,
+        and the precise per-key decision runs under the state lock in
+        ``_pending_wipes``. A state that cannot be read answers no: an
+        unreadable document must not spin a dial per member per tick.
+        """
+        try:
+            state = SyncState.load(str(document.network_id), root=self._root)
+        except Exception:  # noqa: BLE001 — unreadable state: nothing owed
+            return False
+        rows = state.acks.get(device_id) or {}
+        for row in rows.values():
+            if isinstance(row, dict) and not row.get("wiped"):
+                return True
+        return False
+
+    def deliver_removal_endings(self, device_id: str) -> dict[str, int]:
+        """The endings a MEMBER REMOVAL owes, delivered while it is still contactable.
+
+        WHY THIS EXISTS (review round 1, Q1). The definitions tick never runs for
+        a member that stopped being ``active`` — that is the whole point of the
+        tombstone — so ``member rm`` is the LAST moment an owner exchange with
+        this device is possible at all, and the measured removal path left every
+        copied store secret usable on the removed device with no wipe attempt and
+        no sentence. This is that path's own bounded exchange, run by
+        ``_ctl_member_rm`` BEFORE the tombstone is written (afterwards
+        ``_ensure_link_with_reason`` refuses the dial BY DESIGN — a tombstoned
+        member is never contacted again).
+
+        EVERY un-``wiped`` ledger row is an ending here, whatever the key's
+        serveability: the member's whole membership ends, so the generic
+        ``_pending_wipes`` serveability check — which excludes keys still served —
+        would wrongly skip exactly the copies a removal must end. The frames are
+        the same per-key ``absent`` announces the tick carries, sent once, now.
+
+        Bounded: one dial (probe-bounded), then at most ``ANNOUNCE_CAP`` frames
+        inside ``REMOVAL_TOTAL_BUDGET_S``; every give-up is REPORTED, in two
+        classes because they mean different things (review round 2, F1):
+        ``timed_out`` — an attempt whose answer did not arrive inside the frame
+        bound, where the member may still be completing the delete — counts
+        separately from the rows never contacted (no link, error answer, or
+        budget spent), because for a removed member there is no next contact to
+        reconcile either fact. The caller turns ``copies``/``wiped``/
+        ``timed_out`` into the removal receipt's ending sentences — the open
+        state is visible rather than silent (§2.3's discipline), and the
+        TIMEOUT wording is not the unreachable wording.
+
+        THE LEDGER ROW LEFT OPEN MEANS "NOT CONFIRMED", NEVER "still there":
+        after a removal nothing will ever contact this member again, so the row
+        can only record what an answer proved; a timed-out exchange may already
+        have ended the copy on the member. The receipt carries which flavour
+        this was; the ledger deliberately does not guess.
+        """
+        document = self._placement()
+        if document is None or not device_id:
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
+        network_id = str(document.network_id)
+        try:
+            state = SyncState.load(network_id, root=self._root)
+        except Exception:  # noqa: BLE001 — unreadable state: nothing derivable
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
+        rows = state.acks.get(device_id) or {}
+        pending: list[dict[str, Any]] = []
+        for key in sorted(rows):
+            row = rows[key]
+            if not isinstance(row, dict) or row.get("wiped"):
+                continue
+            gen = int(row.get("gen") or 0)
+            digest = str(row.get("digest") or "")
+            if gen > 0 and digest:
+                pending.append(
+                    {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
+                )
+        if not pending:
+            return {"copies": 0, "wiped": 0, "timed_out": 0}
+        link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam
+            device_id, probe_timeout_s=REMOVAL_PROBE_TIMEOUT_S
+        )
+        if link is None:
+            return {"copies": len(pending), "wiped": 0, "timed_out": 0}
+        confirmed = 0
+        timed_out = 0
+        attempted = 0
+        deadline = time.monotonic() + REMOVAL_TOTAL_BUDGET_S
+        for item in pending[:ANNOUNCE_CAP]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # NOT ATTEMPTED, so NOT timed-out: these rows keep the
+                # "could NOT be confirmed" meaning — nothing was ever sent.
+                logger.debug(
+                    "credentials sync: removal ending budget spent for %s; "
+                    "%d row(s) not attempted",
+                    device_id,
+                    len(pending[:ANNOUNCE_CAP]) - attempted,
+                )
+                break
+            frame = {
+                "op": "net_broker",
+                "kind": "announce",
+                "network_id": network_id,
+                "from_device": self._self_device,
+                "from_device_name": self._self_device_name,
+                "req": self._server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
+                **item,
+            }
+            attempted += 1
+            # THE WAIT IS CLAMPED BY THE BUDGET (review round 3, F2): checking
+            # the budget only BEFORE a frame left the loop's true envelope at
+            # budget + one full frame (25 + 10 = 35 s, and 38 s with the
+            # probe) — one frame bound past the caller's wait, i.e. a window
+            # where the CLI would fall back to the local write mid-exchange.
+            # Clamping means the loop can never outrun REMOVAL_TOTAL_BUDGET_S,
+            # so the envelope is probe + budget and the caller's wait covers it
+            # by construction (pinned in test_wipe_notice.py).
+            wait_s = min(REMOVAL_FRAME_TIMEOUT_S, remaining)
+            try:
+                reply = link.request(frame, timeout=wait_s)
+            except Exception:  # noqa: BLE001 — the link itself is failing; stop the run
+                # NOT the timed-out class: the measured give-up is ``None`` below
+                # (the wait expiring), while an exception here is the send/wait
+                # machinery failing and the rest of the frames would ride the same
+                # broken link. The rows left unattempted stay "could NOT be
+                # confirmed" — nothing was proven sent — and the ordering keeps a
+                # programming-error raise from silently counting as a soft timeout.
+                logger.debug(
+                    "credentials sync: removal ending for %s failed on the link",
+                    item.get("key"),
+                    exc_info=True,
+                )
+                break
+            if reply is None:
+                # THE GIVE-UP THAT IS NOT SILENT (F1): ``request`` returns None
+                # when its wait expires (or the send failed), and in the measured
+                # shape the member was still deleting — so this counts in the
+                # may-still-complete class the receipt renders.
+                logger.debug(
+                    "credentials sync: removal ending for %s timed out (bound %ss)",
+                    item.get("key"),
+                    REMOVAL_FRAME_TIMEOUT_S,
+                )
+                timed_out += 1
+                continue
+            detail = reply.get("detail") if isinstance(reply, dict) else None
+            if not isinstance(detail, dict) or str(detail.get("kind") or "") == "error":
+                logger.debug(
+                    "credentials sync: removal ending for %s answered %s",
+                    item.get("key"),
+                    detail,
+                )
+                continue
+            if str(detail.get("action") or "") == "wiped":
+                self._record_wipe_reply(network_id, device_id, item, detail)
+                confirmed += 1
+        # THE LEDGER IS THE COUNT, not the replies: ``_record_wipe_reply`` swallows
+        # a lost write, and the receipt must say what the ledger will show a reader.
+        try:
+            after = SyncState.load(network_id, root=self._root)
+            open_now = sum(
+                1
+                for row in (after.acks.get(device_id) or {}).values()
+                if isinstance(row, dict) and not row.get("wiped")
+            )
+            wiped = max(0, len(pending) - open_now)
+        except Exception:  # noqa: BLE001 — the reply count is the best datum left
+            wiped = confirmed
+        return {"copies": len(pending), "wiped": wiped, "timed_out": timed_out}
 
     def _read_value(self, key: str, entry: Any) -> dict[str, Any] | None:
         """Read the owner's value for a copy, via the owner's own store.
@@ -847,7 +1370,7 @@ class SyncEngine:
         except Exception:  # noqa: BLE001 — an unopenable store holds nothing
             return None
         try:
-            return read_copy_value(store, key, entry)
+            return read_copy_value(store, key, entry, root=self._root)
         finally:
             _close_quietly(store)
 
@@ -895,6 +1418,29 @@ class SyncEngine:
                 "here; nothing was pulled",
             )
         entry = document.entry(key)
+        if value_state == VALUE_STATE_ABSENT:
+            # THE WIPE NOTICE (§5.5c, §4.3 as-built), handled BEFORE the holder
+            # checks because it must be handleable AFTER the grant is gone —
+            # that is the whole point of a wipe. The ownership check still
+            # gates it when an entry exists (a device cannot order a patch on
+            # what it does not own here); when no entry exists (a removed
+            # member whose placement is gone), the deletion is bounded instead
+            # BY THE MARKER: only records whose provenance names the
+            # authenticated sender are ever touched.
+            if entry is not None and str(entry.owner_device) != by:
+                return _sync_error(
+                    "not_owner",
+                    key,
+                    f"the wipe notice for {key!r} arrived from a device that does "
+                    "not own it on this device; nothing was deleted",
+                )
+            return self._wipe_now(by, key, gen, digest)
+        if value_state != VALUE_STATE_PRESENT:
+            return _sync_error(
+                "malformed_announce",
+                key,
+                "the announcement carried an unknown value_state; nothing was pulled",
+            )
         if entry is None:
             return _sync_error(
                 "unknown_key",
@@ -921,11 +1467,6 @@ class SyncEngine:
                 f"{key!r} is not a copy-eligible credential; it stays on the brokering "
                 "path and nothing was pulled",
             )
-        if value_state != VALUE_STATE_PRESENT:
-            # An announced absence is S4's wipe notice shape. Until the wipe
-            # lands, the member keeps its copy (§5.5a) and says so by doing
-            # nothing — the announce is answered receipt-only.
-            return {"kind": "ack", "key": key, "action": "noted"}
         self._schedule_pull(by, key, gen, digest)
         return {"kind": "ack", "key": key, "action": "noted"}
 
@@ -951,6 +1492,130 @@ class SyncEngine:
             future.result()
         except Exception:  # noqa: BLE001 — a pull logs, never surfaces into a turn
             logger.debug("credentials sync: pull %s failed", token, exc_info=True)
+
+    def _wipe_now(self, owner: str, key: str, gen: int, digest: str) -> dict[str, Any]:
+        """Delete this device's copies for ``key``, INLINE, and answer the notice.
+
+        BY PROVENANCE, NEVER BY TRUST IN THE FRAME: only rows whose marker names
+        the AUTHENTICATED sender (``origin.owner_device == owner``) and this key
+        are touched — a wipe can never reach records another owner wrote, and the
+        scan stays findable even when the ``applied`` sidecar was lost, the same
+        property the apply-sweep keeps from the other side.
+
+        WHY INLINE, when the pull is scheduled off this worker: the confirmation
+        must ride THIS reply. An un-approved member cannot open a frame — its
+        ``broker_credential`` capability went with the grant — so a wipe-ack sent
+        as a fresh request is refused at the owner's door (measured), and the
+        answer to the request the owner dialled is the only channel left. The
+        work is local and bounded (two store scans, no dial, no transfer), so the
+        §5.4 property that matters here — never a reader thread, never a wait on
+        the network — holds; only the delete of a few rows runs here.
+        """
+        removed_auth = self._wipe_auth_copies(owner, key)
+        removed_secrets = self._wipe_secret_copies(owner, key)
+        if removed_auth is None or removed_secrets is None:
+            # A scan that could not run proves nothing: answer receipt-only and
+            # let the owner's next contact recompute the notice.
+            return {"kind": "ack", "key": key, "action": "noted"}
+        document = self._placement()
+        network_id = str(document.network_id) if document is not None else ""
+        if network_id:
+            with mutate(network_id, self._root) as state:
+                state.clear_applied(key)
+        self._audit_row(
+            "credential.copy_wiped",
+            network_id=network_id,
+            subject=owner,
+            detail={
+                "credential_key": key,
+                "act": self._self_device,
+                "sub": owner,
+                "rows": removed_auth + removed_secrets,
+            },
+        )
+        return {
+            "kind": "ack",
+            "key": key,
+            "action": "wiped",
+            "gen": gen,
+            "digest": digest,
+            "value_state": VALUE_STATE_ABSENT,
+        }
+
+    def _wipe_auth_copies(self, owner: str, key: str) -> int | None:
+        """Delete this device's class-4 copies of ``key`` from ``owner``.
+
+        ``None`` means the scan itself could not run (an unopenable store), and
+        the caller must not claim a wipe on it; ``0`` means it ran and found
+        nothing, which IS a wipe (nothing held is the ending asked for).
+        """
+        try:
+            store = self._store()
+        except Exception:  # noqa: BLE001 — an unopenable store proves nothing
+            return None
+        removed = 0
+        try:
+            for row in store.list_credentials(None, include_disabled=True):
+                origin = getattr(row, "data", {}).get(MESH_ORIGIN_KEY)
+                if not isinstance(origin, dict):
+                    continue
+                if str(origin.get("key") or "") != key:
+                    continue
+                if str(origin.get("owner_device") or "") != owner:
+                    continue
+                try:
+                    store.delete_credential(int(getattr(row, "id", 0) or 0))
+                    removed += 1
+                except Exception:  # noqa: BLE001 — one row must not stop the rest
+                    logger.debug("credentials sync: wipe of an auth row failed", exc_info=True)
+            return removed
+        except Exception:  # noqa: BLE001 — a failed scan claims nothing
+            logger.debug("credentials sync: auth wipe scan failed", exc_info=True)
+            return None
+        finally:
+            _close_quietly(store)
+
+    def _wipe_secret_copies(self, owner: str, key: str) -> int | None:
+        """Delete this device's class-2 copies of ``key`` from ``owner``.
+
+        Same ``None`` contract as the class-4 half. A device with NO secret
+        store answers 0 without opening one: it holds nothing, and a read must
+        not be the reason a store appears (the announce reader's own rule).
+        """
+        try:
+            from local_operator.secrets.keys import store_path
+
+            if not store_path(self._root).exists():
+                return 0
+        except Exception:  # noqa: BLE001 — cannot tell: claim nothing
+            return None
+        try:
+            from local_operator.secrets import access
+
+            store = access.open_store(self._root)
+        except Exception:  # noqa: BLE001 — no store openable: claim nothing
+            return None
+        removed = 0
+        try:
+            for record in store.list():
+                origin = getattr(record, "origin", None)
+                if not isinstance(origin, dict):
+                    continue
+                if str(origin.get("key") or "") != key:
+                    continue
+                if str(origin.get("owner_device") or "") != owner:
+                    continue
+                try:
+                    store.delete(record.name)
+                    removed += 1
+                except Exception:  # noqa: BLE001 — one row must not stop the rest
+                    logger.debug("credentials sync: wipe of a secret failed", exc_info=True)
+            return removed
+        except Exception:  # noqa: BLE001 — a failed scan claims nothing
+            logger.debug("credentials sync: secret wipe scan failed", exc_info=True)
+            return None
+        finally:
+            _close_quietly(store)
 
     def _pull_blocking(
         self, owner: str, key: str, announced_gen: int, announced_digest: str
@@ -1052,7 +1717,18 @@ class SyncEngine:
             # NEVER A VALUE ROLLBACK (§5.2's monotonicity rule): a generation at
             # or below what this device holds is dropped however it arrived.
             return
-        row_id = self._apply_value(key, entry, value, owner, served)
+        provenance = detail.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = None
+        applied = self._apply_value(key, entry, value, owner, served, provenance=provenance)
+        if applied is None:
+            # NOTHING WAS WRITTEN, SO NOTHING IS HELD: a failed apply must not
+            # be recorded or acked — the owner would stop announcing a value
+            # this device never received, and the member would sit silently
+            # behind (§5.1's recompute-on-contact is the repair, but only if
+            # the ack was never sent).
+            return
+        row_id, record_id = applied
         with mutate(document.network_id, self._root) as editable:
             editable.record_applied(
                 key,
@@ -1060,6 +1736,7 @@ class SyncEngine:
                 digest=reply_digest,
                 owner_device=owner,
                 row_id=row_id,
+                record_id=record_id,
                 at=time.time(),
             )
         self._audit_row(
@@ -1071,25 +1748,54 @@ class SyncEngine:
         self._send_ack(document.network_id, owner, key, served, reply_digest)
 
     def _apply_value(
-        self, key: str, entry: Any, value: Mapping[str, Any], owner: str, gen: int
-    ) -> int:
-        """Write a received copy into THIS device's own store. Returns the row id.
+        self,
+        key: str,
+        entry: Any,
+        value: Mapping[str, Any],
+        owner: str,
+        gen: int,
+        *,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> tuple[int, str] | None:
+        """Write a received copy into THIS device's own store.
 
-        ORDER, AND WHY: the new row is upserted FIRST and the superseded row is
-        swept after, so a reader racing the apply sees the old value or the new
-        one — never neither (§5.4 property 3). The sweep finds previous copies by
-        the ORIGIN MARKER, not by the sidecar alone, so a lost sync document
-        cannot accumulate rows on the member; the marker is also what S4's
-        wipe-by-provenance will compute over.
+        Returns ``(row_id, record_id)`` — the class-4 row's integer id or the
+        class-2 record's string id, one slot each — or ``None`` when nothing
+        was written. ``None`` is load-bearing at the caller: a failed apply
+        must not be recorded or acked as held, or the owner stops announcing a
+        value this device never received; a not-applied pull is recomputed on
+        the next contact (§5.1: nothing here is a queue that can be lost).
+
+        ORDER, AND WHY: the new value is upserted FIRST and any superseded row
+        is swept after, so a reader racing the apply sees the old value or the
+        new one — never neither (§5.4 property 3). The sweep — and the wipe —
+        find previous copies by the ORIGIN MARKER, not by the sidecar alone, so
+        a lost sync document cannot accumulate rows on the member.
+
+        CLASS 4 (``api-key-static``): the received payload IS a row's ``data``
+        (the origin marker rides in it), so the write is the store's ordinary
+        credential upsert — the same 0600 row a local login writes.
+
+        CLASS 2 (``store-secret``): the value is re-sealed into THIS device's
+        own encrypted store under ITS OWN master key, with the provenance
+        marker inside the sealed payload — never the owner's key, never a
+        plaintext file (§8.2's copy invariant). An existing record under the
+        name is UPDATED: the default copy-set is the needs-list — keys the node
+        is missing — so colliding with a LOCAL value is the operator's
+        deliberate force-add, and "this device's value for this key" is what
+        was asked for; refusing instead would leave a key the owner keeps
+        announcing permanently un-acked.
         """
+        if str(entry.kind) == SECRET_KIND:
+            return self._apply_secret_value(key, value, owner, gen, provenance)
         if str(entry.kind) != "api-key-static":
-            return 0
+            return None
         store = self._store()
         try:
             provider = str(entry.provider or key)
             payload = _copyable_payload(value)
             if payload is None:
-                return 0
+                return None
             payload[MESH_ORIGIN_KEY] = {
                 "owner_device": owner,
                 "key": key,
@@ -1112,10 +1818,90 @@ class SyncEngine:
                     store.delete_credential(int(row.id))
                 except Exception:  # noqa: BLE001 — a failed sweep must not fail the apply
                     logger.debug("credentials sync: sweep of row %s failed", row.id, exc_info=True)
-            return new_id
+            return new_id, ""
         except Exception:  # noqa: BLE001 — a failed apply is retried on the next contact
             logger.debug("credentials sync: apply for %s failed", key, exc_info=True)
-            return 0
+            return None
+        finally:
+            _close_quietly(store)
+
+    def _apply_secret_value(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        owner: str,
+        gen: int,
+        provenance: Mapping[str, Any] | None,
+    ) -> tuple[int, str] | None:
+        """The class-2 half of :func:`_apply_value`: re-seal into ``secrets/``.
+
+        The store is opened WITH ``create``: unlike the owner's announce read
+        (which must never be the reason a store appears), this call exists
+        because a copy is arriving for exactly this device, and refusing to
+        create the store would make the first copy of a node's life
+        unappliable forever. What is NOT created is any derivation of the value
+        outside the sealed store: the bytes go from the link into ``secrets/``
+        in one write, under this device's own master key.
+        """
+        try:
+            name = secret_name_from_key(key)
+        except ValueError:
+            return None
+        if str(value.get("name") or "") != name:
+            # The payload must name the key it claims to be: defence in depth
+            # under the digest pin — a reply mis-addressed at either end is
+            # dropped whole rather than written under the wrong name.
+            return None
+        raw = value.get("value")
+        if not isinstance(raw, str) or not raw or len(raw) > _SECRET_HEX_MAX:
+            return None
+        try:
+            material = bytes.fromhex(raw)
+        except ValueError:
+            return None
+        description = str(value.get("description") or "")
+        origin: dict[str, Any] = {
+            "owner_device": owner,
+            "key": key,
+            "gen": int(gen),
+            "applied_at": time.time(),
+        }
+        owner_name = str((provenance or {}).get("owner_device_name") or "")
+        if owner_name:
+            origin["owner_device_name"] = owner_name
+        try:
+            from local_operator.secrets import access
+            from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+
+            store = access.open_store(self._root, create=True)
+        except Exception:  # noqa: BLE001 — no store openable: nothing is written
+            logger.debug("credentials sync: secret store for apply failed", exc_info=True)
+            return None
+        try:
+            try:
+                store.describe(name)
+                exists = True
+            except SecretNotFound:
+                exists = False
+            except SecretStoreError:
+                # NO STORE ON DISK YET is not an error for a WRITE path: the first
+                # copy of a node's life is exactly this state, and the ``set``
+                # below is what creates the store. Any OTHER read failure (a
+                # damaged row, key trouble) re-raises — a blind ``set`` over an
+                # unreadable record would destroy what it cannot read.
+                from local_operator.secrets.keys import store_path
+
+                if store_path(self._root).exists():
+                    raise
+                exists = False
+            if exists:
+                record = store.update(name, material, origin=origin)
+            else:
+                record = store.set(name, material, description=description, origin=origin)
+            return 0, str(getattr(record, "record_id", "") or "")
+        except Exception:  # noqa: BLE001 — a failed apply is retried on the next contact
+            logger.debug("credentials sync: secret apply for %s failed", key, exc_info=True)
+            return None
         finally:
             _close_quietly(store)
 
@@ -1302,9 +2088,24 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
             "member_not_active",
             f"{by} is not an active member of this network; nothing was copied",
         )
+    with mutate(str(broker.network_id), broker.root) as state:
+        if state.mark_for(key) == MARK_LOCAL_ONLY:
+            # §4.2's kill switch, enforced where the value would move: the mark
+            # can land after a grant was written, and a grant must not outrun
+            # it. The ledger row this leave behind turns into a wipe on the
+            # next pass, so an already-held copy ends too.
+            return broker._refuse(
+                link,
+                key,
+                key,
+                by,
+                "local_only",
+                f"{key!r} is marked local-only on this device, so it never crosses; "
+                "nothing was copied",
+            )
     meta = None
     try:
-        meta = read_copy_value(broker._auth_store_instance(), key, entry)
+        meta = read_copy_value(broker._auth_store_instance(), key, entry, root=broker.root)
     except Exception:  # noqa: BLE001 — an unreadable store holds nothing to copy
         logger.debug("credentials sync: owner read for %s failed", key, exc_info=True)
     if meta is None:
@@ -1377,11 +2178,13 @@ def _served_generation(
 def owner_ack(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any]:
     """Record an ``ack`` (member -> owner). Idempotent; never blocks anything.
 
-    The ledger is bookkeeping for the surface and the announce gate; a lost or
-    late ack costs one recomputed announce, never a blocked anything (§5.5b).
-    Only an ack from a current holder of a key this device owns is recorded;
-    anything else is receipt-only, because the ledger's job is not to collect
-    assertions.
+    TWO ACKS ARRIVE HERE, under DIFFERENT authority. A PRESENT ack claims a
+    held copy: only a current holder of a key this device owns is recorded —
+    the ledger's job is not to collect assertions. An ABSENT ack confirms a
+    WIPE (§5.5c): it necessarily arrives after the grant was removed, so the
+    holder check cannot apply; the ledger entry the wipe was sent for is the
+    authority it is recorded against, and a wipe-ack with no such row (a lost
+    owner state) is receipt-only — the next announce pass recomputes the need.
     """
     key = _bounded_key(frame.get("key"))
     if not key:
@@ -1391,12 +2194,20 @@ def owner_ack(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any
         return refused
     gen = peer_int(frame.get("gen"), maximum=GEN_CEILING)
     digest = _bounded_digest(frame.get("digest"))
+    value_state = str(frame.get("value_state") or VALUE_STATE_PRESENT)
     entry = broker._entry(key)  # noqa: SLF001 — the broker's own document read
-    if (
-        entry is not None
-        and str(entry.owner_device) == str(broker.self_device)
-        and entry.is_holder(by)
-    ):
+    owned_here = entry is not None and str(entry.owner_device) == str(broker.self_device)
+    if value_state == VALUE_STATE_ABSENT:
+        if owned_here and gen > 0 and digest:
+            with mutate(broker.network_id, broker.root) as state:
+                if state.ack_for(by, key) is not None:
+                    state.record_ack(by, key, gen=gen, digest=digest, at=time.time(), wiped=True)
+        return {"kind": "ack", "key": key, "action": "recorded"}
+    if value_state != VALUE_STATE_PRESENT:
+        return BrokerError(
+            code="malformed_frame", message="the ack carried an unknown value_state"
+        ).to_detail()
+    if owned_here and entry is not None and entry.is_holder(by):
         if gen > 0 and digest:
             with mutate(broker.network_id, broker.root) as state:
                 state.record_ack(by, key, gen=gen, digest=digest, at=time.time())
@@ -1441,6 +2252,12 @@ def sync_segment(*, acked: Mapping[str, Any] | None, current: Mapping[str, Any] 
     gen = peer_int(current.get("gen"), maximum=GEN_CEILING)
     if gen <= 0:
         return ""
+    if acked is not None and acked.get("wiped") is True:
+        # THE ENDING FORM (§4.3 as-built): what this member holds now is
+        # nothing, confirmed by its own delete-ack. It outranks the counter
+        # comparison — nothing is stale when nothing is held — and a re-share
+        # clears it back to the ordinary forms by announcing again.
+        return f"wiped (gen {gen})"
     if acked is None:
         return f"not yet synced (gen {gen})"
     acked_gen = peer_int(acked.get("gen"), maximum=GEN_CEILING)
@@ -1486,6 +2303,11 @@ def sync_checks(record: Any, *, root: Path | None = None) -> list[dict[str, Any]
                 continue
             name = str(getattr(member, "name", "") or "")
             acked = state.ack_for(str(holder.device), key)
+            if isinstance(acked, Mapping) and acked.get("wiped") is True:
+                # A confirmed ending owes nothing: the row would read "wiped"
+                # and pass, which is noise, not a check. A re-share re-announces
+                # and the row returns on its own.
+                continue
             segment = sync_segment(acked=acked, current=current)
             if not segment:
                 continue
