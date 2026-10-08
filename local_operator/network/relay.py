@@ -7411,6 +7411,15 @@ class RelayServer:
         pin = identity.birth
         if pin is None or not (pin.provider or pin.model_id) or wanted_model is None:
             return ""
+        # The two styles differ only in what they CLAIM: "the agent 'X'" for a
+        # pin the profile's own row supplied, "the --agent row 'X'" for one the
+        # row supplied. The comparison is by NAME, so a row spelled exactly like
+        # the profile reads as the profile's pin — ambiguous, not false (the
+        # name printed is the same either way, and the receipt's own ``agent:``
+        # line is equally ambiguous for identically-named definitions; agent
+        # review F12). A source tag on ``CreateIdentity`` would remove the
+        # class; ``test_a_row_named_like_the_profile_reads_as_the_profiles_pin``
+        # pins the current reading until then.
         subject = (
             f"the agent {identity.agent_name!r}"
             if identity.birth_owner == identity.agent_name
@@ -10178,9 +10187,11 @@ class RelayServer:
         # no guess. When this device does NOT hold the row, nothing can be
         # established locally, so the frame travels and the OWNING device refuses;
         # that residual push is bounded to the frame's own names, idempotent, and
-        # the always-on definitions cadence mirrors these rows to every paired
-        # member regardless — the refusal merely stops being the FIRST mirror. A
-        # routing-only row is never refused by either device.
+        # the always-on definitions cadence mirrors these rows to paired members
+        # anyway — a member that cannot hold ``net_definitions`` is skipped and
+        # one refusing on policy is parked for 1800 s, so the refusal merely
+        # stops being the FIRST mirror. A routing-only row is never refused by
+        # either device.
         if team:
             from local_operator.session.errors import flag_with_team_refusal_message
 

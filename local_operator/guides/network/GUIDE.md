@@ -202,7 +202,7 @@ owns the session's agent slot (the same rule `lop exec` refuses that pair with),
 `--profile` beside `--team` is refused — by the creating device before anything is
 sent, and by the owning device in the same sentence if it arrives anyway (the
 creating device names the team's manager only when it holds that team; otherwise
-it says "its manager is the speaker") — and no session is made. An `--agent` row
+it says `its manager is the speaker`) — and no session is made. An `--agent` row
 beside a team is refused when that row's instructions are attachable (a role or a
 specialist) — the creating device refuses it too when it holds that row, and the
 owning device refuses it in every case; a routing-only legacy row beside a team is
@@ -232,8 +232,10 @@ copying its client secret, and a mirrored server whose key the peer's store lack
 NOT hidden — it refuses at connect, by name. The key reaches that device one of two
 ways: `lop secret set <KEY>` on the device that runs it, or a COPY from the owner (a
 secret a pushed bundle declares as `ref:<NAME>` is preselected when the device is
-approved, and `lop network credential mark <NAME> sync` preselects any other; see
-"Credentials on a peer"). A row whose text looks like a credential is withheld and
+approved, `lop network credential mark <NAME> sync` preselects any other for later
+approvals, and a device already approved takes it with `lop network credential
+share <NAME> --with <device>`; see "Credentials on a peer"). A row whose text looks like
+a credential is withheld and
 named rather than sent, on both ends.
 
 WHAT A PEER MAY AND MAY NOT BE ASKED FOR, and each is refused in words rather than
@@ -262,8 +264,10 @@ quietly dropped:
   arrived.
 - **A pinned model outranks `--model`**, which is this product's precedence on a local
   create too (agent > flag > config). The receipt says the requested model was not
-  applied and names what pinned it: the profile on its own, or — when a create names
-  both halves — the `--agent` row, whose routing outranks the profile's own model.
+  applied and names what pinned it: the profile on its own, or — when the `--agent` row
+  carries both its own hosting and its own model — the row, whose routing then outranks
+  the profile's own model (a row carrying only one of the two keeps the profile's pin,
+  or takes the pin as a half when the profile pins nothing).
 - **An edited copy is never overwritten.** Each device remembers what it mirrored; if
   the local copy has been edited since, a later push REFUSES that row by name (`the
   copy of that name here has local edits`) and leaves the edit alone. A row this device
@@ -557,8 +561,9 @@ for work that follows the person, not for work that follows the machine.
 Credentials are brokered by default, and TWO CLASSES ARE COPIED (the provisioning
 design, `mesh-consent-provisioning.md` §2.1): rows of kind `api-key-static` (a
 provider API key you signed in with) and rows whose key starts `secret:` (kind
-`store-secret`: anything in the `lop secret` store, a `GITHUB_TOKEN` among them).
-What arrives is that device's OWN material, and where it rests depends on the class.
+`store-secret`: anything in the `lop secret` store, a `GITHUB_TOKEN` among them —
+except the provider-owned `LOP_PROVIDER_*` rows, which are never offered). What
+arrives is that device's OWN material, and where it rests depends on the class.
 A `store-secret` copy is re-sealed into the device's own encrypted store under its
 own master key: never plaintext, never the owner's key. An `api-key-static` copy is
 the same row a local sign-in would write, in that device's 0600 `auth.db` — the
@@ -747,16 +752,23 @@ build on it, joins the member, anchors the operator's key, supervises the relay
 and writes the grants; the rest of what a node inherits is short and
 deliberate: agent and team DEFINITIONS (they also travel with a create — see
 `lop network definitions push` / `state`), MCP server declarations with their
-brokered logins (values never travel; `lop network mcp state` names the keys
-that device still needs), the model and provider logins it serves or borrows
+brokered logins (values never travel with the push; a key a mirrored server
+needs arrives as a re-sealed copy when the approval's copy-set includes it (a
+`ref:<NAME>` declaration or a `sync` mark), or by `lop secret set` on that
+device — see "Credentials on a peer"; `lop network mcp state` names the keys that
+device still needs), the model and provider logins
+it serves or borrows
 (`lop network credentials`), a git identity seeded from this device's where the
 node has none (one it already has is never overwritten), and the run's own
 provisioning receipts — `invite`, `pre_read`, `install`, `join`, `anchor`,
 `relay`, `grants`, `provision`, `verify` — readable in
 `lop network approvals run <id> --json`.
 
-Everything else a node must have on its own disk, or borrow per use. The four
-limits below are the ones the live remote-node E2E on `cloud-node-1` paid for.
+Everything else a node must have on its own disk, or borrow per use — except the
+copied classes, which land in that node's own credential storage (re-sealed for
+`store-secret`, the login's own 0600 row for `api-key-static`) at the approval or
+by a later `credential share` (see "Credentials on a peer"). The four limits below
+are the ones the live remote-node E2E on `cloud-node-1` paid for.
 Read them before trusting a node with work, and read
 `lop network ready --peer <device>`: every failing row carries the remedy and
 the side it runs on.

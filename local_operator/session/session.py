@@ -2531,6 +2531,43 @@ def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
 _render_compaction_marker = render_compaction_marker
 
 
+def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
+    """Apply one ``[session-state]`` record's ``blocks`` payload to ``blocks``.
+
+    One fold, two readers: the resume path replays EVERY record in the journal
+    to recover what was last shipped, and the compaction re-anchor
+    (:meth:`Session._visible_state_blocks`) replays only the records still in
+    the model's context, to recover what the model can still SEE. Two copies of
+    this loop would be two ways to disagree about the same bytes.
+    """
+    for key, value in record.items():
+        index = int(key)
+        if not (0 <= index < len(blocks)):
+            continue
+        if isinstance(value, Mapping):
+            # Section-granular record: replace exactly the named sections of the
+            # block reconstructed so far; an empty value says that section is
+            # gone. The split of what we hold is deterministic (see
+            # ``split_system_block_sections``), so folding a sequence of records
+            # ends on the bytes the last record's render produced.
+            current = split_system_block_sections(index, blocks[index])
+            updated: dict[str, str] = {}
+            for name, text in current.items():
+                if name in value:
+                    text = str(value[name]) if value[name] else ""
+                if text:
+                    updated[name] = text
+            for name, text in value.items():
+                if name not in current and text:
+                    updated[str(name)] = str(text)
+            blocks[index] = assemble_system_block_sections(index, updated)
+        else:
+            # Whole-block record (the shape every record had before sections,
+            # and the one a block with no known split still gets): the text IS
+            # the block.
+            blocks[index] = str(value)
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -3068,38 +3105,9 @@ class Session:
                     payload = entry.payload
                     if payload.get("custom_type") != "session_state":
                         continue
-                    for key, value in payload.get("details", {}).get("blocks", {}).items():
-                        index = int(key)
-                        if not (0 <= index < len(self._last_system_blocks)):
-                            continue
-                        if isinstance(value, Mapping):
-                            # Section-granular record: replace exactly the named
-                            # sections of the block reconstructed so far; an
-                            # empty value says that section is gone. The split
-                            # of what we hold is deterministic (see
-                            # ``split_system_block_sections``), so folding a
-                            # sequence of records ends on the bytes the last
-                            # record's render produced.
-                            current = split_system_block_sections(
-                                index, self._last_system_blocks[index]
-                            )
-                            updated: dict[str, str] = {}
-                            for name, text in current.items():
-                                if name in value:
-                                    text = str(value[name]) if value[name] else ""
-                                if text:
-                                    updated[name] = text
-                            for name, text in value.items():
-                                if name not in current and text:
-                                    updated[str(name)] = str(text)
-                            self._last_system_blocks[index] = assemble_system_block_sections(
-                                index, updated
-                            )
-                        else:
-                            # Whole-block record (the shape every record had
-                            # before sections, and the one a block with no
-                            # known split still gets): the text IS the block.
-                            self._last_system_blocks[index] = str(value)
+                    _fold_state_record(
+                        self._last_system_blocks, payload.get("details", {}).get("blocks", {})
+                    )
                     self._system_state_message_id = entry.id
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
@@ -5331,14 +5339,21 @@ class Session:
             self._system_state_message_id is not None
             and compaction_id != self._system_state_compaction_id
         )
+        if lost_state:
+            # RE-ANCHOR AGAINST WHAT THE MODEL CAN STILL SEE, not against
+            # nothing. This branch used to re-ship EVERY section after any
+            # compaction that moved past the last state record — but the frozen
+            # prefix never leaves the request, and records after the cut point
+            # survive in context. A replay of 1,142 transcripts (2026-10-08)
+            # found 1,371 of 1,989 re-anchored sections byte-identical to what
+            # the model could still see (3.03M of 4.73M chars): the team brief,
+            # the tool inventory and the interactivity block re-sent unchanged.
+            previous = self._visible_state_blocks()
         changes: dict[str, dict[str, str]] = {}
         for index, block in enumerate(desired):
             if index == 0:
                 continue
             sections = split_system_block_sections(index, block)
-            if lost_state:
-                changes[str(index)] = sections
-                continue
             prior = (
                 split_system_block_sections(index, previous[index]) if index < len(previous) else {}
             )
@@ -5351,6 +5366,23 @@ class Session:
             if section_changes:
                 changes[str(index)] = section_changes
         return changes, compaction_id
+
+    def _visible_state_blocks(self) -> list[str]:
+        """The system blocks as the model can see them in the LIVE context.
+
+        The frozen prefix folded with every ``[session-state]`` record still in
+        ``_context.messages`` — after a compaction, that is only the records at or
+        after its cut point. This is the baseline a re-anchor must diff against:
+        a section equal to it is already in front of the model, and re-sending it
+        buys nothing but tokens. A section the model cannot see in its current
+        form (changed since the prefix, its carrier compacted away) still differs
+        and still ships, which is the whole of what the re-anchor exists for.
+        """
+        blocks = list(self._frozen_system_blocks or [])
+        for message in self._context.messages:
+            if isinstance(message, CustomMessage) and message.custom_type == "session_state":
+                _fold_state_record(blocks, message.details.get("blocks", {}) or {})
+        return blocks
 
     @staticmethod
     def _system_state_message(changes: dict[str, Any]) -> CustomMessage:
@@ -13113,6 +13145,10 @@ class Session:
             # re-sends that array (see ``_wire_tools`` for why the array may
             # move only here).
             self._published_tools = None
+            # The model-facing attachment reading moves only HERE, at the turn
+            # boundary, so a transient detach inside a turn publishes no
+            # ``[session-state]`` row (see ``GoalState.latch_interactivity``).
+            self._goal_state.latch_interactivity()
             blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()

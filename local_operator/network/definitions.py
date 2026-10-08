@@ -1806,12 +1806,13 @@ def resolve_create_identity(
         # named: ``--agent`` is the explicit routing selector ("whose model and
         # hosting that device will use" — the network guide), while a profile's
         # row carrying a model is a convenience of its definition. But a HALF pair
-        # (one field) must not replace a profile's COMPLETE pin (F6 / QA row 9):
-        # the missing half would fall to the device config and silently swap the
-        # pin's other side, and completing it from the profile would pair a
-        # provider with a model id present in NEITHER definition. So the row takes
-        # the pin only as a complete pair — or as a half when there is no pin to
-        # keep, standing exactly as it does for the row alone.
+        # (one field) must not replace a profile's pin — complete OR half (F6 /
+        # QA row 9; F10): the missing half would fall to the device config and
+        # silently swap the pin's other side, and completing it from the profile
+        # would pair a provider with a model id present in NEITHER definition. So
+        # the row takes the pin only as a complete pair, or as a half when the
+        # profile pins nothing (no pin to keep, standing exactly as it does for
+        # the row alone).
         if (hosting and model) or (birth is None and (hosting or model)):
             birth = BirthModel(provider=hosting, model_id=model, reasoning_effort=effort or None)
             birth_owner = str(row.name)

@@ -1126,6 +1126,44 @@ def seed_ask_index(projections: list[SessionProjection]) -> None:
         write_entry(root, projection.session_id, cwd="/synthetic", asks=rows)
 
 
+async def serve_queued_ask_runtime(
+    daemon: MobileDaemon, queued: SessionProjection
+) -> tuple[QueuedAskHarness, RuntimeServer, "asyncio.Future[None]"]:
+    """Start the ANSWERABLE queued-ask session as a real runtime and dial it.
+
+    Extracted from ``main()`` so a second fixture that needs the same live session
+    (``scripts/mobile_asks_open_fixture.py``) shares ONE launch recipe instead of
+    carrying a copy that drifts: the registrant, the registry wait and the relay's
+    own dial are the parts that are easy to get subtly wrong (a record that is not
+    live yet, a dial that races the scan), and each was learnt the hard way here.
+
+    Returns the harness (mutate its projection, then call ``harness.on_change()`` to
+    push a new frame to every phone watching, exactly as a real session's own event
+    stream does), the registrant (``close()`` it on the way out) and the dial task
+    (``cancel()`` it on the way out).
+    """
+    harness = QueuedAskHarness(queued)
+    registrant = RuntimeServer(harness, kind="tui")
+    registrant.start()
+    harness.on_change = registrant._schedule_push
+    from local_operator.session.runtime import registry
+
+    deadline = asyncio.get_running_loop().time() + 10
+    record = None
+    while asyncio.get_running_loop().time() < deadline:
+        found = [pair for pair in registry.scan() if pair[1] == "live"]
+        if found:
+            record = found[0][0]
+            break
+        await asyncio.sleep(0.05)
+    if record is None:
+        registrant.close()
+        raise SystemExit("the fixture's runtime never registered")
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    return harness, registrant, asyncio.ensure_future(_dial(daemon, entry))
+
+
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4187
     password = required_password(sys.argv[2:])
@@ -1193,26 +1231,7 @@ async def main() -> None:
     # dials it exactly as it dials a terminal session — its record is the real
     # registry one, and the projection the phone renders is pushed over that
     # socket rather than injected into the daemon's table.
-    harness = QueuedAskHarness(queued)
-    registrant = RuntimeServer(harness, kind="tui")
-    registrant.start()
-    harness.on_change = registrant._schedule_push
-    dial = None
-    from local_operator.session.runtime import registry
-
-    deadline = asyncio.get_running_loop().time() + 10
-    record = None
-    while asyncio.get_running_loop().time() < deadline:
-        found = [pair for pair in registry.scan() if pair[1] == "live"]
-        if found:
-            record = found[0][0]
-            break
-        await asyncio.sleep(0.05)
-    if record is None:
-        raise SystemExit("the fixture's runtime never registered")
-    entry = SessionEntry(record)
-    daemon.table.entries[record.pid] = entry
-    dial = asyncio.ensure_future(_dial(daemon, entry))
+    _harness, registrant, dial = await serve_queued_ask_runtime(daemon, queued)
     app = build_app(daemon)
     print(f"Fixture mobile: http://127.0.0.1:{port}", flush=True)
     try:
@@ -1220,8 +1239,7 @@ async def main() -> None:
             uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
         ).serve()
     finally:
-        if dial is not None:
-            dial.cancel()
+        dial.cancel()
         registrant.close()
 
 

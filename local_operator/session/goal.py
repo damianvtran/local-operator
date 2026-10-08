@@ -542,6 +542,12 @@ class GoalState:
     #: build, which never recorded one.
     created_at: str = ""
 
+    #: The turn-boundary snapshot :meth:`interactivity` serves once latched
+    #: (see :meth:`latch_interactivity`). Excluded from repr/compare: it is a
+    #: cache of the probe, not state the holder describes.
+    _interactivity_snapshot: bool | None = field(default=None, repr=False, compare=False)
+    _interactivity_latched: bool = field(default=False, repr=False, compare=False)
+
     def is_interactive(self) -> bool:
         """Whether a surface can answer a question right now (default True)."""
         probe = self.interactive_probe
@@ -552,8 +558,36 @@ class GoalState:
         except Exception:  # noqa: BLE001 — an unreadable probe must not kill a turn
             return True
 
+    def latch_interactivity(self) -> None:
+        """Snapshot the model-facing attachment reading for the turn starting now.
+
+        Called by ``Session._run_turn`` at the turn boundary. Until the next call,
+        :meth:`interactivity` answers with this snapshot instead of the live probe.
+
+        WHY. The model-facing ``<interactivity>`` block is re-rendered before every
+        provider call, and the probe follows the control socket's connection table,
+        which blinks: a desktop reconnect or a pane swap reads as detach-then-attach
+        within seconds. Each blink journalled a ~800-char ``[session-state]`` row
+        the model then re-read for the rest of the session — measured as three
+        flips inside ONE turn of a manager session (2026-10-08), and 240 identical
+        re-sends of the section across 1,142 transcripts. Latching makes the block
+        move only at a turn boundary, so a real attach/detach still reaches the
+        model at the very next turn, and a transient one inside a turn says nothing.
+
+        Only the MODEL-FACING reading is latched. :meth:`is_interactive` stays a
+        live probe read, because the decisions that use it (parking a gate, the
+        browser tool's attached probe) act now and must see the present.
+        """
+        self._interactivity_snapshot = self._measured_interactivity()
+        self._interactivity_latched = True
+
     def interactivity(self) -> bool | None:
         """Tier A as a MEASURED fact: attached, detached, or nothing measured.
+
+        Answers with the turn-boundary snapshot once :meth:`latch_interactivity`
+        has run (see it for why), and with a live probe read before that — a
+        host that never runs a turn (a test driving the prompt builder directly)
+        keeps the live reading it always had.
 
         The tri-state twin of :meth:`is_interactive`, for the model-facing block
         only, where ``None`` must render nothing: a host that installed no probe
@@ -568,6 +602,12 @@ class GoalState:
         is ``None`` for the same reason, in the other register — a probe that
         raised measured nothing, so the block may say nothing.
         """
+        if self._interactivity_latched:
+            return self._interactivity_snapshot
+        return self._measured_interactivity()
+
+    def _measured_interactivity(self) -> bool | None:
+        """The live tri-state probe read behind :meth:`interactivity`."""
         probe = self.interactive_probe
         if probe is None:
             return None

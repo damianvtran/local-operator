@@ -266,6 +266,50 @@ EXPAND_ROW = """
 })()
 """
 
+CLOSE_SHEET = """
+(() => {
+  const close = document.querySelector('[role="dialog"] button[aria-label="close sheet"]');
+  if (!close) return "no close";
+  close.click();
+  return "closed";
+})()
+"""
+
+
+def close_auto_opened(page: Page, wait_s: float = 2.5) -> dict[str, Any]:
+    """Close the sheet the phone opened BY ITSELF, the way a user does, and say so.
+
+    The phone opens the asks sheet on its own, once, when a conversation with asks waiting
+    is opened (``lib/ask-open-policy.ts``). Most frames in this rig are about the surface a
+    user reaches by tapping the bar (the bar itself, the busiest stack, the read in flight),
+    so each of them has to start from the same place it always did: the sheet closed and the
+    bar showing. Without this the ``-bar`` frame photographed the sheet, and the ``-loading``
+    frame never showed a read in flight, because the auto-opened sheet had already finished
+    its read before the stall was installed. The probe numbers did not move (the bar is still
+    in the DOM behind the sheet, only inert), so the frames were wrong while every reading
+    said they were right.
+
+    A click on the sheet's own close control, not a reach into page state: that click is what
+    the policy records as "the user dismissed it", which is what keeps the sheet from coming
+    back under the frame (clause 4) for the rest of the page's life. ``Element.click`` and not
+    a touch, because that is how step 2d below has always closed it and the close control's
+    release-click guard only concerns a press still held when the sheet mounted.
+
+    Returns what happened, for the report: ``closed`` on a build that opens by default,
+    ``none`` on one that does not (the same script runs on both, which is what makes the
+    before/after pair comparable).
+    """
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if page.js("document.querySelector('[role=\"dialog\"]') !== null"):
+            # Let the open transition finish so the click lands on a mounted control.
+            time.sleep(0.4)
+            result = page.js(CLOSE_SHEET)
+            time.sleep(0.8)
+            return {"autoOpened": result}
+        time.sleep(0.1)
+    return {"autoOpened": "none"}
+
 
 #: Bring one ask card into the sheet's own viewport with a REAL finger drag
 #: (never `scrollIntoView`, which can move a region a thumb cannot — the rule the
@@ -353,6 +397,7 @@ def main() -> None:
             # 1. MINIMIZED (R7): the bar, with the conversation composer live.
             page.goto(f"{base}/#/s/asks")
             time.sleep(1.5)
+            report[f"{vp}-bar-settle"] = close_auto_opened(page)
             page.shot(outdir / f"{label}-{vp}-bar.png")
             report[f"{vp}-bar"] = json.loads(page.js(BAR_PROBE))
 
@@ -413,6 +458,7 @@ def main() -> None:
             #     an approval card AND the ask chip sharing one column.
             page.goto(f"{base}/#/s/asks-stacked")
             time.sleep(1.5)
+            report[f"{vp}-stacked-settle"] = close_auto_opened(page)
             page.shot(outdir / f"{label}-{vp}-stacked.png")
             report[f"{vp}-stacked"] = json.loads(page.js(BAR_PROBE))
 
@@ -481,13 +527,26 @@ def main() -> None:
             # navigation does not remount — the first version of this step
             # therefore photographed the previous step's sheet and called it
             # "loading".
+            #
+            # THE STALL IS REGISTERED BEFORE THE RELOAD, because the phone now opens this
+            # sheet by itself when the page lands on a conversation with asks waiting
+            # (``lib/ask-open-policy.ts``): the first read of ``/api/asks`` happens during
+            # the reload, so a stall installed after it photographs a sheet whose read has
+            # already finished (a close and a re-open repaint the rows they already hold,
+            # which is the sheet's own stale-while-revalidate, not a loading state). With the
+            # stall in place first, a build that opens by itself shows the AUTO-OPENED sheet
+            # reading, and a build that does not shows nothing until the bar is tapped.
+            stall = page.send("Page.addScriptToEvaluateOnNewDocument", source=STALL_AGGREGATE)
             page.js("location.reload()")
             time.sleep(2.5)
-            page.js(STALL_AGGREGATE)
-            page.js(TAP_ROW)
+            if not page.js("document.querySelector('[role=\"dialog\"]') !== null"):
+                page.js(TAP_ROW)
             time.sleep(0.8)
             page.shot(outdir / f"{label}-{vp}-loading.png")
             report[f"{vp}-loading"] = json.loads(page.js(SHEET_PROBE))
+            # Removed so the steps below (another origin, the light pass's own reload) read the
+            # real aggregate: the stall is for this one frame.
+            page.send("Page.removeScriptToEvaluateOnNewDocument", identifier=stall["identifier"])
 
             # 7. Zero outstanding asks: no bar, but the settling rows remain.
             page.goto(f"{base}/#/s/asks-settled")
@@ -536,6 +595,7 @@ def main() -> None:
             )
             # The reload keeps the URL, so the screen is already the asks session.
             time.sleep(2.5)
+            report[f"{vp}-bar-light-settle"] = close_auto_opened(page)
             page.shot(outdir / f"{label}-{vp}-bar-light.png")
             report[f"{vp}-bar-light"] = json.loads(page.js(BAR_PROBE))
             page.js(TAP_ROW)
@@ -564,6 +624,8 @@ def main() -> None:
                 f"composerVisible={geo['composerVisible']} mirroredCard={geo['mirroredCardDrawn']} "
                 f"headerEntry={geo['headerAskEntry']}"
             )
+        elif "autoOpened" in geo:
+            print(f"{key:<22} sheet opened by itself: {geo['autoOpened']}")
 
 
 if __name__ == "__main__":
