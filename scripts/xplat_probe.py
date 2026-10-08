@@ -677,6 +677,65 @@ def probe_secret_roundtrip(env: dict[str, str]) -> Result:
     )
 
 
+def probe_login_list(env: dict[str, str]) -> Result:
+    """`lop login` with no provider: the first-run provider list, on this OS.
+
+    The list a new user reads first (first-run onboarding audit Q12). PASS
+    needs the recommended provider FIRST and the desktop's group headings, so
+    a regression to the flat registry dump fails here on every leg rather than
+    only in a unit test that never ran the console script.
+    """
+    proc = run(_cli_argv("login"), env, timeout=120.0)
+    text = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        return Result("login.list", "FAIL", _tail(text), {"rc": proc.returncode})
+    # Row lines are indented four; their description lines are indented past
+    # the id column, so only the former start a provider id.
+    ids = [
+        line.split()[0]
+        for line in proc.stdout.splitlines()
+        if line.startswith("    ") and not line.startswith("     ") and line.split()
+    ]
+    first = ids[0] if ids else ""
+    ok = first == "radient" and "Use an API key" in text and "Use a subscription" in text
+    return Result(
+        "login.list",
+        "PASS" if ok else "FAIL",
+        f"first={first or '-'}, {len(ids)} rows",
+        {"first": first, "rows": len(ids)},
+    )
+
+
+def probe_login_api_key(env: dict[str, str]) -> Result:
+    """A paste-key login with a DUMMY key through a pipe: store + defaults, no noise.
+
+    Exercises the CLI login path that has no browser at all — the one a
+    headless or scripted first run uses — and pins two first-run findings on
+    every OS: a piped key prints no ``GetPassWarning`` (Q10), and the chat
+    API-key row stores under the chat provider and sets hosting (Q1). The key
+    is a fixed fake in the probe's isolated root; nothing is sent anywhere.
+    """
+    proc = run(
+        _cli_argv("login", "anthropic-key"),
+        env,
+        timeout=180.0,
+        stdin="sk-ant-xplat-probe-not-a-key\n",
+    )
+    text = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        return Result("login.api_key", "FAIL", _tail(text), {"rc": proc.returncode})
+    noisy = "GetPassWarning" in text or "may be echoed" in text
+    stored = "Stored API key for 'anthropic'" in text
+    status = run(_cli_argv("login", "status"), env, timeout=120.0)
+    listed = "anthropic" in status.stdout and "api_key" in status.stdout
+    ok = stored and listed and not noisy
+    return Result(
+        "login.api_key",
+        "PASS" if ok else "FAIL",
+        f"stored={stored} listed={listed} getpass_noise={noisy}",
+    )
+
+
 def probe_sessions_list(env: dict[str, str]) -> Result:
     proc = run(_cli_argv("sessions", "--json"), env, timeout=120.0)
     if proc.returncode != 0:
@@ -2062,6 +2121,8 @@ PROBES = (
     probe_paths_roots,
     probe_config_roundtrip,
     probe_secret_roundtrip,
+    probe_login_list,
+    probe_login_api_key,
     probe_sessions_list,
     probe_wake_status,
     probe_wake_install,
