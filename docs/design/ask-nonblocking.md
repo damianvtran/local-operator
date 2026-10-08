@@ -556,15 +556,26 @@ free-text-only question has no `Other` row to open: its input is the question's 
 control and is shown open (on the TUI that is the picker's single free-text row, which is
 itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today; the
 desktop, relay web and app gain the explicit `Other` field with their own `Other` PRs, and
-this section states the target those PRs build to. Neither the ask surface's draft nor the
-composer's draft is ever sent into the other's channel. Where a surface keeps an answer
-draft across collapse (desktop and relay web do; the native app deliberately persists
-nothing — ADR 0005 §2 — and re-expands empty), toggling the surface preserves it. When the
-ask **settles** (answered, timed out, declined, dismissed) its draft is released with it
-(a surface may hold the dead key until it unmounts; nothing offers it again) and the
-composer's own draft is left exactly as the user had it. A secret-only ask still refuses a
-*main-box* send that would carry a credential into the transcript — that is a
-credential-safety rule, not routing.
+this section states the target those PRs build to. An ask surface never
+moves, sends or discards composer text: the composer's draft stays in its own buffer
+through expand, collapse, settle and a conversation switch, and the ask surface's draft is
+never sent into the composer's channel. (A *user* expand may take the caret for the card —
+that is caret, not text movement; the TUI's automatic open-by-default mount does NOT take
+the caret, so the composer keeps focus until the user expands or presses f4.) Where a
+surface keeps an answer draft across collapse (desktop and relay web do; the native app
+deliberately persists nothing — ADR 0005 §2 — and re-expands empty), toggling the surface
+preserves it. When the ask **settles** (answered, timed out, declined, dismissed) its draft
+is released with it (a surface may hold the dead key until it unmounts; nothing offers it
+again).
+
+**Secret-only asks.** The invariant is that a secret-only answerable ask never lets the
+CHAT door carry the credential — a credential-safety rule, not routing. It holds by
+different mechanics per surface: the **desktop** refuses input (typing in the composer is
+disabled while such an ask is answerable); the **TUI** refuses the *submit* (the text stays
+in the composer, nothing is sent or recorded, and a notice points at the card's hidden
+field; slash, shell and aside entries still work); the **relay web and native app** have no
+gap to close, because their sheets are modal (the composer is unreachable behind an inert
+ancestor).
 
 > *Superseded text.* The first revision of this rule routed the composer to the ask while the
 > answer surface was EXPANDED (separate ask/chat buffers, a swapped placeholder, Enter sends
@@ -897,7 +908,7 @@ A dedicated case, because the composer rule is a *behavioural* claim that stills
   Enter; (4) collapsing preserves the composer's draft and the ask surface's draft, and
   re-expanding restores the ask surface's draft on surfaces that keep one (not the native app, which persists
   nothing, ADR 0005 §2); (5) an ask settling while expanded leaves the composer exactly as
-  the user left it (placeholder never swapped, draft kept); (6) the minimized bar is absent
+  the user left it (placeholder never swapped, draft kept in the buffer, text never moved); (6) the minimized bar is absent
   at zero asks and shows head + count at 3.
 - **Frames:** minimized bar (1 and 3 asks), expanded with the `Other` row closed and open
   (once that surface's `Other` PR lands), and the list/sidebar outstanding-asks state — **light and dark** where the surface has
