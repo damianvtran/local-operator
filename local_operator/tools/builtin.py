@@ -27072,18 +27072,52 @@ def _promote_credential(store: Any, key: str, description: str) -> str:
     return promote_session_credential_guarded(store, key, description=description).message
 
 
-def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
+def _ask_report(
+    questions: list[AskQuestion],
+    answers: dict[str, list[str]],
+    image_counts: Mapping[str, int] | None = None,
+    images_missing: int = 0,
+) -> str:
     """The answers as text the model can act on, keyed by the ids it chose.
 
     Each question is echoed with its answer rather than only the id: the ask
     may be several turns back by the time the model reads this, and an id on
     its own ("purge: Drop them") does not say what was agreed to.
+
+    ``image_counts`` is how many pictures answer each question (queued asks
+    only; the blocking path never passes it, so its report is byte-identical).
+    The pictures themselves are NOT in this string -- they ride the same user
+    turn as image blocks after it -- so the text has to POINT at them, per
+    question, or the model sees a screenshot and cannot tell which question it
+    answers. An image-only answer is a legal answer (core completeness is on
+    keys), and reads "(image attached, shown below)" rather than "(not answered)",
+    which would be a false statement about the user's reply.
+
+    ``images_missing`` is how many attached images could not be loaded back from
+    the store at delivery. It is said in words, once, rather than leaving a
+    "shown below" that points at nothing.
     """
+    counts = image_counts or {}
     lines: list[str] = []
     for question in questions:
         chosen = [text for text in answers.get(question.id, []) if text.strip()]
+        attached = int(counts.get(question.id, 0))
         lines.append(f"{question.id} — {question.question}")
-        lines.append(f"  answer: {'; '.join(chosen) if chosen else '(not answered)'}")
+        if chosen and attached:
+            noun = "image" if attached == 1 else "images"
+            body = f"{'; '.join(chosen)} (+{attached} {noun}, shown below)"
+        elif attached:
+            body = (
+                "(image attached, shown below)"
+                if attached == 1
+                else f"({attached} images attached, shown below)"
+            )
+        else:
+            body = "; ".join(chosen) if chosen else "(not answered)"
+        lines.append(f"  answer: {body}")
+    if images_missing:
+        noun = "image" if images_missing == 1 else "images"
+        lines.append(f"({images_missing} attached {noun} could not be loaded and is not shown.)")
     return "The user answered:\n" + "\n".join(lines)
 
 

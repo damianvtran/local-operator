@@ -59,9 +59,24 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
-from local_operator.harness.types import CustomMessage
+from local_operator.harness.types import CustomMessage, ImageContent
 
 logger = logging.getLogger(__name__)
+
+#: The most images ONE answer may carry, across all its questions. The same bound
+#: the HTTP door (``Answer.images``) and a composer send (``Prompt.images``) use;
+#: it is restated here because the queue is also reached directly (the TUI's
+#: in-process owner, a cold relay engage) and the cap must hold wherever the
+#: bytes enter, not only where the HTTP model happens to sit in front of them.
+MAX_ANSWER_IMAGES = 8
+
+#: The refusal for a revision that carries images (design D5: v1 revisions are
+#: text only). One sentence, shared by the queue and the session hop in front of
+#: it, so the wire and the dock say the same thing.
+REVISION_IMAGES_REFUSED = (
+    "a revision carries text only: the images already sent stay as they were and "
+    "cannot be changed"
+)
 
 
 def _now_ms() -> int:
@@ -271,6 +286,7 @@ class AskQueue:
         *,
         by: str = "unknown",
         tool_call_id: str = "",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """Append ``answered`` for the whole ask, atomically, and reconcile.
 
@@ -297,6 +313,15 @@ class AskQueue:
         this is what makes that hop load-bearing rather than merely the current
         caller's good manners — a cold CLI or route in B/C reaches the queue
         directly, and the value must not be able to reach the log through it.
+
+        ``attachments`` are IMAGES answering particular questions (the Other
+        door's attachment half). They are content, and the row that lands is
+        terminal, so they are never dropped on the way in: anything the queue
+        cannot keep (a secret question, a question that is not on the ask, more
+        than :data:`MAX_ANSWER_IMAGES`, a store that will not take the bytes)
+        refuses the WHOLE answer and leaves the ask open. Accepted ones are
+        written to the AttachmentStore FIRST and the ``answered`` event carries
+        only refs -- see :meth:`_store_attachments` for the ordering argument.
         """
         now = self._now()
         record = self._find(ask_id, now)
@@ -309,6 +334,14 @@ class AskQueue:
         if map_refusal:
             return {"ok": False, "error": map_refusal}
         assert cleaned is not None  # ``_whole_ask_cells`` returns one with no refusal
+        refs: dict[str, list[dict[str, Any]]] = {}
+        if attachments:
+            image_refusal = self.attachment_refusal(record, attachments)
+            if image_refusal:
+                return {"ok": False, "error": image_refusal}
+            refs, image_refusal = self._store_attachments(attachments)
+            if image_refusal:
+                return {"ok": False, "error": image_refusal}
         payload = {
             "v": store.EVENT_SCHEMA,
             "kind": store.EVENT_ANSWERED,
@@ -317,6 +350,11 @@ class AskQueue:
             "by": {"surface": by},
             "answers": cleaned,
         }
+        if refs:
+            # REFS ONLY, never base64: ``asks.jsonl`` is one-line O_APPEND rows and
+            # ``store.fold`` reads the WHOLE log on every refresh, so inline bytes
+            # would make every later read of every ask pay for one screenshot.
+            payload["attachments"] = refs
         if tool_call_id or record.get("tool_call_id"):
             # The id of the tool call that QUEUED this ask, carried on the answer
             # so a card can link the two (review round 1, MINOR 5). The record's
@@ -335,6 +373,7 @@ class AskQueue:
         *,
         by: str = "unknown",
         tool_call_id: str = "",
+        attachments: Mapping[str, Sequence[ImageContent]] | None = None,
     ) -> dict[str, Any]:
         """SUPERSEDE a recorded answer while it is still UNDELIVERED (design §10).
 
@@ -382,6 +421,14 @@ class AskQueue:
         sees the map — asks the probe first rather than doing it speculatively for
         a revision this path is about to turn down.
         """
+        if attachments and any(attachments.values()):
+            # A REVISION CARRIES TEXT ONLY (v1): an answer's images are immutable
+            # once sent, because the revision event replaces the answer TEXT and
+            # the fold keeps the first ``answered`` event's attachments. Refused in
+            # words BEFORE any decision so nothing is stored for a revision that
+            # would not use it -- the alternative, silently keeping the old images
+            # under new text, is the failure the user cannot see.
+            return {"ok": False, "error": REVISION_IMAGES_REFUSED}
         now = self._now()
         record, refusal = self._revision_decision(ask_id, now)
         if refusal:
@@ -412,6 +459,114 @@ class AskQueue:
             return {"ok": False, "error": "the revision could not be recorded."}
         self._settled(ask_id)
         return {"ok": True, "revised": True}
+
+    def attachment_refusal(
+        self, record: Mapping[str, Any], attachments: Mapping[str, Sequence[ImageContent]]
+    ) -> str:
+        """Why this answer's images would be REFUSED, or ``""`` if they would be taken.
+
+        READ-ONLY, and public for the same reason :meth:`revision_refusal` is: the
+        one caller with an effect it must not perform speculatively --
+        ``Session.respond_ask`` stores a SECRET's value before the queue sees the
+        map -- asks first, so an answer refused for its images never leaves a
+        credential behind. The queue asks it again at the write (the authority),
+        because a direct caller reaches ``respond`` without the session's hop.
+
+        Every rule exists because the alternative is silent loss on a terminal
+        answer: a question that is not on this ask, or one that is SECRET (a
+        secret answer is a key name only and has no attachment hop, so a picture
+        attached to it could only be dropped or leaked), or more images than one
+        answer may carry.
+        """
+        questions = {str(q.get("id")): q for q in (record.get("questions") or ())}
+        total = 0
+        for qid, images in attachments.items():
+            count = len(images or ())
+            if not count:
+                continue
+            question = questions.get(str(qid))
+            if question is None:
+                return f"an image names question {qid!r}, which is not on this ask"
+            if question.get("secret"):
+                return (
+                    f"question {qid!r} is a secret: a credential is answered by its key "
+                    "name, so an image cannot be attached to it"
+                )
+            total += count
+        if total > MAX_ANSWER_IMAGES:
+            return f"an answer can carry at most {MAX_ANSWER_IMAGES} images; this one has {total}"
+        return ""
+
+    def _store_attachments(
+        self, attachments: Mapping[str, Sequence[ImageContent]]
+    ) -> tuple[dict[str, list[dict[str, Any]]], str]:
+        """Write the images to the AttachmentStore; return ``(refs, refusal)``.
+
+        **BYTES FIRST, THEN THE EVENT** -- the secrets' ordering rule: a value (here
+        a picture) must be where the row points BEFORE the row exists. A crash
+        between the two leaves ORPHAN BYTES, which the store's own contract
+        tolerates (content-addressed, idempotent, never deleted); the reverse order
+        would leave a durable ``answered`` row pointing at nothing, and the model
+        would be told "image attached" about a picture nobody can load.
+
+        A write the store reports as failed (``put`` -> ``None``: read-only home,
+        full disk, undecodable) REFUSES the answer. The transcript path falls back
+        to inline bytes for such a failure, but this log cannot: base64 does not go
+        in ``asks.jsonl``, so there is no degraded form to fall back to, and
+        recording the text while losing the picture is exactly the outcome the
+        user cannot see.
+        """
+        from local_operator.session.attachments import store_for_transcript_dir
+
+        blobs = store_for_transcript_dir(self.session_dir)
+        refs: dict[str, list[dict[str, Any]]] = {}
+        for qid, images in attachments.items():
+            group: list[dict[str, Any]] = []
+            for image in images or ():
+                ref = blobs.put(image.data, image.mime_type)
+                if ref is None:
+                    return {}, (
+                        "an attached image could not be saved, so the answer was not "
+                        "recorded; try again or send the answer as text"
+                    )
+                group.append(
+                    {"attachment": ref.digest, "mime_type": ref.mime_type, "bytes": ref.bytes}
+                )
+            if group:
+                refs[str(qid)] = group
+        return refs, ""
+
+    def _resolve_attachments(
+        self, record: Mapping[str, Any]
+    ) -> tuple[dict[str, list[ImageContent]], int]:
+        """The record's image refs as ``ImageContent`` by question, plus the number lost.
+
+        Resolution can legitimately fail (a store pruned by hand, a damaged
+        sidecar -- ``AttachmentStore.get`` returns ``None`` for both), and a
+        delivery must survive that the way a resumed session survives a missing
+        transcript attachment: the picture is omitted and the COUNT of what was
+        lost is returned so the text can SAY so, rather than the model being told
+        an image is "shown below" that is not.
+        """
+        refs = record.get("attachments") or {}
+        if not refs:
+            return {}, 0
+        from local_operator.session.attachments import store_for_transcript_dir
+
+        blobs = store_for_transcript_dir(self.session_dir)
+        resolved: dict[str, list[ImageContent]] = {}
+        missing = 0
+        for qid, group in refs.items():
+            for ref in group:
+                found = blobs.get(str(ref.get("attachment") or ""))
+                if found is None:
+                    missing += 1
+                    continue
+                data, mime_type = found
+                resolved.setdefault(str(qid), []).append(
+                    ImageContent(data=data, mime_type=mime_type)
+                )
+        return resolved, missing
 
     def revision_refusal(self, ask_id: str, now_ms: int | None = None) -> str:
         """Why a revision of this ask would be REFUSED, or ``""`` if it would be taken.
@@ -1067,11 +1222,35 @@ class AskQueue:
 
     def _response_message(self, record: Mapping[str, Any]) -> CustomMessage:
         lost = self._secret_answer_lost(record)
-        text = render.response_text(record, secret_lost=lost)
+        images, images_missing = self._resolve_attachments(record)
+        text = render.response_text(
+            record,
+            secret_lost=lost,
+            image_counts={qid: len(group) for qid, group in images.items()},
+            images_missing=images_missing,
+        )
+        extra: dict[str, Any] = {}
+        if images:
+            # THE IMAGES RIDE AS A TOP-LEVEL ``content`` EXTRA, not inside
+            # ``details`` -- measured, not assumed (design §1.3, spikes A and B):
+            # the transcript externalises only ``payload["content"]`` blocks into
+            # the AttachmentStore, so base64 in ``details`` stays inline in the
+            # row (16.9 kB for a 64x64 PNG) and never reaches the model, while the
+            # same bytes as ``content`` become a 290 B row of digest refs that
+            # replay byte-identically. ``CustomMessage`` is ``extra="allow"`` for
+            # exactly this. The render hop turns these blocks into the
+            # ``ImageContent`` of an ordinary user turn.
+            extra["content"] = [
+                block.model_dump(mode="json", exclude={"marker"})
+                for group in images.values()
+                for block in group
+            ]
+        details_attachments = record.get("attachments")
         return CustomMessage(
             custom_type=ASK_RESPONSE_MESSAGE_TYPE,
             attribution="user",
             id=store.response_row_id(str(record["ask_id"])),
+            **extra,
             details={
                 "ask_id": record["ask_id"],
                 "status": record["status"],
@@ -1085,6 +1264,19 @@ class AskQueue:
                 "secret_lost": lost,
                 "tool_call_id": str(record.get("tool_call_id") or ""),
                 "text": text,
+                # REFS for the cards (TUI, desktop, phone): thumbnails come from
+                # the digest route, never from bytes on the row. Absent for a
+                # text-only answer so the row is unchanged for every existing ask.
+                **(
+                    {
+                        "attachments": {
+                            str(qid): [dict(ref) for ref in group]
+                            for qid, group in dict(details_attachments).items()
+                        }
+                    }
+                    if details_attachments
+                    else {}
+                ),
             },
         )
 

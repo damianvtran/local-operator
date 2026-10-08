@@ -667,3 +667,51 @@ def test_open_asks_is_the_narrower_cap_set():
     assert record["status"] == store.STATUS_TIMED_OUT
     assert store.open_asks([record]) == []
     assert len(store.outstanding_asks([record])) == 1
+
+
+# ---------------------------------------------------------------------------
+# Image answers: refs, never bytes (the Other door's attachments)
+# ---------------------------------------------------------------------------
+
+_REF = {"attachment": "0123456789abcdef0123456789abcdef", "mime_type": "image/png", "bytes": 4242}
+
+
+def test_a_text_only_answer_folds_without_an_attachments_key() -> None:
+    (record,) = store.fold([_queued(), _answered(at=1_500_000)], now=1_600_000)
+    assert "attachments" not in record
+    assert "attachments" not in store.pending_row(record)
+
+
+def test_the_fold_keeps_the_first_answers_refs_across_a_revision() -> None:
+    """D5: a revision replaces the TEXT; the pictures are immutable once sent."""
+    answered = {**_answered(at=1_500_000), "attachments": {"q": [dict(_REF)]}}
+    revised = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_REVISED,
+        "ask_id": "a-1",
+        "at": 1_550_000,
+        "by": {"surface": "desktop"},
+        "answers": {"q": ["changed my mind"]},
+        "supersedes": 1_500_000,
+    }
+
+    (record,) = store.fold([_queued(), answered, revised], now=1_600_000)
+
+    assert record["answers"] == {"q": ["changed my mind"]}
+    assert record["attachments"] == {"q": [_REF]}
+    assert store.pending_row(record)["attachments"] == {"q": [_REF]}
+
+
+def test_a_revision_cannot_smuggle_attachments_in() -> None:
+    """Even a hand-written ``revised`` event carrying the key contributes nothing."""
+    revised = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_REVISED,
+        "ask_id": "a-1",
+        "at": 1_550_000,
+        "by": {"surface": "desktop"},
+        "answers": {"q": ["x"]},
+        "attachments": {"q": [dict(_REF)]},
+    }
+    (record,) = store.fold([_queued(), _answered(at=1_500_000), revised], now=1_600_000)
+    assert "attachments" not in record

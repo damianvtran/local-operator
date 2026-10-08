@@ -1558,3 +1558,106 @@ async def test_a_fork_refusal_frame_reaches_the_raiser_as_a_typed_refusal() -> N
     with pytest.raises(RuntimeError) as plain:
         client._raise_for_reply_error({"op": "error", "req": 3, "message": "the owner's own words"})
     assert str(plain.value) == "the owner's own words"
+
+
+# ---------------------------------------------------------------------------
+# Image answers on a queued ask (ask-attachments-v1): refuse, never strip
+# ---------------------------------------------------------------------------
+
+
+def _wire_image(question_id: str = "q1") -> dict[str, str]:
+    return {"question_id": question_id, "data_b64": "QUJD", "mime_type": "image/png"}
+
+
+async def _sent_ask_frame(client: AttachClient, **kwargs: Any) -> dict[str, Any]:
+    """Send one ``ask_respond`` and return the frame that reached the wire."""
+    task = asyncio.create_task(client.ask_respond("a-1", {"q1": ["yes"]}, **kwargs))
+    await _wait_until(lambda: bool(client._pending))
+    ((req, future),) = client._pending.items()
+    future.set_result({"op": "ack", "req": req, "detail": "answered"})
+    await task
+    assert isinstance(client._writer, _RecordingWriter)
+    return client._writer.frames[-1]
+
+
+@pytest.mark.asyncio
+async def test_an_owner_without_the_capability_refuses_images_and_writes_no_frame() -> None:
+    """NEW core -> OLD owner runtime. Unlike ``input_mode`` this must NOT strip: the
+    text would be recorded as a terminal answer and the picture lost without a word."""
+    from local_operator.session.runtime.types import ASK_ATTACHMENTS_UNSUPPORTED
+
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._writer = cast(Any, _RecordingWriter())
+    assert client._ask_attachments_supported is False
+
+    with pytest.raises(ValueError) as refused:
+        await client.ask_respond("a-1", {"q1": ["yes"]}, images=[_wire_image()])
+
+    assert str(refused.value) == ASK_ATTACHMENTS_UNSUPPORTED
+    # The authored sentence, pinned verbatim: it is the user-facing contract (D4).
+    assert str(refused.value) == (
+        "this session's runtime predates image answers; update the runtime or send "
+        "the answer as text"
+    )
+    frames = cast(Any, client._writer).frames
+    assert frames == [], "a refused answer must not be written to the owner"
+    assert client._pending == {}, "nothing may be left parked for a frame that never went out"
+
+
+@pytest.mark.asyncio
+async def test_an_old_owner_still_gets_a_text_only_answer_byte_for_byte() -> None:
+    """OLD UI -> NEW core: the frame is exactly the pre-feature frame (no ``images`` key,
+    not even an empty one), to a capable owner and an incapable one alike."""
+    for supported in (False, True):
+        client = AttachClient(lambda p: None, lambda reason: None)
+        client._connected = True
+        client._ask_attachments_supported = supported
+        client._writer = cast(Any, _RecordingWriter())
+
+        for empty in (None, []):
+            frame = await _sent_ask_frame(client, by="desktop", images=empty)
+            assert set(frame) == {"op", "req", "ask_id", "answers", "by"}, (supported, frame)
+            assert frame["answers"] == {"q1": ["yes"]}
+
+
+@pytest.mark.asyncio
+async def test_a_capable_owner_gets_the_flat_images_list_unchanged() -> None:
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._ask_attachments_supported = True
+    client._writer = cast(Any, _RecordingWriter())
+    images = [_wire_image("q1"), _wire_image("q1")]
+
+    frame = await _sent_ask_frame(client, by="desktop", images=images)
+
+    assert frame["images"] == images
+    assert set(frame) == {"op", "req", "ask_id", "answers", "by", "images"}
+
+
+@pytest.mark.asyncio
+async def test_the_capability_is_resolved_per_dial_from_the_record(
+    config: Path,
+) -> None:
+    """Resolved from the owner's RECORD at connect, like its neighbours -- a real
+    registrant whose handle takes the keyword advertises it; one that does not, doesn't."""
+    from local_operator.session.runtime.types import ASK_ATTACHMENTS_CAPABILITY
+
+    class Keeping(FakeHandle):
+        async def ask_respond(
+            self, ask_id, answers, by="", attachments=None
+        ) -> str:  # noqa: ANN001
+            return "answered"
+
+    for handle, expected in ((Keeping("sess-k"), True), (FakeHandle("sess-n"), False)):
+        r = RuntimeServer(handle, kind="tui")
+        r.start()
+        try:
+            record = await _wait_record()
+            assert (ASK_ATTACHMENTS_CAPABILITY in record.capabilities) is expected
+            client = AttachClient(lambda p: None, lambda reason: None)
+            await client.connect(record, handle._projection.session_id)
+            assert client._ask_attachments_supported is expected
+            await client.detach()
+        finally:
+            r.close()

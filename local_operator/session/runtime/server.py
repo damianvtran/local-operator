@@ -51,7 +51,16 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,6 +101,8 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
+    ASK_ATTACHMENTS_CAPABILITY,
+    ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
@@ -1251,6 +1262,64 @@ def _accepts_kw(fn: Any, name: str) -> bool:
 _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
+async def _answer_attachment_kwargs(
+    op: str,
+    method: Any,
+    wire_images: Any,
+    answers: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Decode an ``ask_respond`` frame's ``images`` into ``{"attachments": ...}``.
+
+    Every refusal here is a ``ValueError`` -- the dispatch turns it into an
+    ``error`` frame and the viewer shows the sentence on the answer card -- and
+    every one leaves the ask OPEN, because it is raised before the handle is
+    called. Refused, never dropped (see the call site for why).
+
+    * only a first answer carries images: a revision is text-only (an answer's
+      images are immutable once sent), so ``ask_revise`` + images is refused
+      even if a sender skipped its own check;
+    * the handle must take the keyword (``_takes_ask_attachments``) -- a handle
+      that predates it would ignore the images, so this is the owner-side twin of
+      the sender's capability gate for a frame that arrived anyway;
+    * a question's images are decoded with ``image_blocks_in_thread`` (sniffed,
+      bounded, off the loop) and ALL of them must survive: ``image_blocks``
+      drops what it cannot decode, so a short result is the signal to refuse.
+    """
+    if op != "ask_respond":
+        raise ValueError("a revision carries text only; images cannot be changed once sent")
+    if not isinstance(wire_images, list):
+        raise ValueError("images must be a list of image objects")
+    try:
+        accepts = "attachments" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if not accepts:
+        raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
+    by_question: dict[str, list[dict[str, str]]] = {}
+    for image in wire_images:
+        if not isinstance(image, dict):
+            raise ValueError("images must be a list of image objects")
+        question_id = image.get("question_id")
+        if not isinstance(question_id, str) or question_id not in answers:
+            raise ValueError("every image must name a question the answers body answers")
+        by_question.setdefault(question_id, []).append(
+            {
+                "data_b64": str(image.get("data_b64") or ""),
+                "mime_type": str(image.get("mime_type") or ""),
+            }
+        )
+    attachments: dict[str, list[Any]] = {}
+    for question_id, group in by_question.items():
+        blocks = await image_blocks_in_thread(group)
+        if len(blocks) != len(group):
+            raise ValueError(
+                f"an image attached to question {question_id!r} could not be read, so the "
+                "answer was not recorded; re-attach it or send the answer as text"
+            )
+        attachments[question_id] = list(blocks)
+    return {"attachments": attachments}
+
+
 def _takes_input_mode(handle: Any) -> bool:
     """Whether ``handle``'s ``prompt`` AND ``steer`` take BOTH carriage keywords.
 
@@ -1279,6 +1348,27 @@ def _takes_input_mode(handle: Any) -> bool:
         if "input_mode" not in parameters or "input_path" not in parameters:
             return False
     return True
+
+
+def _takes_ask_attachments(handle: Any) -> bool:
+    """Whether ``handle``'s ``ask_respond`` takes the ``attachments`` keyword.
+
+    Gates the ``ask-attachments-v1`` capability on what the DISPATCH will DO, for
+    ``_takes_input_mode``'s reason: the dispatch passes the keyword only when the
+    literal parameter name is present, so a ``**kwargs``-only method would
+    swallow the images and must not be advertised. Here the stakes are higher
+    than for the carriage metadata -- a handle that advertised the string and
+    dropped the pictures would record the text of a TERMINAL answer and lose the
+    attachments with nothing to say so. An unreadable or missing method answers
+    no, the conservative side.
+    """
+    method = getattr(handle, "ask_respond", None)
+    if method is None:
+        return False
+    try:
+        return "attachments" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def receives_message_id(target: Any) -> bool:
@@ -2085,6 +2175,11 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # IMAGES ON A QUEUED-ASK ANSWER, gated on the handle that would
+                # KEEP them for the reason above, and read by senders that
+                # REFUSE (rather than strip) when it is absent: an image is
+                # content on a terminal answer. See ``ASK_ATTACHMENTS_CAPABILITY``.
+                + ([ASK_ATTACHMENTS_CAPABILITY] if _takes_ask_attachments(handle) else [])
                 # SENDER-MINTED MESSAGE IDENTITY, on the same fail-closed
                 # argument as the carriage above: the string is the sender's
                 # licence to RETRY a send, and a receiver that would silently
@@ -7088,7 +7183,27 @@ class RuntimeServer:
                 answers = {
                     str(key): [str(item) for item in (value or [])] for key, value in raw.items()
                 }
-                outcome = method(str(frame.get("ask_id", "")), answers, by=str(frame.get("by", "")))
+                ask_kwargs: dict[str, Any] = {}
+                wire_images = frame.get("images")
+                if wire_images:
+                    # ATTACHMENTS (``ask-attachments-v1``). Decoded HERE, per
+                    # question, and REFUSED rather than dropped when anything
+                    # fails -- the opposite of a prompt, where ``image_blocks``
+                    # drops a bad entry because "a half-decoded paste costs one
+                    # image". An answer is TERMINAL (the first ``answered`` event
+                    # wins and nothing re-asks), so an image that quietly vanished
+                    # would leave the user believing the agent saw a screenshot it
+                    # never received, and they could not retry. The ask stays open
+                    # on a refusal.
+                    ask_kwargs.update(
+                        await _answer_attachment_kwargs(op, method, wire_images, answers)
+                    )
+                outcome = method(
+                    str(frame.get("ask_id", "")),
+                    answers,
+                    by=str(frame.get("by", "")),
+                    **ask_kwargs,
+                )
             else:
                 outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
             # ``method`` came from a getattr probe, so what it returns is not
