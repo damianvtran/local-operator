@@ -69,6 +69,7 @@ from local_operator.harness.rows import gate_waited_text
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
+    ImageContent,
     Message,
     TextContent,
 )
@@ -80,7 +81,9 @@ from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
 
 
-def _injected_user_message(text: str, entry_id: str) -> Message:
+def _injected_user_message(
+    text: str, entry_id: str, images: list[ImageContent] | None = None
+) -> Message:
     """A user-role message minted from a harness aside, stamped as such.
 
     The stamp is compaction's provenance signal. Once this function has run,
@@ -92,10 +95,51 @@ def _injected_user_message(text: str, entry_id: str) -> Message:
 
     It rides ``provider_payload``, which the wire builders never ship as
     content, so this is invisible to the model and to every provider.
+
+    ``images`` is for the one injection that can carry pictures -- a queued ask's
+    answer. It goes through :meth:`Message.user`, the constructor a composer send
+    uses, so the turn is ``[Text, Image...]`` exactly as the user's own pasted
+    screenshot would be and every image rule downstream applies unchanged
+    (history re-bounding, stripping for a non-vision model, the rejected-image
+    latch, snapcompact). Absent, the message is the text-only one it always was.
     """
-    message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
+    if images:
+        message = Message.user(text, images=images, id=entry_id)
+    else:
+        message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
     message.provider_payload = {RENDERED_INJECTION_KEY: True}
     return message
+
+
+def _ask_response_images(message: CustomMessage) -> list[ImageContent]:
+    """The ``ImageContent`` blocks an ``ask_response`` row carries, in row order.
+
+    Read defensively because the row has been through a JSONL round trip: a block
+    is a plain dict, a reference that no longer resolved comes back with EMPTY
+    ``data`` (``transcript.ATTACHMENT_MISSING``), and a hand-edited row may hold
+    anything. A block without bytes is skipped rather than shipped as an empty
+    image the provider would refuse -- the report text already says how many
+    attachments could not be loaded -- so a damaged store degrades one picture,
+    never the whole turn.
+    """
+    raw = (message.model_extra or {}).get("content")
+    if not isinstance(raw, list):
+        return []
+    out: list[ImageContent] = []
+    for block in raw:
+        if isinstance(block, ImageContent):
+            if block.data:
+                out.append(block)
+            continue
+        if not isinstance(block, dict) or not block.get("data"):
+            continue
+        out.append(
+            ImageContent(
+                data=str(block["data"]),
+                mime_type=str(block.get("mime_type") or "image/png"),
+            )
+        )
+    return out
 
 
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
@@ -239,7 +283,18 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # from ``asks/render.py``: for an answer it IS ``_ask_report``, the
             # same report the blocking tool returned, so the model cannot tell
             # the two paths apart in what it is told.
-            out.append(_injected_user_message(message.details.get("text", ""), message.id))
+            #
+            # A queued answer may carry IMAGES (the Other door's attachments). They
+            # ride the row as a top-level ``content`` list -- the one place the
+            # transcript externalises media -- and become the image blocks of the
+            # same user turn here, after the text that points at them.
+            out.append(
+                _injected_user_message(
+                    message.details.get("text", ""),
+                    message.id,
+                    _ask_response_images(message),
+                )
+            )
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
             # difference is the whole reason the row exists: without it the

@@ -1253,6 +1253,12 @@ class PendingAskState(BaseModel):
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: REFS to the images attached to the answer, ``{question_id: [{"attachment":
+    #: digest, "mime_type", "bytes"}]}`` -- never bytes (the log is one-line
+    #: appends and this row rides every frame). ``None`` for every ask that never
+    #: carried one, which keeps the row identical for text-only asks; a reader
+    #: built before the field sees an unknown key (``extra="allow"``) it ignores.
+    attachments: dict[str, list[dict[str, Any]]] | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):

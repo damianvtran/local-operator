@@ -2323,3 +2323,41 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
             finally:
                 transcript_module._locate_cursor_row = real_locate
             assert located == unlocated, f"{kind}={cursor} at window {window}"
+
+
+@pytest.mark.asyncio
+async def test_a_custom_row_content_extra_externalises_and_replays(transcript):
+    """The ask-response row carries its pictures as a top-level ``content`` extra.
+
+    ``CustomMessage`` has no ``content`` field (it is ``extra="allow"``), and the
+    transcript externalises only ``payload["content"]`` blocks -- so this is the
+    shape that keeps a screenshot out of the row (design spike B: 290 B against
+    16.9 kB when the bytes sat inline in ``details``) while replaying byte-identically.
+    """
+    import base64
+    import os
+
+    from local_operator.harness.types import CustomMessage
+
+    data = base64.b64encode(os.urandom(4096)).decode("ascii")
+    # ``content`` is an EXTRA (``CustomMessage`` is ``extra="allow"``), so it goes in by
+    # unpacking: the model has no such field for the checker to see.
+    extra: dict[str, Any] = {"content": [{"type": "image", "data": data, "mime_type": "image/png"}]}
+    row = CustomMessage(
+        custom_type="ask_response",
+        attribution="user",
+        id="ask-response-a-x",
+        details={"ask_id": "a-x", "text": "The user answered: ..."},
+        **extra,
+    )
+    await transcript.append_message(row)
+
+    line = transcript.path.read_text().splitlines()[-1]
+    assert data not in line, "the bytes must not sit inline in the journal row"
+    assert len(line) < 1000
+    payload = json.loads(line)["payload"]
+    assert set(payload["content"][0]) >= {"attachment", "mime_type"}
+
+    replayed = Transcript(transcript.directory).build_llm_history()
+    (back,) = [m for m in replayed if isinstance(m, CustomMessage) and m.id == "ask-response-a-x"]
+    assert (back.model_extra or {})["content"][0]["data"] == data
