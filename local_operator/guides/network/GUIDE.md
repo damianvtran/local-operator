@@ -624,11 +624,13 @@ command, so a re-login or a token rotation needs no gesture on the node):
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
 
-**Designate the repositories first** — on **every node that borrows or serves**:
+**Designate the repositories on the owner**:
 `network.credentials.github.repositories` (search it in `/settings`),
 `owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
 allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything".
+never "everything". The designation travels WITH the grant — the borrowing
+device writes the owner's list into its own config before the git child runs —
+so a node does not maintain one by hand.
 
 Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),
@@ -687,6 +689,87 @@ the App route than GitHub's OAuth token is — a scoped token can be minted for
 the mesh and revoked alone — so the strong path will mint-or-use a dedicated
 token rather than share the primary login. Until then, GitLab push through the
 mesh is unavailable; public clones and everything non-GitLab are unaffected.
+
+## What a remote node can and cannot inherit
+
+An approved device is provisioned, not cloned. The onboarding run installs a
+build on it, joins the member, anchors the operator's key, supervises the relay
+and writes the grants; the rest of what a node inherits is short and
+deliberate: agent and team DEFINITIONS (they also travel with a create — see
+`lop network definitions push` / `state`), MCP server declarations with their
+brokered logins (values never travel; `lop network mcp state` names the keys
+that device still needs), the model and provider logins it serves or borrows
+(`lop network credentials`), a git identity seeded from this device's where the
+node has none (one it already has is never overwritten), and the run's own
+provisioning receipts — `invite`, `pre_read`, `install`, `join`, `anchor`,
+`relay`, `grants`, `verify` — readable in `lop network approvals run <id>
+--json`.
+
+Everything else a node must have on its own disk, or borrow per use. The four
+limits below are the ones the live remote-node E2E on `cloud-node-1` paid for.
+Read them before trusting a node with work, and read
+`lop network ready --peer <device>`: every failing row carries the remedy and
+the side it runs on.
+
+### Credentials are grants with scopes, not blanket copies
+
+A push that the node's git helper cannot serve — a repository outside the
+owner's designation, or any push on a device whose grant carried no list — is
+refused exactly like a missing login: `fatal: could not read Username for
+'https://github.com'`, with git exiting 128, because the helper refuses by
+silence. That was the first wall of the remote-node E2E, and it is the
+fail-closed design, not a broken share. The `github` credential is never copied
+to the node: the owner lends a short-lived token per command, and the helper
+serves `https://github.com` for exactly the repositories the OWNER designated
+and nothing else. The designation travels WITH the grant — the borrowing device
+writes the owner's list into its own config before the git child runs — so a
+node does not maintain one by hand, and no credential file is written there.
+`lop network credentials` on either device shows the share and its holders (a
+holder row is a grant; the borrow itself is per command); the push is its own
+check — designated serves, anything else refuses by silence.
+
+### Toolchains do not travel
+
+A build or test on the node fails mid-task with `node: command not found` — or
+`npm`, `make`, `docker` missing — not because the setup failed: the node runs
+what its own disk has, and the mesh moves credentials and definitions, never
+installers. A repository whose build needs a JS toolchain cannot be worked from
+a node without it, and full brokered credentials do not change that.
+`lop network ready`'s tooling row names the gap BEFORE a lane starts (it reads
+and creates nothing on either device). Live, from the E2E node: `cloud-node-1
+has no glab, node, npm, make and docker on its PATH or in ~/.local/bin; has gh
+installed but not on its PATH; has no stored GitHub CLI login: offloaded work
+that needs them will fail there` — with one remedy line per gap (an install, a
+PATH fix, a sign-in; each runs on the node, and the product asks before
+changing anything there). The row reads `warn` on purpose: missing tooling does
+not make a device less onboarded — it makes lanes that need it fail there.
+
+### The build gates the machinery
+
+A capability this guide describes can be absent on the node, because it runs
+ITS build: an older build lacks the newer provisioning, sync and broker
+machinery, and checks that device does not know come back as `peer_too_old`
+rows rather than as a pass. Build parity is not a nit: the readiness `build`
+row is ADMISSION-class — the class that holds the onboarding verdict — so a
+node behind this device is not "ready, with caveats". Read parity from
+`lop network ready`'s build row: `cloud-node-1 runs the same build as this
+device` when level; otherwise it names which side is behind, and that work
+offloaded there runs the older build. Remedy, on the node side: update it —
+`lop update` on the node, the same updater the onboarding card drives — and
+its supervised relay rolls onto the new build; re-check afterwards.
+
+### Session capability is wired at session start
+
+A credential shared while a session is already running is invisible to it: the
+provider reports `No API key configured for provider '…'` even though
+`lop network credentials` lists the share right there. This is a known
+limitation with a one-step remedy — not a bug to re-share around: the brokering
+rung is built when a session STARTS, so a session that began before this
+device's first borrowable share runs without it for its whole life. Start a new
+session (or restart that one). A session that was already brokering picks up a
+newly shared key on the next pull without a restart — and
+`lop network credentials` prints `note: '…' is now available to borrow on this
+device…` at the moment a pull makes a key newly borrowable.
 
 ## When something looks wrong
 
