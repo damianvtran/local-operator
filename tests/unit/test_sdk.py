@@ -174,6 +174,60 @@ async def test_open_session_builds_through_the_factory_and_scopes_the_roots(
     assert "decoy-config" in str(paths.config_dir())
 
 
+def _seed_lopdev(roots: SessionRoots) -> None:
+    """A team this root holds, so team resolution has something to resolve."""
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    TeamRegistry(roots.config_path).create_team(
+        TeamEditFields(
+            name="lopdev",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="ship it",
+            project="local-operator",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_session_refuses_the_team_profile_pair_with_the_shared_sentence(
+    scratch: SessionRoots,
+) -> None:
+    """Q-MAJOR-3 (#2050's re-review): the pair is refused, not silently split.
+
+    Once ``to_runner_args`` forwards the team, ``resolve_startup`` sees it and
+    the #2014 rule fires for the SDK exactly as it does for ``lop exec`` — the
+    same shared sentence, re-raised as the spec surface's own error type.
+    """
+    _seed_lopdev(scratch)
+    with pytest.raises(SessionSpecError, match="cannot be combined with --team"):
+        async with sdk.open_session(_mock_spec(team="lopdev", profile="reviewer"), roots=scratch):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_open_session_attaches_a_named_team(scratch: SessionRoots) -> None:
+    """Team-only used to be dropped silently; now it is the session's team.
+
+    The attach rides the same post-open ``session.attach_team`` exec uses, so
+    ``active_team`` is the registry row the name resolved to — not a string the
+    SDK kept to itself.
+    """
+    _seed_lopdev(scratch)
+    async with sdk.open_session(_mock_spec(team="lopdev"), roots=scratch) as session:
+        session = cast(Any, session)
+        assert session.active_team is not None
+        assert session.active_team.name == "lopdev"
+
+
+@pytest.mark.asyncio
+async def test_open_session_refuses_a_team_this_root_does_not_hold(scratch: SessionRoots) -> None:
+    """A missing team is refused by name — the other silent-drop half of Q-MAJOR-3."""
+    with pytest.raises(SessionSpecError, match="No team named"):
+        async with sdk.open_session(_mock_spec(team="nobody-here"), roots=scratch):
+            pass
+
+
 @pytest.mark.asyncio
 async def test_tool_surface_matches_create_tools_for_the_same_allow_list(
     scratch: SessionRoots,

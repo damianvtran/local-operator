@@ -195,11 +195,22 @@ rendering is not a contract.
 
 ## Who the session on the peer runs as
 
-A create on a peer can name the agent PROFILE it runs as and the TEAM it manages, and
-it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model and
-hosting that device will use. The definitions travel with the create:
-`lop network sessions --peer <id> --create --profile reviewer --team release`
-reconciles those two definitions onto that device FIRST (idempotent, by name, only
+A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
+and it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model
+and hosting that device will use. A profile and a team cannot both be named: a team
+owns the session's agent slot (the same rule `lop exec` refuses that pair with), so
+`--profile` beside `--team` is refused — by the creating device before anything is
+sent, and by the owning device in the same sentence if it arrives anyway (the
+creating device names the team's manager only when it holds that team; otherwise
+it says "its manager is the speaker") — and no session is made. An `--agent` row
+beside a team is refused when that row's instructions are attachable (a role or a
+specialist) — the creating device refuses it too when it holds that row, and the
+owning device refuses it in every case; a routing-only legacy row beside a team is
+allowed, and — when a first prompt is sent — the receipt says routing-only.
+
+The definitions travel with the create:
+`lop network sessions --peer <id> --create --profile reviewer`
+reconciles the named definitions onto that device FIRST (idempotent, by name, only
 what the frame mentions), so this works against a device that has never seen them —
 including a bare install that was paired a minute ago.
 
@@ -246,9 +257,10 @@ quietly dropped:
   product's rule, not the mesh's), so such a session runs its OWN instructions on that
   agent's model — and the receipt says exactly that instead of implying the whole row
   arrived.
-- **A profile outranks `--model`**, which is this product's precedence on a local
+- **A pinned model outranks `--model`**, which is this product's precedence on a local
   create too (agent > flag > config). The receipt says the requested model was not
-  applied and names the profile that overrode it.
+  applied and names what pinned it: the profile on its own, or — when a create names
+  both halves — the `--agent` row, whose routing outranks the profile's own model.
 - **An edited copy is never overwritten.** Each device remembers what it mirrored; if
   the local copy has been edited since, a later push REFUSES that row by name (`the
   copy of that name here has local edits`) and leaves the edit alone. A row this device
@@ -264,7 +276,7 @@ over a paired mesh. From a shell:
 | `lop network sessions --all-peers --json` | every peer's sessions, merged; each row names the device holding it |
 | `lop network sessions --peer <id\|name> --json` | one device's own catalogue |
 | `lop sessions --peer <id\|name>` / `--all-peers` | the same rows through the ordinary session list |
-| `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] [--effort <level>]` | create the session ON the peer, which mints its id |
+| `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] (not --profile with --team) [--effort <level>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
 | `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |

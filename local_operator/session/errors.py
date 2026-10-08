@@ -37,13 +37,42 @@ def team_owns_the_agent_slot_message(team: str, manager: str) -> str:
     before a session or model exists. The ``local-operator-ui`` header lane keys
     on this exact sentence, so a rewording is a wire change, not a tidy-up.
 
-    ``manager`` may be empty (a reduced team object); the sentence then states
-    the rule without naming a speaker rather than claiming one it does not have.
+    ``manager`` may be empty (a reduced team object, or a device that does not
+    hold the team); the sentence then states the rule without naming a speaker
+    rather than claiming one it does not have.
     """
     identity = f"{manager} is the speaker" if manager else "its manager is the speaker"
     return (
         f"team {team} owns this session: {identity}, so /agent is closed. "
         "Run /team clear to detach the team first."
+    )
+
+
+def flag_with_team_refusal_message(flag: str, team: str, manager: str) -> str:
+    """THE refusal sentence for a flag that would attach an agent beside ``--team``.
+
+    One builder for every shell-facing seat that refuses the pair — ``lop exec``'s
+    preflight (:func:`exec_startup.resolve_startup`) and both halves of the network
+    create (``relay._ctl_peer_create`` / ``relay._op_session_create``) — so the
+    wording cannot drift between the exec and mesh vocabularies. The flag-level
+    fact leads, for the reason design round 1 (D6) established: a caller who typed
+    two flags is told WHICH PAIR is wrong before being told how the SESSION feels
+    about it. The session's own sentence (:func:`team_owns_the_agent_slot_message`)
+    follows VERBATIM, because the desktop's header lane keys on those words.
+
+    ``flag`` is the user's own spelling (``--profile``, ``--agent``); ``team`` and
+    ``manager`` reach :func:`team_owns_the_agent_slot_message` unchanged, empty
+    manager included. The remedy clause is APPENDED after the shared sentence
+    (``Drop … to create the session.`` — design round 1, D5): the shared sentence
+    ends on ``/team clear``, which needs a session a refused create never made and
+    ``lop exec`` never started, so the shell caller gets the way out that exists
+    for them. Appended, never woven in, because the desktop lane keys on the
+    shared sentence's exact words.
+    """
+    return (
+        f"{flag} cannot be combined with --team: a team owns the session's agent slot. "
+        + team_owns_the_agent_slot_message(team, manager)
+        + f" Drop {flag} or --team to create the session."
     )
 
 

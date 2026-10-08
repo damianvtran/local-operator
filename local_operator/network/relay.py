@@ -6754,6 +6754,43 @@ class RelayServer:
         )
         if identity is None:
             raise MeshRefusal("definition_missing", refusal)
+        # THE PAIR THAT CAN NEVER BE HONOURED, REFUSED BEFORE ANYTHING MOVES (#2014's
+        # rule on the seam it missed). A create that would attach BOTH an attachable
+        # identity and a team — ``--profile X --team Y``, or a role/specialist row
+        # named via ``--agent`` beside a team — used to write a sidecar carrying both
+        # (the ``write_session_attachment`` below) and answer a receipt claiming the
+        # profile was applied, while the restore's deliberate team-wins rule dropped
+        # the profile silently: the session ran the team's manager under the profile's
+        # name, which is the exact wrong-thing-under-the-right-name failure the rule
+        # exists to forbid. The refusal lands HERE — after both names resolve (a name
+        # this device does not hold keeps its own sentence above) and before the
+        # mint, the stamp and the sidecar — so a refused create leaves nothing on
+        # disk. The sentence is the SAME one the session and ``lop exec`` use, with
+        # the flag-level fact in front for the caller who typed two flags (see
+        # ``flag_with_team_refusal_message``); the flag named is the attachable
+        # half's own. A routing-only legacy ``--agent`` row is NOT this case — its
+        # instructions are not attachable, so nothing is dropped and the pair stays
+        # allowed — which is why this reads the RESOLVED attachability rather than
+        # the raw flags.
+        if identity.instructions_attachable and identity.team_name:
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(identity.team_name)
+                manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                manager = ""
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            raise MeshRefusal(
+                "bad_request",
+                flag_with_team_refusal_message(
+                    "--profile" if str(frame.get("profile") or "") else "--agent",
+                    identity.team_name,
+                    manager,
+                ),
+            )
         stale = definitions.check_expected(self.root, frame.get("expect"))
         if stale:
             raise MeshRefusal("definition_stale", stale)
@@ -6881,11 +6918,13 @@ class RelayServer:
         # ``session_factory``'s own precedence for a local session is agent > flag >
         # config, so this is the parity answer rather than a preference of this op's;
         # deciding it here is what keeps the promptless branch (which answers its id and
-        # warms in the background) from applying a flag OVER the profile it was asked to
-        # run. ``identity.birth`` is the profile's pinned model and it reaches the runtime
-        # as the errand's BIRTH SAMPLE — the only channel that lands before the first
-        # provider call — so the flag is not applied on top of it, and ``override`` is the
-        # sentence both receipts carry where they would otherwise claim a model was taken.
+        # warms in the background) from applying a flag OVER the pin it was asked to
+        # run. ``identity.birth`` is the pinned model — the profile's own row, or the
+        # ``--agent`` row's routing when both halves are named — and it reaches the
+        # runtime as the errand's BIRTH SAMPLE, the only channel that lands before the
+        # first provider call, so the flag is not applied on top of it, and ``override``
+        # is the sentence both receipts carry where they would otherwise claim a model
+        # was taken.
         # Applied loudly: a silent override of an explicit request is the shape this whole
         # change exists to remove.
         override = self._profile_overrides_flag(identity, wanted_model)
@@ -6910,10 +6949,10 @@ class RelayServer:
             self._warm_after_create(
                 session_id,
                 cwd=cwd,
-                # A PROFILE THAT PINS A MODEL TAKES THE BIRTH SAMPLE INSTEAD, so the
+                # AN IDENTITY THAT PINS A MODEL TAKES THE BIRTH SAMPLE INSTEAD, so the
                 # background warm applies the same precedence the synchronous path
                 # applies a few lines down: passing the flag here would override the
-                # profile on the path the desktop actually creates on (``/new`` sends no
+                # pin on the path the desktop actually creates on (``/new`` sends no
                 # prompt), which is the silent override this change exists to remove.
                 model=None if override else wanted_model,
                 initial_model=identity.birth,
@@ -7338,24 +7377,32 @@ class RelayServer:
     # -- the two local helpers the ops above share --------------------------
 
     def _profile_overrides_flag(self, identity: Any, wanted_model: Any) -> str:
-        """The sentence a create's receipt carries when the profile pins a model.
+        """The sentence a create's receipt carries when the identity pins a model.
 
         EMPTY MEANS THE FLAG STANDS, and that is the whole return contract: a frame that
-        named no model, or a profile that pins none, has nothing to say here. ONE
+        named no model, or an identity that pins none, has nothing to say here. ONE
         producer for the two receipts that must agree about it (the promptless create's
         immediate answer and the prompted one's ``model`` result) — a second copy of the
         sentence would let one create be explained two ways depending only on whether the
         caller happened to send a first prompt.
 
-        ``identity.birth`` is what the profile pins and what the runtime is handed as the
-        errand's birth sample (``_engage_locally``), so this method answers the one
-        question left: was a model REQUESTED that will not be applied.
+        ``identity.birth`` is the pin — the profile's own row, or the ``--agent`` row's
+        routing when a create names both halves (the fold) — and ``birth_owner`` names
+        the definition the sample came from, so the sentence says WHO overrode the flag
+        instead of assuming the profile: naming the profile when the row pinned it was
+        the false attribution design round 1 (D1) refused, and in the ``auditor`` case
+        it contradicted the very definition it named.
         """
         pin = identity.birth
         if pin is None or not (pin.provider or pin.model_id) or wanted_model is None:
             return ""
+        subject = (
+            f"the agent {identity.agent_name!r}"
+            if identity.birth_owner == identity.agent_name
+            else f"the --agent row {identity.birth_owner!r}"
+        )
         return (
-            f"the agent {identity.agent_name!r} pins "
+            f"{subject} pins "
             f"{pin.provider or 'its configured hosting'}/"
             f"{pin.model_id or 'its default model'}, and an agent "
             "outranks a flag on its own device too, so the requested model was "
@@ -7384,9 +7431,9 @@ class RelayServer:
 
         ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
         sends (``launch.WarmErrand.initial_model``), and a create that names an
-        agent reuses it for the same reason: it is the only channel that reaches
+        identity reuses it for the same reason: it is the only channel that reaches
         a runtime BEFORE its first provider call, so it is the only one that can
-        make the session's FIRST turn run on the profile's model. Applying the
+        make the session's FIRST turn run on the pinned model. Applying the
         model afterwards over the model RPC (which this op also still does for a
         frame that names one) leaves the session briefly on the device default
         and loses the choice entirely if the owner was already running. It builds
@@ -10067,6 +10114,59 @@ class RelayServer:
         agent_id = str(frame.get("agent_id") or "")
         team = str(frame.get("team") or "")
         effort = str(frame.get("effort") or "")
+        # A PAIR THAT CAN NEVER BE HONOURED IS REFUSED BEFORE THE PUSH (#2014's rule
+        # on the half that can see the flags). ``lop exec`` refuses ``--profile``
+        # beside ``--team`` at preflight — same flags, same rule — and this half
+        # refuses it in the SAME words, BEFORE ``definitions.push_to_peer`` below:
+        # a create that is going to be refused must not mirror definitions onto the
+        # peer as a side effect of asking, and the refusal must not depend on the
+        # peer answering (or existing) either. The team is named CANONICALLY when
+        # this device holds it (its registry row's name; aliases and case spellings
+        # resolve there exactly as they do for ``lop exec`` — design D3/F5), and a
+        # team this device does not hold is a legitimate create (``definitions
+        # push`` brings it), where the shared sentence states the rule without
+        # naming a speaker.
+        #
+        # THE ``--agent`` DOOR IS REFUSED HERE TOO WHEN THIS DEVICE CAN SETTLE IT:
+        # a row this device HOLDS whose own resolver classifies it as attachable is
+        # refused before the push (agent review F3 / QA Q-2), using the same
+        # ``resolve_create_identity`` the owning device runs — the same information,
+        # no guess. When this device does NOT hold the row, nothing can be
+        # established locally, so the frame travels and the OWNING device refuses;
+        # that residual push is bounded to the frame's own names, idempotent, and
+        # the always-on definitions cadence mirrors these rows to every paired
+        # member regardless — the refusal merely stops being the FIRST mirror. A
+        # routing-only row is never refused by either device.
+        if team:
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            team_key = team
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(team)
+                if team_row is not None:
+                    team_key = str(getattr(team_row, "name", "") or team)
+                    manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                pass
+            if profile:
+                raise MeshRefusal(
+                    "bad_request",
+                    flag_with_team_refusal_message("--profile", team_key, manager),
+                )
+            if agent_name or agent_id:
+                from local_operator.network import definitions
+
+                held, _ = definitions.resolve_create_identity(
+                    self.root, agent_name=agent_name, agent_id=agent_id
+                )
+                if held is not None and held.instructions_attachable:
+                    raise MeshRefusal(
+                        "bad_request",
+                        flag_with_team_refusal_message("--agent", team_key, manager),
+                    )
         named = bool(profile or agent_name or agent_id or team)
         push_reason = ""
         expect: dict[str, Any] = {}

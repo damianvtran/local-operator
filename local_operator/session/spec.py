@@ -530,6 +530,14 @@ class SessionSpec:
             **vars(self.to_namespace()),
             birth_effort=self.birth_effort,
             profile=self.profile,
+            # THE TEAM IS FORWARDED, so ``resolve_startup`` can resolve it, refuse
+            # a name this root does not hold, and fire the #2014 pair refusal —
+            # before this key existed the team half was silently dropped
+            # (Q-MAJOR-3 on #2050's re-review: team-only opened as if no team was
+            # named, and ``--team X --profile Y`` opened instead of being
+            # refused). It lives HERE, not in ``to_namespace``: the eight-field
+            # narrow namespace is pinned field-for-field to exec's factory shape.
+            team=self.team,
             # exec stores --tools as the comma-separated string; the helpers
             # parse it through exec_startup.parse_tool_inventory.
             tools=",".join(self.tools) if self.tools is not None else None,
