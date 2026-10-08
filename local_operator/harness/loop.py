@@ -51,7 +51,6 @@ from local_operator.harness.intent import (
 from local_operator.harness.redaction import tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
-    COLLAPSED_OPTIONAL_NULL_KEY,
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -5028,7 +5027,7 @@ def validate_tool_arguments(
         prop_schema = properties.get(name)
         if not isinstance(prop_schema, dict):
             continue
-        if prop_schema.get(COLLAPSED_OPTIONAL_NULL_KEY):
+        if name in tool.optional_null_unions:
             # A property ``tools.registry.collapse_optional_nulls`` rewrote from
             # ``anyOf: [T, null]``. Base semantics are restored here rather than
             # the collapsed type being enforced: the union shape is what this

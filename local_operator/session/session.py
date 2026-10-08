@@ -9921,9 +9921,9 @@ class Session:
     def _deferred_now(self) -> frozenset[str]:
         """Names whose schema is withheld from the array RIGHT NOW.
 
-        The deferral set for this session's kind, minus role pins and minus
-        what the session has already activated. Empty when ``tools.defer`` is
-        off, which is the inverse canary: the pre-deferral array comes back.
+        The deferral set minus role pins and minus what the session has
+        already activated. Empty when ``tools.defer`` is off, which is the
+        inverse canary: the pre-deferral array comes back.
         """
         if not self._tool_deferral:
             return frozenset()

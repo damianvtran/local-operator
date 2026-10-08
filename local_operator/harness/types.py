@@ -1545,25 +1545,6 @@ ToolExecuteFn = Callable[
 ApprovalDescribeFn = Callable[[dict[str, Any], str], str]
 
 
-#: The JSON-Schema marker :func:`local_operator.tools.registry.collapse_optional_nulls`
-#: stamps on a property it rewrote from ``anyOf: [T, null]`` to `T`.
-#:
-#: WHY IT EXISTS, and it is a CORRECTNESS contract rather than bookkeeping.
-#: ``validate_tool_arguments`` skips any property with no top-level ``type``,
-#: which is exactly the shape every optional field used to have — so the loop
-#: performed no type check on them and the TOOL's own pydantic model decided,
-#: including the coercers several tools ship deliberately (``hub``'s ``to``
-#: accepts a bare job id or its JSON; ``jobs``' ``job_id`` accepts a number).
-#: Collapsing the union puts a ``type`` at the top level, so without the marker
-#: the loop would enforce a type the tool itself is happy to coerce and refuse
-#: the call before the tool ran. A marked property is therefore UNCHECKED at
-#: the loop, which restores the base semantics union-shaping implied.
-#:
-#: It is an ``x-`` key so a strict-schema provider ignores it; live MCP schemas
-#: never carry it, because the collapse runs only on builtins (``create_tools``).
-COLLAPSED_OPTIONAL_NULL_KEY = "x-collapsed-optional-null"
-
-
 class AgentTool(BaseModel):
     """A tool the model can call.
 
@@ -1595,6 +1576,34 @@ class AgentTool(BaseModel):
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
     describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
+    #: TOP-LEVEL property names whose ``anyOf: [T, null]`` the schema collapse
+    #: rewrote into a plain ``T`` (``tools.registry.collapse_optional_nulls``),
+    #: and which the loop's validator must therefore NOT type-check.
+    #:
+    #: WHY THE VALIDATOR NEEDS THIS AT ALL, and it is a correctness contract
+    #: rather than bookkeeping: ``validate_tool_arguments`` skips any property
+    #: with no top-level ``type``, which is exactly the shape every optional
+    #: field used to have — so the loop checked nothing and the TOOL's own
+    #: pydantic model decided, including the coercers several tools ship
+    #: deliberately (``hub``'s ``to`` accepts a bare job id or its JSON;
+    #: ``jobs``' ``job_id`` accepts a number). Collapsing the union puts a
+    #: ``type`` at the top level, so without this set the loop would enforce a
+    #: type the tool is happy to coerce and refuse the call before the tool ran
+    #: (review round 1, MAJOR-1).
+    #:
+    #: HOST-SIDE, deliberately, and ``exclude=True`` is the load-bearing half: an
+    #: earlier revision carried this as an ``x-collapsed-optional-null`` key
+    #: INSIDE the schema, which put 121 occurrences / ~3.4k characters on every
+    #: published request — a third of what this feature saves — and asked strict
+    #: providers to accept a keyword their schema dialect does not list (review
+    #: round 2, MAJOR-2). Nothing about this belongs on the wire: it exists to
+    #: keep the loop's own check off a property, which the loop can read here.
+    #:
+    #: Flat NAMES, not paths: the loop validates top-level arguments only, so a
+    #: name is the whole key even for a property rewritten inside a nested
+    #: ``$defs`` entry. Live MCP schemas never populate it — the collapse runs
+    #: only on builtins (``create_tools``).
+    optional_null_unions: frozenset[str] = Field(default_factory=frozenset, exclude=True)
     #: The MCP server's ``tools/list`` annotations for this tool, when one
     #: built it: ``{readOnlyHint: True, …}``. Read by exactly one consumer —
     #: the monitor read-only evaluator, whose §6.5 rule is

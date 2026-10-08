@@ -10,14 +10,14 @@ those are the two halves the contract is made of.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from local_operator.harness.loop import validate_tool_arguments
 from local_operator.harness.types import (
-    COLLAPSED_OPTIONAL_NULL_KEY,
     AbortSignal,
     AgentTool,
     ChatRequest,
@@ -562,15 +562,18 @@ def test_optional_null_unions_collapse_and_required_ones_do_not() -> None:
         },
     }
     out = collapse_optional_nulls(schema)
-    marked = {COLLAPSED_OPTIONAL_NULL_KEY: True}
-    # EVERY rewrite carries the marker: the loop skips a marked property, so an
-    # unmarked rewrite would restore the type enforcement that refused the
-    # string forms ``hub``/``jobs`` coerce (review round 1, MAJOR-1).
-    assert out["properties"]["opt"] == {"type": "string", "description": "d", **marked}
-    assert out["properties"]["req"] == schema["properties"]["req"]
-    assert out["properties"]["multi"] == schema["properties"]["multi"]
-    assert out["properties"]["kept_default"] == schema["properties"]["kept_default"]
-    assert out["$defs"]["Item"]["properties"]["x"] == {"type": "integer", **marked}
+    # NOTHING but the collapse's own rewrite lands in the schema: an earlier
+    # revision carried the "I am collapsed" flag as an ``x-`` key here, which
+    # rode 121 properties onto every published request (review round 2,
+    # MAJOR-2). The names travel beside the schema instead.
+    assert out.parameters["properties"]["opt"] == {"type": "string", "description": "d"}
+    assert out.parameters["properties"]["req"] == schema["properties"]["req"]
+    assert out.parameters["properties"]["multi"] == schema["properties"]["multi"]
+    assert out.parameters["properties"]["kept_default"] == schema["properties"]["kept_default"]
+    assert out.parameters["$defs"]["Item"]["properties"]["x"] == {"type": "integer"}
+    # ROOT-level names only: the loop reads the root ``properties`` and nothing
+    # else, so the nested ``Item.x`` is deliberately NOT reported.
+    assert out.unchecked == frozenset({"opt"})
     # The input is not mutated (schemas are shared by pydantic's cache).
     assert "anyOf" in schema["properties"]["opt"]
 
@@ -582,19 +585,18 @@ def test_the_loop_does_not_type_check_a_collapsed_property() -> None:
     top-level ``type``) is restored by the marker, so a tool's own coercer
     still decides. A REQUIRED ``string`` is checked exactly as before.
     """
-    tool = _tool(
-        "t",
-        [],
-        parameters=collapse_optional_nulls(
-            {
-                "type": "object",
-                "properties": {
-                    "opt": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
-                    "req": {"type": "string"},
-                },
-                "required": ["req"],
-            }
-        ),
+    collapsed = collapse_optional_nulls(
+        {
+            "type": "object",
+            "properties": {
+                "opt": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                "req": {"type": "string"},
+            },
+            "required": ["req"],
+        }
+    )
+    tool = _tool("t", [], parameters=collapsed.parameters).model_copy(
+        update={"optional_null_unions": collapsed.unchecked}
     )
     assert validate_tool_arguments(tool, {"req": "a", "opt": None}) == []
     assert validate_tool_arguments(tool, {"req": "a", "opt": 3}) == []
@@ -603,57 +605,68 @@ def test_the_loop_does_not_type_check_a_collapsed_property() -> None:
     ]
 
 
-def _walk_properties(node: Any):
-    """Yield ``(name, property_schema)`` for every property in a schema tree.
+def _uncollapsed_parameters() -> dict[str, Any]:
+    """Every tool's schema with the collapse DISABLED.
 
-    Recursive on purpose: the collapse reaches nested ``$defs`` (a pydantic
-    sub-model's fields), and those are exactly where a missed marker would sit
-    unnoticed because no probe names them.
+    The source of truth for "what did the collapse change": rebuilding the real
+    surface with the rewrite neutralised and diffing it against the published
+    one needs no walk over the schema tree, so it cannot miss a nested ``$defs``
+    entry the way a hand-written traversal did (review round 2, MINOR-3).
     """
-    if isinstance(node, list):
-        for item in node:
-            yield from _walk_properties(item)
-        return
-    if not isinstance(node, dict):
-        return
-    for key, value in node.items():
-        if key == "properties" and isinstance(value, Mapping):
-            for name, prop in value.items():
-                yield name, prop
-                yield from _walk_properties(prop)
-        elif key in ("$defs", "definitions", "items", "anyOf", "oneOf", "allOf"):
-            yield from _walk_properties(value)
+    from local_operator.tools import registry
+    from scripts.real_tool_surface import build_real_tools
+
+    original = registry.collapse_optional_nulls
+    registry.collapse_optional_nulls = lambda schema: registry.CollapsedSchema(schema, frozenset())
+    try:
+        return {tool.name: tool.parameters for tool in build_real_tools(".")}
+    finally:
+        registry.collapse_optional_nulls = original
 
 
-def test_the_loop_checks_no_collapsed_property_and_still_checks_the_rest() -> None:
+def test_the_reported_set_is_exactly_what_the_collapse_changed() -> None:
     """THE structural invariant MAJOR-1 needs, over the FULL tool surface.
 
-    A collapsed property without the marker is a call the loop refuses before
-    the tool can coerce it — which is how ``hub``'s ``to`` and ``jobs``'
-    ``job_id`` lost their documented input forms. This walks every property of
-    every tool a fully-capable session advertises (nested ``$defs`` included)
-    and asserts the loop raises no complaint about any it finds marked, so it
-    fails on the NEXT such property rather than only on the two families a probe
-    happened to try.
+    A collapsed property missing from ``optional_null_unions`` is a call the
+    loop refuses before the tool can coerce it — which is how ``hub``'s ``to``
+    and ``jobs``' ``job_id`` lost their documented input forms — and a name in
+    it that was never collapsed is a type check silently switched off. So the
+    set is compared for EQUALITY against a diff of the real surface against
+    itself with the collapse neutralised: no sampling, no walk, every tool.
 
-    The converse half is what gives it teeth: an unmarked REQUIRED property must
-    still be type-checked, so a validator that simply stopped checking cannot
-    pass this test.
+    The converse half is what gives it teeth: a ROOT property that is required
+    and plain must still be type-checked, so a validator that simply stopped
+    checking cannot pass this test.
     """
     from scripts.real_tool_surface import build_real_tools
 
-    tools = build_real_tools(".")
-    checked = 0
-    for tool in tools:
-        for name, prop in _walk_properties(tool.parameters or {}):
-            if not isinstance(prop, dict) or not prop.get(COLLAPSED_OPTIONAL_NULL_KEY):
-                continue
-            checked += 1
+    uncollapsed = _uncollapsed_parameters()
+    collapsed = build_real_tools(".")
+    assert len(uncollapsed) == len(collapsed) > 20, "the surface moved"
+
+    for tool in collapsed:
+        before = uncollapsed[tool.name].get("properties") or {}
+        after = tool.parameters.get("properties") or {}
+        changed = {
+            name
+            for name, prop in before.items()
+            if json.dumps(prop, sort_keys=True) != json.dumps(after.get(name), sort_keys=True)
+        }
+        assert set(tool.optional_null_unions) == changed, (
+            f"{tool.name}: reported {sorted(tool.optional_null_unions)} but the "
+            f"collapse changed {sorted(changed)}"
+        )
+        for name in changed:
+            # Each reported name really did lose its union AND gained a type the
+            # loop would otherwise enforce — that is the whole reason it is here.
+            assert "anyOf" not in after[name], (tool.name, name)
+            assert isinstance(after[name].get("type"), str), (tool.name, name)
             errors = validate_tool_arguments(tool, {name: {"wrong": "type"}})
             assert not [error for error in errors if f"'{name}'" in error], (
-                f"{tool.name}.{name} is collapsed and marked, but the loop still "
-                "type-checks it — a coerced form would be refused before the tool ran"
+                f"{tool.name}.{name} is collapsed, but the loop still type-checks "
+                "it — a coerced form would be refused before the tool ran"
             )
+
         properties = tool.parameters.get("properties") or {}
         typed = next(
             (
@@ -661,7 +674,7 @@ def test_the_loop_checks_no_collapsed_property_and_still_checks_the_rest() -> No
                 for field in tool.parameters.get("required") or []
                 if isinstance(properties.get(field), dict)
                 and isinstance(properties[field].get("type"), str)
-                and not properties[field].get(COLLAPSED_OPTIONAL_NULL_KEY)
+                and field not in tool.optional_null_unions
             ),
             None,
         )
@@ -673,8 +686,33 @@ def test_the_loop_checks_no_collapsed_property_and_still_checks_the_rest() -> No
             "longer type-checks it — this test would pass on a validator that "
             "checked nothing"
         )
-    # The full surface carries ~123 of them; 0 means the walk moved.
-    assert checked > 100, f"walked {checked} collapsed properties — the marker moved?"
+
+    reported = sum(len(tool.optional_null_unions) for tool in collapsed)
+    assert reported > 100, f"only {reported} collapsed properties reported — the collapse moved?"
+
+
+def test_an_unmarked_optional_property_is_still_type_checked() -> None:
+    """MINOR-1's guard: the null tolerance lives ONLY in the reported set.
+
+    The runtime scope was right and unguarded — an unconditional "a null is
+    acceptable for an optional property" escape could be re-added and every
+    other test stayed green. This is the shape it would swallow: an optional
+    property with a plain ``type`` and no null branch, which is what an MCP
+    server's schema looks like.
+    """
+    tool = _tool(
+        "mcp_like",
+        [],
+        parameters={
+            "type": "object",
+            "properties": {"opt": {"type": "string"}, "req": {"type": "integer"}},
+            "required": ["req"],
+        },
+    )
+    assert validate_tool_arguments(tool, {"req": 1, "opt": None}) == [
+        "argument 'opt' does not match type string"
+    ]
+    assert validate_tool_arguments(tool, {"req": 1, "opt": "a"}) == []
 
 
 @pytest.mark.asyncio
@@ -747,31 +785,19 @@ async def test_a_numeric_job_id_survives_the_loop_and_reaches_the_tool(tmp_path)
     await session.dispose()
 
 
-def test_the_marker_is_what_the_loop_reads_not_an_absence_of_type() -> None:
-    """A marked property IS type-checked when the marker is removed.
+def test_the_side_set_is_what_the_loop_reads_not_an_absence_of_type() -> None:
+    """A reported property IS type-checked again once the report is dropped.
 
-    The fail-proof direction for the invariant above: strip the marker from a
-    real schema and the loop refuses the coerced form again, so the test that
-    walks the surface would go red on a regression rather than passing because
-    the walk found nothing.
+    The fail-proof direction for the invariants above: empty the tool's
+    ``optional_null_unions`` and the loop refuses the coerced form, so those
+    tests go red on a regression instead of passing because they found nothing.
     """
     from scripts.real_tool_surface import build_real_tools
 
     hub = next(tool for tool in build_real_tools(".") if tool.name == "hub")
-    parameters = {
-        **hub.parameters,
-        "properties": {
-            name: (
-                {key: value for key, value in prop.items() if key != COLLAPSED_OPTIONAL_NULL_KEY}
-                if isinstance(prop, dict)
-                else prop
-            )
-            for name, prop in hub.parameters["properties"].items()
-        },
-    }
-    markerless = hub.model_copy(update={"parameters": parameters})
-    errors = validate_tool_arguments(markerless, {"op": "list", "to": "job-1"})
+    unreported = hub.model_copy(update={"optional_null_unions": frozenset()})
+    errors = validate_tool_arguments(unreported, {"op": "list", "to": "job-1"})
     assert [error for error in errors if "'to'" in error], (
-        "without the marker the loop must type-check 'to' again — if this passes, "
-        "the marker is not what makes the coerced forms work"
+        "with the set dropped the loop must type-check 'to' again — if this passes, "
+        "the set is not what makes the coerced forms work"
     )

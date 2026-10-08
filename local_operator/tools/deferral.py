@@ -42,12 +42,13 @@ from collections.abc import Collection, Mapping
 #: schema tokens by making the tools the child was given harder to use, which is
 #: not a saving. The per-tool counts and the route each run took are on the PR.
 #:
-#: Chosen from per-kind usage, not the blended figure: 93% of the 30-day
+#: Chosen from usage counted PER KIND rather than blended: 93% of the 30-day
 #: ledger's sessions are subagents, so a blended "share of sessions that called
-#: it" hides that ``send`` is called by ~50% of top-level sessions and ~2% of
-#: children. Every tool here is called by at most ~2% of sessions of EITHER
-#: kind; ``lsp`` and ``patience`` by roughly none. ``ask`` is deliberately NOT
-#: here: the ``<interactivity>`` bodies name it as the channel to the operator.
+#: it" would hide that ``send`` is a tool ~50% of top-level sessions use and a
+#: child almost never does. Every name here is called by at most ~2% of
+#: sessions of EITHER kind; ``lsp`` and ``patience`` by roughly none. ``ask`` is
+#: deliberately NOT here: the ``<interactivity>`` bodies name it as the channel
+#: to the operator.
 DEFERRED_TOOLS: frozenset[str] = frozenset(
     {
         "console",

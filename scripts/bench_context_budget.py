@@ -1272,43 +1272,51 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: why): +360 chars = ~+129 billed, measured head 95,232 chars = ~34,256. The
 #: ceiling is NOT raised for it — the 554 tokens left (~1.6%) are the headroom.
 #:
-#: LOWERED 34,810 -> 27,901 by the context diet, slice A (deferred tool schemas,
-#: ``perf/deferred-tools``), RE-MEASURED after review round 1. Measured with THIS
-#: script, CLEAN arm via ``env -i``, both trees on the same machine (base
-#: re-measured after slice B merged, so the delta is slice A's alone):
+#: LOWERED 34,810 -> 26,668 by the context diet, slice A (deferred tool schemas,
+#: ``perf/deferred-tools``), RE-MEASURED after review rounds 1 and 2. Measured
+#: with THIS script, CLEAN arm via ``env -i``, both trees on the same machine
+#: (base re-measured after slice B merged, so the delta is slice A's alone):
 #:
 #:   base (origin/main 5e59e0cd0)    95,232 chars = ~34,256
-#:   head (this branch)              76,044 chars = ~27,354
-#:   delta                          -19,188 chars = ~-6,902
+#:   head (this branch)              72,684 chars = ~26,145
+#:   delta                          -22,548 chars = ~-8,111
 #:
 #: Instructions, environment and knowledge are byte-identical across the arms;
-#: the delta is the tools array and one inventory line:
+#: the delta is the tools array and one inventory line. Components, each
+#: measured rather than apportioned:
 #:
-#:   -10,690 chars  ``tool_schemas``: 10 tools' schemas DEFERRED — still held,
+#:   -13,259 chars  ``tool_schemas``: 10 tools' schemas DEFERRED — still held,
 #:                  callable, approval-gated and documented, but published only
 #:                  once activated (``tools/deferral.py``). ``tool_schemas``
 #:                  counts only what is published, as ``Session._publishable``
-#:                  sends it. Measured as ``--no-defer`` minus the default arm.
-#:   - 5,142 chars  ``tool_schemas``: optional ``anyOf: [T, null]`` +
-#:                  ``default: null`` collapsed to ``T`` (123 properties;
-#:                  ``tools.registry.collapse_optional_nulls``), measured alone
-#:   - 3,728 chars  ``tool_schemas``: description trims (``ask``, ``send``,
+#:                  sends it. Measured as ``--no-defer`` minus the default arm,
+#:                  net of the inventory line below.
+#:   - 4,704 chars  ``tool_schemas``: optional ``anyOf: [T, null]`` +
+#:                  ``default: null`` collapsed to ``T`` (119 ROOT properties on
+#:                  the published surface; ``tools.registry.collapse_optional_nulls``),
+#:                  measured as the published set with the collapse on against
+#:                  the same set with it neutralised
+#:   - 4,922 chars  ``tool_schemas``: description trims (``ask``, ``send``,
 #:                  ``sessions``, ``browser``, ``todo.op``, ``project``, the
 #:                  ``i`` intent) whose prose moved into ``read tool://<name>``
-#:                  (the remainder of 68,995 -> 59,369 after the collapse)
-#:   +   372 chars  ``tool_inventory``: the one "schema on demand" line naming
-#:                  the deferred tools with a purpose phrase each
-#:   = -19,188 chars = ~-6,902 billed
+#:                  — the residual, so the four components sum to the delta
+#:   +   337 chars  ``tool_inventory``: the one "schema on demand" line naming
+#:                  the 10 deferred tools with a purpose phrase each
+#:   = -22,548 chars = ~-8,111 billed
 #:
-#: ``--no-defer`` (the ``tools.defer: false`` kill switch) measures ~32,317 —
+#: ``--no-defer`` (the ``tools.defer: false`` kill switch) measures ~30,794 —
 #: the two trims alone — the inverse canary that proves the deferral share is
-#: real. The ceiling is the measured head + ~2% (547), inside the 1,200 band.
+#: real. The ceiling is the measured head + ~2% (523), inside the 1,200 band.
 #:
-#: RE-MEASURED DOWN from 27,634/28,187 (round 1's number) because ``network``
-#: and the five child-only extras were UN-DEFERRED: each was measured collapsing
-#: adoption on a live model when its schema was absent. Re-derive with
-#: ``--verbose`` after any change to the deferred set.
-BUDGET_BILLED_TOKENS = 27_901
+#: RE-MEASURED DOWN twice, and each time the measurement changed the design.
+#: Round 1 un-deferred ``network`` and the five child-only extras, each measured
+#: collapsing adoption on a live model when its schema was absent. Round 2 moved
+#: the collapse's "I rewrote this" flag OUT of the schema: carried in-schema it
+#: put 121 keys on every published request, which cost 1,209 billed tokens here
+#: (27,354 -> 26,145 across that fix) and asked strict providers to accept a
+#: keyword their dialect does not list. Re-derive with ``--verbose`` after any
+#: change to the deferred set or to the collapse.
+BUDGET_BILLED_TOKENS = 26_668
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1322,11 +1330,11 @@ BUDGET_BILLED_TOKENS = 27_901
 #: tool filter and channel):
 #:
 #:   base (origin/main 5e59e0cd0)    83,243 chars = ~29,944
-#:   head (this branch)              68,704 chars = ~24,714
-#:   delta                          -14,539 chars = ~-5,230
+#:   head (this branch)              65,974 chars = ~23,732
+#:   delta                          -17,269 chars = ~-6,212
 #:
-#: ``--no-defer`` measures ~28,568. The ceiling is the measured head + ~2% (494).
-BUDGET_CHILD_BILLED_TOKENS = 25_208
+#: ``--no-defer`` measures ~27,334. The ceiling is the measured head + ~2% (475).
+BUDGET_CHILD_BILLED_TOKENS = 24_207
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -1476,7 +1484,7 @@ def main() -> int:
         default="top",
         help=(
             "which session to measure: a top-level session (default) or an "
-            "unrestricted subagent, which carries its own deferral set and "
+            "unrestricted subagent, which has a smaller inventory and its own "
             "budget (BUDGET_CHILD_BILLED_TOKENS)"
         ),
     )
