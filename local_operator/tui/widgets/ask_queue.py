@@ -64,6 +64,7 @@ from textual.widget import Widget
 
 from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
 #: composer chip vocabulary already leaves free (``!`` is the sidebar's
@@ -776,6 +777,13 @@ def _clip_cells(text: str, room: int) -> str:
     return clipped + "…"
 
 
+#: The one key a PASSIVE list can honour from the composer (``AskQueueList(passive=True)``):
+#: Tab hands it the caret. Spelled with the card's own glyph (``TAB_HINT_KEY``) so the
+#: two ask surfaces name the same key the same way, and as a header hint so it sheds
+#: under the same width rule as every other hint rather than being a second line.
+PASSIVE_TAB_HINT = f"{TAB_HINT_KEY} answer here"
+
+
 @dataclass(frozen=True)
 class HeaderAtom:
     """One paintable piece of the list's ONE-LINE header.
@@ -862,19 +870,23 @@ class AskQueueList(Widget):
     HEADER_ROWS = 1
 
     #: The header's hints, in the order they are SPENT — earlier entries are
-    #: kept longest, so the irreversible `d` outlives the reversible tips when
-    #: the row runs out of room (UX round 1, U7 asked for `d` to be named
-    #: precisely because it cannot be undone).
+    #: kept longest.
     #:
-    #: `d` LEADS since review round 2 (D3): the spend order is by
-    #: IRREVERSIBILITY, and `enter` already carries its own cue on the row (the
-    #: `❯` caret marks the selected one), so at a width where only one hint fits
-    #: it has to be the hint with no other teacher. The base named `d decline`
-    #: at 100x30 and the first cut of this header had silently stopped doing so.
+    #: `enter` LEADS since the open-by-default round (U3/D4): the auto-opened
+    #: surface teaches `⇥` while passive, and the moment the user pressed it the
+    #: ladder named only `d decline` — the primary action was the first casualty
+    #: at the width the repo assumes. The earlier order spent `d` first by
+    #: IRREVERSIBILITY (review round 2, D3) on the argument that `enter` already
+    #: carries its own cue in the row's `❯` caret; the walk found the caret says
+    #: WHICH row, not that Enter takes it — and on the passive→live handover the
+    #: caret arrives in the same frame the hint is shed, so `enter answer` is
+    #: the hint that cannot be spared. `d` still outlives `x`: a decline cannot
+    #: be undone, and `x` is only ever offered over a timed-out row.
     HEADER_HINTS = (
-        "d decline",
         "enter answer",
+        "d decline",
         "x dismiss",
+        PASSIVE_TAB_HINT,
         "esc collapse",
     )
 
@@ -894,11 +906,25 @@ class AskQueueList(Widget):
         open_count: int | None = None,
         truncated: bool = False,
         session_titles: Mapping[str, str] | None = None,
+        passive: bool = False,
     ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
         self._index = 0
         self._now_ms = now_ms
+        #: True for a list the open-by-default policy put up and the user has not yet
+        #: engaged: the composer still holds the caret, so NONE of this list's keys
+        #: (arrows, Enter, ``d``, ``x``, the filter digits) can reach it. It is painted
+        #: as a read-only view of the queue — no ``❯`` marker, no key hints it cannot
+        #: honour — because a list that looked live over a dead keyboard is exactly the
+        #: dead end UX round 1 (U2) removed, and it says how to take the keyboard
+        #: instead (Tab, or a click on a row). Ends on an explicit user gesture
+        #: (:meth:`engage`), and NOT on merely receiving focus — Textual lends focus to
+        #: whatever is next when a neighbouring prompt is removed, and a list that
+        #: took that for engagement would paint a live ``❯`` and live key hints over a
+        #: composer that holds the caret (see ``AskPickerScreen._passive``). A
+        #: door-opened list (f4, the bar) takes focus at mount and is never passive.
+        self._passive = passive
         # The three-way filter is CLIENT-LOCAL view state (§5.0's rule for the
         # EXPANDED state): which slice of one surface's list the reader is
         # looking at has no wire meaning, and persisting it would be a second
@@ -1237,6 +1263,11 @@ class AskQueueList(Widget):
         `pending`.
         """
         event.stop()
+        # The user chose this list: end its passivity for good (see :meth:`engage`),
+        # not only while the click's own focus is on it.
+        if self._passive:
+            self._passive = False
+            self.refresh(layout=True)
         y = int(event.y)
         segment = self._segment_at(int(event.x), y)
         if segment is not None:
@@ -1250,6 +1281,40 @@ class AskQueueList(Widget):
         target = self.visible_rows[row]
         if target.answerable and target.ask_id not in self._in_flight:
             self.post_message(self.Picked(target.ask_id))
+
+    def on_focus(self, event: events.Focus) -> None:  # type: ignore[override]
+        """Repaint: a focused list paints live, an unfocused passive one does not.
+
+        :attr:`passive` includes "not holding the caret", so the look changes with
+        focus and has to be repainted on both edges (see :meth:`on_blur`). It does NOT
+        end passivity — only :meth:`engage` does, because focus also arrives by
+        accident.
+        """
+        if self._passive:
+            self.refresh(layout=True)
+
+    def on_blur(self, event: events.Blur) -> None:  # type: ignore[override]
+        if self._passive:
+            self.refresh(layout=True)
+
+    @property
+    def passive(self) -> bool:
+        """Whether the list is up, un-engaged, and NOT holding the caret.
+
+        The same two-part reading as ``AskPickerScreen.passive``, for the same reason:
+        un-engaged alone would paint a list passive while the user is driving it,
+        focus alone would paint it live for the one frame Textual lends it the caret.
+        """
+        return self._passive and not self.has_focus
+
+    def engage(self) -> None:
+        """The user chose this list: end its passivity and give it the caret.
+
+        The Tab handover from the composer and a click both come through here.
+        """
+        self._passive = False
+        self.refresh(layout=True)
+        self.focus()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:  # type: ignore[override]
         """Hover moves the highlight, so the row under the pointer is the one
@@ -1288,6 +1353,15 @@ class AskQueueList(Widget):
         """
         visible = self.visible_rows
         live = {"esc collapse"}
+        if self.passive:
+            # A PASSIVE list owns no key: the composer holds the caret, so `enter`,
+            # `d` and `x` would type into the composer, not act on a row. It names
+            # the one key that works (Tab hands it the caret) and `esc`, which the
+            # app handles for the whole surface, so the header never advertises a
+            # key the keyboard cannot deliver.
+            if any(row.answerable for row in visible):
+                live.add(PASSIVE_TAB_HINT)
+            return tuple(hint for hint in self.HEADER_HINTS if hint in live)
         if any(row.answerable for row in visible):
             live |= {"enter answer", "d decline"}
         if any(row.moved_on for row in visible):
@@ -1310,9 +1384,13 @@ class AskQueueList(Widget):
         * The DRAWER CLAUSE yields next, WHOLE: the segments already carry the
           three counts, so at a narrow width the sentence adds nothing the
           numbers do not say. Dropping it is why this is one line and not two.
-        * The HINTS yield first, left to right, whole and never mid-phrase —
-          design round 2's D12, which is what stops the header wrapping and
-          every pointer hit below it shifting by a row.
+        * The HINTS yield left to right, whole and never mid-phrase — design
+          round 2's D12, which is what stops the header wrapping and every
+          pointer hit below it shifting by a row — with ONE exception: the
+          FIRST hint outbids the drawer clause (U3), which already yields to
+          the numbers at a narrow width and is measured below with the first
+          hint reserved, so the surface that teaches a key is never the
+          surface that names no key at all.
 
         Atoms rather than a string because the segments are PRESSED controls:
         the painter inks them differently and the hit test (``_segment_spans``)
@@ -1360,19 +1438,28 @@ class AskQueueList(Widget):
         # nothing; the drawer count goes first because the three segments below
         # it already carry those numbers.
         head: list[HeaderAtom] = []
+        # THE FIRST HINT OUTBIDS THE DRAWER CLAUSE (U3). The clause's own rung
+        # already argues it is expendable at a narrow width ("the segments carry
+        # the three counts"), but the ladder used to spend it WITHOUT leaving
+        # room for a single hint: at 80 columns — the repo's own default
+        # assumption — the auto-opened surface named no key at all. The rungs
+        # below therefore measure with the first hint RESERVED, so the clause
+        # yields to the hint the way it already yields to the numbers.
+        hints = self.header_hints()
+        reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
-            if _atoms_width([*atoms, *with_clause, *_seg_block(True)]) <= width:
+            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *reserve]) <= width:
                 head = with_clause
         if not head and subject:
             candidate = [HeaderAtom(subject, "fg")]
-            if _atoms_width([*atoms, *candidate, *_seg_block(True)]) <= width:
+            if _atoms_width([*atoms, *candidate, *_seg_block(True), *reserve]) <= width:
                 head = candidate
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
         kept: list[HeaderAtom] = []
-        for hint in self.header_hints():
+        for hint in hints:
             prefix = "  ·  "
             if _atoms_width([*atoms, *kept, HeaderAtom(prefix + hint, "muted")]) > width:
                 break
@@ -1464,7 +1551,11 @@ class AskQueueList(Widget):
             # (design round 2, D1).
             text.append(sentence, style=muted)
         for index, row in enumerate(visible):
-            selected = index == self._index
+            # A PASSIVE list marks no row: `❯` says "Enter acts on this one", and the
+            # keyboard is not here. The column is kept (two blank cells) so a row's
+            # question starts where it will once the list takes the caret, and the
+            # frame does not shift when Tab hands it over.
+            selected = index == self._index and not self.passive
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append("❯ " if selected else "  ", style=bold if selected else muted)
             chip = settled_chip(row) if row.settled else delivering_chip(row)
@@ -1556,7 +1647,7 @@ class AskQueueList(Widget):
 
 
 def expiry_text(row: AskRow, now_ms: int) -> str:
-    """``expires in 42m`` / ``timed out`` / ``urgent`` — one honest word per state.
+    """``expires in 42 m`` / ``timed out`` / ``urgent`` — one honest word per state.
 
     Derived from ``expires_at`` against the client's own clock, which is what
     §5 says the countdown is: the server states a deadline, the client decides
@@ -1575,19 +1666,19 @@ def expiry_text(row: AskRow, now_ms: int) -> str:
     if remaining_s <= 0:
         return "urgent · expiring" if row.urgent else "expiring"
     if remaining_s < 60:
-        left = f"{remaining_s}s"
+        left = f"{remaining_s} s"
     elif remaining_s < 3600:
-        left = f"{remaining_s // 60}m"
+        left = f"{remaining_s // 60} m"
     else:
-        left = f"{remaining_s // 3600}h"
+        left = f"{remaining_s // 3600} h"
     return f"urgent · expires in {left}" if row.urgent else f"expires in {left}"
 
 
 def expiry_room(row: AskRow, expiry: str) -> int:
     """Cells a row's ``  <expiry>`` TAIL may need, over its whole life.
 
-    The tail CHANGES WIDTH as the clock runs — ``10m`` is one cell wider than
-    ``9m``, the words change unit at the hour and minute boundaries, and
+    The tail CHANGES WIDTH as the clock runs — ``10 m`` is one cell wider than
+    ``9 m``, the words change unit at the hour and minute boundaries, and
     ``expiring`` replaces them all — so a question that filled its line got
     RE-CUT by its own countdown: ``…which shard …`` became ``…which shard s…``
     without the user touching anything, on a surface whose whole promise is
@@ -1597,7 +1688,7 @@ def expiry_room(row: AskRow, expiry: str) -> int:
 
     Derived from the row's OWN span (``expires_at - created_at``, the deadline
     the ask was given) rather than a global constant: a constant wide enough
-    for ``expires in 999h`` would eat ten cells of question from every ask
+    for ``expires in 999 h`` would eat ten cells of question from every ask
     forever. ``expiry_text`` prints minutes and seconds below an hour — always
     at most two digits — so only the hours form can be wider, and the digits
     it can reach are the ones the row's own span implies.
@@ -1613,7 +1704,7 @@ def expiry_room(row: AskRow, expiry: str) -> int:
     else:
         prefix = "urgent · expires in " if row.urgent else "expires in "
         span_s = (row.expires_at - row.created_at) // 1000 if row.created_at else 0
-        widest = cell_len(prefix) + max(2, len(str(max(0, span_s) // 3600))) + 1
+        widest = cell_len(prefix) + max(2, len(str(max(0, span_s) // 3600))) + 2
     return 2 + max(widest, cell_len(expiry))
 
 
