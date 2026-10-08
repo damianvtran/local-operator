@@ -54,68 +54,64 @@
   },
   "frame_files": {
     "01-before-setup-80.png": {
-      "bytes": 39790,
-      "px": null
+      "bytes": 39790
     },
     "02-after-setup-80.png": {
-      "bytes": 43697,
-      "px": null
+      "bytes": 43697
     },
     "03-before-setup-120.png": {
-      "bytes": 41274,
-      "px": null
+      "bytes": 41274
     },
     "04-after-setup-120.png": {
-      "bytes": 45041,
-      "px": null
+      "bytes": 45041
     },
     "05-before-login-picker-120.png": {
-      "bytes": 79024,
-      "px": null
+      "bytes": 79024
     },
     "06-after-login-picker-120.png": {
-      "bytes": 98081,
-      "px": null
+      "bytes": 98081
     },
     "07-before-login-picker-80.png": {
-      "bytes": 76764,
-      "px": null
+      "bytes": 76764
     },
     "08-after-login-picker-80.png": {
-      "bytes": 94026,
-      "px": null
+      "bytes": 94026
     },
     "09-before-radient-login-80.png": {
-      "bytes": 48040,
-      "px": null
+      "bytes": 48040
     },
     "10-after-radient-login-80.png": {
-      "bytes": 49192,
-      "px": null
+      "bytes": 49192
     },
     "11-before-api-key-login-80.png": {
-      "bytes": 31599,
-      "px": null
+      "bytes": 31599
     },
     "12-after-api-key-login-80.png": {
-      "bytes": 38282,
-      "px": null
+      "bytes": 38282
     },
     "13-before-refusal-120.png": {
-      "bytes": 22224,
-      "px": null
+      "bytes": 22224
     },
     "14-after-refusal-120.png": {
-      "bytes": 20383,
-      "px": null
+      "bytes": 20383
     },
     "15-real-run-attended-greeting.png": {
-      "bytes": 182714,
-      "px": null
+      "bytes": 182714
     },
     "16-real-run-signed-in-radient.png": {
-      "bytes": 249961,
-      "px": null
+      "bytes": 249961
+    },
+    "17-before-radient-login-120.png": {
+      "bytes": 46763
+    },
+    "18-after-radient-login-120.png": {
+      "bytes": 46767
+    },
+    "19-before-api-key-login-120.png": {
+      "bytes": 32863
+    },
+    "20-after-api-key-login-120.png": {
+      "bytes": 39562
     }
   },
   "measured_by": "scratchpad rigs: shots/onboarding_shot.py (splash/picker/login frames) and rig/attended_greet.py (real provider runs)",

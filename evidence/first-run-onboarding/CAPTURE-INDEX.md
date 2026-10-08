@@ -25,6 +25,10 @@ home for them, per `AGENTS.md` §7.
 | 09 | `before-radient-login-80` | `/login radient` BEFORE — `opening your browser to authorize…` then a 300-character OAuth URL across five rows |
 | 10 | `after-radient-login-80` | `/login radient` AFTER — `Opening your browser to sign in to Radient (…)`, `Didn't open? http://…:54549/launch`, `Finished in the browser? This window continues on its own · ctrl+c cancels`, full URL last in the dimmest ink |
 | 11, 12 | `before/after-api-key-login-80` | a pasted-key login — the new chat key rows (`anthropic-key` / `openai-api-key`) with the same copy |
+| 17 | `before-radient-login-120` | `/login radient` BEFORE at 120 columns (same URL dump) |
+| 18 | `after-radient-login-120` | the same, AFTER |
+| 19 | `before-api-key-login-120` | a pasted-key login BEFORE at 120 columns |
+| 20 | `after-api-key-login-120` | the same, AFTER |
 | 13 | `before-refusal-120` | a message typed at the setup splash, BEFORE — `! your message was not sent: /login openai to get started — no provider configured (/provider lists all). — edit e`, toast `No provider configured` |
 | 14 | `after-refusal-120` | the same, AFTER — `! Not sent — connect an AI account first: type /login radient — edit e`, toast `Connect an AI account` (shorter, names the recommended command, and the apology for the length is gone) |
 | 15 | `real-run-attended-greeting` | **the real thing**: real provider turn; Aida's reply is the only visible row, no trigger line, no wake receipt card, no user row |
