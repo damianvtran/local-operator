@@ -134,7 +134,13 @@ that answer before returning rather than waiting for a later projection push.
 A refused operation carries no replacement attention state. Mobile `POST /api/sessions/{id}/seen` takes the same token in
 a JSON object: missing legacy bodies return422, unknown/foreign tokens409,
 superseded tokens409 carrying `code: superseded_completion_token`, unknown
-sessions404, and unauthenticated callers401. Reads and subscriptions do not
+sessions404, and unauthenticated callers401. Its bulk sibling
+`POST /api/attention/seen` clears the receipts a caller enumerated
+(`{"items": [{"session_id", "completion_token"}, ...]}`, 1..500) in one
+write, answering per-item verdict buckets `read`/`superseded`/`unknown`
+under the same not-a-sweep rule; a batch that clears nothing is still 200,
+and a dead or foreign item is `unknown` for that item rather than a 404 for
+the call. Reads and subscriptions do not
 mutate the receipt store.
 
 The relay's aggregate unread read is `GET /api/attention/unread` (auth-gated

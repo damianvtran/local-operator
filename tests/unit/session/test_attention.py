@@ -2056,9 +2056,23 @@ def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
 
     A surface that clears marks without being asked is the hazard this whole
     design exists to prevent -- a receipt that moved by itself is a result nobody
-    read. The batch operation is therefore reachable from exactly two callers:
+    read. The batch operation is therefore reachable from exactly three callers:
     the desktop facade's worker hop (whose own only caller is the HTTP route a
-    user's click reaches), and the TUI command the user TYPES.
+    user's click reaches), the TUI command the user TYPES, and the phone's own
+    mark-all tap -- the mobile daemon's bulk route (``POST /api/attention/seen``),
+    which only the client's `mark all as read` control reaches. All three are
+    gestures; R9 forbids the callers that are NOT (timers, polls, focus hooks),
+    and it forbids them by NAME rather than by a wildcard.
+
+    THE MOBILE SITE READS ``build_app``, and that is the AST's honest answer
+    rather than a route name: every mobile handler is a nested def inside the
+    app factory, so the outermost enclosing def for a call made there is the
+    factory itself. That name says less than the other two, and the guard still
+    bites there: the map's VALUES are lists, so a second caller inside the
+    factory lands as ``["build_app", "build_app"]`` and reddens the equality
+    below -- measured by injecting a nested poll that reaches the batch write.
+    The entry must therefore be added deliberately; nothing renames it into
+    place.
 
     Driven off the syntax tree, so a call added from `_poll_completion_attention`
     or from a window-blur handler fails here BY NAME, rather than passing because
@@ -2071,6 +2085,7 @@ def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
         "the batch operation was renamed or removed; this test's expectations " "describe nothing"
     )
     assert _batch_call_sites("acknowledge_many") == {
+        "mobile/daemon.py": ["build_app"],
         "server/utils/desktop_sessions.py": ["acknowledge_attention_many"],
         "tui/app.py": ["_notifications_receipt"],
     }

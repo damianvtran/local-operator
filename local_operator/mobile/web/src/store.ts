@@ -137,6 +137,58 @@ export function usePinMarks(): ReadonlyMap<string, boolean> {
 	return useSyncExternalStore(subscribe, () => pinMarks);
 }
 
+/** The mark-all receipt, as MODULE state rather than component state.
+
+    Two things the component-local version could not answer (design D3, UX
+    U2/U8): a glance into a conversation and back (``#/`` -> ``#/s/<id>`` ->
+    ``#/``) unmounted the screen and erased the receipt -- the only explanation
+    of a partial or failed clear -- and the receipt never expired, so it
+    outlived the gesture indefinitely. Module state carries it across a route
+    change; the TTL bounds it; ``null`` clears it (the next press, or the
+    dismiss control on the line itself).
+
+    Same shape as ``pinMarks`` above and for the same reason: this is a slice
+    of state with its own change signal, so a caller that only reads the list
+    must not be made to re-render by it. */
+export interface MarkNotice {
+	text: string;
+	danger: boolean;
+}
+
+let markNotice: MarkNotice | null = null;
+
+/** How long a receipt survives once it is ON SCREEN, without the reader
+    dismissing it -- long enough to read after a glance away, short enough that
+    it does not outlive the gesture it describes (UX round 1, U8). */
+export const MARK_NOTICE_TTL_MS = 12000;
+
+export function useMarkNotice(): MarkNotice | null {
+	const notice = useSyncExternalStore(subscribe, () => markNotice);
+	/* THE CLOCK RUNS ONLY WHILE THE RECEIPT IS BEING LOOKED AT (UX round 2, U9).
+	   A store-owned timer armed at publish kept ticking through a route change,
+	   so a glance into a conversation longer than the TTL still erased the
+	   receipt on return -- and the receipt is the only explanation of a partial
+	   or failed clear (the same U2 reason it outlives the route change at all).
+	   Owning the timer HERE, and clearing it on unmount, ties the window to the
+	   reader's own viewing time: leaving the screen pauses the clock, coming
+	   back restarts it, and a fresh receipt gets its own full window. */
+	useEffect(() => {
+		if (notice === null) return;
+		const timer = setTimeout(() => publishMarkNotice(null), MARK_NOTICE_TTL_MS);
+		return () => clearTimeout(timer);
+	}, [notice]);
+	return notice;
+}
+
+/** Publish (``notice``) or clear (``null``) the receipt. No timer lives here:
+    the consuming hook owns the countdown, so an unmounted screen cannot expire
+    a receipt nobody is looking at (U9), and ``null`` is also how the dismiss
+    control and every new press clear the line. */
+export function publishMarkNotice(notice: MarkNotice | null): void {
+	markNotice = notice;
+	emit();
+}
+
 /** The daemon's capability answer (``capabilities`` on the list payload). */
 export function useCapabilities(): Capabilities | null {
 	return useSyncExternalStore(subscribe, () => capabilities);
