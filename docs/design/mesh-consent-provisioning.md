@@ -254,12 +254,22 @@ What follows from it, for copies specifically:
 | Mechanism | un-share / un-approve does | Ceiling (what cannot be undone) |
 |---|---|---|
 | Broker (classes 3/5/6b, forge default) | Stops new grants immediately; drops the borrower from `holders`; the broker refuses on the next frame. **Measured (PR #1513 QA): new borrows refused 2.3 s after `credential revoke`; a lent grant stops at the borrower's next re-ask.** | A bearer already picked up lives until its own expiry at the provider (grant TTL ≤ 900 s bounds only a well-behaved borrower; a copy of the bearer stops at the token's expiry — three latency statements, `mesh-credentials.md` §3.7). |
-| Copy (classes 2/4, forge opt-in) | Sends a **wipe notice** for every copied key with this owner's provenance; the node deletes and acks. Reachable: immediate. Unreachable: queued to the next contact (§5.5). | A copy already exfiltrated from the node cannot be recalled. **Rotate at the source** — that is the only ending, and every surface that ends a copy says so (share receipt, guide, `credential revoke` output). |
+| Copy (classes 2/4, forge opt-in) | Sends a **wipe notice** for every copied key with this owner's provenance; the node deletes and acks. Reachable: immediate. Unreachable: queued to the next contact (§5.5). | A copy already exfiltrated from the node cannot be recalled. **Rotate at the source** — that is the only ending, and every surface that ends a copy says so (the `member rm` receipt, the network guide, `credential revoke` output). |
 | Refuse (1/6) | Nothing to do. | — |
 
-The one sentence the design commits to, on every surface that ends a copy: *"This
-removed the copies it could reach. A copy that already left that device can only be
-ended by rotating the secret at its source."*
+The one commitment the design makes, on every surface that ends a copy: *"This ends the
+copies the owner can still reach. A copy that has left the owner's control can only be
+ended by rotating the secret at its source."* **As built (S4, design review round 1, D2):**
+tense-free on purpose. It follows state lines ("a wipe notice ... is queued", "could NOT be
+confirmed deleted") in which nothing has been removed yet, so the first draft's "This
+removed the copies it could reach" claimed a completed action on exactly the arms that say
+nothing completed, and re-used the tombstone's verb on the `member rm` receipt. It prints as
+two lines, one fact each, after every state line of `credential revoke` on a stored secret and
+of every `member rm` ending. **Scope, as built:** the provider-key (class-4) `credential
+revoke` keeps the closing sentence it had before S4 — "a copy of the key taken out of that
+device never expires: to end it, rotate the '<key>' key at the provider" — which says the
+second half in that credential's own words and omits the first; it does not print these two
+lines.
 
 ---
 
@@ -412,6 +422,10 @@ defaults off this paragraph:
 - `sync` — the operator's standing "send this to approved nodes" mark. A key so marked
   joins every approved device's copy-set by default, for keys the operator knows a node
   will need before the node's bundles can say so.
+  **As built (S4):** the mark is read when a device is APPROVED — it preselects the key on
+  the pairing screens' share list and in the run-only approval's default set — and writes
+  no grant of its own, so an approved device that is not yet sharing it takes one step:
+  `credential share <NAME> --with <device>`.
 - `local-only` — never crosses. The operator's per-key kill switch (and the class rule
   for anything device-bound).
 - `refuse`-by-class — the structural exclusions of §1.4 apply; nothing here can widen
@@ -420,6 +434,10 @@ defaults off this paragraph:
 Everything outside the default set is *offered* — visible on the approval card, one
 step to add — and not copied unless selected. One keystroke up per key when wanted, not
 an opt-out per key to keep it out.
+**As built (S4):** the pairing screens' share list (`offers.render_rows`) prints such a row
+as `not offered`, and that list is reduce-only (§1.4), so the "one step" is the operator's
+own: `mark <NAME> sync` before the approval, or `credential share <NAME> --with <device>`
+after it.
 
 The **bounding story**, stated as five concrete bounds:
 
@@ -435,7 +453,13 @@ The **bounding story**, stated as five concrete bounds:
    encrypted store re-sealed under its own master key (class 2), or the node's own 0600
    credential rows (class 4, the local-login posture) — with provenance marking (new: an
    `origin`/`owner_device` field or sidecar index on the receiving side, so `local-only`
-   marks and wipe notices are computable).
+   marks and wipe notices are computable). **As built (S4):** the marker is `origin` — a
+   small bounded object sealed INSIDE each record's payload (`secrets/store.py`'s
+   `_payload`/`_validate_origin`; never plaintext on disk, surviving `update` and
+   `rotate`), and `MESH_ORIGIN_KEY` inside each class-4 row's `data`, where the existing
+   row shape already carries it. The `applied` sidecar keeps gen/digest/row-ids as the
+   fast path, but the WIPE scans by the marker, never by the sidecar: a lost sidecar
+   must not orphan a copy.
 5. **The ending.** Wipe + rotate (§2.3, §5.5).
 
 **Explicitly rejected in the other direction:** copying the owner's whole `secrets/`
@@ -448,14 +472,48 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
 - **Wipe.** Un-approve or unshare → the owner sends one wipe notice per covered key
   (§5.5); the node deletes rows by provenance (`origin = mesh:<owner_device>`) and acks.
   Deletion is the store's ordinary delete path (`secrets/store.py:1186`; class-4 rows:
-  the credential row delete), so no new deletion semantics are invented.
+  the credential row delete), so no new deletion semantics are invented. **As built
+  (S4), the notice and its confirmation:** the notice is an announce carrying
+  `value_state: absent`, recomputed on each contact — never a queued frame — and the
+  confirmation rides the notice's own REPLY, not a fresh request: a deactivated
+  member's `broker_credential` capability left with its grants, and the transport
+  refuses `net_broker` from its rows (measured), so a fresh-request ack would be
+  refused at the owner's door for exactly the members a wipe matters most for. The
+  member therefore deletes inline on its slow-op worker (local, bounded — no dial, no
+  transfer) and answers `wiped`; the owner records the ledger row from that reply. The
+  member-side delete is bound by the marker it scans, not by the grant it outlives.
+  **As built (S4, review round 1 Q1), the NO-NEXT-CONTACT case:** the definitions tick
+  only visits ACTIVE members, so `member rm` — the un-approve path — is the last
+  moment a contact is possible at all. The removal handler therefore runs the ending
+  exchange ITSELF, bounded (one probe-capped dial, at most a cap of frames), BEFORE the
+  tombstone is written — after it the dial is refused by design, and measured the
+  copies survived silently. A member unreachable at that instant keeps its copy with
+  the ledger row left OPEN and the receipt naming the count plus the ceiling sentence:
+  deleted-and-confirmed / open-and-named is the whole receipt vocabulary, so a removal
+  with live copies never reads as a clean sweep. **Re-sized and given a third class
+  (S4, review round 2 F1):** the frame bound matches the tick's 10 s — 3 s could not
+  cover a loaded member's store open (measured 5.02 s in the open alone, the request
+  returning `None` at exactly 3.00 s with the member finishing its delete ~2 s later),
+  the loop carries a 25 s wall budget, and the CLI wait (35 s) covers probe + budget so
+  the local-write fallback can never swap in mid-exchange. A give-up that may still be
+  in flight renders as `timed out — the member may still complete the deletion`, its own
+  class apart from `could NOT be confirmed deleted` (nothing was contacted): an OPEN
+  ledger row after a removal means NOT CONFIRMED — never "still there" — and the row is
+  never reconciled, because a removed member is never contacted again.
 - **Rotate.** The only ending for a copy that may have left the node. The design's
   guidance: rotate at the provider (API keys), `gh auth logout`/token revocation (forge),
   `lop secret` update on the owner then sync (store secrets — though for a suspected
   exfiltration the provider side is the real rotation).
 - **The receipt says which happened**, and both sentences are shipped in
   `credentials/messages.py`'s house style — one home per surface
-  (`mesh-credentials.md` §4 intro).
+  (`mesh-credentials.md` §4 intro). **As built (S4):** `render_copy_revoke_notice`
+  renders the per-state lines (a queued notice / an already-wiped copy / no RECORDED
+  copy — the ledger's word: a row is written from the member's reply, so a copy whose
+  confirmation never arrived is not tracked, and the receipt says so) from the same
+  ledger the listing reads. The §2.3 ceiling (`COPY_CEILING_LINES`; `COPY_CEILING_SENTENCE`
+  is the same words joined) prints after EVERY state line of a stored secret's `credential
+  revoke` and every `member rm` ending arm (design review round 1, D1/D8); the provider-key
+  revoke keeps its own closing sentence (§2.3 above).
 
 ---
 
@@ -608,7 +666,12 @@ operator can act before the failure, and the repair path catches it after.
 Un-approve / unshare runs: (1) broker refusal is immediate for new grants (measured
 2.3 s) and the link-level membership rules are unchanged; (2) one wipe notice per copied
 key with this owner's provenance — reachable members delete and ack, unreachable ones
-get it on next contact (same catch-up as (a)); (3) the receipt states the ceiling and
+get it on next contact (same catch-up as (a)) — UNLESS the member is being REMOVED,
+where no next contact exists: the removal path delivers the ending while the member is
+still contactable and, unreachable at that instant, records the OPEN ending on the
+ledger and the receipt (as built, S4 review round 1 Q1); **as built (S4), the ack for a wipe is
+the reply to the notice itself — an un-approved member can no longer open a frame —
+see §4.3's as-built note**; (3) the receipt states the ceiling and
 the rotate guidance (§2.3). In-flight sessions on that node are **not** killed: they are
 the node's sessions, and the removal is a credential-and-link event; running turns keep
 what they hold (its borrowed grants die at their TTL; its copies die at the wipe or the

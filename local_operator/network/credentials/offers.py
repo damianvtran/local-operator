@@ -45,7 +45,15 @@ share|revoke`` remain as adjustment surfaces, never prerequisites):
   an agent cannot do the work it was onboarded for — and the reduce step is the
   narrowing surface. Pool exclusion is structural and unchanged (§1.3: pool
   members declare no credentials and are excluded from every credential path).
-* ``secret`` (class 2) remains NEVER a candidate — it is not brokered at all.
+* ``store-secret`` (class 2, the ``lop secret`` store) — **offered, with the
+  §4.2 needs-list default**: a key is preselected exactly when the pushed
+  bundles declare it (``ref:<NAME>``) or the operator marked it ``sync``;
+  everything else the device holds is listed and NOT copied unless the operator
+  adds it; ``local-only`` keys are not candidates at all (the one mark that
+  must not be softened to "off by default"). Its default is per KEY, not per
+  kind, so ``share_default`` deliberately has no table row for it — the kind
+  table below covers the provider classes, and ``build_items`` computes this
+  one from the sync document and the needs-list.
 
 The two exclusions that do NOT move, because they are facts rather than
 postures: device-bound providers (kimi, below) and host-local credentials (the
@@ -97,13 +105,19 @@ KIND_LABELS: dict[str, str] = {
     # can be served from any ladder arm (§3.2) — the label names the row, and
     # the receipt names the arm that actually served.
     "github-app": "GitHub",
+    # Class 2 (the encrypted ``lop secret`` store): shown as "Secret", and the
+    # row's name is the key MINUS the ``secret:`` prefix (the key itself is the
+    # placement identity).
+    "store-secret": "Secret",
 }
 
 #: The per-kind default posture (§1.4 of ``mesh-consent-provisioning.md``,
 #: which supersedes the §2.3 table: approval of a device is the authorisation,
 #: so the join-time list is the default provisioning set). A kind absent here has
 #: no default and is not offered; ``share_default`` answers ``False`` for it,
-#: which is the closed direction.
+#: which is the closed direction. ``store-secret`` is DELIBERATELY absent: its
+#: default is per KEY (§4.2's needs-list ∪ ``sync`` marks) and ``build_items``
+#: computes it directly — the absent-table answer is never reached for it.
 SHARE_DEFAULT_BY_KIND: dict[str, bool] = {
     "oauth-rotating": True,
     # Flipped from False (S1 of the provisioning design): static keys are the
@@ -265,8 +279,18 @@ def shape_for_key(key: str, config: Path) -> tuple[str, str, str]:
     row wins in all of them.
     """
     from local_operator.network.credentials import github as github_mod
-    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
+    from local_operator.network.credentials.types import (
+        is_mcp_key,
+        is_secret_key,
+        mcp_url_from_key,
+        secret_name_from_key,
+    )
 
+    if is_secret_key(key):
+        # Class 2's row: the kind is the class; the "provider" is the secret's
+        # own name (there is no provider behind it), and there is no identity
+        # label — the name IS the identity.
+        return "store-secret", secret_name_from_key(key), ""
     if github_mod.is_github_key(key):
         # github has no store row, so its shape is the key's own name. The
         # identity label stays empty on purpose: the row is served from whichever
@@ -304,8 +328,38 @@ def credential_here(key: str, config: Path) -> bool:
     answers ``False`` — the closed direction at a grant seam.
     """
     from local_operator.network.credentials import github as github_mod
-    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
+    from local_operator.network.credentials.types import (
+        is_mcp_key,
+        is_secret_key,
+        mcp_url_from_key,
+        secret_name_from_key,
+    )
 
+    if is_secret_key(key):
+        # A class-2 key is "here" when THIS device's encrypted store holds the
+        # name. The store is never CREATED by this read (the same rule the
+        # offer's secret enumeration keeps), and every failure folds to False —
+        # the closed direction at a grant seam.
+        name = secret_name_from_key(key)
+        try:
+            from local_operator.secrets import access
+            from local_operator.secrets.errors import SecretNotFound
+            from local_operator.secrets.keys import store_path
+
+            if not store_path(config).exists():
+                return False
+            store = access.open_store(config)
+        except Exception:  # noqa: BLE001 — unreadable is "not held"
+            return False
+        try:
+            store.describe(name)
+            return True
+        except SecretNotFound:
+            return False
+        except Exception:  # noqa: BLE001 — an unreadable row is "not held"
+            return False
+        finally:
+            close_quietly(store)
     if github_mod.is_github_key(key):
         # "Does this device hold it" for github is whether any ladder arm
         # resolves (§3.2) — the App secret, a ``GITHUB_TOKEN``-class secret, or
@@ -355,7 +409,7 @@ def _strict_provider_rows(config: Path) -> list[Any]:
         raise OfferEnumerationError(str(exc)) from exc
 
 
-def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
+def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str, Any]]:
     """Every credential this device could serve, sorted by key.
 
     Excluded BY NAME, each for a reason the broker would refuse anyway: MCP rows
@@ -369,12 +423,22 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
     a login row exists HERE: offering a server with nothing behind it would
     promise the joiner something the admission's re-check drops.
 
-    Raises :class:`OfferEnumerationError` when the store exists but cannot be
+    CLASS 2 JOINS THE LIST (S4): every ``lop secret`` store row the operator has
+    not marked ``local-only`` is a candidate, keyed ``secret:<NAME>``; its
+    per-key ``share`` default is decided in :func:`build_items` (§4.2) because —
+    unlike every provider row — it depends on the device's declared needs and
+    the operator's ``sync`` marks, not on a per-kind table. ``local-only`` keys
+    are dropped HERE rather than defaulted off: a candidate row is a promise the
+    join screen can turn into a grant, and "never crosses" must not appear as
+    one.
+
+    Raises :class:`OfferEnumerationError` when a store exists but cannot be
     read — the caller sends an empty offer and records WHY.
     """
     from local_operator.network.credentials.types import (
         DEVICE_BOUND_PROVIDERS,
         credential_key_for_mcp,
+        credential_key_for_secret,
     )
 
     rows: list[dict[str, Any]] = []
@@ -403,6 +467,15 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
             continue
         rows.append({"key": credential_key_for_mcp(url), "kind": "mcp-rotating", "label": ""})
 
+    from local_operator.network.credentials import sync as sync_mod
+
+    marks_state = sync_mod.SyncState.load(network_id) if network_id else None
+    for name in _secret_candidate_names(config):
+        key = credential_key_for_secret(name)
+        if marks_state is not None and marks_state.mark_for(key) == sync_mod.MARK_LOCAL_ONLY:
+            continue
+        rows.append({"key": key, "kind": "store-secret", "label": ""})
+
     from local_operator.network.credentials import github as github_mod
 
     if github_mod.source_present(config):
@@ -417,23 +490,89 @@ def enumerate_candidates(config: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_items(config: Path) -> list[dict[str, Any]]:
-    """The offer's ``items``: candidates + per-kind defaults + masked labels, capped.
+def _secret_candidate_names(config: Path) -> list[str]:
+    """The names in this device's encrypted store that may be candidate rows.
+
+    An absent store is no rows — a read must not be the reason one appears. A
+    store that EXISTS and cannot be read raises :class:`OfferEnumerationError`:
+    the same two-facts distinction ``_strict_provider_rows`` keeps, so an empty
+    offer can be told from a broken one. Provider-role rows (the reserved
+    ``LOP_PROVIDER_`` namespace) are skipped: they can never be copied (the
+    store refuses them on both its write and read paths for an agent caller),
+    so listing one would promise a grant the serve path refuses.
+    """
+    from local_operator.secrets.keys import store_path
+
+    if not store_path(config).exists():
+        return []
+    try:
+        from local_operator.secrets import access
+        from local_operator.secrets.store import is_provider_secret_name
+
+        store = access.open_store(config)
+    except Exception as exc:  # noqa: BLE001 — exists but unreadable: say so
+        raise OfferEnumerationError(f"the encrypted secret store could not be read: {exc}") from exc
+    names: list[str] = []
+    try:
+        for record in store.list():
+            name = str(getattr(record, "name", "") or "")
+            if not name or is_provider_secret_name(name):
+                continue
+            names.append(name)
+    except Exception as exc:  # noqa: BLE001 — an enumeration that failed is unreadable
+        raise OfferEnumerationError(
+            f"the encrypted secret store could not be enumerated: {exc}"
+        ) from exc
+    finally:
+        close_quietly(store)
+    return sorted(names)
+
+
+def build_items(config: Path, *, network_id: str = "") -> list[dict[str, Any]]:
+    """The offer's ``items``: candidates + defaults + masked labels, capped.
 
     Sorted by key (the sort is part of the contract — the digest commits to the
     list as built, and two implementations that sort differently would fail each
     other's digest check), capped at :data:`MAX_OFFER_ITEMS`.
+
+    THE PER-ROW ``share`` IS TWO RULES, one per family: provider rows take their
+    kind's table default (§1.4), and class-2 rows take §4.2's per-key selection —
+    ``sync`` marks win, else the key is preselected exactly when the pushed
+    bundles declare it (the needs-list read through ``mcpdefs.state_rows``).
+    Everything else a device holds stays listed with ``share`` false: OFFERED,
+    not copied.
     """
-    rows = sorted(enumerate_candidates(config), key=lambda row: str(row["key"]))
-    items = [
-        {
-            "key": row["key"],
-            "kind": row["kind"],
-            "label": mask_label(row["label"]),
-            "share": share_default(row["kind"]),
-        }
-        for row in rows
-    ]
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import (
+        SECRET_KIND,
+        secret_name_from_key,
+    )
+
+    rows = sorted(
+        enumerate_candidates(config, network_id=network_id), key=lambda row: str(row["key"])
+    )
+    state = sync_mod.SyncState.load(network_id) if network_id else None
+    needs = (
+        sync_mod.needs_names(config)
+        if any(str(row["kind"]) == SECRET_KIND for row in rows)
+        else frozenset()
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        kind = str(row["kind"])
+        if kind == SECRET_KIND:
+            mark = state.mark_for(str(row["key"])) if state is not None else ""
+            share = sync_mod.secret_mark_default(mark, secret_name_from_key(str(row["key"])), needs)
+        else:
+            share = share_default(kind)
+        items.append(
+            {
+                "key": row["key"],
+                "kind": kind,
+                "label": mask_label(str(row["label"] or "")),
+                "share": share,
+            }
+        )
     return items[:MAX_OFFER_ITEMS]
 
 

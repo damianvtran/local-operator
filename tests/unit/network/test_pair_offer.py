@@ -181,7 +181,9 @@ def test_offer_bounded_sorted_digest_matches_canonical_items(
         {"key": f"provider-{index:03d}", "kind": "api-key-static", "label": ""}
         for index in range(offers.MAX_OFFER_ITEMS + 6)
     ]
-    monkeypatch.setattr(offers, "enumerate_candidates", lambda config: list(reversed(many)))
+    monkeypatch.setattr(
+        offers, "enumerate_candidates", lambda config, **kwargs: list(reversed(many))
+    )
 
     items = offers.build_items(root)
     assert len(items) == offers.MAX_OFFER_ITEMS
@@ -196,7 +198,7 @@ def test_offer_bounded_sorted_digest_matches_canonical_items(
 
     # And a list that is exactly at the cap is kept whole.
     monkeypatch.setattr(
-        offers, "enumerate_candidates", lambda config: many[: offers.MAX_OFFER_ITEMS]
+        offers, "enumerate_candidates", lambda config, **kwargs: many[: offers.MAX_OFFER_ITEMS]
     )
     assert len(offers.build_items(root)) == offers.MAX_OFFER_ITEMS
 

@@ -1163,7 +1163,12 @@ class MeshCredentialBroker:
             return {"kind": "error", "code": "not_a_holder", "key": key}
         if failure == "quota":
             return self._remote_quota_block(key, entry, by, frame, reported_id=reported_id)
-        if failure in ("invalid", "unauthorized"):
+        if failure in ("invalid", "unauthorized", "copy_stale"):
+            # ``copy_stale`` (S4) rides the same arm as the ordinary 401: a copy
+            # upstream rejects is a value the owner may be able to refresh at
+            # its source, and the announce pass carries whatever the refresh
+            # produced to the holder on its next contact. Its own name in the
+            # audit keeps the two failure stories distinguishable.
             return self._one_owner_refresh(key, entry, by, reason=failure, reported_id=reported_id)
         # Anything else — ``unavailable`` (a provider 5xx/529 overload), ``failed`` —
         # is audited above and changes nothing: a provider-side fault is not evidence

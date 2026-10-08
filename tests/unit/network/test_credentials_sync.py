@@ -781,12 +781,14 @@ def test_offline_catch_up_never_invalidates_the_member_copy(sync_mesh: Any) -> N
 
 
 def test_a_removed_member_is_not_announced_to_and_is_refused(sync_mesh: Any) -> None:
-    """§8.1/§8.3: the sync path withholds from a non-active member, both ways.
+    """§8.1/§8.3: the sync path withholds from a non-active member, both ways —
+    and §5.5c/§4.3 (S4): the ENDING reaches the same member.
 
-    The announce side: once B is deactivated in A's record the exchange has
-    nothing to say to it (the tick answers ``in_sync`` and no dial is made). The
-    copy side: a copy request from the removed member is refused, audited, and
-    changes nothing.
+    The announce side: once B is deactivated in A's record no new generation is
+    delivered. The ending side: a wipe notice is NOT a copy, so it does reach
+    the removed member — B deletes its copy by provenance and acks, and A's
+    ledger records the ending. The copy side: a copy request from the removed
+    member is refused, audited, and changes nothing.
     """
     mesh = sync_mesh
     _run_exchange(mesh)
@@ -801,11 +803,19 @@ def test_a_removed_member_is_not_announced_to_and_is_refused(sync_mesh: Any) -> 
     mesh.auth_a.upsert_credential(KEY, _payload(VALUE_2))
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
-    time.sleep(0.5)
-    after = SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY)
-    assert after is not None and after.get("gen") == before.get(
-        "gen"
-    ), "a removed member must not receive the new generation"
+    # THE ENDING, NOT THE NEW VALUE: B's copy is deleted by provenance and its
+    # applied sidecar cleared; the generation A bumped never arrives.
+    assert net_fixtures.wait_for(
+        lambda: SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY) is None
+    ), "the removed member's copy was not wiped"
+    # And the wipe-ack lands in A's ledger as an ending, not a held copy.
+    assert net_fixtures.wait_for(
+        lambda: bool(
+            (SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) or {}).get(
+                "wiped"
+            )
+        )
+    ), "the wipe was not acknowledged to the owner"
 
     # The refusal arm: a copy request from the removed member is refused.
     from local_operator.network.credentials import owner as owner_mod

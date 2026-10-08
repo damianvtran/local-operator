@@ -1799,6 +1799,26 @@ def capability_change_event(record: NetworkRecord, change: CapabilityChange) -> 
     )
 
 
+def rotation_lock_refusal(record: NetworkRecord, *, now: float | None = None) -> None:
+    """Refuse a rotation the lock covers, in the ONE sentence both readers use.
+
+    TWO READERS, which is why this is a function rather than an inline check:
+    ``rotate_epoch`` itself, and the member-removal handler's precheck (review
+    round 3's QA observation — the ending exchange and the removal must be one
+    unit of decision, so a refusal must fire BEFORE the endings run; measured:
+    a lock-refused ``member rm`` wiped the member's copies while the refusal
+    said nothing about them). Factored the instant it had a second caller, so
+    the sentence cannot drift between the two.
+    """
+    moment = time.time() if now is None else now
+    if record.rotation_lock_until > moment:
+        raise MeshRefusal(
+            "rotation_in_progress",
+            f"a rotation of {record.name} is already in progress; wait "
+            f"{int(record.rotation_lock_until - moment)} s and try again",
+        )
+
+
 def rotate_epoch(
     record: NetworkRecord,
     state: SecretState,
@@ -1826,12 +1846,7 @@ def rotate_epoch(
     from secrets import token_bytes
 
     moment = time.time() if now is None else now
-    if record.rotation_lock_until > moment:
-        raise MeshRefusal(
-            "rotation_in_progress",
-            f"a rotation of {record.name} is already in progress; wait "
-            f"{int(record.rotation_lock_until - moment)}s and try again",
-        )
+    rotation_lock_refusal(record, now=moment)
     previous_epoch = record.epoch
     record.epoch = record.epoch + 1
     state.rotate(wire.b64u(token_bytes(32)), record.epoch)
@@ -8526,7 +8541,9 @@ class RelayServer:
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
 
-            send_offer, offer_items, offer_detail = _pair_offer_for(handshake, self.root)
+            send_offer, offer_items, offer_detail = _pair_offer_for(
+                handshake, self.root, record.network_id
+            )
             if send_offer:
                 sock.sendall(
                     codec.seal(
@@ -9503,6 +9520,30 @@ class RelayServer:
         resolved = self._require_network(str(frame.get("network") or ""))
         state = store.require_secrets(resolved.network_id, self.root)
         device_id = str(frame.get("device_id") or "")
+        # ONE UNIT OF DECISION (review round 3 QA observation): a removal the
+        # rotation lock will refuse must not run its ending exchange first —
+        # measured, a lock-refused `member rm` wiped the member's copies while
+        # the refusal said nothing about them, and the member stayed an active
+        # holder a tick could re-deliver the copy to. The precheck reads the
+        # record the write will touch; `rotate_epoch` still re-checks inside
+        # the write lock, so a rotation landing in the window between the two
+        # is refused there exactly as before (the pre-existing race).
+        rotation_lock_refusal(store.load(resolved.network_id, self.root))
+        # THE LAST CONTACT THE COPIES GET (review round 1, Q1): the ending exchange
+        # runs BEFORE the tombstone, because afterwards this device's own dial is
+        # refused by design (``_ensure_link_with_reason`` skips inactive members) and
+        # every copy on the removed member would end silently. Bounded inside the
+        # engine (probe + total budget); the counts ride the receipt so an unreachable
+        # member's copies read as OPEN — rotate at the source — rather than gone, and
+        # a give-up that may still be in flight (F1) reads as its own class.
+        from local_operator.network.credentials.sync import sync_for_relay
+
+        engine = sync_for_relay(self)
+        endings = (
+            engine.deliver_removal_endings(device_id)
+            if engine is not None
+            else {"copies": 0, "wiped": 0, "timed_out": 0}
+        )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
                 record, state, device_id=device_id, by=record.self_device_id, root=self.root
@@ -9528,6 +9569,9 @@ class RelayServer:
             "removed": device_id,
             "epoch": outcome.epoch,
             "queued": len(store.queued_frames(device_id, self.root)),
+            "copies": int(endings.get("copies") or 0),
+            "wiped": int(endings.get("wiped") or 0),
+            "timed_out": int(endings.get("timed_out") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -11116,9 +11160,13 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path
+    handshake: Handshake, root: Path, network_id: str
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
+
+    ``network_id`` is the ceremony's own network: class-2 rows take their
+    per-key default from THAT network's ``sync`` marks (§4.2), so an offer built
+    without it would silently ignore an operator's standing marks.
 
     THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
     ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
@@ -11143,7 +11191,7 @@ def _pair_offer_for(
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
     try:
-        items = offers_mod.build_items(root)
+        items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
         empty = offers_mod.digest_of([])
         return (

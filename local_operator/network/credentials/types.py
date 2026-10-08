@@ -108,6 +108,41 @@ def mcp_url_from_key(key: str) -> str:
     return key[len(MCP_KEY_PREFIX) :]
 
 
+#: The placement-key namespace for the ENCRYPTED SECRET STORE (design class 2):
+#: ``secret:<NAME>``, one key per ``lop secret`` row. Prefixed for the same reason
+#: ``mcp:<url>`` is (module docstring): a store secret named ``openai`` must not
+#: collide with the provider placement ``openai`` — one placement entry per key,
+#: and a collision would serve the wrong thing rather than refusing.
+SECRET_KEY_PREFIX = "secret:"
+
+#: The placement ``kind`` for a class-2 secret (design ``mesh-consent-provisioning``
+#: §2.1 row 2). Spelled without the provider classes' ``-static``/``-rotating``
+#: suffix on purpose: this class's copy policy is per KEY (the needs-list ∪
+#: ``sync`` marks, §4.2), not a per-kind default.
+SECRET_KIND = "store-secret"
+
+
+def credential_key_for_secret(name: str) -> str:
+    """The placement key for an encrypted-store secret. Identity, spelled once."""
+    return f"{SECRET_KEY_PREFIX}{name}"
+
+
+def is_secret_key(key: str) -> bool:
+    return key.startswith(SECRET_KEY_PREFIX)
+
+
+def secret_name_from_key(key: str) -> str:
+    """The secret NAME inside a ``secret:<name>`` key. Raises on a non-secret key.
+
+    Raising rather than returning ``""`` for the reason the MCP sibling states in
+    this module: a caller that asked for the name of a provider key has a bug, and
+    an empty string would march it on to look up the empty secret.
+    """
+    if not is_secret_key(key):
+        raise ValueError(f"{key!r} is not a secret:<name> placement key")
+    return key[len(SECRET_KEY_PREFIX) :]
+
+
 # ---------------------------------------------------------------------------
 # Device-bound providers
 # ---------------------------------------------------------------------------
@@ -338,6 +373,14 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "unavailable": 60_000,
     "not_implemented": NO_RETRY,
     "internal": 60_000,
+    # S4's two additions, and each caches by what its remedy is. ``local_only``
+    # is a policy answer no retry can change (§4.2's kill switch), cached long
+    # like the other authorisation refusals. ``copy_stale`` (design §6.1's added
+    # code) is self-healing on the owner's next contact — the holder's copy
+    # keeps working meanwhile, and a dead value fails at its own use — so it
+    # caches short, beside the failure it describes.
+    "local_only": 300_000,
+    "copy_stale": 60_000,
 }
 
 BROKER_ERROR_CODES: frozenset[str] = frozenset(BROKER_ERROR_TTL_MS)

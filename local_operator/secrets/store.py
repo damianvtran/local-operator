@@ -220,6 +220,7 @@ class SecretRecord:
     created_at: float
     updated_at: float
     last_used_at: float | None
+    origin: dict[str, Any] | None = None
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -288,7 +289,54 @@ def _write_meta_int(connection: sqlite3.Connection, key: str, value: int) -> Non
     )
 
 
-def _payload(name: str, description: str, value: bytes) -> bytes:
+#: Bounds for the mesh-copy ``origin`` marker. Small on purpose: it names a
+#: source (a device, a key, a generation), never material, and the copy engine
+#: is its only writer. Bounding here as well as at the writer keeps a
+#: pathological marker from bloating every enumeration of the store.
+_ORIGIN_MAX_FIELDS = 16
+_ORIGIN_MAX_VALUE = 512
+
+#: The sentinel :meth:`SecretStore.update` uses for "keep the marker the record
+#: already carries" — distinct from an explicit ``None``, which CLEARS it.
+_ORIGIN_KEEP = object()
+
+
+def _validate_origin(origin: Any) -> dict[str, Any] | None:
+    """The bounded marker to seal, or ``None``. Refuses anything else loudly.
+
+    Refusing (rather than dropping) because this is a WRITE path: a caller that
+    tried to store provenance of a shape the store cannot bound has a bug that
+    would otherwise surface much later as a missing wipe.
+    """
+    if origin is None:
+        return None
+    if not isinstance(origin, dict) or len(origin) > _ORIGIN_MAX_FIELDS:
+        raise SecretStoreError(
+            "the origin marker must be a small object (at most "
+            f"{_ORIGIN_MAX_FIELDS} fields) or absent"
+        )
+    bounded: dict[str, Any] = {}
+    for key, value in origin.items():
+        if not isinstance(key, str) or not key or len(key) > 64:
+            raise SecretStoreError("origin keys are short strings")
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            # Strings, integers and floats: the JSON primitives the marker is
+            # made of (timestamps are floats — the class-4 marker carries one).
+            # A nested object would need a bound this store does not want, so
+            # it is refused LOUDLY rather than stored unbounded.
+            raise SecretStoreError("origin values are strings, integers or floats")
+        if isinstance(value, str) and len(value) > _ORIGIN_MAX_VALUE:
+            raise SecretStoreError("an origin value is longer than this store carries")
+        bounded[key] = value
+    return bounded
+
+
+def _payload(
+    name: str,
+    description: str,
+    value: bytes,
+    origin: dict[str, Any] | None = None,
+) -> bytes:
     """The plaintext sealed inside the ciphertext.
 
     JSON with the value hex-encoded rather than raw bytes: a value may be
@@ -300,12 +348,22 @@ def _payload(name: str, description: str, value: bytes) -> bytes:
     The name is in here as well as in the blind index because the index is
     one-way — this is the only copy of the label that can be read back for
     ``list``, and being inside the AEAD is what authenticates it.
+
+    ``origin`` (the mesh-copy marker) is an ADDITIVE field: absent on every
+    locally-created record, and a runtime old enough to predate the copy slice
+    simply ignores it on read. The one accepted loss is that such a runtime's
+    ``update``/``rotate`` would re-seal without it — accepted because that
+    runtime also cannot create a mesh copy, and clearing a marker it could
+    never have written is the safe direction (the row reads as local again).
     """
-    return json.dumps(
-        {"name": name, "description": description, "value": value.hex()},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    body: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "value": value.hex(),
+    }
+    if origin is not None:
+        body["origin"] = origin
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def recorded_key_fingerprint(base: Path | None = None) -> bytes | None:
@@ -635,6 +693,7 @@ class SecretStore:
                 f"Secret record {record_id} is inconsistent: its sealed name does not match "
                 "its lookup index. Refusing to return a value."
             )
+        origin = payload.get("origin")
         record = SecretRecord(
             record_id=record_id,
             name=payload["name"],
@@ -644,6 +703,11 @@ class SecretStore:
             created_at=float(row[7]),
             updated_at=float(row[8]),
             last_used_at=None if row[9] is None else float(row[9]),
+            # Tolerantly read: the marker was authenticated inside the payload,
+            # so a non-object here is a bug or damage, and dropping it to None
+            # keeps one bad field from poisoning every enumeration — the same
+            # safe direction the missing-field case lands in.
+            origin=dict(origin) if isinstance(origin, dict) else None,
         )
         return record, bytes.fromhex(payload["value"])
 
@@ -667,6 +731,7 @@ class SecretStore:
         kind: str = "string",
         role: str = "agent",
         session_id: str | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> SecretRecord:
         """Store a NEW secret. Refuses to overwrite an existing name.
 
@@ -684,6 +749,7 @@ class SecretStore:
         canonical = validate_name(name)
         _validate_role(canonical, role)
         description = _validate_description(description)
+        bounded_origin = _validate_origin(origin)
         if kind not in KINDS:
             raise InvalidSecretName(f"kind must be one of {', '.join(KINDS)}; got {kind!r}.")
         self.initialize()
@@ -709,7 +775,9 @@ class SecretStore:
                     key_generation=generation,
                 )
                 nonce, ciphertext = seal(
-                    self._master_key, metadata, _payload(canonical, description, value)
+                    self._master_key,
+                    metadata,
+                    _payload(canonical, description, value, origin=bounded_origin),
                 )
                 connection.execute(
                     f"INSERT INTO secrets({_RECORD_COLUMNS})"
@@ -750,6 +818,7 @@ class SecretStore:
             created_at=now,
             updated_at=now,
             last_used_at=None,
+            origin=bounded_origin,
         )
 
     def update(
@@ -760,6 +829,7 @@ class SecretStore:
         description: str | None = None,
         role: str = "agent",
         session_id: str | None = None,
+        origin: dict[str, Any] | None | object = _ORIGIN_KEEP,
     ) -> SecretRecord:
         """Re-seal an existing secret with a new value under a FRESH nonce.
 
@@ -772,6 +842,12 @@ class SecretStore:
         ``role`` is checked against the name exactly as ``set`` checks it, so a
         value cannot be RE-SEALED into the other namespace even if a caller
         knows a name it could not have created.
+
+        ``origin`` defaults to KEEPING the record's existing marker, because
+        the ordinary update is a value change of the same secret — a mesh copy
+        that is updated by the copy engine passes a fresh marker instead, and
+        an explicit ``None`` is how a marker is cleared (an update is a full
+        re-seal, so nothing else could preserve it).
         """
         canonical = validate_name(name)
         _validate_role(canonical, role)
@@ -786,6 +862,10 @@ class SecretStore:
                     if description is None
                     else _validate_description(description)
                 )
+                if origin is _ORIGIN_KEEP:
+                    new_origin = existing.origin
+                else:
+                    new_origin = _validate_origin(origin)
                 metadata = RecordMetadata(
                     record_id=existing.record_id,
                     name_index=name_index(self._master_key, canonical),
@@ -793,7 +873,9 @@ class SecretStore:
                     key_generation=existing.key_generation,
                 )
                 nonce, ciphertext = seal(
-                    self._master_key, metadata, _payload(canonical, new_description, value)
+                    self._master_key,
+                    metadata,
+                    _payload(canonical, new_description, value, origin=new_origin),
                 )
                 connection.execute(
                     "UPDATE secrets SET nonce = ?, ciphertext = ?, updated_at = ? WHERE id = ?",
@@ -822,6 +904,7 @@ class SecretStore:
             created_at=existing.created_at,
             updated_at=now,
             last_used_at=existing.last_used_at,
+            origin=new_origin,
         )
 
     def get(self, name: str, *, role: str = "agent", session_id: str | None = None) -> bytes:
@@ -867,6 +950,28 @@ class SecretStore:
                 connection.execute("ROLLBACK")
                 raise
         return value
+
+    def read_for_copy(self, name: str, *, role: str = "agent") -> tuple[SecretRecord, bytes]:
+        """Open a record for the COPY path: value plus metadata, NO ``last_used`` touch.
+
+        WHY A THIRD READER EXISTS. :meth:`get` writes ``last_used_at`` and an
+        audit row on every call, deliberately — a retrieval that leaves no
+        trace is the one an attacker most wants. But the credential copy
+        engine reads a value on EVERY sync tick, purely to recompute the
+        digest it announces; routed through :meth:`get` that would fabricate
+        "last used" every minute and turn the audit log into tick noise — a
+        trace that means nothing buries the ones that mean something. The copy
+        path's own serve is audited by the engine's audit record
+        (``credential.copy``), and the announce read is not a use.
+
+        Everything else matches :meth:`get`: the same namespace check (a copy
+        can never touch a ``LOP_PROVIDER_*`` row), the same authenticated
+        decode, the same refusal shapes.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
+        with closing(self._open(for_write=False)) as connection:
+            return self._decode(self._row_for(connection, canonical))
 
     def describe(self, name: str, *, role: str = "agent") -> SecretRecord:
         """Metadata for one secret. Never returns the value.
@@ -1279,7 +1384,12 @@ class SecretStore:
                     nonce, ciphertext = seal(
                         new_master_key,
                         metadata,
-                        _payload(record.name, record.description, value),
+                        _payload(
+                            record.name,
+                            record.description,
+                            value,
+                            origin=record.origin,
+                        ),
                     )
                     connection.execute(
                         "UPDATE secrets SET name_index = ?, key_generation = ?, nonce = ?,"

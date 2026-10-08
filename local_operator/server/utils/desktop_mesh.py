@@ -740,11 +740,19 @@ def remove_member(root: Path | None, network: str, device: str) -> dict[str, Any
     has no business holding a sentence a person typed. This function is the write
     itself: the tombstone, the rotation and the queued frames all happen on the
     relay, which owns the record's lock.
+
+    TIMEOUT: ``REMOVAL_CLI_TIMEOUT_S``, not the shared 20 s verb budget — the
+    relay's ending exchange before the tombstone is probe + a 25 s budget by
+    construction, and a 20 s wait would surface a timeout for a removal that did
+    complete (review round 2, F1's sizing, applied to the second caller of this
+    op).
     """
+    from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
+
     return _call(
         root,
         "net_member_rm",
-        timeout=_VERB_TIMEOUT_S,
+        timeout=REMOVAL_CLI_TIMEOUT_S,
         network=network,
         device_id=device,
     )
