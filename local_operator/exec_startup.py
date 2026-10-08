@@ -380,17 +380,18 @@ def resolve_startup(args: Any) -> Any:
         # (``team_owns_the_agent_slot_message``): the desktop's header lane keys
         # on those words, and a --profile that reads like /agent (docs/EXEC.md)
         # must be refused in the words of /agent.
-        from local_operator.session.errors import team_owns_the_agent_slot_message
+        from local_operator.session.errors import flag_with_team_refusal_message
 
         raise ValueError(
             # The flag-level fact FIRST (design round 1, D6): the shared sentence
-            # below speaks to a user of ``/agent`` in a session, and a shell
-            # user who typed two flags needs to be told which pair is wrong
-            # before being told how the SESSION feels about it. The sentence
-            # itself stays VERBATIM — the desktop lane keys on those words.
-            "--profile cannot be combined with --team: a team owns the session's "
-            "agent slot. "
-            + team_owns_the_agent_slot_message(
+            # speaks to a user of ``/agent`` in a session, and a shell user who
+            # typed two flags needs to be told which pair is wrong before being
+            # told how the SESSION feels about it. Both halves are composed by the
+            # ONE builder the network create refuses the same pair with, so the
+            # exec and mesh spellings cannot drift; the session's sentence itself
+            # stays VERBATIM — the desktop lane keys on those words.
+            flag_with_team_refusal_message(
+                "--profile",
                 str(getattr(team, "name", "") or args.team),
                 str(getattr(team, "manager", "") or ""),
             )

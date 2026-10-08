@@ -195,11 +195,19 @@ rendering is not a contract.
 
 ## Who the session on the peer runs as
 
-A create on a peer can name the agent PROFILE it runs as and the TEAM it manages, and
-it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model and
-hosting that device will use. The definitions travel with the create:
-`lop network sessions --peer <id> --create --profile reviewer --team release`
-reconciles those two definitions onto that device FIRST (idempotent, by name, only
+A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
+and it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model
+and hosting that device will use. A profile and a team cannot both be named: a team
+owns the session's agent slot (the same rule `lop exec` refuses that pair with), so
+`--profile` beside `--team` is refused — by the creating device before anything is
+sent, and by the owning device in the same words if it arrives anyway — and no
+session is made. An `--agent` row beside a team is the same refusal when that row's
+instructions are attachable (a role or a specialist); a routing-only legacy row
+beside a team is allowed, and the receipt says routing-only.
+
+The definitions travel with the create:
+`lop network sessions --peer <id> --create --profile reviewer`
+reconciles the named definitions onto that device FIRST (idempotent, by name, only
 what the frame mentions), so this works against a device that has never seen them —
 including a bare install that was paired a minute ago.
 

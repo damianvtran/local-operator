@@ -6754,6 +6754,43 @@ class RelayServer:
         )
         if identity is None:
             raise MeshRefusal("definition_missing", refusal)
+        # THE PAIR THAT CAN NEVER BE HONOURED, REFUSED BEFORE ANYTHING MOVES (#2014's
+        # rule on the seam it missed). A create that would attach BOTH an attachable
+        # identity and a team — ``--profile X --team Y``, or a role/specialist row
+        # named via ``--agent`` beside a team — used to write a sidecar carrying both
+        # (the ``write_session_attachment`` below) and answer a receipt claiming the
+        # profile was applied, while the restore's deliberate team-wins rule dropped
+        # the profile silently: the session ran the team's manager under the profile's
+        # name, which is the exact wrong-thing-under-the-right-name failure the rule
+        # exists to forbid. The refusal lands HERE — after both names resolve (a name
+        # this device does not hold keeps its own sentence above) and before the
+        # mint, the stamp and the sidecar — so a refused create leaves nothing on
+        # disk. The sentence is the SAME one the session and ``lop exec`` use, with
+        # the flag-level fact in front for the caller who typed two flags (see
+        # ``flag_with_team_refusal_message``); the flag named is the attachable
+        # half's own. A routing-only legacy ``--agent`` row is NOT this case — its
+        # instructions are not attachable, so nothing is dropped and the pair stays
+        # allowed — which is why this reads the RESOLVED attachability rather than
+        # the raw flags.
+        if identity.instructions_attachable and identity.team_name:
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(identity.team_name)
+                manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                manager = ""
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            raise MeshRefusal(
+                "bad_request",
+                flag_with_team_refusal_message(
+                    "--profile" if str(frame.get("profile") or "") else "--agent",
+                    identity.team_name,
+                    manager,
+                ),
+            )
         stale = definitions.check_expected(self.root, frame.get("expect"))
         if stale:
             raise MeshRefusal("definition_stale", stale)
@@ -10067,6 +10104,35 @@ class RelayServer:
         agent_id = str(frame.get("agent_id") or "")
         team = str(frame.get("team") or "")
         effort = str(frame.get("effort") or "")
+        # A PAIR THAT CAN NEVER BE HONOURED IS REFUSED BEFORE THE PUSH (#2014's rule
+        # on the half that can see the flags). ``lop exec`` refuses ``--profile``
+        # beside ``--team`` at preflight — same flags, same rule — and this half
+        # refuses it in the SAME words, BEFORE ``definitions.push_to_peer`` below:
+        # a create that is going to be refused must not mirror definitions onto the
+        # peer as a side effect of asking, and the refusal must not depend on the
+        # peer answering (or existing) either. The team's manager is read from THIS
+        # device's registry when it holds one; a team this device does not hold is a
+        # legitimate create (``definitions push`` brings it), and the shared
+        # sentence states the rule without naming a speaker for exactly that case.
+        # The ``--agent`` spelling is deliberately NOT refused here: whether that row
+        # is attachable is a fact only the OWNING device establishes, and its refusal
+        # is computed there (``_op_session_create``); a routing-only row beside a
+        # team is a legitimate pair that must not be pre-refused by a guess.
+        if profile and team:
+            manager = ""
+            try:
+                from local_operator.teams import TeamRegistry
+
+                team_row = TeamRegistry(self.root).get_team_by_name(team)
+                manager = str(getattr(team_row, "manager", "") or "")
+            except Exception:  # noqa: BLE001 — a damaged registry costs only the name
+                manager = ""
+            from local_operator.session.errors import flag_with_team_refusal_message
+
+            raise MeshRefusal(
+                "bad_request",
+                flag_with_team_refusal_message("--profile", team, manager),
+            )
         named = bool(profile or agent_name or agent_id or team)
         push_reason = ""
         expect: dict[str, Any] = {}
