@@ -16,7 +16,8 @@
 //    This is the leak the design's routing rule exists to prevent — the blocked
 //    path's composer swallow is exactly the behaviour being replaced.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { askOpenPolicy } from "./lib/ask-open-policy";
 import { SessionScreen } from "./screens/session-view";
 import type { PendingAsk, PendingRequest, SessionProjection } from "./types";
 
@@ -118,11 +119,26 @@ function projection(patch: Partial<SessionProjection> = {}): SessionProjection {
 	} satisfies SessionProjection;
 }
 
+/* THE OPEN-BY-DEFAULT POLICY IS OFF FOR THIS FILE, deliberately. Every cell here is
+   about the DOOR — the dock and the header entry, which a user presses — and each one
+   mounts a conversation that already has an ask waiting, which is precisely the state
+   the policy now answers by opening the sheet on its own. An open sheet makes the rest
+   of the screen `inert`/`aria-hidden`, so these cells could no longer find the controls
+   they exist to press, and they would be asserting the policy's behaviour by accident.
+   That behaviour is pinned where it belongs, in `session-view.asks-open.test.tsx`, which
+   runs the same real screen with the policy ON; this file keeps testing the door. */
+beforeEach(() => {
+	askOpenPolicy.reset();
+	askOpenPolicy.setEnabled(false);
+});
+
 afterEach(() => {
 	cleanup();
 	localStorage.clear();
 	vi.clearAllMocks();
 	slot = { projection: null, connected: true };
+	askOpenPolicy.setEnabled(true);
+	askOpenPolicy.reset();
 });
 
 describe("SessionScreen and queued asks", () => {
