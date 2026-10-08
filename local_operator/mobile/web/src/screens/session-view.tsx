@@ -984,10 +984,13 @@ export function SessionScreen({
 			    asks, and its presence CHANGES NOTHING about the composer beneath it —
 			    with the bar showing, the composer is an ordinary conversation
 			    composer, so a message typed there can never be sent as an answer.
-			    That is the half of §5.0's routing rule this screen enforces; the other
-			    half ("while EXPANDED the composer sends the answer") is enforced by the
-			    sheet being modal over this column: while it is open, the sheet's own
-			    answer fields are the only inputs that can receive a keystroke. */}
+			    That is the WHOLE of the routing rule this screen keeps: the composer is
+			    an ordinary conversation composer, and while the sheet is open the
+			    sheet's own answer fields are the only inputs that can receive a
+			    keystroke — the sheet is modal over this column — so a message typed
+			    here can never be sent as an answer. (The old design-doc half, "while
+			    EXPANDED the composer sends the answer", described a routing the sheet
+			    makes unreachable by construction; §5.0 is amended by #2056.) */}
 			<AskDock rows={projection.asks} onOpen={openAsks} />
 
 			<Composer

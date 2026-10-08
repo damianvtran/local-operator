@@ -375,18 +375,22 @@ async def test_the_header_hints_follow_the_view():
     assert delivering.header_hints() == ("esc collapse",)
     # A moved-on row IS answerable, and `x dismiss` names a key it can honour.
     moved = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
-    assert moved.header_hints() == ("d decline", "enter answer", "x dismiss", "esc collapse")
+    assert moved.header_hints() == ("enter answer", "d decline", "x dismiss", "esc collapse")
     # An OPEN row cannot be dismissed (dismiss is offered on a timed-out ask
     # alone), so that key is not advertised over it.
     opened = AskQueueList(ask_rows([_row("a1")]))
     assert "x dismiss" not in opened.header_hints()
 
 
-async def test_the_irreversible_hint_outlives_the_reversible_one():
-    """`d decline` is kept longest, and the base named it at 100x30 (D3).
+async def test_the_primary_hint_outlives_the_irreversible_one():
+    """`enter answer` is kept longest since U3/D4 — it REVERSES review round 2's D3.
 
-    The selected row already carries the `❯` cue for Enter; `d` has no other
-    teacher anywhere on the frame, and it cannot be undone.
+    D3 spent `d` first by IRREVERSIBILITY, on the argument that the `❯` caret
+    already teaches Enter. The open-by-default walk found the caret says WHICH
+    row, not that Enter takes it — and the passive→live handover lands the caret
+    in the same frame the ladder sheds hints, so `enter answer` is the hint that
+    cannot be spared. `d` still outlives `x`: a decline cannot be undone, and
+    `x` is only ever offered over a timed-out row.
     """
     rows = ask_rows(
         [
@@ -399,19 +403,22 @@ async def test_the_irreversible_hint_outlives_the_reversible_one():
     listing = AskQueueList(rows)
     for width in (60, 80, 100, 130):
         painted = listing.header_text(width)
-        if "decline" in painted:
+        if "d decline" in painted:
+            assert "enter answer" in painted, (width, painted)
+        if "x dismiss" in painted:
             assert "d decline" in painted, (width, painted)
-        if "enter answer" in painted:
-            assert "d decline" in painted, (width, painted)
-    # D3's own case: the SESSION scope at 100x30 — the size the base named it at.
-    assert "d decline" in listing.header_text(100)
-    # The FLEET scope spends 6 more cells on its subject, so at 100 the hints are
-    # gone whole rather than clipped — the control survives, which is what A9 and
-    # D3's own `keep one-line + control-survives-last` rule require.
+    # U3/D4's own case: the SESSION scope at 100x30 — the surviving hint is the
+    # primary action, not the one that was there before the user pressed Tab.
+    assert "enter answer" in listing.header_text(100)
+    assert "d decline" not in listing.header_text(100)
+    # The FLEET scope spends 6 more cells on its subject, and the FIRST hint now
+    # outbids the drawer clause (U3), so a hint survives even where the clause
+    # does not fit with it.
     fleet = AskQueueList(rows, scope=SCOPE_FLEET)
     assert "All conversations" in fleet.header_text(100)
-    assert "decline" not in fleet.header_text(100)
-    assert "d decline" in fleet.header_text(130)
+    assert "enter answer" in fleet.header_text(100)
+    assert "d decline" in fleet.header_text(100)
+    assert "x dismiss" in fleet.header_text(150)
 
 
 async def test_the_segments_are_one_painted_line_and_never_split_a_hint():
@@ -1198,7 +1205,7 @@ async def test_a_fleet_list_arms_the_countdown_clock_with_no_current_asks(enable
     ``_sync_ask_tick`` armed on ``self._ask_rows`` — the CURRENT session's rows —
     and was called only from the frontend snapshot. At the fleet door the
     ordinary case is a session with NO asks of its own (the note counts other
-    conversations'), so nothing armed and the fleet rows' ``expires in 41m``
+    conversations'), so nothing armed and the fleet rows' ``expires in 41 m``
     stayed frozen at the ``now_ms`` they were mounted with.
     """
     _seed(isolated_index, "s-other", [_row("o1")])

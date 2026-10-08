@@ -142,13 +142,13 @@ async def _settle(pilot, turns: int = 3) -> None:
 
 
 def _countdown_seconds(painted: str) -> int:
-    """The first ``expires in Ns`` in a painted list, or 0 once it expired.
+    """The first ``expires in N s`` in a painted list, or 0 once it expired.
 
     A frame is a rendering, not a struct: the countdown test has to read the
     number back out of the pixels it is asserting about, and ``expiring`` (the
     row past its deadline) is the floor of that scale, not an unparsed value.
     """
-    match = re.search(r"expires in (\d+)s", painted)
+    match = re.search(r"expires in (\d+) s", painted)
     return int(match.group(1)) if match else 0
 
 
@@ -663,10 +663,18 @@ def _refusal_rows(app: OperatorApp) -> list[Any]:
     ImportError — the behavioural assertions come first in every test below."""
     import local_operator.tui.app as app_module
 
-    sentence = getattr(app_module, "ASK_SECRET_REFUSAL", None)
-    if sentence is None:
+    sentences = {
+        getattr(app_module, name)
+        for name in (
+            "ASK_SECRET_REFUSAL_CLOSED",
+            "ASK_SECRET_REFUSAL_OPEN_CARD",
+            "ASK_SECRET_REFUSAL_OPEN_LIST",
+        )
+        if getattr(app_module, name, None)
+    }
+    if not sentences:
         return []
-    return [block for block in app.query(NoticeBlock) if (block.text() or "") == sentence]
+    return [block for block in app.query(NoticeBlock) if (block.text() or "") in sentences]
 
 
 async def test_a_secret_only_ask_refuses_chat_and_keeps_the_text(enabled):
@@ -676,7 +684,8 @@ async def test_a_secret_only_ask_refuses_chat_and_keeps_the_text(enabled):
     The TUI's composer stopped being an answer box when the routing went, which
     opened the same hole: the key goes to the model and into the transcript. The
     refusal is on SUBMIT (the leak is the transcript), it keeps the text exactly as
-    typed, sends and records nothing, and names the card's hidden field.
+    typed, sends and records nothing, and names the card's Value row in the
+    door's own words (with the surface CLOSED, the door is f4).
     """
     session = _AskSession()
     app = _app(session)
@@ -694,10 +703,15 @@ async def test_a_secret_only_ask_refuses_chat_and_keeps_the_text(enabled):
         assert composer.text == "PASTED-CREDENTIAL-SENTINEL", "the user's text was lost"
         assert "PASTED-CREDENTIAL-SENTINEL" not in composer.prompt_history()
         # ...and the user was told where a credential goes.
-        from local_operator.tui.app import ASK_SECRET_REFUSAL
+        # Read through the module so a tree without the state-aware copy reports a
+        # BEHAVIOURAL miss (the old sentence != None) rather than an ImportError.
+        import local_operator.tui.app as app_module
 
+        closed = getattr(app_module, "ASK_SECRET_REFUSAL_CLOSED", None)
         assert len(_refusal_rows(app)) == 1
-        assert "hidden field" in ASK_SECRET_REFUSAL and "f4" in ASK_SECRET_REFUSAL
+        assert _refusal_rows(app)[0].text() == closed
+        assert "hidden field" not in (closed or "")
+        assert "Value row" in (closed or "") and "f4" in (closed or "")
 
 
 async def test_the_secret_refusal_is_one_row_however_many_times_enter_is_pressed(enabled):
@@ -728,6 +742,91 @@ async def test_the_secret_refusal_comes_down_when_the_ask_is_answered(enabled):
 
         app._sync_ask_surface([])  # answered elsewhere: the fold drops it
         await _settle(pilot, 3)
+        assert _refusal_rows(app) == []
+
+
+async def test_the_refusal_names_the_route_the_open_surface_offers(enabled):
+    """D2/U2: `f4` CLOSES an open card, so the copy may not tell the user to press it.
+
+    The open-by-default policy makes "the surface is already up" the default
+    state for a first-timer, and in that state the old sentence taught both
+    meanings of f4 in one frame. The route is now the one on screen — the Tab
+    handover — and it moves IN PLACE when the surface opens or closes under a
+    standing row: one row, kept true, never a second copy.
+    """
+    import local_operator.tui.app as app_module
+
+    closed = getattr(app_module, "ASK_SECRET_REFUSAL_CLOSED", None)
+    open_card = getattr(app_module, "ASK_SECRET_REFUSAL_OPEN_CARD", None)
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row()]))
+        await _settle(pilot)
+        await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
+        rows = _refusal_rows(app)
+        assert len(rows) == 1, "premise: the refusal was shown"
+        assert rows[0].text() == closed
+
+        # The user opens the door the sentence named: the row restates, in place.
+        await pilot.press(ASK_TOGGLE_KEY)
+        await _settle(pilot)
+        assert app._ask_card is not None, "premise: one ask opens the card"
+        rows = _refusal_rows(app)
+        assert len(rows) == 1, "a restated row must not stack a second"
+        assert rows[0].text() == open_card
+        assert "⇥" in (rows[0].text() or "") and "f4" not in (rows[0].text() or "")
+
+        # ...and when it closes again, the door is f4 once more.
+        await pilot.press(ASK_TOGGLE_KEY)
+        await _settle(pilot)
+        rows = _refusal_rows(app)
+        assert len(rows) == 1
+        assert rows[0].text() == closed
+
+
+async def test_the_refusal_on_a_list_names_tab_then_the_ask_card(enabled):
+    """On a list the head ask's Value row is one row away; the copy names that route."""
+    import local_operator.tui.app as app_module
+
+    open_list = getattr(app_module, "ASK_SECRET_REFUSAL_OPEN_LIST", None)
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_secret_row("s1"), _secret_row("s2")]))
+        await _settle(pilot)
+        await pilot.press(ASK_TOGGLE_KEY)
+        await _settle(pilot)
+        assert app._ask_list is not None, "premise: two asks open the list"
+        await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
+        rows = _refusal_rows(app)
+        assert len(rows) == 1
+        assert rows[0].text() == open_list
+        assert "⇥" in (rows[0].text() or "") and "f4" not in (rows[0].text() or "")
+
+
+async def test_a_row_the_card_cannot_draw_does_not_trap_the_composer(enabled):
+    """Q-1: the refusal may only point at a card that can exist.
+
+    A wire row whose question the card's own validator refuses (a secret
+    question carrying options) cannot be drawn anywhere, so refusing chat would
+    name a Value row that exists nowhere while protecting nothing — and the row
+    can still be declined from the list. The chat goes through.
+    """
+    session = _AskSession()
+    app = _app(session)
+    undrawable = _secret_row()
+    undrawable["questions"][0]["options"] = [{"label": "Keep", "description": ""}]
+    async with app.run_test(size=(140, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([undrawable]))
+        await _settle(pilot)
+        await _submit_chat(app, pilot, "an ordinary sentence")
+        assert session.prompts == [
+            "an ordinary sentence"
+        ], "chat was trapped behind a door that cannot open"
         assert _refusal_rows(app) == []
 
 
@@ -1642,7 +1741,7 @@ async def test_the_countdown_repaints_between_snapshots(enabled, monkeypatch):
     """The countdown is derived at paint time, so a paint must fire on its own.
 
     ``_sync_ask_surface`` runs only on a frontend snapshot, so a surface left
-    open froze its "expires in 42m" until the next wire event — past the very
+    open froze its "expires in 42 m" until the next wire event — past the very
     deadline it was counting down to. The tick is that missing event. The period
     is patched to a test-sized one so it is the FIRING that is asserted rather
     than the wiring, and the second half pins the other edge: no rows, no clock.
@@ -1693,13 +1792,13 @@ async def test_the_countdown_repaints_between_snapshots(enabled, monkeypatch):
 
 
 def _countdown_token(painted: str) -> str:
-    """The ``expires in 42m`` word a painted row carries, or "".
+    """The ``expires in 42 m`` word a painted row carries, or "".
 
     Design D2's tests are about the WORD moving while the layout does not, so
     they read the token out of the frame rather than asserting a fixed string:
     the exact value depends on a live clock, and the claim is the CHANGE.
     """
-    match = re.search(r"expires in \d+[smh]", painted)
+    match = re.search(r"expires in \d+ [smh]", painted)
     return match.group(0) if match else ""
 
 
@@ -1777,7 +1876,7 @@ async def test_a_clock_tick_does_not_re_cut_the_question(enabled):
         listing.set_now(deadline - 600_000)
         await _settle(pilot)
         before = listing.render().plain.splitlines()[1]
-        assert "expires in 10m" in before, before
+        assert "expires in 10 m" in before, before
         assert "…" in before, before
         listing.set_now(deadline - 599_000)
         await _settle(pilot)
