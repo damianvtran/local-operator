@@ -3631,6 +3631,41 @@ async def test_the_session_model_errand_skips_the_tier_and_keeps_the_errand_shap
 
 
 @pytest.mark.asyncio
+async def test_the_session_model_errand_follows_a_pinned_fallback_and_drops_fast_mode(
+    tmp_path, monkeypatch
+):
+    """``effective_model``, not the selected primary: a refresh on a session
+    pinned to a rescue route asks the route that is actually answering turns.
+    And fast mode is the turn's priority lane, not a title's — it is cleared.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "openai/gpt-5-mini"}})
+    captured: list[ChatRequest] = []
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        captured.append(request)
+
+        async def gen():
+            yield StreamTextDelta(delta="<title>t</title>")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    primary = build_model_spec("anthropic", "claude-opus-5")
+    session = make_session(tmp_path, stream_fn, model=primary)
+    session._active_fallback = ModelSpec(
+        provider="xai", model_id="grok-4.6", context_window=100_000, fast_mode=True
+    )
+    await session.complete_once_on_session_model("name this", "tune autovacuum")
+    await session.dispose()
+
+    assert len(captured) == 1
+    assert (captured[0].model.provider, captured[0].model.model_id) == ("xai", "grok-4.6")
+    assert captured[0].model.fast_mode is False, "a title paid the fast-mode premium"
+
+
+@pytest.mark.asyncio
 async def test_an_errand_on_the_session_model_does_not_retry_itself(tmp_path, monkeypatch):
     """Falling back to the route that just failed buys a second wire attempt for
     the same answer, and blocking a tier that was never in play would demote

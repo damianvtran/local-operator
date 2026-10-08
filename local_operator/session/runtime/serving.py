@@ -7285,8 +7285,12 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.session import naming
 
         setter = getattr(session, "set_conversation_name", None)
-        complete_once = getattr(session, "complete_once", None)
-        if not callable(setter) or not callable(complete_once):
+        # Probes the completer the refresh will actually call, so this guard and
+        # that call cannot disagree about which seam has to exist.
+        complete = (
+            naming.refresh_completer(session) if hasattr(session, "complete_once") else None
+        )
+        if not callable(setter) or not callable(complete):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         current = getattr(session, "conversation_name", "") or ""
         # One budget over the history read AND the naming call, and one failure

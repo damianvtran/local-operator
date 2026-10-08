@@ -17922,7 +17922,7 @@ class Session:
         """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
         Hosts need the session's configured provider and credentials for small
-        side errands — conversation auto-naming is the only caller — and
+        side errands — conversation and checkpoint naming — and
         rebuilding a client from the spec would duplicate the whole auth
         cascade. The call carries no tools, no history and no abort signal: it
         is not a turn and must not appear in the transcript.
@@ -18028,8 +18028,14 @@ class Session:
         token-capped, tools-free) and the same effort clamp. No tier fallback
         and no tier block: the tier is never consulted, so it can neither be
         blamed for a failure here nor rescue one.
+
+        Fast mode is cleared. It buys the TURN a priority lane at a priority
+        price; a title is decoration, and the ``lo`` tier this replaces never
+        paid that premium.
         """
         spec = self._lowest_effort(self.effective_model)
+        if spec.fast_mode:
+            spec = spec.model_copy(update={"fast_mode": False})
         return await self._drain_errand(self._errand_request(spec, system, prompt))
 
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
