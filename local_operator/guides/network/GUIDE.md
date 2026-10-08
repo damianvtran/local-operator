@@ -576,10 +576,13 @@ copies they can reach: a reachable device deletes its copy and confirms, and the
 receipt says so; a device that is unreachable at that instant keeps its copy — and
 the receipt says THAT too, because a removed member is never contacted again. A
 receipt reports what the owner's ledger holds: "no copy ... is recorded" means no
-confirmation arrived, not that nothing is there. Every receipt that reports an ending
-closes with the same two lines, because the ceiling holds regardless: "This ends the
-copies the owner can still reach. A copy that has left the owner's control can only be
-ended by rotating the secret at its source."
+confirmation arrived, not that nothing is there. Every `member rm` ending, and
+`credential revoke` on a stored secret, closes with the same two lines, because the
+ceiling holds regardless: "This ends the copies the owner can still reach. A copy that
+has left the owner's control can only be ended by rotating the secret at its source."
+`credential revoke` on a provider API key closes with its own sentence for the same
+fact: a copy of that key taken out of the device never expires, so the key is rotated
+at the provider.
 
 Provider logins are shareable by name (except device-bound ones such as kimi),
 and the ledger lists them beside the MCP servers: `lop network credentials`

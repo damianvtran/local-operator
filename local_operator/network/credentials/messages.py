@@ -425,11 +425,14 @@ def render_repair_notice(peer_name: str, key: str) -> str:
     )
 
 
-#: THE ONE COMMITMENT THE DESIGN MAKES ABOUT ENDING A COPY (§2.3), on every surface that
-#: ends one: ``credential revoke`` output, the ``member rm`` receipt and the network guide's
-#: credentials section print these exact lines (the ``mark`` receipt, which only SETS a
-#: policy, says the same thing about a holder that never reconnects in its own words). It
-#: is not a disclaimer: it
+#: THE ONE COMMITMENT THE DESIGN MAKES ABOUT ENDING A COPY (§2.3). These exact lines close
+#: ``credential revoke`` on a stored secret, every ``member rm`` ending, and the network
+#: guide's credentials section. Two surfaces say the same thing in their own words instead:
+#: the ``mark`` receipt (it only SETS a policy, so it speaks of a holder that never
+#: reconnects) and ``credential revoke`` on a provider key, whose pre-S4 closing sentence
+#: ("a copy of the key taken out of that device never expires ...") carries the second half
+#: for THAT credential. A test pins that boundary, so the day it prints these lines too the
+#: guide and the design doc that scope the claim fail with it. It is not a disclaimer: it
 #: states the actual limit of a wipe (a copy the owner can still reach ends; one that has
 #: left the owner's control does not) and the only effective ending (rotation at the source).
 #:
@@ -470,8 +473,8 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     confirmation never arrived looks exactly like this state. The first draft ("… was
     confirmed on <peer>, so there is nothing to wipe there") turned an absent row into a
     guarantee about the device, and its caller then withheld the ceiling in this one state.
-    The second line names what the ledger cannot see; the caller prints the ceiling after
-    EVERY arm.
+    The second line names what the ledger cannot see; the stored-secret caller prints the
+    ceiling after EVERY arm (the provider-key caller keeps its own closing sentence).
 
     ``key`` is the placement key; a store secret is named by its bare name
     (:func:`render_key_name`) and any other key as typed.

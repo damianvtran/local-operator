@@ -9,9 +9,12 @@ sentence would be a slow way to read it.
 
 WHAT IS PINNED, and the finding each cell answers:
 
-- the ceiling is printed in EVERY revoke state, tense-free, and never borrows the
-  tombstone's verb (D1, D2) — and the guide and the design quote the SAME words
+- the ceiling is printed in EVERY revoke state of a stored secret, tense-free, and never
+  borrows the tombstone's verb (D1, D2) — and the guide and the design quote the SAME words
   (D2: "move ALL of them together"), so a future edit that moves one fails here;
+- a provider key's revoke keeps its OWN closing sentence, and the guide and the design
+  scope the ceiling claim to say so (the author's own sweep of the round's universal
+  claims found the first draft's "every" false on that arm);
 - a receipt says what the LEDGER holds, never what the world holds (D1);
 - one secret has one spelling in prose (D5) while ``--json`` keeps the
   placement key an integration reads;
@@ -241,6 +244,54 @@ def test_the_no_row_arm_says_a_lost_confirmation_is_untracked(
     _placement(owner, member_holds=True)
     _code, lines, _err = _run(capsys, "credential", "revoke", SECRET, "--from", MEMBER_NAME)
     assert "a copy whose confirmation never arrived is not tracked here" in lines, lines
+
+
+def test_a_provider_key_revoke_keeps_its_own_closing_sentence_and_the_docs_say_so(
+    owner: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The boundary of the ceiling: it closes a stored secret's revoke, not a provider key's.
+
+    ``credential revoke`` on a provider API key (class 4) predates S4 and closes with its own
+    sentence for the same fact - "a copy of the key taken out of that device never expires: to
+    end it, rotate the key at the provider" - which says the second half of the ceiling in
+    that credential's own words and omits the first. The guide and the design doc therefore
+    SCOPE the claim ("on a stored secret", "keeps the closing sentence it had before S4"), and
+    this cell is what keeps that scoping true: the day the class-4 arm prints the two lines
+    too, or loses its own sentence, the documents that describe the boundary fail with it.
+    """
+    me = owner.identity.device_id
+    document = placement_mod.PlacementDocument(NETWORK, root=owner.root, written_by=me)
+    document.declare(
+        "openai",
+        owner_device=me,
+        owner_device_name=OWNER_NAME,
+        provider="openai",
+        kind="api-key-static",
+        by=me,
+    )
+    document.grant("openai", MEMBER, scope="device", by=me)
+    document.save()
+    with sync.mutate(NETWORK, owner.root) as state:
+        state.record_ack(MEMBER, "openai", gen=1, digest=DIGEST, at=time.time(), wiped=False)
+
+    code, lines, _err = _run(capsys, "credential", "revoke", "openai", "--from", MEMBER_NAME)
+    assert code == 0, lines
+    for ceiling_line in CEILING:
+        assert ceiling_line not in lines, lines
+    assert (
+        "a copy of the key taken out of that device never expires: to end it, "
+        "rotate the 'openai' key at the provider"
+    ) in lines, lines
+    assert "`credential revoke` on a provider API key closes with its own sentence" in (
+        _credentials_section()
+    )
+    design = " ".join(
+        (REPO / "docs/design/mesh-consent-provisioning.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "the provider-key (class-4) `credential revoke` keeps the closing sentence it had "
+        "before S4"
+    ) in design
 
 
 @pytest.mark.parametrize(

@@ -264,7 +264,12 @@ tense-free on purpose. It follows state lines ("a wipe notice ... is queued", "c
 confirmed deleted") in which nothing has been removed yet, so the first draft's "This
 removed the copies it could reach" claimed a completed action on exactly the arms that say
 nothing completed, and re-used the tombstone's verb on the `member rm` receipt. It prints as
-two lines, one fact each, after every state line.
+two lines, one fact each, after every state line of `credential revoke` on a stored secret and
+of every `member rm` ending. **Scope, as built:** the provider-key (class-4) `credential
+revoke` keeps the closing sentence it had before S4 — "a copy of the key taken out of that
+device never expires: to end it, rotate the '<key>' key at the provider" — which says the
+second half in that credential's own words and omits the first; it does not print these two
+lines.
 
 ---
 
@@ -506,8 +511,9 @@ bundle stays non-credential by its own rule, `definitions._withheld:571`).
   copy — the ledger's word: a row is written from the member's reply, so a copy whose
   confirmation never arrived is not tracked, and the receipt says so) from the same
   ledger the listing reads. The §2.3 ceiling (`COPY_CEILING_LINES`; `COPY_CEILING_SENTENCE`
-  is the same words joined) prints after EVERY state line of `credential revoke` and every
-  `member rm` ending arm (design review round 1, D1/D8).
+  is the same words joined) prints after EVERY state line of a stored secret's `credential
+  revoke` and every `member rm` ending arm (design review round 1, D1/D8); the provider-key
+  revoke keeps its own closing sentence (§2.3 above).
 
 ---
 
