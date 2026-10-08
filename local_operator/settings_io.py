@@ -4147,13 +4147,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="agents.auto_update.seeds",
         path=("agents", "auto_update", "seeds"),
         section="agents",
-        label="Auto-update starters",
+        label="Auto-update built-in roles",
         kind=Kind.BOOL,
         default=True,
-        choices=_bool_choices(
-            "update untouched starters automatically", "only tell me; I apply them"
-        ),
-        help="Apply packaged starter updates you have not edited, at launch.",
+        choices=_bool_choices("keep unedited built-ins current", "only tell me; I apply them"),
+        # <= 72 cells (the picker's budget). Names the held exception too:
+        # "tool changes still ask" is what the launch pass does, and leaving
+        # it out let the "on" choice over-promise (design round 1, D7).
+        help="At launch, update built-in roles you have not edited; tool changes still ask.",
     ),
     # -- aida --------------------------------------------------------------
     # Defaults are LITERALS here, not imports: this module deliberately keeps the

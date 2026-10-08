@@ -59,6 +59,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, TypeVar
@@ -1396,11 +1397,11 @@ def normalize_seed_prose(text: str) -> str:
     """A seed's prose under the ONE canonicalisation the ledger shares.
 
     CRLF/CR -> LF, per-line trailing whitespace stripped, outer blank lines
-    stripped. Measured the IDENTITY on all 96 committed seed versions (every
-    whitespace it would move is already absent), so this is cheap insurance
-    rather than a repair: the ledger compares texts written by many hands over
-    months, and a careless future edit must not turn an untouched row into a
-    false "diverged".
+    stripped. Measured the IDENTITY on all 81 HEAD-reachable committed seed
+    versions (every whitespace it would move is already absent), so this is
+    cheap insurance rather than a repair: the ledger compares texts written by
+    many hands over months, and a careless future edit must not turn an
+    untouched row into a false "diverged".
 
     NEVER applied to ``tools:``/``effort``/``delegate``/``class`` - those are
     capability boundaries, and an allowlist entry is a name, not prose. Only
@@ -1722,6 +1723,14 @@ class SeedSyncVerdict:
     #: :data:`_SEED_FIELDS` order: the reset echo's second half, so a forced
     #: overwrite of a widened ``tools:`` allowlist is still recoverable.
     replaced_fields: tuple[tuple[str, str], ...] = ()
+    #: The label a FORCED replace discarded, present only when it differed from
+    #: the packaged label. The wholesale writer resets the label, and this echo
+    #: is the only record of it (UX round 1, U5).
+    replaced_label: str | None = None
+    #: The row's non-seed tag NAMES a forced replace discarded, in row order.
+    #: The wholesale writer drops every tag it does not own, so this is the
+    #: only record of them (UX round 1, U5).
+    replaced_tags: tuple[str, ...] = ()
     #: How many published revisions behind its packaged starter this row is,
     #: when the revision ledger could position BOTH ends of the move — a
     #: ledger-ORDER distance, never a version comparison (version strings
@@ -1841,12 +1850,19 @@ def sync_installed_seeds(
     yields a ``not-installed`` verdict for a name with nothing installable
     behind it.
 
-    ``apply=False`` is READ-ONLY at the byte level: nothing is written,
-    anywhere. The clean arm answers ``outdated-clean`` with ``applied=False``
-    (and its ``behind_by`` distance when the ledger could position it), and
-    the renderer says "update available" — a caller that only wants to KNOW
-    must never be told "updated". ``lop agents sync --check`` and
-    ``--dry-run`` and the startup pass's classification all use this mode.
+    ``apply=False`` writes no agent rows and no seed state: the starter arm
+    persists nothing, and the classification is returned as verdicts. It is
+    NOT a blanket byte-level promise for a whole command run — a caller that
+    wraps this call in larger machinery (``lop agents sync``) may still touch
+    its OWN stores, and both exceptions are pre-existing and documented: the
+    hub arm refreshes ``hub/status.json``, and the startup seam's class
+    backfill may repair a row's ``class:`` tag before this call runs (agent
+    review round 1, R1-6; QA O1). The clean arm answers ``outdated-clean``
+    with ``applied=False`` (and its ``behind_by`` distance when the ledger
+    could position it), and the renderer says "update available" — a caller
+    that only wants to KNOW must never be told "updated". ``lop agents sync
+    --check`` and ``--dry-run`` and the startup pass's classification all use
+    this mode.
 
     Classification, in order — the ledger (``seed_revisions.json``: every text
     that ever shipped, oldest first per seed) supplies positions, and the
@@ -2084,12 +2100,20 @@ def _apply_seed_update(
     are left alone.
 
     ORDER IS THE CRASH CONTRACT, not style: the prompt lands FIRST (already
-    atomic in the registry), the tag/stamp rewrite LAST, so a crash between
-    the two leaves tags pointing at the OLD revision — the update simply
-    re-applies next launch — never a fresh "updated" stamp over an old
-    prompt. ``update_agent`` writes ``agent.yml`` atomically for the same
-    class of reason: the strict registry gate refuses every profile while that
-    file is short, and several ``lop`` processes start at once on a machine.
+    atomic in the registry), the tag/stamp rewrite LAST — and the two are
+    wrapped so a FAILURE of the second half ROLLS THE PROMPT BACK, leaving the
+    row exactly as it was: it still classifies clean-and-behind, so the update
+    simply re-applies next launch. The rollback covers the CATCHABLE case only.
+    A process killed between the two writes cannot be rolled back, and the
+    residual is real and narrow: the row keeps the NEW prompt with the OLD
+    tags and stamps. For a prose-only revision that reads "matches the
+    packaged starter" (correct text, stale stamps — cosmetic); a revision that
+    ALSO moved the description leaves a row that differs in description alone
+    and reads as needing an explicit ``--replace --yes``/reset — the one case
+    where the crash is user-visible (agent review round 1, R1-7; UX N1).
+    ``update_agent`` writes ``agent.yml`` atomically for the same class of
+    reason: the strict registry gate refuses every profile while that file is
+    short, and several ``lop`` processes start at once on a machine.
     """
 
     from local_operator.agents import AgentEditFields
@@ -2119,33 +2143,48 @@ def _apply_seed_update(
         tags.append(f"{SEED_VERSION_PREFIX}{version}")
 
     description = seed.when_to_use or seed.description or ""
+    previous_prompt = registry.get_agent_system_prompt(agent.id)
     registry.set_agent_system_prompt(agent.id, seed.instructions)
     # Every other field is explicitly None: ``AgentEditFields`` is validated in
     # strict mode and pyright's pydantic pass requires the full spelling - the
     # same convention ``install_seed``'s ``_fields`` documents and follows.
-    registry.update_agent(
-        agent.id,
-        AgentEditFields(
-            name=None,
-            label=None,
-            security_prompt=None,
-            hosting=None,
-            model=None,
-            description=description,
-            tags=tags,
-            categories=None,
-            last_message=None,
-            temperature=None,
-            top_p=None,
-            top_k=None,
-            max_tokens=None,
-            stop=None,
-            frequency_penalty=None,
-            presence_penalty=None,
-            seed=None,
-            current_working_directory=None,
-        ),
-    )
+    try:
+        registry.update_agent(
+            agent.id,
+            AgentEditFields(
+                name=None,
+                label=None,
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                description=description,
+                tags=tags,
+                categories=None,
+                last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=None,
+            ),
+        )
+    except Exception:
+        # The half that landed (the prompt) is rolled back so a caught failure
+        # leaves the row exactly as before and the next pass re-applies it.
+        # Without this, a failure left a row that read "up-to-date" with stale
+        # stamps and was never re-applied (agent review round 1, R1-7). The
+        # rollback is best-effort and must not mask the original error.
+        try:
+            registry.set_agent_system_prompt(agent.id, previous_prompt)
+        except Exception:  # noqa: BLE001 - the re-raise below is the report
+            logger.warning(
+                "seed update: could not roll back %r after a failed write", agent.id, exc_info=True
+            )
+        raise
     return True
 
 
@@ -2198,6 +2237,26 @@ def _sync_one_seed(
         return tuple(
             (field, _field_text(values.get(field))) for field in diverged if field != "instructions"
         )
+
+    def _forced_removed() -> tuple[str | None, tuple[str, ...]]:
+        """``(label, tag names)`` this row will lose to a wholesale overwrite.
+
+        The forced path uses the wholesale writer, so it resets the label and
+        drops every tag the seed does not own; both are echoed so the discard
+        stays recoverable (UX round 1, U5). The label is reported only when it
+        really differs from the packaged spelling - a row already showing the
+        packaged label has nothing to recover.
+        """
+
+        from local_operator.display_labels import default_label, normalize_label
+
+        label = str(getattr(agent, "label", "") or "")
+        packaged_label = normalize_label(seed.label or "") or default_label(seed.name)
+        removed_label = (
+            label if label.strip() and label.casefold() != packaged_label.casefold() else None
+        )
+        removed_tags = tuple(str(tag) for tag in (agent.tags or []) if not _is_seed_owned_tag(tag))
+        return removed_label, removed_tags
 
     def _apply_forced() -> bool:
         """Overwrite the classified row with the packaged starter, wholesale.
@@ -2268,7 +2327,7 @@ def _sync_one_seed(
                 verdict="up-to-date",
                 detail=(
                     f"no update to pull (installed {installed_version or 'unversioned'}); "
-                    "this copy has local edits — see op='show'"
+                    "this copy has local edits — leaving it alone"
                 ),
             )
         if matched_index > packaged_index:
@@ -2299,19 +2358,23 @@ def _sync_one_seed(
         # direction, and the wording says exactly what is known instead of
         # announcing an update or a local edit it cannot prove (agent review
         # round 1, M1).
+        removed_label, removed_tags = _forced_removed()
         applied = _apply_forced() if (force and apply) else False
         return _verdict(
             verdict="outdated-diverged",
             applied=applied,
             replaced_instructions=(profile.instructions or "") if applied else None,
             replaced_fields=_replaced_fields() if applied else (),
+            replaced_label=removed_label if applied else None,
+            replaced_tags=removed_tags if applied else (),
             detail=(
                 "forced over this copy's text"
                 if applied
                 else (
-                    "no install record — cannot tell whether the starter moved or this "
-                    "copy was edited; to take the packaged text, run "
-                    f"`lop agents sync --name {key} --replace --yes`"
+                    f"differs from the packaged starter in {', '.join(diverged)}, and there is "
+                    "no install record, so it cannot be told whether the starter moved or the "
+                    "copy was edited. Left alone. To take the packaged text instead: "
+                    f"`lop agents sync --name {key} --replace --yes`."
                 )
             ),
         )
@@ -2329,7 +2392,7 @@ def _sync_one_seed(
             verdict="up-to-date",
             detail=(
                 f"no update to pull (installed {installed_version or 'unversioned'}); "
-                "this copy has local edits — see op='show'"
+                "this copy has local edits — leaving it alone"
             ),
         )
 
@@ -2349,17 +2412,25 @@ def _sync_one_seed(
     # CLI actually honours (``--replace --yes``); ``force`` is deprecated and
     # hidden, and prescribing it here would have sent users to a flag whose
     # own warning points at ``--replace`` (finding F2 of #2060).
+    removed_label, removed_tags = _forced_removed()
     applied = _apply_forced() if (force and apply) else False
     return _verdict(
         verdict="outdated-diverged",
         applied=applied,
         replaced_instructions=(profile.instructions or "") if applied else None,
         replaced_fields=_replaced_fields() if applied else (),
+        replaced_label=removed_label if applied else None,
+        replaced_tags=removed_tags if applied else (),
         detail=(
             "forced over local edits"
             if applied
-            else f"to take the packaged text, run `lop agents sync --name {key} --replace --yes`"
-            + (f" (installed {installed_version})" if installed_version else "")
+            else (
+                f"differs from the packaged starter in {', '.join(diverged)}"
+                + (f" (installed {installed_version})" if installed_version else "")
+                + ". It looks edited, so it was left alone. To discard your edits and take "
+                "the packaged text: " + f"`lop agents sync --name {key} --replace --yes` "
+                "(your current text is printed so you can save it)."
+            )
         ),
     )
 
@@ -2385,6 +2456,11 @@ AUTO_UPDATE_SEEDS_DEFAULT = True
 #: deliberately IN the config dir (not the package): every config root gets
 #: its own de-dup memory, and deleting it costs at most one repeated notice.
 SEED_NOTICES_NAME = ".seed-notices.json"
+
+#: Ceiling on queued TUI notice lines. A machine that never opens the TUI
+#: (a pure-CLI or desktop-only install) would otherwise grow ``pending`` by a
+#: few lines per upgrade forever; the oldest lines are the ones to drop.
+MAX_PENDING_SEED_NOTICES = 50
 
 #: The lock file name serialising unattended writes and notice-state updates.
 #: Sized for a machine where several ``lop`` processes start at once (TUI,
@@ -2451,7 +2527,7 @@ def _seed_version_note(installed: str | None, packaged: str) -> str:
 
     if installed and packaged:
         if installed == packaged:
-            return f" ({packaged}, text moved)"
+            return f" ({packaged}, text revised)"
         return f" ({installed} -> {packaged})"
     return ""
 
@@ -2464,28 +2540,62 @@ def _seed_display_name(agent: "AgentData") -> str:
     return display_form(str(agent.name or ""), str(getattr(agent, "label", "") or ""))
 
 
-def _held_notice_line(display: str, name: str, diverged_fields: tuple[str, ...]) -> str:
-    """The held-row notice: an update exists, but it changes a capability."""
+#: How a capability field reads in copy: ``(long, short)``. The long form is
+#: for the held notice, the short one for the ``--check`` line. ONE table so
+#: the notice and the render can never disagree about what ``tools`` means
+#: (design round 1, D2).
+_CAPABILITY_WORDS: dict[str, tuple[str, str]] = {
+    "tools": ("the role's tool access", "tool access"),
+    "effort": ("which model tier the role runs on", "the model tier the role runs on"),
+    "delegate": ("what the role may delegate", "what the role may delegate"),
+}
 
-    wording = {
-        "tools": "the role's tool access",
-        "delegate": "what the role may delegate",
-        "effort": "which model tier the role runs on",
-    }
-    what = next((text for field, text in wording.items() if field in diverged_fields), None)
+
+def _capability_note(diverged_fields: tuple[str, ...]) -> tuple[str, str]:
+    """``(long, short)`` for the FIRST capability field in ``diverged_fields``.
+
+    ``("", "")`` when no capability field diverged. First match wins because
+    one note reads; the field list a refusal prints already names the rest.
+    """
+
+    for field, (long, short) in _CAPABILITY_WORDS.items():
+        if field in diverged_fields:
+            return long, short
+    return "", ""
+
+
+def _held_notice_line(display: str, name: str, diverged_fields: tuple[str, ...]) -> str:
+    """The held-row notice: an update exists, but it changes a capability.
+
+    The copy names ``--check`` FIRST for a reason: the old wording said \"to
+    review\" while naming a command that applies the change outright, and the
+    one surface that really previews (``--check``) never said what the held
+    change was (design round 1, D2; UX round 1, U4). The word \"review\" may
+    only name a command that really reviews.
+    """
+
+    long, _short = _capability_note(diverged_fields)
     return (
-        f"{display}: a newer packaged starter is available, but it changes "
-        f"{what or 'what the role is allowed to do'}. "
-        f"Run `lop agents sync --name {name}` to review."
+        f"{display}: a newer packaged starter is available but was not applied "
+        f"automatically, because it changes {long or 'what the role is allowed to do'}. "
+        f"See what changes with `lop agents sync --name {name} --check`; "
+        f"apply it with `lop agents sync --name {name}`."
     )
 
 
 def _reported_notice_line(display: str, installed: str | None, packaged: str) -> str:
-    """The report-only notice (auto-update off, or an install that cannot self-update)."""
+    """The report-only notice (auto-update off, or an install that cannot self-update).
+
+    Carries the off-switch pointer, and ONLY this notice class does: a user
+    who chose \"only tell me\" is exactly the person who may now want to turn
+    the channel off, and the notice is where they are looking (UX round 1,
+    U6a).
+    """
 
     return (
         f"{display}: an update to the packaged starter is available"
-        f"{_seed_version_note(installed, packaged)}. Run `lop agents sync` to apply it."
+        f"{_seed_version_note(installed, packaged)}. Run `lop agents sync` to apply it. "
+        "(turn these off: /settings → Agents)"
     )
 
 
@@ -2494,7 +2604,74 @@ def _applied_notice_line(display: str, installed: str | None, packaged: str) -> 
 
     return (
         f"{display}'s instructions updated to the packaged starter"
-        f"{_seed_version_note(installed, packaged)}; your settings were kept."
+        f"{_seed_version_note(installed, packaged)}; your label, model and tags were kept."
+    )
+
+
+def _edited_notice_line(display: str, name: str, installed: str, packaged: str) -> str:
+    """The edited-and-moved notice: report-only, provable facts only.
+
+    Fires ONLY when both versions are recorded and differ (the gate lives at
+    the call site): a row with no install record or no version proof stays
+    silent, because neither half of the sentence could be shown true. The
+    remedy is the typed command, which REFUSES on an edited row - safe by
+    construction (design round 1, D8's option; the operator's standing
+    direction that edits are reported, not swallowed).
+    """
+
+    return (
+        f"{display}: you have edited these instructions and the packaged starter "
+        f"has moved ({installed} -> {packaged}). Your copy was left alone. "
+        f"Run `lop agents sync --name {name}` to see your options."
+    )
+
+
+def _rollup_transition(installed: str | None, packaged: str) -> str:
+    """One member's ``1.0.0 -> 1.4.0`` transition for a rolled-up notice."""
+
+    if installed and packaged and installed != packaged:
+        return f"{installed} -> {packaged}"
+    if packaged:
+        return f"{packaged}, text revised"
+    return "text revised"
+
+
+def _rollup_members(entries: list[tuple[str, str | None, str]]) -> str:
+    """``Aida 1.0.0 -> 1.4.0, Coder 1.0.0 -> 1.2.0, and 7 more`` for one group."""
+
+    members = [
+        f"{display} {_rollup_transition(installed, packaged)}"
+        for display, installed, packaged in entries
+    ]
+    return f"{', '.join(members[:2])}, and {len(members) - 2} more"
+
+
+def _applied_rollup_line(entries: list[tuple[str, str | None, str]]) -> str:
+    """The >2-applied roll-up: one line instead of one per role (D4/U2)."""
+
+    return (
+        f"Updated {len(entries)} built-in roles to the packaged text "
+        f"({_rollup_members(entries)}); your labels, models and tags were kept."
+    )
+
+
+def _reported_rollup_line(entries: list[tuple[str, str | None, str]]) -> str:
+    """The >2-available roll-up (action needed, so it names the command)."""
+
+    return (
+        f"{len(entries)} built-in roles have updates available "
+        f"({_rollup_members(entries)}). Run `lop agents sync` to apply them. "
+        "(turn these off: /settings → Agents)"
+    )
+
+
+def _edited_rollup_line(entries: list[tuple[str, str | None, str]]) -> str:
+    """The >2-edited roll-up; individual lines stay for one or two (D4)."""
+
+    return (
+        f"{len(entries)} built-in roles you edited have newer packaged starters "
+        f"({_rollup_members(entries)}). Your copies were left alone. "
+        "Run `lop agents sync` to see your options."
     )
 
 
@@ -2545,25 +2722,40 @@ def _write_seed_notice_state(
     )
 
 
-def drain_pending_seed_notices(config_dir: Path) -> list[str]:
-    """Take the queued notice lines and clear them, KEEPING the de-dup map.
+def peek_pending_seed_notices(config_dir: Path) -> list[str]:
+    """The queued notice lines, WITHOUT clearing them.
 
-    The TUI boot hook's half of the notice channel (delivery). Delivery clears
-    ``pending`` but keeps ``announced``: an undelivered notice survives a
-    crash and shows next boot, while a delivered one cannot fire again — and
-    because the de-dup token is per seed x packaged revision, a FUTURE update
-    re-notifies while a standing one stays quiet. A write failure leaves
-    ``pending`` in place (show again next boot: the safe direction).
+    Half one of the delivery split (agent review round 1, R1-3): the TUI hook
+    PEEKS, displays, and only then clears - so a crash between the two shows a
+    duplicate next boot (safe direction) instead of losing the line (silent).
+    Clearing first, which the old single-function drain did, loses a notice
+    whenever the display half fails; its docstring then claimed the opposite.
+    """
+
+    _announced, pending = _load_seed_notice_state(config_dir)
+    return pending
+
+
+def clear_pending_seed_notices(config_dir: Path, displayed: list[str]) -> None:
+    """Remove the DISPLAYED lines from ``pending``, keeping ``announced``.
+
+    Only the lines actually shown are removed (by value): another process may
+    have queued fresh ones between the peek and this call, and clearing the
+    whole list would discard them unseen. A write failure leaves ``pending``
+    in place - the next boot shows them again, the safe direction.
     """
 
     announced, pending = _load_seed_notice_state(config_dir)
     if not pending:
-        return []
+        return
+    remaining = list(pending)
+    for line in displayed:
+        if line in remaining:
+            remaining.remove(line)
     try:
-        _write_seed_notice_state(config_dir, announced=announced, pending=[])
+        _write_seed_notice_state(config_dir, announced=announced, pending=remaining)
     except OSError:
         logger.debug("seed notices: could not clear pending; they will show again")
-    return pending
 
 
 def startup_seed_update_pass(
@@ -2585,19 +2777,33 @@ def startup_seed_update_pass(
     * A missing or corrupt LEDGER ends the pass silently: without positions
       there is no proof of direction, and a dev build must not nag.
     * A row split into: applied (ledger-positioned strictly behind, delta
-      prose/description-only, packaged text == ledger tail, this install kind
-      may self-update, the setting is on — written through the narrow writer
-      under a lock, after a re-check); held (ledger-positioned, but the delta
-      touches ``tools``/``effort``/``delegate`` — a capability boundary is
-      never widened unattended); available (eligible but report-only: the
-      setting is off, or this install kind is EDITABLE); silent (up-to-date,
-      ahead, no ledger proof, draft packaged text, unsupported rows).
-    * NOTICES de-dup per seed x packaged revision in ``.seed-notices.json``:
-      CLI lines go to ``logger.info`` (visible on CLI stderr; the TUI wraps
-      its run in ``file_logging``), TUI lines go to the file's ``pending``
-      queue for the boot hook to deliver. ``--check``/``--dry-run`` never
-      reach this file at all: the ``agents sync`` carve-out in the seam keeps
-      the whole pass off that command.
+      touching only prose/description/class — ``class`` is NOT a hold test, it
+      is user data the narrow writer preserves (agent review round 1, R1-2);
+      packaged text == ledger tail, this install kind may self-update, the
+      setting is on — written through the narrow writer under a lock, after a
+      re-check); held (ledger-positioned, but the delta touches
+      ``tools``/``effort``/``delegate`` — a capability boundary is never
+      widened unattended); available (eligible but report-only: the setting
+      is off, this install kind is EDITABLE, or the launch is a DAEMON —
+      a launch nobody reads must not write what nobody will be told about);
+      edited (diverged from the
+      packaged text with BOTH versions recorded and different — reported,
+      never written); silent (up-to-date, ahead, no ledger proof, draft
+      packaged text, rows with no version proof, unsupported rows).
+    * NOTICES de-dup per SURFACE x seed x packaged revision in
+      ``.seed-notices.json``, because a notice consumed by a log-only launch
+      is a notice the person never sees (agent review round 1, R1-1; design
+      D3). ``tui`` lines queue in ``pending`` for the boot hook; ``cli``
+      lines print plainly to stderr (no ``date - INFO -`` prefix) and record
+      only their own slot; ``daemon`` surfaces (``serve``, ``wake serve``,
+      ``mobile start``) log at DEBUG and record NOTHING, so the human
+      surfaces still announce. More than two rows in one group collapse to a
+      single rolled line (design round 1, D4); held rows stay individual
+      because they need action. ``--check``/``--dry-run`` never reach this
+      file at all: the seam's carve-out keeps the whole pass off that
+      command — and off ``config edit agents.auto_update.seeds``, whose
+      whole point is to change the setting this pass reads (UX round 1,
+      U6b).
 
     One writer at a time, bounded: the wake store's lock serialises peers (a
     machine starts the TUI, ``serve`` and a wake supervisor together), a busy
@@ -2647,7 +2853,20 @@ def startup_seed_update_pass(
     apply_candidates: list[str] = []
     held: list[str] = []
     available: list[str] = []
+    edited: list[str] = []
     for key, verdict in classified:
+        if verdict.verdict == "outdated-diverged":
+            # Reported when the person's copy is provably an edit AND the
+            # package provably moved: both versions recorded, different. A
+            # no-record row stays silent - neither half of the sentence could
+            # be shown true (design round 1, D8's option).
+            if (
+                verdict.installed_version
+                and verdict.packaged_version
+                and verdict.installed_version != verdict.packaged_version
+            ):
+                edited.append(key)
+            continue
         if verdict.verdict != "outdated-clean" or verdict.behind_by is None:
             # up-to-date, ahead, or no ledger position: silent. A stamp-cleaned
             # row lands here too - unattended writes require the ledger.
@@ -2656,58 +2875,148 @@ def startup_seed_update_pass(
             # The packaged text is not the ledger's tail: a draft prompt in a
             # worktree, or a rollback. Never auto-apply, never nag.
             continue
-        if set(verdict.diverged_fields) <= {"instructions", "description"}:
-            apply_candidates.append(key)
-        else:
+        if {"tools", "effort", "delegate"} & set(verdict.diverged_fields):
+            # A capability boundary is never widened unattended. ``class`` is
+            # deliberately NOT in this set: a switched class is user data the
+            # narrow writer preserves, and holding on it left the reporter's
+            # own row (``class: proactive``) without its update (agent review
+            # round 1, R1-2 / ADR Q2).
             held.append(key)
+        else:
+            apply_candidates.append(key)
 
     if apply_candidates:
-        if not _auto_update_seeds_enabled(config_dir):
+        if surface == "daemon":
+            # A DAEMON LAUNCH NEVER WRITES, which is the closest correct reading
+            # of "a daemon consumes nothing": a launch nobody reads cannot tell
+            # anyone it rewrote a role, and the row is CURRENT by the time a
+            # human surface runs - so the applied notice could never fire for
+            # it (the apply IS the event; the human launch would classify the
+            # row up-to-date and say nothing). Leaving the rows for the first
+            # human surface keeps "every write is announced" true, and matches
+            # the ADR's deferral of desktop auto-update together with its
+            # notice. Report-only here: logged at DEBUG, nothing recorded.
+            available.extend(apply_candidates)
+            apply_candidates = []
+        elif not _auto_update_seeds_enabled(config_dir):
             available.extend(apply_candidates)
             apply_candidates = []
         elif not _installed_via_updater():
             available.extend(apply_candidates)
             apply_candidates = []
 
+    # A notice is a DISPLAY event: only the two HUMAN surfaces (``tui``, ``cli``)
+    # consume one. Any other surface (a daemon, or a name this code does not
+    # know) is report-only - it logs at DEBUG and neither writes a row nor
+    # records a token, so the first human surface still applies and announces
+    # (agent review round 1, R1-1 / design round 1, D3).
+    human = surface in ("tui", "cli")
+
     def _notice_token(key: str) -> str | None:
         entry = _packaged_tail_entry(key, revisions)
-        return f"{key}:{entry.sha}" if entry is not None else None
+        # SURFACE-scoped: a notice consumed by one surface's launch must not
+        # silence another's (a log-only process spending the TUI's token was
+        # exactly the R1-1 defect). ``None`` for a draft packaged text (not the
+        # ledger's tail): never nag about a dev build's unpublished prompt.
+        return f"{surface}:{key}:{entry.sha}" if entry is not None else None
 
     announced, pending = _load_seed_notice_state(config_dir)
-    planned: list[tuple[str, str]] = []  # (token, line), in emission order
 
-    def _plan(key: str, line: str) -> None:
-        token = _notice_token(key)
-        if token is None or token in announced or any(t == token for t, _ in planned):
-            return
-        planned.append((token, line))
+    def _unannounced(keys: list[str]) -> list[str]:
+        """The keys THIS surface has not yet been told about.
 
-    for key in held:
-        agent = rows.get(key)
-        if agent is not None:
-            verdict = next((v for k, v in classified if k == key), None)
-            _plan(
-                key,
-                _held_notice_line(
-                    _seed_display_name(agent),
-                    key,
-                    verdict.diverged_fields if verdict is not None else (),
-                ),
-            )
-    for key in available:
-        agent = rows.get(key)
-        if agent is None:
-            continue
-        _plan(
-            key,
-            _reported_notice_line(
-                _seed_display_name(agent),
-                marker_value(agent, SEED_VERSION_PREFIX),
+        A group's roll-up must list only these: re-listing rows an earlier
+        launch already announced would repeat old news inside a new line the
+        moment ONE seed gains a revision.
+        """
+
+        fresh: list[str] = []
+        for key in keys:
+            token = _notice_token(key)
+            if token is None or rows.get(key) is None:
+                continue
+            if human and token in announced:
+                continue
+            fresh.append(key)
+        return fresh
+
+    planned: list[tuple[tuple[str, ...], str]] = []  # (tokens, line), emission order
+
+    def _plan(keys: list[str], line: str) -> None:
+        tokens = tuple(token for token in (_notice_token(key) for key in keys) if token)
+        if tokens:
+            planned.append((tokens, line))
+
+    def _group_entries(keys: list[str]) -> list[tuple[str, str | None, str]]:
+        """``(display, installed, packaged)`` per key, for roll-up member lines."""
+
+        return [
+            (
+                _seed_display_name(rows[key]),
+                marker_value(rows[key], SEED_VERSION_PREFIX),
                 load_seed_version(key),
+            )
+            for key in keys
+        ]
+
+    verdicts_by_key = dict(classified)
+    for key in _unannounced(held):
+        # Held rows are ALWAYS individual: they need action (design round 1, D4).
+        verdict = verdicts_by_key.get(key)
+        _plan(
+            [key],
+            _held_notice_line(
+                _seed_display_name(rows[key]),
+                key,
+                verdict.diverged_fields if verdict is not None else (),
             ),
         )
 
+    fresh_available = _unannounced(available)
+    if len(fresh_available) > 2:
+        # One rolled line for a typical multi-role report; individual lines
+        # stay for one or two (design round 1, D4).
+        _plan(fresh_available, _reported_rollup_line(_group_entries(fresh_available)))
+    else:
+        for key in fresh_available:
+            _plan(
+                [key],
+                _reported_notice_line(
+                    _seed_display_name(rows[key]),
+                    marker_value(rows[key], SEED_VERSION_PREFIX),
+                    load_seed_version(key),
+                ),
+            )
+
+    fresh_edited = _unannounced(edited)
+    if len(fresh_edited) > 2:
+        _plan(fresh_edited, _edited_rollup_line(_group_entries(fresh_edited)))
+    else:
+        for key in fresh_edited:
+            verdict = verdicts_by_key.get(key)
+            _plan(
+                [key],
+                _edited_notice_line(
+                    _seed_display_name(rows[key]),
+                    key,
+                    verdict.installed_version if verdict and verdict.installed_version else "",
+                    verdict.packaged_version if verdict else "",
+                ),
+            )
+
     if not apply_candidates and not planned:
+        return SeedStartupOutcome(
+            held=tuple(sorted(held)),
+            available=tuple(sorted(available)),
+        )
+
+    if not human:
+        # Report-only (a daemon): nothing to WRITE, so nothing to take the lock
+        # for - log the lines and leave the state file, and every human
+        # surface's tokens, untouched. ``apply_candidates`` is already empty
+        # for such a surface (see above).
+        for _tokens, line in planned:
+            logger.debug("seed update: %s", line)
         return SeedStartupOutcome(
             held=tuple(sorted(held)),
             available=tuple(sorted(available)),
@@ -2719,18 +3028,27 @@ def startup_seed_update_pass(
         WakeWriteLock,
     )
 
-    lock = WakeWriteLock(config_dir, name=SEED_SYNC_LOCK_NAME, timeout_s=5.0)
+    # 2.0 s, not 5: a contended launch must not stall a TUI/CLI start for
+    # seconds; the lock is held for milliseconds in practice (UX round 1, O2).
+    lock = WakeWriteLock(config_dir, name=SEED_SYNC_LOCK_NAME, timeout_s=2.0)
     try:
         lock.acquire()
     except (WakeLockBusy, WakeLockUnavailable):
         # Another launch is mid-write: skip this launch SILENTLY (nothing
         # logged, nothing queued, nothing recorded); the next launch retries.
         logger.debug("seed update pass: another writer holds the lock; skipping")
-        return SeedStartupOutcome(skipped=tuple(sorted({*apply_candidates, *held, *available})))
+        return SeedStartupOutcome(
+            skipped=tuple(sorted({*apply_candidates, *held, *available, *edited}))
+        )
 
     try:
-        emitted: list[str] = []
         applied: list[str] = []
+        # (key, display, installed-before, packaged, token): the PRE-write
+        # values, captured because ``update_agent`` mutates the same ``agent``
+        # object - reading the markers afterwards printed "(1.4.0, text
+        # revised)" for a real 1.0.0 -> 1.4.0 jump (agent review round 1,
+        # R1-3 / QA Q1 / design D1 / UX U1).
+        apply_entries: list[tuple[str, str, str | None, str, str | None]] = []
         if apply_candidates:
             try:
                 registry.refresh_now()
@@ -2754,44 +3072,95 @@ def startup_seed_update_pass(
                     seed = load_seed(key)
                     if seed is None:  # pragma: no cover - tier 1 already loaded it
                         continue
+                    display_before = _seed_display_name(agent)
+                    version_before = marker_value(agent, SEED_VERSION_PREFIX)
                     _apply_seed_update(registry, agent, seed)
                     applied.append(key)
-                    line = _applied_notice_line(
-                        _seed_display_name(agent),
-                        marker_value(agent, SEED_VERSION_PREFIX),
-                        load_seed_version(key),
+                    apply_entries.append(
+                        (
+                            key,
+                            display_before,
+                            version_before,
+                            load_seed_version(key),
+                            _notice_token(key),
+                        )
                     )
-                    emitted.append(line)
-                    # The applied notice joins the SAME de-dup map as the
-                    # held/available ones (both de-dup, per the manager
-                    # addendum): recorded under this seed x packaged revision,
-                    # so a NEW revision still re-notifies while this one never
-                    # repeats.
-                    token = _notice_token(key)
-                    if token is not None:
-                        announced[token] = line
                 except Exception:  # noqa: BLE001 - never partial claims, never stops start
                     logger.warning("seed update pass: could not update %r", key, exc_info=True)
 
-        for token, line in planned:
-            if token in announced:
+        # RE-READ THE NOTICE STATE UNDER THE LOCK. The read above was only for
+        # planning; writing a stale snapshot back would let this launch erase a
+        # peer's freshly queued ``pending`` lines (a TUI starting beside a CLI
+        # command is the ordinary case).
+        announced, pending = _load_seed_notice_state(config_dir)
+
+        # APPLIED lines are never de-duplicated against ``announced``. An apply
+        # is a WRITE and must always be told; it cannot repeat on its own (the
+        # row is current afterwards), but it CAN share a token with an earlier
+        # "update available" line for the same revision - the person flips the
+        # setting on after being told, and the apply must not then be silent.
+        applied_lines: list[tuple[tuple[str, ...], str]] = []
+        if len(apply_entries) > 2:
+            # One rolled line replaces the applied group when more than two
+            # rows moved (design round 1, D4; UX round 1, U2).
+            members = [
+                (display, installed, packaged)
+                for _k, display, installed, packaged, _t in apply_entries
+            ]
+            applied_lines.append(
+                (
+                    tuple(token for *_, token in apply_entries if token),
+                    _applied_rollup_line(members),
+                )
+            )
+        else:
+            for _key, display, installed, packaged, token in apply_entries:
+                applied_lines.append(
+                    (
+                        (token,) if token is not None else (),
+                        _applied_notice_line(display, installed, packaged),
+                    )
+                )
+
+        emitted: list[str] = []
+        applied_emitted: list[str] = []
+        for tokens, line in applied_lines:
+            for token in tokens:
+                announced[token] = line
+            emitted.append(line)
+            applied_emitted.append(line)
+        for tokens, line in planned:
+            # Planned before the lock; a peer may have announced some since.
+            fresh_tokens = tuple(token for token in tokens if token not in announced)
+            if not fresh_tokens:
                 continue
-            announced[token] = line
+            for token in fresh_tokens:
+                announced[token] = line
             emitted.append(line)
 
         if emitted:
+            queue = list(pending)
+            if surface == "tui":
+                queue.extend(emitted)
+            else:
+                # A ``cli`` launch PRINTS its lines, but an APPLIED notice is a
+                # one-time event the TUI could never re-derive (the row is
+                # current by the time it opens), so it is ALSO queued for the
+                # next TUI boot. Report-style lines need no such echo: the TUI
+                # surface announces those itself under its own token.
+                queue.extend(applied_emitted)
             try:
-                if surface == "tui":
-                    _write_seed_notice_state(
-                        config_dir, announced=announced, pending=[*pending, *emitted]
-                    )
-                else:
-                    _write_seed_notice_state(config_dir, announced=announced, pending=pending)
+                _write_seed_notice_state(
+                    config_dir, announced=announced, pending=queue[-MAX_PENDING_SEED_NOTICES:]
+                )
             except Exception:  # noqa: BLE001 - display-only state
                 logger.debug("seed update pass: could not record notices", exc_info=True)
-        if emitted and surface != "tui":
-            for line in emitted:
-                logger.info("%s", line)
+            if surface == "cli":
+                # Plainly to stderr, without the ``date - INFO -`` prefix: the
+                # CLI's own message idiom; the log prefix read as chatter
+                # (design round 1, D3's cosmetic note).
+                for line in emitted:
+                    print(line, file=sys.stderr)
         return SeedStartupOutcome(
             applied=tuple(applied),
             held=tuple(sorted(held)),

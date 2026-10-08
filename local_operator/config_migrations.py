@@ -76,6 +76,14 @@ logger = logging.getLogger(__name__)
 #: knows what it is. Nothing writes it any more.
 LEGACY_STAMP_NAME = ".migrations"
 
+#: The subcommand spellings whose OWN promise is "change nothing" and which
+#: therefore skip the seed-update arm WHOLE: a startup write under them would
+#: break the promise — and ``config edit agents.auto_update.seeds`` racing the
+#: pass would pre-apply under the OLD value before the user's choice takes
+#: effect (UX round 1, U6b). Canonical spellings are computed by
+#: ``cli._seed_sync_command``; keep the two in sync.
+_NO_WRITE_COMMANDS = frozenset({"agents sync", "config edit agents.auto_update.seeds"})
+
 #: The retired ceilings of the first eviction policy. Removed: nothing reads
 #: them at any version that also carries this module, and an older runtime
 #: treated any value as "retired and ignored" with a warning, so their
@@ -217,16 +225,21 @@ def run_startup_migrations(
     Each arm fails on its own; one skipping never skips the others.
 
     ``surface``/``command`` describe the invocation for the seed-update arm
-    only. ``surface`` is "tui" or "cli" and picks the notice channel (the
-    TUI queues lines for its boot hook; the CLI logs them) — ONE definition
-    of "which surface is this", computed by ``cli._startup_surface`` and
-    shared with the ``use_tui`` decision so the two cannot drift. ``command``
-    is the subcommand spelling (e.g. "agents sync") and SKIPS the arm
-    entirely for the commands that do their own read-only/apply work: a
-    startup write under ``lop agents sync --check`` would break the "change
-    nothing" promise the command makes, and would race the state it is
-    checking. Nothing else in the tree promises no-write, so nothing else is
-    carved out.
+    only. ``surface`` is "tui", "cli" or "daemon" and picks the notice
+    channel (the TUI queues lines for its boot hook; the CLI prints them
+    plainly to stderr; a daemon launch is REPORT-ONLY — it writes no row,
+    records nothing and logs at DEBUG, so the first human surface applies
+    and announces) —
+    ONE definition of "which surface is this", computed by
+    ``cli._startup_surface`` and shared with the ``use_tui`` decision so the
+    two cannot drift. ``command`` is the subcommand spelling (e.g. "agents
+    sync") and SKIPS the arm entirely for the commands that do their own
+    read-only/apply work or that change the pass's own switch: a startup
+    write under ``lop agents sync --check`` would break the "change
+    nothing" promise the command makes and race the state it is checking,
+    and ``config edit agents.auto_update.seeds`` must land the new value
+    before the next pass reads it. See ``_NO_WRITE_COMMANDS``; nothing else
+    in the tree promises no-write, so nothing else is carved out.
     """
     try:
         migrate_session_cleanup(config_dir)
@@ -253,15 +266,15 @@ def run_startup_migrations(
     except Exception as exc:  # noqa: BLE001 — never a reason not to start
         logger.warning("config migration: action-class backfill skipped: %s", exc)
         logger.debug("config migration: traceback", exc_info=True)
-    if command != "agents sync":
+    if command not in _NO_WRITE_COMMANDS:
         try:
             # THE THIRD AGENT-REGISTRY ARM, and the #2060 fix proper: the
             # upgrade that brings a newer packaged starter should bring its
             # text too, reported or applied per the ledger's proof. Imported
             # lazily - this module must not drag the registry (dill, yaml)
             # onto every CLI start just because one arm may touch it - and
-            # skipped WHOLE for `agents sync`, whose own body does the
-            # read-only/apply work and whose `--check` promises no writes.
+            # skipped WHOLE for the commands whose own body does the work (see
+            # ``_NO_WRITE_COMMANDS``).
             from local_operator.agent_profiles import startup_seed_update_pass
 
             startup_seed_update_pass(config_dir, surface=surface)

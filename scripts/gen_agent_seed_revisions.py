@@ -29,13 +29,34 @@ THREE MODES, and the discipline each one keeps:
 * **``--bootstrap-from-git``**: the one-time enumeration that built the first
   file: every commit touching any seed (``git log --follow``), deduped by the
   full canonical vector per seed, sha = the commit that FIRST carried the
-  text. Refuses on a shallow repository (the history it must walk is not
-  there). Re-run only when bootstrapping; the normal mode's append rule keeps
-  the file current afterwards.
+  text. Refuses when ``git rev-parse --is-shallow-repository`` is true — and
+  writes NOTHING on a refusal — unless ``--allow-shallow`` is passed, which
+  is ONLY for a clone that is marked shallow yet carries every seed's
+  history (this fleet's reference clone; the per-seed check below is what
+  makes the override safe). Independently, a bootstrap never DECREASES a
+  target's revision count vs the file already there: a walk that would
+  truncate the committed ledger refuses instead, whichever door it came
+  through (QA round 1, Q3 / agent review round 1, R1-4). Re-run only when
+  bootstrapping; the normal mode's append rule keeps the file current
+  afterwards.
+
+SEED-EDIT WORKFLOW (the sequence a seed editor must follow, because a ledger
+entry names the commit that first carried the text — agent review round 1,
+R1-10):
+
+1. Edit ``local_operator/agent_seeds/<name>.md`` (bump ``version`` if the
+   move is user-visible).
+2. COMMIT the seed file. The normal mode refuses an uncommitted seed: the
+   new entry's sha has to name a real commit, and a dirty file has none.
+3. Run the normal mode: ``.venv/bin/python scripts/gen_agent_seed_revisions.py``
+   — it appends the packaged revision and rewrites nothing else.
+4. Commit the regenerated ``seed_revisions.json`` in the same PR. The
+   byte-identity unit test fails otherwise, naming this command.
 
 Run:
     .venv/bin/python scripts/gen_agent_seed_revisions.py            # append if moved
     .venv/bin/python scripts/gen_agent_seed_revisions.py --check    # CI / reviewer
+    .venv/bin/python scripts/gen_agent_seed_revisions.py --bootstrap-from-git
 """
 
 from __future__ import annotations
@@ -344,16 +365,57 @@ def _history_available(relative_path: str) -> bool:
     return added is not None and added.returncode == 0 and bool(added.stdout.strip())
 
 
-def bootstrap_from_git() -> str:
+def _shallow_repository() -> bool:
+    """Whether git MARKS this repository shallow (``rev-parse --is-shallow-repository``).
+
+    The bootstrap's outer guard, and deliberately COARSER than
+    :func:`_history_available`: a marked-shallow clone may still carry every
+    commit the seeds need (the fleet's reference clone does), which is why
+    the override exists — but a bootstrap must be asked EXPLICITLY before it
+    trusts a graft-marked clone, because the failure it would hide (a walk
+    truncated at the graft point, silently omitting older revisions) leaves
+    no trace in the ledger it writes. ``--is-shallow-repository`` is answered
+    locally by git and needs no history fetch itself.
+    """
+
+    result = _git("rev-parse", "--is-shallow-repository")
+    return result is not None and result.stdout.decode("utf-8", "replace").strip() == "true"
+
+
+def _partition_entry_count(rendered: str) -> int:
+    """Total revisions in a rendered ledger; 0 for anything unparseable."""
+
+    try:
+        payload = json.loads(rendered)
+        return sum(len(rows) for rows in payload["seeds"].values())
+    except (ValueError, KeyError, AttributeError, TypeError):
+        return 0
+
+
+def bootstrap_from_git(*, allow_shallow: bool = False) -> str:
     """Rebuild the whole ledger from repository history (one-time).
 
     Walks every commit that touched each seed (``--follow`` included),
     extracts the seed's canonical vector at that commit, keeps the FIRST
     commit to carry each full vector, and renders the result. This is the
-    only mode that reads history; it refuses when any seed's history is
-    incomplete (a shallow fetch that truncated the walk) because the ledger
-    it would build would silently omit older revisions.
+    only mode that reads history.
+
+    Two guards, because a truncated walk writes a plausible-looking ledger:
+    a clone git MARKS shallow refuses outright (``--allow-shallow`` overrides
+    for the known-complete marked clone), and every seed's ADD commit must be
+    reachable. The caller additionally refuses to shrink an existing target
+    (see ``main``); together these are the QA-round-1 Q3 answer, whose repro
+    showed a depth-1 clone silently truncating 65 revisions to 10 with
+    ``--check`` still passing afterwards.
     """
+
+    if _shallow_repository() and not allow_shallow:
+        raise SystemExit(
+            "bootstrap: this repository is marked shallow; the history walk would "
+            "silently omit older revisions. Re-run with --allow-shallow ONLY if the "
+            "clone is known-complete (every seed's whole history present) despite "
+            "the marker, or fetch the full history first."
+        )
 
     for name in sorted(list_seeds()):
         relative = f"local_operator/agent_seeds/{name}.md"
@@ -390,10 +452,12 @@ def bootstrap_from_git() -> str:
         if entries:
             result[name] = tuple(entries)
     # The walk's own count is the bootstrap's audit trail: the manager's
-    # measured fleet state is 96 commits -> 65 revisions, and a future
-    # re-bootstrap should reproduce BOTH numbers (a shallower walk that still
+    # measured fleet state is 81 HEAD-reachable commits (96 with ``--all``,
+    # which adds unmerged branches) -> 65 revisions, and a future re-bootstrap
+    # should reproduce BOTH of those numbers (a shallower walk that still
     # produces plausible output is exactly the silent truncation the
-    # history check above exists to stop; this line makes it visible).
+    # shallow/marker guards and the caller's count check exist to stop; this
+    # line makes it visible either way).
     print(f"scanned {scanned} commits touched seed files", file=sys.stderr)
     return render_seed_revisions(result)
 
@@ -410,7 +474,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--bootstrap-from-git",
         action="store_true",
-        help="Rebuild the whole ledger from git history (one-time; refuses on a shallow clone).",
+        help=(
+            "Rebuild the whole ledger from git history (one-time; refuses on a "
+            "repository git marks shallow unless --allow-shallow is also given)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-shallow",
+        action="store_true",
+        help=(
+            "Permit --bootstrap-from-git on a marked-shallow clone that is KNOWN to "
+            "carry every seed's history (the fleet's reference clone). A bootstrap "
+            "that would still shrink the target's revision count refuses regardless."
+        ),
     )
     parser.add_argument(
         "--out",
@@ -432,10 +508,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.bootstrap_from_git:
-        rendered = bootstrap_from_git()
-        target.write_text(rendered, encoding="utf-8")
+        rendered = bootstrap_from_git(allow_shallow=bool(args.allow_shallow))
+        # NEVER TRUNCATE A TARGET: a walk that would leave FEWER revisions
+        # than the file already carries has gone wrong somewhere (a mode-3
+        # run against a thinner clone), and the file it would overwrite is
+        # the committed ledger. Refuse, write nothing.
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+        existing_total = _partition_entry_count(existing)
         payload = json.loads(rendered)
         total = sum(len(rows) for rows in payload["seeds"].values())
+        if existing and total < existing_total:
+            raise SystemExit(
+                f"bootstrap: the walk found {total} revisions but {target} already "
+                f"carries {existing_total}; refusing to truncate the ledger "
+                "(writes nothing)."
+            )
+        target.write_text(rendered, encoding="utf-8")
         print(f"wrote {target} (bootstrap: {total} revisions across {len(payload['seeds'])} seeds)")
         return 0
 
