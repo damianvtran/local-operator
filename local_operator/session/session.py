@@ -287,6 +287,11 @@ from local_operator.tools.builtin import (
     todo_fingerprint,
     todo_snapshot,
 )
+from local_operator.tools.deferral import (
+    DeferralKind,
+    deferred_tool_names,
+    tool_deferral_enabled,
+)
 from local_operator.tools.tool_docs import chain_tool_docs
 
 if TYPE_CHECKING:
@@ -612,6 +617,7 @@ _PER_TOKEN_EVENT_TYPES = (
     ToolExecutionUpdateEvent,
 )
 
+
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
 #: ask hook). Named here rather than inline in
@@ -620,6 +626,27 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
+def _deferred_availability(name: str, published: bool) -> str:
+    """The line a ``tool://`` read appends when it activated a deferred tool.
+
+    Same promise as an ``mcp://server/tool`` enable (``mcp/resources.py``):
+    the schema joins at the next model call only if this turn has not yet
+    published its array; otherwise at the NEXT TURN, because the array is
+    published once per turn (``Session._wire_tools``). Either way the tool is
+    callable NOW — resolution reads the inventory, not the array.
+    """
+    if published:
+        return (
+            f"`{name}` schema loaded: it is in the tool definitions from the next "
+            "model call. It is callable now."
+        )
+    return (
+        f"`{name}` schema loaded: it joins the tool definitions at the NEXT TURN, "
+        "not the next model call, because this turn already published its tool "
+        "list. It is callable now — call it with the parameters above."
+    )
+
+
 SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "task",
     "wait",
@@ -3039,6 +3066,20 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
+        #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_kind`` picks the
+        #: set — a subagent's build sets ``"child"`` — and ``_deferral_pins``
+        #: are names a role/profile ``tools:`` list asked for, which stay
+        #: published. ``_activated_tools`` is STICKY for the session's life:
+        #: every activation reprices the whole cached prefix once (the array is
+        #: position 0), so un-deferring again later would pay that twice. It is
+        #: deliberately not persisted across resume: a resumed session starts
+        #: on a cold cache anyway and every deferred tool stays callable.
+        #: ``_tool_deferral`` is the ``tools.defer`` kill switch, read once at
+        #: construction and followed live by :meth:`_apply_config_change`.
+        self._deferral_kind: DeferralKind = "top"
+        self._deferral_pins: frozenset[str] = frozenset()
+        self._activated_tools: set[str] = set()
+        self._tool_deferral = tool_deferral_enabled()
         #: True while a mid-session model selection has not reached the
         #: transcript yet; the same dispose-flush contract as the title (the
         #: write is a background task, and dispose cancels background tasks,
@@ -3204,7 +3245,14 @@ class Session:
         # other scheme reaches ``skill_resolver`` exactly as before, and a
         # session constructed with no resolver at all still answers
         # ``tool://``. Mechanism + contract: ``tools/tool_docs.py``.
-        self._skill_resolver = chain_tool_docs(skill_resolver, lambda: self._tools)
+        # ``on_tool_read`` is the deferred-schema hook: a ``read tool://X`` of a
+        # deferred tool is the explicit request for its schema, so it publishes
+        # X (sticky) and the reply says when the schema joins the array. Passed
+        # INTO the link rather than wrapped around it, so the value reaching the
+        # executor is still the identity-checked ``ToolDocsLink``.
+        self._skill_resolver = chain_tool_docs(
+            skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
+        )
         self._request_approval = request_approval
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -5218,6 +5266,7 @@ class Session:
             # the historical live probe.
             host_has_browser=getattr(self._system_blocks_provider, "host_has_browser", None),
             host_has_console=getattr(self._system_blocks_provider, "host_has_console", None),
+            deferred=self.deferred_tool_names(),
         )
         for index, block in enumerate(blocks):
             if block.startswith(TOOL_INVENTORY_HEADING):
@@ -5611,7 +5660,9 @@ class Session:
                     + "\n"
                     + json.dumps(tool.parameters, sort_keys=True, separators=(",", ":"))
                 )
-                for tool in self._tools
+                # What the provider is SENT, not the inventory: a deferred
+                # tool's schema is not on the wire until it is activated.
+                for tool in self._side_channel_tools()
             ),
             "messages": estimate_messages_tokens(
                 self._render_history(list(self._context.messages))
@@ -6326,6 +6377,10 @@ class Session:
             # path. Both call sites share ``_resolve_profile_or_specialist`` so
             # the order cannot drift between them again.
             kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+            if kind in ("role", "seed") and profile is not None:
+                # The manager's ``tools:`` list pins those schemas published,
+                # exactly as an ``/agent`` attach of the same role would.
+                self.set_tool_deferral(pins=tuple(profile.tools or ()))
             if kind in ("role", "seed") and profile is not None and profile.preamble:
                 preamble = profile.preamble + (preamble or "")
             elif kind == "specialist" and specialist_prompt:
@@ -6938,6 +6993,9 @@ class Session:
             # :attr:`attached_profile_tools` for why this is recorded rather
             # than re-resolved on demand.
             self._attached_profile_tools = tuple(profile.tools or ())
+            # A role that NAMES a tool keeps its schema published (see
+            # ``tools/deferral.py``); the lopdev manager names ``project``.
+            self.set_tool_deferral(pins=self._attached_profile_tools)
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
             # A specialist carries instructions only — the registry row has no
@@ -9823,7 +9881,7 @@ class Session:
         latch decides.
         """
         if self._published_tools is None:
-            self._published_tools = list(self._tools)
+            self._published_tools = self._publishable(self._tools)
         return self._published_tools
 
     def _side_channel_tools(self) -> list[AgentTool]:
@@ -9844,7 +9902,109 @@ class Session:
         advertised. With nothing published yet this is the live inventory, which
         is what the turn's first call will capture anyway.
         """
-        return list(self._published_tools if self._published_tools is not None else self._tools)
+        if self._published_tools is not None:
+            return list(self._published_tools)
+        return self._publishable(self._tools)
+
+    # -- deferred tool schemas -------------------------------------------------
+
+    def _deferred_now(self) -> frozenset[str]:
+        """Names whose schema is withheld from the array RIGHT NOW.
+
+        The deferral set for this session's kind, minus role pins and minus
+        what the session has already activated. Empty when ``tools.defer`` is
+        off, which is the inverse canary: the pre-deferral array comes back.
+        """
+        if not self._tool_deferral:
+            return frozenset()
+        return deferred_tool_names(self._deferral_kind, self._deferral_pins) - self._activated_tools
+
+    def _publishable(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+        """``tools`` minus the deferred schemas — the array a provider is sent.
+
+        THE one filter, applied by every reader of "what is advertised": the
+        turn's array (:meth:`_wire_tools`), the side channels that must match it
+        byte for byte (:meth:`_side_channel_tools`) and ``context_breakdown``.
+        Resolution never goes through here — ``_plan_call`` reads the full
+        ``context.tools`` — so a deferred tool is callable on the first try,
+        with full validation and the approval gate. Registry order is kept, so
+        an activated tool lands where it always sat rather than at the end
+        (appending saves nothing under tools-first caching).
+        """
+        deferred = self._deferred_now()
+        if not deferred:
+            return list(tools)
+        return [tool for tool in tools if tool.name not in deferred]
+
+    def deferred_tool_names(self) -> frozenset[str]:
+        """The inventory's DEFERRABLE tools for this session (activated or not).
+
+        What the inventory block's "schema on demand" line lists. Deliberately
+        not net of activations: the line must not move when a tool activates,
+        or every activation would also cost a ``[session-state]`` delta.
+        """
+        if not self._tool_deferral:
+            return frozenset()
+        held = {tool.name for tool in self._tools}
+        return deferred_tool_names(self._deferral_kind, self._deferral_pins) & held
+
+    def set_tool_deferral(
+        self, kind: DeferralKind | None = None, *, pins: Sequence[str] | None = None
+    ) -> None:
+        """Set which deferral set applies (``kind``) and which names a role pins.
+
+        Called by the subagent build (``kind="child"``, pins = the role's
+        ``tools:`` list) and by ``attach_agent_profile``/``attach_team`` (pins
+        only). Takes effect at the next publish, like any inventory change.
+        """
+        if kind is not None:
+            self._deferral_kind = kind
+        if pins is not None:
+            # ADDITIVE, for the reason activations are sticky: dropping a pin
+            # (an ``/agent clear``, a role switch) would re-defer a schema the
+            # cached prefix already carries and pay a second rewrite for it.
+            self._deferral_pins = self._deferral_pins | frozenset(pins)
+
+    def activate_deferred_tool(self, name: str) -> bool | None:
+        """Publish a deferred tool's schema from the next publish on (sticky).
+
+        Returns ``None`` when ``name`` is not currently deferred (nothing to
+        do), else the same answer :meth:`refresh_tools` gives: ``True`` when the
+        schema can still reach this turn's first call, ``False`` when this turn
+        already published and it joins at the NEXT TURN.
+        """
+        if name not in self._deferred_now():
+            return None
+        if not any(tool.name == name for tool in self._tools):
+            return None
+        self._activated_tools.add(name)
+        return self._published_tools is None
+
+    def _activate_on_tool_doc(self, name: str) -> str | None:
+        """``on_tool_read`` for the ``tool://`` link: activate ``name`` if deferred.
+
+        Returns the availability note to append to the doc, or ``None`` when
+        the read activated nothing (the doc then renders exactly as before).
+        Mirrors ``mcp://server/tool``'s enable reply, including the NEXT TURN
+        wording when this turn's array is already published.
+        """
+        published = self.activate_deferred_tool(name)
+        if published is None:
+            return None
+        return _deferred_availability(name, published)
+
+    def _activate_after_invalid_call(self, tool_name: str, fault: str) -> None:
+        """A deferred tool called with arguments that failed validation.
+
+        The model guessed the shape and guessed wrong, so it needs the schema;
+        a VALID direct call does not activate (it already knew the arguments,
+        and publishing would only rewrite the prefix). Hooked on the ledger
+        callback because that sees every call exactly once, with its fault.
+        """
+        from local_operator.harness.types import FAULT_INVALID_ARGUMENTS
+
+        if fault == FAULT_INVALID_ARGUMENTS and tool_name in self._deferred_now():
+            self.activate_deferred_tool(tool_name)
 
     def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
         """Narrow a candidate inventory to this session's declared one.
@@ -10337,6 +10497,12 @@ class Session:
         which is a single bounded ``put_nowait`` onto the recorder's existing
         queue and writer thread.
         """
+        # Before the session-id guard: activation is behaviour, not analytics,
+        # and must work for a session the ledger cannot attribute.
+        try:
+            self._activate_after_invalid_call(tool_name, fault)
+        except Exception:  # noqa: BLE001 — this hook must never break a turn
+            logger.debug("deferred-tool activation failed", exc_info=True)
         if not self._session_id:
             return
         try:
@@ -21638,6 +21804,8 @@ class Session:
           the same validation the constructor applied; an unset or invalid
           value restores the manager's built-in default rather than freezing
           the last explicit one, so "reset to default" on the page means it.
+        * ``tools.defer`` — the deferred-schema kill switch; re-read into the
+          publish filter, so it applies at the next turn's publish.
         * ``hosting`` / ``model_name`` — announce that NEW conversations use
           the default; never mutate this conversation's selection. Explicit
           /model commands select on their owning session, not through a watcher.
@@ -21749,6 +21917,11 @@ class Session:
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
                 self._web_tools_dirty = True
+        if "tools.defer" in changed:
+            # The kill switch. Read into the field the publish filter consults,
+            # so it lands at the next turn's publish (the turn latch keeps the
+            # array in flight unchanged) — no inventory rewrite needed.
+            self._tool_deferral = tool_deferral_enabled(values)
         if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
             self._on_configured_model_changed(values, local=source == "local", changed=changed)
         # AIDA'S LIVE-CONFIG SEAM. A pause or resume issued from ANOTHER

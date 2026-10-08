@@ -3462,13 +3462,18 @@ class AgentLoop:
 
         errors = validate_tool_arguments(tool, args, call.raw_arguments)
         if errors:
+            text = "Invalid arguments: " + "; ".join(errors)
+            if not self._schema_was_published(tool.name, config):
+                # A DEFERRED tool (see ``tools/deferral.py``): the model called it
+                # without having been sent its schema, so it guessed the shape.
+                # Name the door to the real one; the host publishes the schema
+                # from the next turn on the strength of this same failure.
+                text += f". Its schema was not in your tool list: read tool://{tool.name}"
             return _PlannedCall(
                 call=call,
                 tool=tool,
                 failure=self._synthetic_result(
-                    call,
-                    "Invalid arguments: " + "; ".join(errors),
-                    details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                    call, text, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
                 ),
             )
         # A tool's OWN plan-time refusal, after the schema check: the ordering
@@ -3521,6 +3526,23 @@ class AgentLoop:
                 # barrier; a failed optimization must never create a race.
                 logger.debug("tool resource identity failed for %s", call.name, exc_info=True)
         return _PlannedCall(call=call, tool=tool, args=args, intent=intent, resources=resources)
+
+    @staticmethod
+    def _schema_was_published(name: str, config: LoopConfig) -> bool:
+        """Whether ``name``'s schema is in the array this turn advertised.
+
+        ``True`` when the host publishes no separate array (``get_tools`` unset:
+        the array IS ``context.tools``) or the read fails — the hint this gates
+        is advice, so an unknown answer says nothing rather than something
+        wrong. Reading ``get_tools`` here is free on the session host: planning
+        runs after the turn's first provider call, which latched the array.
+        """
+        if config.get_tools is None:
+            return True
+        try:
+            return any(tool.name == name for tool in config.get_tools())
+        except Exception:  # noqa: BLE001 — advice must never fail a call
+            return True
 
     async def _runner_result(
         self,
@@ -4970,12 +4992,20 @@ def validate_tool_arguments(
         return []
     errors: list[str] = []
     properties = schema.get("properties", {}) or {}
-    for name in schema.get("required", []) or []:
+    required = schema.get("required", []) or []
+    for name in required:
         if name not in arguments:
             errors.append(f"missing required argument '{name}'")
     for name, value in arguments.items():
         prop_schema = properties.get(name)
         if not isinstance(prop_schema, dict):
+            continue
+        if value is None and name not in required:
+            # An explicit ``null`` for an OPTIONAL property means "not given".
+            # Builtin schemas no longer spell the null branch out
+            # (``tools.registry.collapse_optional_nulls`` drops it to save
+            # ~4k characters a request), so a model that still sends ``null``
+            # for a field it is leaving out must not be refused for it.
             continue
         expected = prop_schema.get("type")
         if expected is None:

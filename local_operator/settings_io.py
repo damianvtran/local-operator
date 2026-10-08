@@ -3520,6 +3520,23 @@ SETTINGS: tuple[Setting, ...] = (
             "an `rg` the guard does not block is still fast. Applies to ripgrep only."
         ),
     ),
+    # LIVE: ``Session._apply_config_change`` re-reads it into the publish
+    # filter, so the next turn's tools array follows the edit. Path mirrors
+    # ``tools.deferral.TOOL_DEFERRAL_PATH`` (not imported: this module must
+    # stay cheap for the CLI).
+    Setting(
+        key="tools.defer",
+        path=("tools", "defer"),
+        section="tools",
+        label="Load rarely used tool schemas on demand",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Keep rarely used tools' schemas out of every request until the agent "
+            "reads tool://<name> or calls one. The tools stay callable either way. "
+            "Off sends every schema on every request."
+        ),
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than

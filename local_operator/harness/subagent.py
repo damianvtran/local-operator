@@ -3236,6 +3236,14 @@ async def _construct_child_session(
     #
     # ``refresh_tools`` rather than touching ``_tools``: it is the committed
     # hook and it keeps the loop's ``context.tools`` in step.
+    # The CHILD deferral set (``tools/deferral.py``): subagents almost never call
+    # the session-management tools a top-level session lives in, so their
+    # schemas ride on demand. A role that NAMES one in ``tools:`` keeps it
+    # published — the allowlist above already decided what the child HOLDS;
+    # this decides only what its request array carries.
+    set_deferral = getattr(child, "set_tool_deferral", None)
+    if callable(set_deferral):
+        set_deferral("child", pins=tuple(profile.tools or ()) if profile is not None else ())
     merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
     if profile is not None:
         may_delegate = profile.may_delegate
