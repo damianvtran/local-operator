@@ -38,6 +38,7 @@ from local_operator.paths import config_dir
 SESSION_A = "aaa111222333"
 SESSION_B = "bbb444555666"
 FUTURE = int(time.time() * 1000) + 3_600_000
+PAST = int(time.time() * 1000) - 60_000
 
 
 def _client() -> TestClient:
@@ -122,6 +123,24 @@ def _patience_row(wake_id: str = "patience-1") -> dict[str, Any]:
         "fired_count": 0,
         "created_at": 1,
         "kind": "patience",
+        "hidden": True,
+    }
+
+
+def _ask_timeout_row(wake_id: str = "ask-timeout-a1") -> dict[str, Any]:
+    """A hidden queued-ask deadline (``asks.queue._arm_deadline_wake`` arms the
+    real one, id ``ask-timeout-<ask_id>``): ``_patience_row``'s fixture shape,
+    the queue's own kind."""
+    return {
+        "id": wake_id,
+        "message": "ask a1 deadline",
+        "next_due_at": FUTURE,
+        "every_ms": None,
+        "until_at": None,
+        "limit": None,
+        "fired_count": 0,
+        "created_at": 1,
+        "kind": "ask_timeout",
         "hidden": True,
     }
 
@@ -296,6 +315,172 @@ def test_the_index_answers_without_a_runtime_and_names_each_row_s_own_session() 
     }
 
 
+def test_a_parked_session_is_still_listed_and_marked_dormant() -> None:
+    """Dormancy parks a wake; it never hides it. The desktop lists stopped
+    (``stopped_at``) and Aida-held (``held_at``) entries by DEFAULT —
+    ``include_dormant`` is true unless asked otherwise — and this route
+    mirrors that default with no knob of its own, so a store holding only
+    parked entries must not answer empty.
+
+    B has no session directory: a parked entry is not a ghost either —
+    nothing is gone, the session is deliberately not firing."""
+    _wake_entry(SESSION_A, stopped_at=1_700_000_000_001)
+    _wake_entry(SESSION_B, held_at=1_700_000_000_002, cwd="/tmp/bbb")
+
+    body = _body(_client())
+
+    wakes = body["wakes"]
+    assert [entry["session_id"] for entry in wakes["entries"]] == [SESSION_A, SESSION_B]
+    assert wakes["total"] == 2
+    stopped, held = wakes["entries"]
+    assert stopped["dormant"] is True and stopped["ghost"] is False
+    assert [row["id"] for row in stopped["schedules"]] == ["w1"]
+    assert held["dormant"] is True and held["ghost"] is False
+
+
+def test_the_monitor_state_word_follows_the_cli_precedence() -> None:
+    """Only ``armed`` was exercised before this cell. The wire's ``state`` word
+    is the CLI's own precedence (``cli._monitor_state_word``): dormancy beats
+    disabled (nothing is SUPPOSED to run, so a failure word would point at the
+    wrong remedy); disabled beats the clock (a watch that does not tick must
+    not read as merely late); expiry is the next fall. A late watch stays
+    armed — the due time moves only on change events, so lateness between
+    events is ordinary, not a state."""
+    _monitor_entry(
+        SESSION_A,
+        rows=[
+            _monitor_row("m1"),
+            _monitor_row("m2", disabled=True, disabled_reason="5 failed"),
+            _monitor_row("m3", until_at=PAST),
+            _monitor_row("m4", due=PAST),
+        ],
+    )
+    _monitor_entry(
+        SESSION_B, stopped_at=1_700_000_000_001, rows=[_monitor_row("m5", disabled=True)]
+    )
+
+    body = _body(_client())
+
+    entries = {entry["session_id"]: entry for entry in body["monitors"]["entries"]}
+    rows = {row["id"]: row for entry in entries.values() for row in entry["monitors"]}
+    assert {row_id: row["state"] for row_id, row in rows.items()} == {
+        "m1": "armed",
+        "m2": "disabled",
+        "m3": "expired",
+        "m4": "armed",
+        "m5": "dormant",
+    }
+    # The word is not decoration on the flags: m5 carries its own disabled
+    # flag, and the park must still be what a reader sees first.
+    assert rows["m5"]["disabled"] is True
+    assert rows["m2"]["disabled_reason"] == "5 failed"
+    assert rows["m4"]["due_in_s"] < 0 and rows["m4"]["next_due_at"] == PAST
+    assert rows["m1"]["due_in_s"] > 0
+    assert entries[SESSION_B]["dormant"] is True and entries[SESSION_B]["ghost"] is False
+
+
+def test_the_shared_wire_models_field_sets_are_pinned() -> None:
+    """The mirror guarantee in ``local_operator/mobile/schedules.py``, made
+    checkable. The rows on this wire are built as the desktop's own models, and
+    this cell is what makes a declared field ADDED, RENAMED or REMOVED on those
+    models fail here — construction alone cannot, because ``extra="allow"``
+    absorbs all three quietly (a defaulted addition ships its default; a rename
+    or a removal lands as an extra).
+
+    A red here means the shared wire moved: mirror the change in
+    ``schedules.py`` (and this file's cells) before a phone can read a default
+    the desktop never serves."""
+    from local_operator.server.models.desktop_monitors import (
+        MonitorEntry,
+        MonitorListing,
+        MonitorRow,
+    )
+    from local_operator.server.models.desktop_wakes import (
+        SupervisorInfo,
+        WakeEntry,
+        WakeListing,
+        WakeScheduleRow,
+    )
+
+    assert set(WakeScheduleRow.model_fields) == {
+        "id",
+        "message",
+        "next_due_at",
+        "every_ms",
+        "until_at",
+        "limit",
+        "fired_count",
+        "overdue_s",
+        "stale",
+        "last_fired_at",
+        "last_attempt_at",
+    }
+    assert set(WakeEntry.model_fields) == {
+        "session_id",
+        "name",
+        "cwd",
+        "origin",
+        "updated_at",
+        "dormant",
+        "ghost",
+        "next_due_at",
+        "schedules",
+    }
+    assert set(SupervisorInfo.model_fields) == {"supported", "running", "detail", "verifiable"}
+    assert set(WakeListing.model_fields) == {
+        "entries",
+        "generated_at",
+        "total",
+        "truncated",
+        "supervisor",
+        "read_error",
+    }
+    assert set(MonitorRow.model_fields) == {
+        "id",
+        "name",
+        "tool",
+        "arguments",
+        "description",
+        "every_ms",
+        "until_at",
+        "notify",
+        "sort_lines",
+        "ignore",
+        "cwd",
+        "created_at",
+        "next_due_at",
+        "last_check_at",
+        "checks",
+        "deliveries",
+        "consecutive_failures",
+        "disabled",
+        "disabled_reason",
+        "due_in_s",
+        "last_check_age_s",
+        "state",
+        "unavailable_since",
+        "health",
+    }
+    assert set(MonitorEntry.model_fields) == {
+        "session_id",
+        "name",
+        "cwd",
+        "origin",
+        "updated_at",
+        "dormant",
+        "ghost",
+        "next_due_at",
+        "monitors",
+    }
+    assert set(MonitorListing.model_fields) == {
+        "entries",
+        "generated_at",
+        "total",
+        "truncated",
+        "read_error",
+    }
+
+
 def test_a_patience_only_session_is_not_a_wake_carrying_session() -> None:
     """Internal timers are invisible on every human surface, so an entry whose
     only rows are hidden must not become an empty wake row."""
@@ -306,6 +491,23 @@ def test_a_patience_only_session_is_not_a_wake_carrying_session() -> None:
     assert body["wakes"]["entries"] == []
     assert body["wakes"]["total"] == 0
     assert body["wakes"]["read_error"] is False
+
+
+def test_an_ask_timeout_only_session_is_not_a_wake_carrying_session() -> None:
+    """The queued ask's deadline rides the same engine (kind ``ask_timeout``,
+    ``asks.queue._arm_deadline_wake``) and is invisible on human surfaces for
+    the same reason a patience wait is — it is a mechanism, not a reminder.
+    The filter must not over-cut either: a session beside a visible row keeps
+    the visible one and loses only the timer."""
+    _wake_entry(SESSION_A, rows=[_ask_timeout_row()])
+    _wake_entry(SESSION_B, rows=[_wake_row("w2"), _ask_timeout_row()])
+
+    body = _body(_client())
+
+    wakes = body["wakes"]
+    assert [entry["session_id"] for entry in wakes["entries"]] == [SESSION_B]
+    assert [row["id"] for row in wakes["entries"][0]["schedules"]] == ["w2"]
+    assert wakes["total"] == 1
 
 
 def test_an_unreadable_wakes_store_reports_the_read_rather_than_an_empty_list() -> None:

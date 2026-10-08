@@ -36,11 +36,18 @@ WHY THE DERIVATION IS MIRRORED, NOT IMPORTED. ``desktop_wakes._collect_listing``
 and ``desktop_monitors._collect_listing`` are the two references this module
 mirrors row for row; they live in FastAPI route modules whose private helpers
 deliberately do not cross module boundaries, and importing them here would put
-the server's request stack on the daemon's read path. What CANNOT drift is the
-WIRE SHAPE: the rows below are built as the very models the desktop serves
-(``server.models.desktop_wakes`` / ``...desktop_monitors``), so a field added,
-renamed or removed on the desktop wire fails loudly here instead of silently
-going missing. The predicates are the stores' own (``is_held``,
+the server's request stack on the daemon's read path. The WIRE SHAPE is what
+cannot drift: the rows below are built as the very models the desktop serves
+(``server.models.desktop_wakes`` / ``...desktop_monitors``), so nothing the
+wire needs goes silently missing — a dump emits every declared field, and a
+change required to construct the model fails loudly. Construction alone is not
+the whole guard, though: the models are ``extra="allow"``, so a defaulted
+addition or a rename is absorbed quietly. That quiet path is pinned instead of
+assumed — the declared field sets are asserted in
+``tests/unit/mobile/test_schedules_relay.py``
+(``test_the_shared_wire_models_field_sets_are_pinned``) — so a field added,
+renamed or removed reds a test before it can reach a phone as a default the
+desktop never serves. The predicates are the stores' own (``is_held``,
 ``scheduled_rows``, ``_is_stale_ms``, ``_session_exists``, ``health_hint``,
 ``unavailable_since_of``) — never a second derivation of a verdict another
 process made.
