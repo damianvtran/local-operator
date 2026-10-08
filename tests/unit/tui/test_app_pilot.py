@@ -884,8 +884,8 @@ async def test_first_run_setup_state_when_hosting_unconfigured() -> None:
         assert app._status._model_label == "setup"
         # The splash carries the guided /login notice, not a failure.
         assert app._splash_notice is not None
-        assert "/login" in app._splash_notice
-        assert "no provider configured" in app._splash_notice
+        assert "/login radient" in app._splash_notice
+        assert "Connect an AI account" in app._splash_notice
         # The splash was NOT retired: it is still the empty-state block.
         assert app._welcome_visible is True
 
@@ -4179,10 +4179,13 @@ async def test_login_list_reports_all_three_credential_states() -> None:
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login ")
         await pilot.pause()
+        # Catalogue order (``providers.login_catalog``): subscription sign-ins
+        # before API keys (registry order within a group), so the fake's
+        # `xai-oauth` leads its two key rows.
         assert _provider_rows(app) == [
-            ("openrouter", "logged in"),
-            ("deepseek", "env key"),
             ("xai-oauth", "needs login"),
+            ("deepseek", "env key"),
+            ("openrouter", "logged in"),
         ]
 
 
@@ -4377,9 +4380,9 @@ async def test_login_still_lists_every_provider_when_the_store_cannot_be_read() 
         await pilot.pause()
         assert app.is_running, "a locked credential store must not take the app down"
         assert _provider_rows(app) == [
-            ("openrouter", ""),
-            ("deepseek", ""),
             ("xai-oauth", ""),
+            ("deepseek", ""),
+            ("openrouter", ""),
         ]
 
 
@@ -4614,14 +4617,15 @@ async def test_mcp_verb_rows_are_the_backend_table_row_for_row() -> None:
 
 @pytest.mark.asyncio
 async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> None:
-    """The registry name restated the id on twelve rows out of twelve.
+    """Every row says what the user needs to HAVE, and the near-twins differ.
 
-    `openai / OpenAI (ChatGPT Plus/Pro)` spent half the description column
-    re-spelling the id in title case and parenthesised the only part that
-    distinguishes the row. That parenthetical is also the ONLY thing telling
-    `openai` from `openai-device` and `xai` from `xai-oauth` apart, so it is
-    what makes those four near-duplicates choosable. Where the name says nothing
-    the id does not, the cell is blank — that is the honest answer.
+    The registry name restated the id (`openai / OpenAI (ChatGPT Plus/Pro)`),
+    and the earlier fix left `deepseek`, `openrouter` and `radient` BLANK —
+    the recommended first sign-in carried no description at all (first-run
+    audit D3/U9/D13). The words now come from ``providers.login_catalog``:
+    every shipped row is described, the recommended one says so, and the
+    pairs that are told apart by nothing else (`openai`/`openai-device`,
+    `xai`/`xai-oauth`) still read differently.
     """
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=RealRegistryController())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -4633,14 +4637,13 @@ async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> No
         described = {
             name: choice.description for name, choice in app.query_one(Editor).picker.suggestions()
         }
-    assert described["openai"] == "ChatGPT Plus/Pro"
-    assert described["openai-device"] == "ChatGPT device code"
-    assert described["xai"] == "Grok API key"
-    assert described["xai-oauth"] == "Grok OAuth"
-    assert described["anthropic"] == "Claude Pro/Max"
-    assert described["deepseek"] == ""
-    assert described["openrouter"] == ""
-    assert described["radient"] == ""
+    assert described["radient"].startswith("recommended · ")
+    assert "ChatGPT Plus/Pro" in described["openai"]
+    assert described["openai"] != described["openai-device"]
+    assert described["xai"] != described["xai-oauth"]
+    assert "Claude Pro/Max" in described["anthropic"]
+    assert all(described[name] for name in ("deepseek", "openrouter", "radient"))
+    assert list(described)[0] == "radient"
 
 
 @pytest.mark.asyncio

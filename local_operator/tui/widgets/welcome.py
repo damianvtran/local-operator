@@ -86,6 +86,7 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import terminals
+from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
 from local_operator.tui.widgets.status_line import format_model_label
@@ -267,12 +268,34 @@ HINTS: tuple[tuple[str, str], ...] = (
 #: that also names `/login` is exactly the line that truncates first (D2/D3), so
 #: relying on it alone left a scanning user pointed at the picker and quit but
 #: never at the action that unblocks them.
+#:
+#: The first two rows are now the first-run PATH rather than a list of keys
+#: (audit D2/U3/U4): the recommended sign-in, then "any other provider", and
+#: the third row says what happens next — her greeting — so the screen answers
+#: "what do I do and what will that get me" in the table the eye scans. The
+#: ``{aida}`` slot is filled with her LIVE configured name
+#: (:func:`setup_hint_rows`), never a hard-coded "Aida".
 HINTS_SETUP: tuple[tuple[str, str], ...] = (
-    ("/login", "set up a provider"),
-    ("/", "command picker"),
-    ("/help", "all commands"),
+    (f"/login {RECOMMENDED_LOGIN}", "sign in (recommended)"),
+    ("/login", "other providers or an API key"),
+    ("then", "{aida} says hello and helps you set up"),
     ("ctrl/cmd+d", "quit"),
 )
+
+
+def setup_hint_rows(aida_name: str | None = None) -> tuple[tuple[str, str], ...]:
+    """:data:`HINTS_SETUP` with her name in it, or without the row when she is off.
+
+    ``aida_name`` is ``None`` when she is disabled (``aida.enabled = false`` /
+    ``LOCAL_OPERATOR_NO_AIDA``): the row would promise a greeting that never
+    comes, so it is replaced by the command picker it displaced.
+    """
+    if not aida_name:
+        return tuple(
+            ("/", "command picker") if key == "then" else (key, desc) for key, desc in HINTS_SETUP
+        )
+    return tuple((key, desc.replace("{aida}", aida_name)) for key, desc in HINTS_SETUP)
+
 
 #: Key column width for the hint rows: the roomy default, and the squeezed
 #: fallback of "longest key plus one space". A narrow terminal drops to the
@@ -563,7 +586,7 @@ TIPS: tuple[str, ...] = (
 #: prior sessions to resume, so the most-read row would advertise a command that
 #: does nothing for them (D4). Once a session exists the rotation resumes into
 #: the normal ring, so this only replaces the opening frame.
-TIP_SETUP = "/login <provider> sets up a provider (e.g. /login openai)"
+TIP_SETUP = f"New here? {RECOMMENDED_LOGIN.title()} is one browser sign-in; no key to paste"
 
 #: The tip a Terminal.app launch opens on, in place of the pinned ``TIPS[0]``.
 #:
@@ -687,6 +710,9 @@ class WelcomeInfo:
     #: hint table leads with, and which tip opens the rotation — so the screen
     #: reads as "you need to act" rather than "a session is still booting".
     setup: bool = False
+    #: Her configured display name for the setup table's "then … says hello"
+    #: row, or ``None`` when she is disabled (the row is dropped).
+    aida_name: str | None = None
 
 
 def app_version() -> str:
@@ -758,9 +784,26 @@ def session_welcome_info(
         cwd=os.getcwd(),
         missing_credential=missing,
         notice=notice or None,
-        update_available=update_available or None,
+        # No update row in the setup state (audit D8): the first screen a new
+        # install shows has one job, and "latest is vX — /update" competes with
+        # the sign-in line for a user who just installed the latest.
+        update_available=(update_available or None) if not setup else None,
         setup=setup,
+        aida_name=_aida_name() if setup else None,
     )
+
+
+def _aida_name() -> str | None:
+    """Her live display name, or ``None`` when she is disabled. Never raises."""
+    try:
+        from local_operator import aida
+        from local_operator.aida import naming
+
+        if not aida.enabled():
+            return None
+        return naming.display_name()
+    except Exception:  # noqa: BLE001 — decoration on the first frame
+        return None
 
 
 def _shorten_home(path: str) -> str:
@@ -952,7 +995,7 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     return rows
 
 
-def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
+def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None) -> list[Text]:
     """Hint rows, left-aligned to a shared key column, block-centered.
 
     Centering each row independently would ragged the key column; the rows are
@@ -970,7 +1013,7 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     2. the tight key column (longest key plus one space),
     3. keys only, which still names every affordance the user can try.
     """
-    hints = HINTS_SETUP if setup else HINTS
+    hints = setup_hint_rows(aida_name) if setup else HINTS
     # The same tint pair the PICKER uses for name/description (fg over muted),
     # not a step quieter. These rows are a preview of the picker — one of them
     # literally says "/  command picker" — and rendering the identical
@@ -1207,7 +1250,7 @@ def build_welcome_lines(
     # actionable login warning last.
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
-    hints = _hint_lines(width, setup=info.setup)
+    hints = _hint_lines(width, setup=info.setup, aida_name=info.aida_name)
     tip = _tip_lines(width, tip_index, setup=info.setup, pin_paste=pin_paste, pin_mesh=pin_mesh)
     show_hints = False
     show_tip = False

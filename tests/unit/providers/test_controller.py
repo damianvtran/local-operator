@@ -3606,6 +3606,10 @@ def test_no_login_flavour_is_in_the_chat_registry() -> None:
         "zai-oauth",
         "radient-key",
         "alibaba-token-plan-oauth",
+        # First-run onboarding: the chat API-key logins for the two providers
+        # whose own login is a subscription sign-in (audit Q1).
+        "openai-api-key",
+        "anthropic-key",
     }
     assert flavours & _chat_ids() == set()
 
