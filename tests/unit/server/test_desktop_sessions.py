@@ -1407,6 +1407,312 @@ async def test_a_mid_resync_viewer_still_interrupts_a_live_turn(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_a_live_turn_behind_a_stale_mirror_is_not_idle(tmp_path, monkeypatch):
+    """The 2026-10-07 incident: a live turn behind a mirror that cannot vouch.
+
+    The follower's canonical folds stall while its own re-sync is parked behind
+    the owner's op chain (``session/runtime/server.py`` chains ops per
+    connection — a slow head op parks the rest, and each caller times out at
+    ``ACK_TIMEOUT_S``), so the store is FROZEN at the last turn boundary while
+    the live turn's deltas buffer behind the sync. ``_work_is_running`` then
+    reads false on every term — not because the owner has nothing to stop, but
+    because this mirror cannot see the turn — and the route answered ``idle``
+    without dialling. That is the incident's shape: four stop presses
+    (receipts 3891-3894) were answered ``idle`` while the UI painted live work,
+    and the turn was never stopped.
+
+    THIS TEST FAILS BEFORE THE FIX — the owner is reachable and the abort would
+    land; the stale ``False`` must not be presented as the owner's own answer.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            # What the follower last SAW: a live roster...
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # ...and then its LAST canonical fold, a turn boundary. The new
+            # turn's deltas are buffered behind the parked re-sync and are not
+            # in this store at all — the mirror does not know they exist.
+            _publish_roster(bridge, streaming=False)
+            # The re-sync is in flight, so the canonical feed is not advancing:
+            # the state above may lag the owner by any amount.
+            bridge.remote._ready_for_events = False
+            assert bridge.remote.is_cold, "the fixture is not the state under test"
+            assert bridge.remote.owner_reachable, "the owner is live"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            # THE CONTRACT: a press must not be answered ``idle`` while the
+            # follower cannot PROVE the owner idle. The owner's own receipt is
+            # the answer instead.
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "stopping this turn", result
+            assert owner.ops == ["abort"], "a live turn behind a stale mirror was never dialled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_behind_an_owed_canonical_resync_is_not_idle(tmp_path, monkeypatch):
+    """The other half of the stall: a WARM mirror that KNOWS it is missing a delta.
+
+    A degraded delta sheds its body to stay under the socket limit, so the store
+    is missing whatever fields that frame carried; the canonical re-sync owed
+    for it (``_frontend_resync_pending``) keeps timing out behind the same
+    parked op chain. Between attempts the event feed is OPEN again — so a
+    readiness-only check would vouch for this store — while the one flag that
+    says "this mirror cannot account for a delta it was sent" stands. If the
+    missing delta was the turn's start, ``_work_is_running`` reads false on a
+    session that is streaming.
+
+    THIS TEST FAILS BEFORE THE FIX — ``_ready_for_events`` is true, ``is_cold``
+    is false, and the route read the under-report as settled.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            _publish_roster(bridge, streaming=False)
+            # The owed re-sync: a shed delta's fields are missing until it
+            # lands, so this store is not allowed to speak for the owner.
+            bridge.remote._frontend_resync_pending = True
+            assert not bridge.remote.is_cold, "the fixture must be a WARM mirror"
+            assert bridge.remote.owner_reachable, "the owner is live"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "stopping this turn", result
+            assert owner.ops == ["abort"], "a debt-owing mirror was trusted as settled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_behind_a_recovering_dial_is_not_idle(tmp_path, monkeypatch):
+    """The recovery window: the socket dropped mid-turn, and the press must not
+    claim ``idle`` from a mirror whose dial is gone.
+
+    A dropped socket says nothing about the turn — a send timeout under a
+    stalled loop is the common cause, and ``_suspect_generation`` literally
+    records the turn that was live at the drop. Recovery owns the dial until it
+    re-binds (bounded at ``COLD_FALLBACK_S``), so this press cannot be
+    delivered; the honest answer is the ladder's 503, not ``idle``. Answering
+    ``idle`` here is the incident's class one door over: "nothing to stop" is a
+    claim this viewer cannot prove, and the user walks away believing a live
+    turn was ended.
+
+    THIS TEST FAILS BEFORE THE FIX — recovery leaves ``owner_reachable`` false,
+    which the route folds into the same ``idle`` as a cold session.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # The pump's own order: ``_connected`` is false BEFORE the host's
+            # disconnect handler runs (``attach_client``'s pump end).
+            owner.connected = False
+            bridge.remote._on_disconnected("owner connection reset")
+            assert bridge.remote.recovering, "the fixture is not the state under test"
+            assert not bridge.remote.owner_reachable, "recovery owns the dial"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable", detail
+            assert detail["message"] == (
+                "Session owner is unavailable. Reconnect and reconcile before retrying."
+            ), detail
+            assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_mirror_behind_a_recovering_dial_is_not_idle(tmp_path, monkeypatch):
+    """The ``_recovering`` disjunct on its own: a settled-looking mirror behind a
+    dial that recovery owns.
+
+    The sibling test above freezes a LIVE turn at the drop, so its press is
+    already owed a dial by ``_work_is_running``. This one publishes a boundary
+    instead — the drop landed between turns and the last canonical fold reports
+    no work — with every OTHER term of ``canonical_current`` deliberately quiet
+    (synced, no owed re-sync), which leaves exactly one term between this press
+    and a false ``idle``: ``_recovering``. Sabotage check (review round 1, S3a):
+    drop that disjunct alone and this is the only test that reds — the shortcut
+    reads the boundary as settled and answers ``idle`` while recovery still owns
+    the dial. The boundary fold predates the drop, and what the owner did after
+    it is unobservable until recovery re-binds: nothing here may be called
+    settled.
+
+    THIS TEST FAILS WITHOUT THE DISJUNCT — and with it the press answers 503
+    (never ``idle``): no dial can be served, so it is handed to the ladder.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            # THE ONE-LINE VARIANT: the last canonical fold is the boundary, not
+            # a frozen live turn — no term of ``_work_is_running`` fires.
+            _publish_roster(bridge, streaming=False)
+            # The pump's own order: ``_connected`` is false BEFORE the host's
+            # disconnect handler runs (``attach_client``'s pump end).
+            owner.connected = False
+            bridge.remote._on_disconnected("owner connection reset")
+            assert bridge.remote.recovering, "the fixture is not the state under test"
+            assert not bridge.remote.owner_reachable, "recovery owns the dial"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable", detail
+            assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_mirror_press_whose_dial_times_out_is_not_idle(tmp_path, monkeypatch):
+    """The unanswerable dial: an ``OwnerAckTimeout`` must never be presented as ``idle``.
+
+    Since the merged companion fix (#2049) ``abort`` is chain-exempt
+    (``_UNCHAINED_OPS = {"ping", "abort"}``), so this is no longer the
+    queued-behind-a-parked-op shape — it is the other way a dial goes unserved:
+    the owner's loop stalls or half-dies and the abort is not answered within
+    ``ACK_TIMEOUT_S`` at all. That raises ``OwnerAckTimeout`` (whose
+    ``owner_alive`` mark says the owner is alive and simply did not answer this
+    request in time), and the route must answer it through its ladder (503,
+    retryable) and NOT fall back to ``idle``: the press was never served, and
+    "nothing to stop" would invent the very answer the owner did not give.
+
+    THIS TEST FAILS BEFORE THE FIX — the stale mirror answered ``idle`` without
+    even sending the abort.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.mobile.attach_client import OwnerAckTimeout
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient()
+            owner.raises = OwnerAckTimeout("owner did not answer 'abort' within 15s")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            _publish_roster(bridge, streaming=True, activity_phase="responding")
+            _publish_roster(bridge, streaming=False)
+            bridge.remote._ready_for_events = False
+            assert bridge.remote.owner_reachable, "the socket is up; only the op is parked"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 503, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_busy", detail
+            assert detail["retryable"] is True, detail
+            assert owner.ops == ["abort"], "the press never reached for the owner"
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_an_interrupt_on_a_cold_session_is_idle_and_spawns_nothing(tmp_path, monkeypatch):
     """A press on a session with no runtime must not cost a process.
 

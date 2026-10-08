@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 141 public members and a POSITIVE
+    than stylistic. This protocol carries 142 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -696,8 +696,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     141 once the DESK READER needed ``history_entry_times`` — a wire row is a
     message with no entry time of its own, so the desktop bridge could only stamp
     it with the moment this device served it until the owner's own
-    ``{entry id: ts}`` join had a seam to read (``Mesh wire honesty`` §S1)), so
-    recompute it rather
+    ``{entry id: ts}`` join had a seam to read (``Mesh wire honesty`` §S1), 142
+    once the desktop interrupt route needed ``canonical_current`` so a press could
+    not be answered ``idle`` from a mirror that says it is mid-resync, owes a
+    canonical re-sync, or is recovering from a dropped socket), so recompute it
+    rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1523,6 +1526,21 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         read a mid-resync viewer as an absent owner. Declared here because the
         desktop interrupt route reads it off a duck-typed bound facade to choose
         between an ``idle`` answer and dialling the owner.
+        """
+        ...
+
+    @property
+    def canonical_current(self) -> bool:
+        """Whether this facade's canonical mirror may speak for the OWNER.
+
+        The second half of the interrupt route's no-dial rule, declared here for
+        the same reason as :attr:`owner_reachable`: the route reads it off a
+        duck-typed bound facade to decide whether a ``False`` from the
+        follower's state may be presented as an ``idle`` answer. True when the
+        mirror is synced (``_ready_for_events``), owes no canonical re-sync,
+        and is not mid-recovery — i.e. when its own machinery does not say it
+        may be behind the owner. An owner ``Session`` has no mirror and no dial,
+        so the state does not exist for it.
         """
         ...
 
