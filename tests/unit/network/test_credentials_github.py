@@ -1690,3 +1690,254 @@ def test_after_the_window_the_next_command_gets_a_new_token_or_fails_clean(
     next_env, next_token = github_mod.borrowed_git_env(client=client, session_id="sess-next")
     assert next_token == second and next_token != first
     assert next_env["GH_TOKEN"] == second
+
+
+# ---------------------------------------------------------------------------
+# The delivered narrowing: the owner's allow-list travels with the grant
+# ---------------------------------------------------------------------------
+
+
+def test_a_grant_carries_the_owner_s_narrowing(owner: Any, github_api: _FakeGithub) -> None:
+    """The delivery vehicle: every github grant names the list the helper must hold.
+
+    The field finding (live remote-node E2E): the narrowing lived only in the
+    OWNER's config and the share wrote the holder row and nothing else, so a
+    borrower whose own config had no list refused every path and its push died
+    at ``could not read Username``. The list now rides the grant.
+    """
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    assert detail["kind"] == "grant", detail
+    assert detail["narrowing"] == {"repositories": [SCRATCH]}
+
+
+def test_the_delivered_narrowing_lands_in_an_empty_config_and_the_helper_serves(
+    env: _Env, owner: Any, github_api: _FakeGithub, tmp_path: Path
+) -> None:
+    """THE field shape: a node with no list — the helper refuses, then works.
+
+    The borrower root starts with a config that has NO ``network`` section at
+    all (cloud-node-1's exact shape, plus a sibling value to prove the write
+    merges rather than replaces). Before delivery the REAL
+    ``lop credential git-helper`` refuses by silence; after the grant's
+    narrowing is materialised the same command serves the listed repo and
+    still refuses an unlisted one.
+    """
+    node_dir = tmp_path / "node"
+    node_dir.mkdir()
+    node = _Env(node_dir)
+    (node.root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 900.0}}}}),
+        encoding="utf-8",
+    )
+
+    def helper(path: str) -> Any:
+        return _run(
+            [sys.executable, "-m", "local_operator.cli", "credential", "git-helper", "get"],
+            env={**_node_env(node), "GH_TOKEN": "tok-under-test"},
+            stdin=f"protocol=https\nhost=github.com\npath={path}\n\n",
+        )
+
+    before = helper(f"{SCRATCH}.git")
+    assert before.returncode == 0 and before.stdout == "", "an empty list must refuse"
+
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    outcome = github_mod.remember_delivered_repositories(
+        detail["narrowing"]["repositories"],
+        root=node.root,
+        self_device=BORROWER_DEVICE,
+        owner_device=OWNER_DEVICE,
+        network_id="n_gh",
+    )
+    assert outcome == {"changed": True, "repositories": [SCRATCH], "error": ""}, outcome
+
+    served = helper(f"{SCRATCH}.git")
+    assert served.returncode == 0, served.stderr
+    assert served.stdout == "username=x-access-token\npassword=tok-under-test\n"
+    refused = helper("someone/else.git")
+    assert refused.returncode == 0 and refused.stdout == ""
+
+    written = yaml.safe_load((node.root / "config.yml").read_text(encoding="utf-8"))
+    assert written["values"]["network"]["credentials"]["github"]["repositories"] == [SCRATCH]
+    assert written["values"]["network"]["credentials"]["grant_ttl_s"] == 900.0
+
+
+def test_borrowed_git_env_materialises_the_narrowing_it_serves(tmp_path: Path) -> None:
+    """The use path's own wiring: a served grant's narrowing lands during the borrow.
+
+    The cached-grant route is the one the bash tool takes, so the delivery is
+    asserted where the child's env is built — before the helper process exists,
+    which is the ordering the helper's config read depends on.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    document = placement_mod.PlacementDocument("n_gh_env", root=root, written_by=OWNER_DEVICE)
+    document.declare(
+        github_mod.GITHUB_KEY,
+        owner_device=OWNER_DEVICE,
+        owner_device_name="owner-laptop",
+        provider=github_mod.GITHUB_KEY,
+        identity_label="",
+        by=OWNER_DEVICE,
+    )
+    document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
+    document.save()
+    client = MeshCredentialClient(
+        root=root,
+        self_device=BORROWER_DEVICE,
+        network_id="n_gh_env",
+        placement=document,
+        state=None,
+    )
+    now_ms = int(time.time() * 1000)
+    client.grants.put(
+        github_mod.GITHUB_KEY,
+        "sess-n",
+        Grant(
+            access_token="tok",
+            kind="bearer",
+            token_expires_at_ms=now_ms + 3_600_000,
+            grant_expires_at_ms=now_ms + 600_000,
+            credential_ref=CredentialRef(
+                owner_device=OWNER_DEVICE,
+                owner_device_name="owner-laptop",
+                provider=github_mod.GITHUB_KEY,
+                kind=github_mod.GITHUB_KIND,
+                credential_id=0,
+            ),
+            served_by=OWNER_DEVICE,
+            scope=GrantScope(kind="device"),
+            narrowing={"repositories": [SCRATCH]},
+        ),
+    )
+    env_out, token = github_mod.borrowed_git_env(root=root, client=client, session_id="sess-n")
+    assert token == "tok" and env_out["GH_TOKEN"] == "tok"
+    assert github_mod.repositories_for(root) == (SCRATCH,), "the served narrowing did not land"
+
+    from local_operator.network.audit import AuditLog
+
+    rows = [
+        row
+        for row in AuditLog(root).tail(50, network_id="n_gh_env")
+        if row.get("event") == "credential.narrowing_applied"
+    ]
+    assert len(rows) == 1, rows
+    assert rows[0]["detail"]["act"] == BORROWER_DEVICE
+    assert rows[0]["detail"]["sub"] == OWNER_DEVICE
+
+
+def test_the_delivery_is_idempotent_and_a_change_propagates(owner: Any, tmp_path: Path) -> None:
+    """Second delivery writes nothing (byte-identical); a new list replaces + receipts."""
+    node_dir = tmp_path / "node-idem"
+    node_dir.mkdir()
+    node = _Env(node_dir)
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    first = github_mod.remember_delivered_repositories(
+        detail["narrowing"]["repositories"],
+        root=node.root,
+        self_device=BORROWER_DEVICE,
+        owner_device=OWNER_DEVICE,
+        network_id="n_gh",
+    )
+    assert first["changed"] is True
+    snapshot = (node.root / "config.yml").read_bytes()
+    again = github_mod.remember_delivered_repositories(
+        detail["narrowing"]["repositories"],
+        root=node.root,
+        self_device=BORROWER_DEVICE,
+        owner_device=OWNER_DEVICE,
+        network_id="n_gh",
+    )
+    assert again["changed"] is False
+    assert (node.root / "config.yml").read_bytes() == snapshot, "an equal list wrote anyway"
+
+    changed = github_mod.remember_delivered_repositories(
+        ["damianvtran/other"],
+        root=node.root,
+        self_device=BORROWER_DEVICE,
+        owner_device=OWNER_DEVICE,
+        network_id="n_gh",
+    )
+    assert changed["changed"] is True
+    assert github_mod.repositories_for(node.root) == ("damianvtran/other",)
+
+    from local_operator.network.audit import AuditLog
+
+    rows = [
+        row
+        for row in AuditLog(node.root).tail(50, network_id="n_gh")
+        if row.get("event") == "credential.narrowing_applied"
+    ]
+    assert len(rows) == 2, rows
+    assert rows[-1]["detail"]["repositories"] == ["damianvtran/other"]
+    assert rows[-1]["detail"]["act"] == BORROWER_DEVICE
+    assert rows[-1]["detail"]["sub"] == OWNER_DEVICE
+
+
+def test_an_unusable_or_empty_delivery_records_a_refusal_and_never_clears(
+    tmp_path: Path,
+) -> None:
+    """``failure-recorded-never-fatal``: junk or an empty list records, writes none."""
+    node_dir = tmp_path / "node-junk"
+    node_dir.mkdir()
+    node = _Env(node_dir)
+    _write_config(node.root, [SCRATCH])
+    for bad in (["not-a-pair", "also/wrong/too"], []):
+        outcome = github_mod.remember_delivered_repositories(
+            bad,
+            root=node.root,
+            self_device=BORROWER_DEVICE,
+            owner_device=OWNER_DEVICE,
+            network_id="n_gh",
+        )
+        assert outcome["changed"] is False and outcome["error"] == "no_usable_entries", outcome
+        assert github_mod.repositories_for(node.root) == (SCRATCH,), "a standing list was cleared"
+
+    from local_operator.network.audit import AuditLog
+
+    rows = [
+        row
+        for row in AuditLog(node.root).tail(50, network_id="n_gh")
+        if row.get("event") == "credential.narrowing_refused"
+    ]
+    assert len(rows) == 2, rows
+    assert {row["detail"]["reason"] for row in rows} == {"no_usable_entries"}
+    assert "repositories" not in rows[0]["detail"], "a refused row carried the list"
+
+
+def test_a_write_failure_is_recorded_and_never_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk layer failing records a refusal row and returns an error — no raise."""
+    node_dir = tmp_path / "node-fail"
+    node_dir.mkdir()
+    node = _Env(node_dir)
+
+    def explode(root: Path | None, repositories: list[str]) -> None:
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(github_mod, "_write_repositories", explode)
+    outcome = github_mod.remember_delivered_repositories(
+        [SCRATCH],
+        root=node.root,
+        self_device=BORROWER_DEVICE,
+        owner_device=OWNER_DEVICE,
+        network_id="n_gh",
+    )
+    assert outcome["changed"] is False and outcome["error"] == "OSError", outcome
+
+    from local_operator.network.audit import AuditLog
+
+    rows = [
+        row
+        for row in AuditLog(node.root).tail(50, network_id="n_gh")
+        if row.get("event") == "credential.narrowing_refused"
+    ]
+    assert len(rows) == 1 and rows[0]["detail"]["reason"] == "OSError", rows
+
+
+def test_an_owner_with_no_list_sends_no_narrowing() -> None:
+    """Absence, not an empty list: a borrower's standing backstop is never wiped."""
+    assert github_mod.grant_narrowing([]) == {}
+    assert github_mod.grant_narrowing([SCRATCH]) == {"repositories": [SCRATCH]}

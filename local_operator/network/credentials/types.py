@@ -228,6 +228,30 @@ def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int
     return int(peer_number(value, default=default, maximum=maximum))
 
 
+def _bounded_narrowing(value: Any) -> dict[str, Any]:
+    """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
+
+    The map is OPEN-ENDED on purpose — one key per provider that needs local
+    materialisation at use time (``repositories`` for github today) — so the
+    boundary here is structural rather than per-key: names are short strings,
+    values are short strings or lists of short strings, and every other shape is
+    dropped rather than guessed at. ``{}`` is the total answer, like everything a
+    peer sends reads through this module: "no narrowing", never an error.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, item in value.items():
+        if not isinstance(name, str) or not name or len(name) > 64:
+            continue
+        if isinstance(item, str):
+            out[name] = item[:200]
+        elif isinstance(item, (list, tuple)):
+            entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
+            out[name] = entries[:64]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Refusal codes: the closed set, and what the requester does with each
 # ---------------------------------------------------------------------------
@@ -419,6 +443,13 @@ class Grant:
     identity: dict[str, str] = dataclasses.field(default_factory=dict)
     latency_ms: int = 0
     grant_id: str = ""
+    #: Per-grant narrowing metadata the OWNER enforced at serve time, for the
+    #: borrower to materialise locally where a provider needs it at use time —
+    #: github's ``{"repositories": [owner/repo, ...]}`` is the git helper's
+    #: allow-list (design §3.4). Empty for every provider that needs none, so the
+    #: wire shape is unchanged for them; peer values are bounded in
+    #: :func:`_bounded_narrowing`.
+    narrowing: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -448,6 +479,8 @@ class Grant:
         }
         if self.identity:
             detail["identity"] = dict(self.identity)
+        if self.narrowing:
+            detail["narrowing"] = dict(self.narrowing)
         return detail
 
     @classmethod
@@ -491,6 +524,7 @@ class Grant:
             ),
             latency_ms=peer_int(detail.get("latency_ms")),
             grant_id=str(detail.get("grant_id") or ""),
+            narrowing=_bounded_narrowing(detail.get("narrowing")),
         )
 
 

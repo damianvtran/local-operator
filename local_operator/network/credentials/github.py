@@ -35,6 +35,18 @@ refuses ``no_local_credential`` in the reader's own terms (push and PR-write are
 unavailable until one of the three is configured; public clones and non-GitHub
 work are unaffected).
 
+THE NARROWING TRAVELS WITH THE GRANT (field finding, live remote-node E2E). The
+allow-list is an owner-side designation, but its ENFORCEMENT is the borrower's
+helper, so it must reach the borrower's config — a list that lives only on the
+owner shipped a live node whose every push died at ``could not read Username``
+because its own config had none. The owner now attaches its CURRENT designation
+to every github grant (:func:`grant_narrowing` → ``Grant.narrowing``), and the
+borrower writes it into its own config before the child runs
+(:func:`remember_delivered_repositories` — idempotent, receipted, never fatal).
+An owner with no designation sends nothing, and a device with no list still
+refuses: the fail-closed backstop is unchanged, it is just no longer a manual
+step on every node.
+
 DEVICE-SCOPED BY CONSTRUCTION (design F3). The borrower side has no
 rail-authenticated session identity — a same-uid process can claim any
 ``for_session`` — so a session-scoped grant would enforce nothing. A session id
@@ -90,6 +102,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -97,6 +110,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+
+logger = logging.getLogger("local_operator.network.credentials.github")
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -261,6 +276,21 @@ def repositories_for(root: Path | None = None) -> tuple[str, ...]:
         return DEFAULT_REPOSITORIES
     normalised = [normalise_repository(entry) for entry in raw]
     return tuple(entry for entry in normalised if entry)
+
+
+def grant_narrowing(repositories: Sequence[str]) -> dict[str, Any]:
+    """The narrowing metadata a github grant carries (design §3.4: the enforced
+    bound is the helper's allow-list).
+
+    NON-EMPTY LISTS ONLY: a cleared or never-set designation is delivered as
+    "nothing", and the borrower leaves its own standing list alone — absence on
+    the wire cannot be told apart from "this owner build predates the field",
+    and wiping a working backstop from an ambiguous signal is the wrong
+    direction for a fail-closed check. The borrower's half is
+    :func:`remember_delivered_repositories`.
+    """
+    entries = [str(entry) for entry in repositories if str(entry)]
+    return {"repositories": entries} if entries else {}
 
 
 def mint_repository_names(repositories: Sequence[str]) -> list[str]:
@@ -1267,6 +1297,154 @@ def revoke_installation_token(token: str, *, base_url: str | None = None) -> boo
         return False
 
 
+def remember_delivered_repositories(
+    repositories: Any,
+    *,
+    root: Path | None = None,
+    self_device: str = "",
+    owner_device: str = "",
+    network_id: str = "",
+) -> dict[str, Any]:
+    """Materialise a delivered narrowing into THIS device's config (borrower side).
+
+    THE BOUND LANDS WITH THE BEARER (design §3.4): the owner attaches its current
+    designation to every github grant it serves, and this writes it where the git
+    credential helper — a separate process git starts later, reading
+    :func:`repositories_for` at use time — will find it. Idempotent (an equal
+    list writes nothing), receipted (a change appends
+    ``credential.narrowing_applied`` to the audit trail), and NEVER fatal: every
+    failure is returned in the result and recorded (``credential.narrowing_refused``
+    where the trail is writable), because the borrow that carried the value must
+    not fail over its own receipt.
+
+    ``repositories`` is whatever the wire carried. Only a list/tuple with at
+    least one USABLE ``owner/repo`` entry writes: a shape that normalises to
+    nothing is a wire anomaly — recorded and ignored, never a silent clearing of
+    a list an operator set here by hand.
+    """
+    result: dict[str, Any] = {"changed": False, "repositories": [], "error": ""}
+    normalised: list[str] = []
+    if isinstance(repositories, (list, tuple)):
+        for entry in repositories:
+            cleaned = normalise_repository(entry)
+            if cleaned and cleaned not in normalised:
+                normalised.append(cleaned)
+    result["repositories"] = normalised
+    if not normalised:
+        reason = (
+            "unreadable" if not isinstance(repositories, (list, tuple)) else "no_usable_entries"
+        )
+        result["error"] = reason
+        _record_narrowing(root, self_device, owner_device, network_id, applied=False, reason=reason)
+        return result
+    try:
+        current = list(repositories_for(root))
+    except Exception as exc:  # noqa: BLE001 — an unreadable config reads as "unknown"
+        result["error"] = exc.__class__.__name__
+        _record_narrowing(
+            root,
+            self_device,
+            owner_device,
+            network_id,
+            applied=False,
+            reason=exc.__class__.__name__,
+        )
+        return result
+    if normalised == current:
+        return result
+    try:
+        _write_repositories(root, normalised)
+    except Exception as exc:  # noqa: BLE001 — recorded, never fatal; see the docstring
+        result["error"] = exc.__class__.__name__
+        logger.warning("github narrowing: the delivered repositories were not written: %s", exc)
+        _record_narrowing(
+            root,
+            self_device,
+            owner_device,
+            network_id,
+            applied=False,
+            reason=exc.__class__.__name__,
+        )
+        return result
+    result["changed"] = True
+    _record_narrowing(
+        root, self_device, owner_device, network_id, applied=True, repositories=normalised
+    )
+    return result
+
+
+def _write_repositories(root: Path | None, repositories: list[str]) -> None:
+    """Write the allow-list through the settings registry — the ONE writer.
+
+    The same row the ``/settings`` UI edits, so a delivered value and a
+    hand-typed one cannot disagree about the path, the validation, or the merge
+    rule; and the write funnels through ``write_setting``'s reload-before-write,
+    so a config another process edited a moment ago is merged rather than
+    reverted by a stale snapshot.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    directory = Path(root) if root is not None else config_dir()
+    setting = next(
+        candidate
+        for candidate in settings_io.settings_for("network")
+        # Matched on the PATH, not the dotted key: ``REPOSITORIES_PATH`` is the
+        # one spelling both sides of the share already read, and a matching
+        # criterion cannot drift from it.
+        if candidate.path == REPOSITORIES_PATH
+    )
+    settings_io.write_setting(ConfigManager(directory), setting, list(repositories))
+
+
+def _record_narrowing(
+    root: Path | None,
+    self_device: str,
+    owner_device: str,
+    network_id: str,
+    *,
+    applied: bool,
+    repositories: Sequence[str] = (),
+    reason: str = "",
+) -> None:
+    """One audit row for a narrowing that landed — or one that was refused.
+
+    The borrow path's own discipline (``cli._audit_placement``'s shape): a
+    one-shot writer, closed after its row, and a trail that cannot be written
+    must never fail the delivery. ``act``/``sub`` are the devices the delegation
+    ran between, so an incident reader can line the receipt up with the grant.
+    """
+    try:
+        from local_operator.network.audit import AuditEvent, AuditLog
+
+        detail: dict[str, Any] = {
+            "credential_key": GITHUB_KEY,
+            "act": self_device,
+            "sub": owner_device,
+        }
+        if applied:
+            detail["repositories"] = list(repositories)
+            event = "credential.narrowing_applied"
+        else:
+            detail["reason"] = reason
+            event = "credential.narrowing_refused"
+        log = AuditLog(root)
+        log.record(
+            AuditEvent(
+                event=event,
+                network_id=network_id,
+                actor=self_device,
+                subject=owner_device,
+                actor_kind="device",
+                detail=detail,
+            )
+        )
+        log.close()
+    except Exception:  # noqa: BLE001 — a receipt is never worth a lost env
+        pass
+
+
 def borrowed_git_env(
     *,
     root: Path | None = None,
@@ -1296,6 +1474,28 @@ def borrowed_git_env(
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
         return {}, ""
+    # THE BOUND LANDS WITH THE BEARER (§3.4): a grant that carries the owner's
+    # narrowing writes it to this device's config HERE, before the child that
+    # will run the helper is spawned — the helper is a separate process that
+    # reads ``repositories_for`` at use time, and this is the moment the value
+    # and its use are guaranteed in order. Best effort by construction:
+    # ``remember_delivered_repositories`` never raises, and a device that
+    # received no narrowing keeps whatever its own config holds (no list still
+    # refuses).
+    try:
+        narrowing = getattr(outcome, "narrowing", None)
+        delivered = narrowing.get("repositories") if isinstance(narrowing, dict) else None
+        if isinstance(delivered, list):
+            owner_of = getattr(client, "owner_of", None)
+            remember_delivered_repositories(
+                delivered,
+                root=root,
+                self_device=str(getattr(client, "self_device", "") or ""),
+                owner_device=str(owner_of(GITHUB_KEY) or "") if callable(owner_of) else "",
+                network_id=str(getattr(client, "network_id", "") or ""),
+            )
+    except Exception:  # noqa: BLE001 — a delivery receipt is never worth a lost env
+        pass
     grant_exp_ms = int(getattr(outcome, "grant_expires_at_ms", 0) or 0)
     _schedule_self_revoke(token, grant_exp_ms)
     return git_env_for_token(token), token

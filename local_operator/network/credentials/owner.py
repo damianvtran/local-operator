@@ -1067,6 +1067,10 @@ class MeshCredentialBroker:
             refreshed=True,
             scope=GrantScope(kind="device", session_id=""),
             identity={},
+            # THE DELIVERY (§3.4): the allow-list this mint was narrowed to
+            # travels WITH the bearer, so the borrower materialises the same
+            # bound the token carries (github.remember_delivered_repositories).
+            narrowing=github_app.grant_narrowing(repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
         lender.register(
@@ -1114,6 +1118,10 @@ class MeshCredentialBroker:
             refreshed=False,
             scope=GrantScope(kind="device", session_id=""),
             identity={},
+            # §3.4's bound for the token arms is the helper's allow-list ALONE,
+            # so it must reach the helper's device too (see _serve_github_app's
+            # note on the delivery; read fresh per serve, like the token).
+            narrowing=github_app.grant_narrowing(github_app.repositories_for(self.root)),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
