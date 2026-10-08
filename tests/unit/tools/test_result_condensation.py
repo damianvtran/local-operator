@@ -29,6 +29,7 @@ from local_operator.tools.builtin import (
     HUB_LIST_COMPLETED_SHOWN,
     READ_OUTPUT_LIMIT_CHARS,
     _collapse_refreshing_frames,
+    _header_candidates,
     _hub_list,
 )
 from local_operator.tools.registry import create_tools
@@ -382,7 +383,7 @@ async def test_peek_returns_the_latest_frame_and_keeps_the_rest_reachable(isolat
     text = _text(peek)
     details = peek.details or {}
     assert (
-        "[4 earlier redraw frame(s) elided — every line they carried is in the frame below" in text
+        "[4 earlier frame(s) elided — every line of text they carried is in the frame below" in text
     )
     assert "line a" in text and text.count("line a") == 1
     assert details["frames_elided"] == 4
@@ -526,3 +527,117 @@ def test_hub_list_does_not_fold_when_the_spill_store_refuses(isolated_spill, mon
     assert "not shown" not in text
     assert details["count"] == 19
     assert "folded_completed" not in details and "spill" not in details
+
+
+# ------------------------------------------- round-2 findings (F1, F2, F3, Q5)
+
+
+@pytest.mark.asyncio
+async def test_paging_reaches_matches_past_the_stores_per_call_limit(isolated_spill, tmp_path):
+    """F1/Q3: the pointer must not run past what one search can materialize.
+
+    A page is addressed by match NUMBER, so page 2 (matches 101-200) needs the
+    search to retain at least 200 matches. With the fixed default limit the store
+    returned the first 100 and every range from 101 up answered "past the last
+    match" — a false statement the model then followed in a loop.
+    """
+    context = ToolContext(cwd=str(tmp_path), session_id="s")
+    tools = {tool.name: tool for tool in create_tools(context)}
+    text = "\n".join(f"hit-{i}" if i % 2 else f"filler {i}" for i in range(434))
+    meta = get_store().write(text, tool_name="bash", session_id="s")
+    assert meta is not None
+    assert text.count("hit-") == 217
+    query = f"{meta.handle}?q=hit-"
+
+    first = await _call(tools, "read", {"path": query}, context)
+    assert "100 of 217 match(es)" in _text(first)
+    assert 'range="101-200"' in _text(first)
+
+    second = await _call(tools, "read", {"path": query, "range": "101-200"}, context)
+    second_text = _text(second)
+    assert "No lines match" not in second_text and "past the last match" not in second_text
+    assert "100 of 217 match(es)" in second_text
+    # match k is `hit-(2k-1)`, on line 2k: page 2 starts at match 101 == hit-201
+    # on line 202, and ends at match 200 == hit-399 on line 400.
+    assert "202| hit-201" in second_text, "page 2 really is matches 101-200"
+    assert "400| hit-399" in second_text and "2| hit-1" not in second_text
+    assert 'range="201-217"' in second_text
+
+    third = await _call(tools, "read", {"path": query, "range": "201-217"}, context)
+    assert "17 of 217 match(es)" in _text(third)
+    assert "that is every match" in _text(third)
+
+    # An open range past the first page works too ("101-").
+    opened = await _call(tools, "read", {"path": query, "range": "101-"}, context)
+    assert "202| hit-201" in _text(opened)
+
+
+@pytest.mark.asyncio
+async def test_a_page_beyond_a_single_calls_ceiling_is_named_as_such(isolated_spill, tmp_path):
+    """Past the ceiling the answer names the limit rather than lying about the content."""
+    tools, context, meta = await _spill_with_matches(tmp_path, count=3)
+    past = await _call(
+        tools, "read", {"path": f"{meta.handle}?q=hit", "range": "9999-10010"}, context
+    )
+    assert "at most 10000 matches" in _text(past)
+    assert "past the last match" not in _text(past)
+
+
+def test_an_indentation_difference_blocks_the_elision():
+    """F2: lines are compared verbatim, so `    x` is not `x`.
+
+    The earlier rule stripped each line before comparing, so an earlier frame's
+    `    indented: deep detail` was dropped because the kept frame held the
+    unindented spelling — while the note said the line was preserved.
+    """
+    indented = "HDR\n    indented: deep detail\nplain line\n"
+    flush = "HDR\nindented: deep detail\nplain line\n"
+
+    assert _collapse_refreshing_frames(indented + flush) == (indented + flush, 0)
+    assert _collapse_refreshing_frames(flush + indented) == (flush + indented, 0)
+    # The same text on both sides still collapses: the rule blocks DIFFERENCES,
+    # it does not refuse indented frames.
+    assert _collapse_refreshing_frames(indented * 3)[1] == 2
+
+
+def test_the_frame_start_preference_actually_applies():
+    """F3: the shaped-candidate preference could never fire, so it was dead weight.
+
+    ``before.rstrip("\n").endswith("\n\n")`` stripped the very bytes it tested
+    for, so only a line at the very top of the text ever qualified. Here ``H``
+    sits under a blank line at every occurrence (4) and ``D`` is the text's first
+    line and otherwise trails content (1); the working check orders ``H`` first,
+    the broken one ordered ``D`` first. Asserted on the ORDER because the
+    preference is a search order, not a correctness lever: every candidate is
+    still validated by containment, and a brute-force search found no payload
+    where two candidates both validate (see ``_header_candidates``).
+    """
+    text = "D\n\nH\nx\ny\n" * 4
+    lines = text.splitlines()
+    occurrences: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        if line.strip():
+            occurrences.setdefault(line, []).append(index)
+
+    ordered = _header_candidates(lines, occurrences)
+
+    assert ordered[0][0] == "H", "the frame-start-shaped header is tried first"
+    assert "D" in [line for line, _offsets in ordered]
+    # ...and the collapse still runs through the same validated path.
+    assert _collapse_refreshing_frames(text)[1] >= 1
+
+
+def test_a_clear_style_redraw_collapses():
+    """Q5: `clear`/`tput clear` emit ESC[H ESC[2J, and the cursor move broke it.
+
+    Matching only the erase code left a dangling ESC[H line at the end of the
+    previous chunk — a line the kept frame does not have, which failed
+    containment and made every `clear`-cleared screen uncollapsible.
+    """
+    text = "".join("\x1b[H\x1b[2J" + REDRAW_FRAME for _ in range(4))
+    latest, elided = _collapse_refreshing_frames(text)
+    assert elided == 3
+    assert latest == REDRAW_FRAME.rstrip("\n")
+    # The reverse order (erase, then home) is what some terminals emit.
+    reversed_text = "".join("\x1b[2J\x1b[H" + REDRAW_FRAME for _ in range(3))
+    assert _collapse_refreshing_frames(reversed_text)[1] == 2

@@ -5723,6 +5723,14 @@ def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
     return f"{before}{line[start:end]}{after}"
 
 
+#: The most matches ONE ``?q=`` call will ask the store to materialize. A page
+#: is addressed by match number, so serving page N needs N matches retained; the
+#: ceiling bounds that (a 4 MB entry matched on every line is the pathological
+#: case) and a page beyond it is refused with the limit named rather than
+#: answered with a false "past the last match".
+_SPILL_SEARCH_PAGE_MAX = 10_000
+
+
 def _search_spill(
     tool_call_id: str,
     store: SpillStore,
@@ -5737,9 +5745,41 @@ def _search_spill(
     page to find one traceback costs more than the truncation ever saved;
     finding the line number for ~200 tokens and reading 40 lines around it
     costs almost nothing.
+
+    THE RANGE DECIDES THE SEARCH LIMIT, because a page is addressed by match
+    NUMBER and the store only retains as many matches as the limit allows. With
+    the fixed default, following this tool's own pointer to page 2 answered
+    "That page is past the last match" for every range from 101 up: the store
+    had returned the first 100 of 714 matches and the page asked for 101-200
+    (agent review / QA round 2, F1/Q3).
     """
+    limit = SPILL_SEARCH_MATCH_LIMIT
+    first_match_index = 1
+    page_end: int | None = None
+    if range_spec:
+        # Documented in the schema: on a search the range pages through
+        # MATCHES. Slicing lines here instead would silently return nothing
+        # whenever the matches fell outside the requested line window.
+        try:
+            first_match_index, page_end = _parse_line_range(range_spec)
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
+        # An open range ("101-") still needs a page's worth past its start.
+        wanted = page_end if page_end is not None else first_match_index + limit - 1
+        if wanted > _SPILL_SEARCH_PAGE_MAX:
+            return _text(
+                tool_call_id,
+                "read",
+                f"One search serves at most {_SPILL_SEARCH_PAGE_MAX} matches, so page "
+                f"'{range_spec}' is beyond what a single call returns. Narrow the query, "
+                f'or read the lines around a match with read(path="{ref.handle}", '
+                f'range="<line>-<line>")',
+                useless=True,
+                details={"url": f"{ref.handle}?q={ref.query}", "useless": True},
+            )
+        limit = max(limit, wanted)
     try:
-        found = store.search(ref.handle, ref.query, SPILL_SEARCH_MATCH_LIMIT)
+        found = store.search(ref.handle, ref.query, limit)
     except re.error as exc:
         # Malformed, same as grep's pattern: the `?q=` fragment rides inside a
         # URL string, so no schema can reject a bad regex before it parses.
@@ -5749,18 +5789,11 @@ def _search_spill(
         # could not serve it. Stays `execution`.
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     matches, total_matches, total_lines = found
+    # Whether the STORE has matches at all, read before this page's slice: the
+    # two "empty" cases need different answers (see below).
     store_has_matches = bool(matches)
-    first_match_index = 1
     if range_spec:
-        # Documented in the schema: on a search the range pages through
-        # MATCHES. Slicing lines here instead would silently return nothing
-        # whenever the matches fell outside the requested line window.
-        try:
-            start, end = _parse_line_range(range_spec)
-        except InvalidToolArgumentsError as exc:
-            return _invalid_arguments(tool_call_id, "read", str(exc))
-        first_match_index = start
-        matches = matches[start - 1 : end]
+        matches = matches[first_match_index - 1 : page_end]
     # The page the caller asked for decides the NEXT page's width: continuing a
     # "1-5" page with "6-10" is what they were reading.
     page_size = max(len(matches), 1)
@@ -25858,7 +25891,18 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
 
 #: ANSI sequences a full-screen redraw starts with: clear-screen (``ESC[2J``),
 #: cursor-home + clear-to-end (``ESC[H ESC[J``) and full reset (``ESC c``).
-_CLEAR_SCREEN_RE = re.compile(r"\x1b\[[23]J|\x1b\[H\x1b\[J|\x1bc")
+#: One control sequence: CSI (``ESC[`` params + a final letter) or a bare RIS.
+_ESCAPE_SEQ = r"\x1b\[[0-9;?]*[A-Za-z]|\x1bc"
+
+#: A screen clear, INCLUDING the cursor moves around it. `clear`/`tput clear`
+#: emit `ESC[H ESC[2J`, and a redrawing printer commonly writes `ESC[H ESC[J`
+#: (home, then erase-below), so the erase is matched with an optional 0-3
+#: parameter rather than as a literal `[2J`. Matching only the erase code alone
+#: left the cursor-home escape dangling at the end of the previous chunk — a line
+#: the kept frame does not have, which failed containment and made every
+#: `clear`-cleared screen uncollapsible (QA round 2, Q5). The cluster is bounded
+#: to CONTROL sequences, so it cannot swallow text.
+_CLEAR_SCREEN_RE = re.compile(rf"(?:{_ESCAPE_SEQ})*\x1b\[[0-3]?J(?:{_ESCAPE_SEQ})*|\x1bc")
 
 #: A frame must carry at least this many non-blank lines to count as a redraw.
 #: Below it, a recurring line is more likely an ordinary repeated log line.
@@ -25941,32 +25985,20 @@ def _repeating_header_spans(text: str) -> list[tuple[int, int]] | None:
     sequences, so the boundary is the frame's first line. Every recurring line
     is tried as a candidate and the split is validated as a whole
     (:func:`_chunks_are_one_frame_redrawn`); candidates whose occurrences
-    already look like frame starts (preceded by a blank line) are tried first,
-    because that is the shape a frame-at-a-time writer produces.
+    already look like frame starts are tried first, because that is the shape a
+    frame-at-a-time writer produces.
+
+    One line basis (``splitlines``), used for the candidate scan, the shaped
+    test and the offsets alike, so a line index cannot mean two things.
     """
-    positions: dict[str, list[int]] = {}
-    for offset, line in _iter_lines_with_offsets(text):
+    lines = text.splitlines()
+    offsets = _line_offsets(lines)
+    occurrences: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
         if line.strip():
-            positions.setdefault(line, []).append(offset)
-    candidates = [(line, at) for line, at in positions.items() if len(at) >= 2]
-    if not candidates:
-        return None
-
-    def frame_start_shaped(at: int) -> bool:
-        # A frame start sits at the top of the text or just past a blank line,
-        # which is where a frame-at-a-time writer puts it.
-        before = text[:at]
-        return not before.strip() or before.rstrip("\n").endswith(("\n\n", "\n\r\n"))
-
-    candidates.sort(
-        key=lambda item: (
-            -sum(1 for at in item[1] if frame_start_shaped(at)),
-            -len(item[1]),
-            item[1][0],
-        )
-    )
-    for _line, offsets in candidates[:_FRAME_HEADER_CANDIDATES]:
-        spans = [(offset, offset) for offset in offsets]
+            occurrences.setdefault(line, []).append(index)
+    for _line, indexes in _header_candidates(lines, occurrences)[:_FRAME_HEADER_CANDIDATES]:
+        spans = [(offsets[index], offsets[index]) for index in indexes]
         chunks = [text[spans[i][1] : spans[i + 1][0]] for i in range(len(spans) - 1)]
         chunks.append(text[spans[-1][1] :])
         leading = text[: spans[0][0]]
@@ -25977,14 +26009,75 @@ def _repeating_header_spans(text: str) -> list[tuple[int, int]] | None:
     return None
 
 
-def _iter_lines_with_offsets(text: str) -> list[tuple[int, str]]:
-    """``(char offset, line)`` per line, offsets counted the way ``split`` is."""
-    out: list[tuple[int, str]] = []
+def _header_candidates(
+    lines: Sequence[str], occurrences: Mapping[str, list[int]]
+) -> list[tuple[str, list[int]]]:
+    """Recurring lines in the order they are tried as a frame HEADER.
+
+    A frame start sits at the top of the text or directly under a blank line,
+    which is where a frame-at-a-time writer puts it, so those candidates are
+    tried first — then the most frequent, then the earliest.
+
+    WHAT THIS ORDERING IS AND IS NOT. It is a search order, not a correctness
+    lever: every candidate is validated by containment before anything is
+    elided, and the search returns the first one that passes. A brute-force
+    search (uniform repeated units, 5-symbol alphabet, 2-4 repeats) found no
+    payload where two candidates BOTH validate, so the preference only decides
+    which frame is kept in a shape not yet observed; either answer is safe.
+
+    A "header" must REPEAT: lines seen once are not candidates at all, because a
+    single occurrence would split the payload into one frame plus a leading
+    fragment, and a fragment contained in the tail then reads as a verified
+    redraw. That filter lives HERE rather than at the call site so a candidate
+    list can never again mean two things.
+
+    THE EARLIER SPELLING OF THE SHAPED TEST COULD NEVER FIRE. It read
+    `before.rstrip("\n").endswith("\n\n")` off the text before an offset — and
+    the ``rstrip`` removed the very bytes it was looking for, so only a line at
+    the very top of the text ever qualified. A dead preference is worse than
+    none, because the next reader believes it steered something (agent review
+    round 2, F3). It is now read off the line list, and pinned by
+    ``test_the_frame_start_preference_actually_applies``.
+    """
+
+    def frame_start_shaped(line_index: int) -> bool:
+        return line_index == 0 or lines[line_index - 1].strip() == ""
+
+    repeating = {line: at for line, at in occurrences.items() if len(at) >= 2}
+    return sorted(
+        repeating.items(),
+        key=lambda item: (
+            -sum(1 for index in item[1] if frame_start_shaped(index)),
+            -len(item[1]),
+            item[1][0],
+        ),
+    )
+
+
+def _line_offsets(lines: Sequence[str]) -> list[int]:
+    """Char offset of each line, on the same basis ``splitlines()`` produced."""
+    offsets: list[int] = []
     offset = 0
-    for line in text.split("\n"):
-        out.append((offset, line))
+    for line in lines:
+        offsets.append(offset)
         offset += len(line) + 1
-    return out
+    return offsets
+
+
+def _frame_body_lines(chunk: str) -> list[str]:
+    """A chunk's content lines, compared EXACTLY and split the read path's way.
+
+    ``splitlines()`` is the same basis the spill store serves and ``read``
+    numbers lines on, so what this rule reasons about is what a follow-up read
+    shows. Lines are compared verbatim: an earlier version stripped them first,
+    which let `    indented: deep detail` be elided while the kept frame held
+    the UNINDENTED `indented: deep detail` — the note then claimed a line was
+    preserved that had been altered (agent review / QA round 2, F2).
+
+    Only EMPTY lines are set aside, because they carry no text to lose and
+    frames are routinely separated by them.
+    """
+    return [line for line in chunk.splitlines() if line != ""]
 
 
 def _chunks_are_one_frame_redrawn(chunks: list[str]) -> bool:
@@ -25997,7 +26090,7 @@ def _chunks_are_one_frame_redrawn(chunks: list[str]) -> bool:
         return False
 
     def body_set(chunk: str) -> set[str]:
-        return {line.strip() for line in chunk.split("\n") if line.strip()}
+        return set(_frame_body_lines(chunk))
 
     kept = body_set(chunks[-1])
     if len(kept) < _FRAME_MIN_LINES:
@@ -26085,10 +26178,14 @@ def _peek_job(
         # through to the untouched output instead (agent review round 1, MAJOR).
         collapsed_meta = _spill(text, "jobs", context)
     if collapsed_meta is not None:
-        # The note states the fact the containment rule actually verified:
-        # every line the dropped frames carried is in the frame below.
+        # The note states exactly what the containment rule verified, in the
+        # words the rule uses: every line of TEXT the dropped frames carried is
+        # in the frame below. "text" is there because empty lines are the one
+        # thing the rule sets aside (they carry nothing), and lines themselves
+        # are compared verbatim — an indentation difference blocks the elision
+        # rather than being silently normalised (agent review round 2, F2).
         parts.append(
-            f"[{elided} earlier redraw frame(s) elided \u2014 every line they carried "
+            f"[{elided} earlier frame(s) elided \u2014 every line of text they carried "
             f'is in the frame below; the full delta: read(path="{collapsed_meta.handle}")]'
         )
         parts.append(frame)
