@@ -2605,20 +2605,29 @@ async def test_a_cold_resume_with_nothing_attached_publishes_the_empty_statement
 async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """THE compatibility cell: every session that already exists on disk.
+    """THE compatibility cell: the sentinel shape a pre-field session holds.
 
-    A checkpoint written before this field shipped carries
-    ``effective_identity: {}`` — the model dumps every field, so the key is
-    present with the sentinel value rather than absent. That value means "a host
-    older than this field" to a client, so a restore that COPIES the field from
-    the checkpoint hands the sentinel back and the header reads an old host until
-    a runtime engages: the bug this whole derivation exists to fix, for exactly
-    the sessions that already exist.
+    TWO shapes exist on disk, and the sibling cell covers the other one (agent
+    review on the follow-up, NIT-2 — a reader who believed the first draft of
+    this docstring could have deleted that sibling as redundant):
 
-    The cell therefore asserts the stored shape first (the key is present and
-    empty), then the derived triple — so a future change back to
-    ``dict(durable.effective_identity)`` fails HERE rather than in a user's
-    header. Sabotage-proof run recorded in the commit body.
+    * a checkpoint written by THIS build with nothing attached holds
+      ``effective_identity: {}``, because the model dumps every field;
+    * a checkpoint last written by a build that predates the field holds NO key
+      for it at all (``test_a_cold_resume_derives_the_identity_the_team_binds``
+      pops the key to reproduce that shape).
+
+    ``{}`` means "a host older than this field" to a client, so a restore that
+    COPIES either shape from the checkpoint hands back something a header has to
+    read as "cannot say" — the bug this derivation exists to fix, for exactly the
+    sessions that already exist.
+
+    The cell asserts the stored shape first (the key present and empty, checked
+    before the checkpoint is written, so it fails LOUDLY at its own precondition
+    if the model ever stops dumping empty fields rather than passing vacuously),
+    then the derived triple. Under the sabotage run (the derivation replaced by
+    ``dict(durable.effective_identity)``) it reds alongside its two siblings —
+    3 failed / 39 passed on the whole file.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
