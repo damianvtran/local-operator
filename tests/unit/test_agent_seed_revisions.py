@@ -114,7 +114,10 @@ def test_regeneration_reproduces_the_committed_bytes() -> None:
     git reads at all; that is what lets CI run this on a shallow checkout.
     """
 
-    assert generator.render() == LEDGER_PATH.read_text(encoding="utf-8")
+    assert generator.render() == LEDGER_PATH.read_text(encoding="utf-8"), (
+        "the committed ledger is stale; regenerate it with: "
+        ".venv/bin/python scripts/gen_agent_seed_revisions.py"
+    )
 
 
 def test_check_passes_on_the_committed_file_and_never_writes(tmp_path, capsys) -> None:
@@ -134,6 +137,64 @@ def test_check_passes_on_the_committed_file_and_never_writes(tmp_path, capsys) -
 
     assert generator.main(["--check", "--out", str(stale)]) == 1
     assert stale.read_text(encoding="utf-8") != committed, "--check must not rewrite"
+
+
+def test_bootstrap_refuses_a_marked_shallow_clone_and_never_truncates(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 1, Q3 / agent review round 1, R1-4, in the repro's shape.
+
+    A ``--depth 1`` clone answers ``--is-shallow-repository`` true; the
+    pre-fix bootstrap walked its single graft commit, wrote a 10-revision
+    ledger over the committed 65, and ``--check`` then PASSED on the
+    truncated file. Now the marker refuses first — writes NOTHING — and
+    ``--allow-shallow`` is the explicit escape hatch, reserved for a clone
+    known to be complete despite the marker. Independently, a bootstrap walk
+    that would shrink an existing target refuses regardless of door.
+
+    ``--depth`` is honoured here because the source is addressed as a
+    ``file://`` URL, which disables git's local-clone path where the flag
+    would otherwise be ignored with a warning.
+    """
+
+    clone = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--single-branch", generator.REPO.as_uri(), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    shallow = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "--is-shallow-repository"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert shallow == "true"
+
+    seeds_dir = clone / "local_operator" / "agent_seeds"
+    monkeypatch.setattr(generator, "REPO", clone)
+    monkeypatch.setattr(agent_profiles, "SEEDS_DIR", seeds_dir)
+
+    # ``--check`` runs without history, as CI does on fetch-depth 2.
+    assert generator.main(["--check"]) == 0
+
+    committed = (seeds_dir / SEED_REVISIONS_NAME).read_bytes()
+
+    with pytest.raises(SystemExit) as refusal:
+        generator.main(["--bootstrap-from-git"])
+    assert "--allow-shallow" in str(refusal.value)
+    assert (seeds_dir / SEED_REVISIONS_NAME).read_bytes() == committed
+
+    # The override proceeds — but only to a FRESH target: the walk's output
+    # (the clone's single commit) must never overwrite the full ledger.
+    out = tmp_path / "boot.json"
+    assert generator.main(["--bootstrap-from-git", "--allow-shallow", "--out", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["seeds"]
+
+    with pytest.raises(SystemExit) as truncation:
+        generator.main(["--bootstrap-from-git", "--allow-shallow"])
+    assert "refusing to truncate" in str(truncation.value)
+    assert (seeds_dir / SEED_REVISIONS_NAME).read_bytes() == committed
 
 
 def test_every_seed_tail_equals_the_packaged_starter() -> None:
