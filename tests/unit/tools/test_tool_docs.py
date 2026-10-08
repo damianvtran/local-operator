@@ -194,17 +194,28 @@ _WALK_DEPTH_CAP = 2
 #: refusals and summaries). Every other entry is byte-identical, and the same
 #: three tools are the whole of ``scripts/bench_context_budget.py``'s raise
 #: (``36,552 -> 37,094``) — the two ledgers move together.
+#: RE-MEASURED 2026-10-08 by the context diet (deferred tool schemas,
+#: ``perf/deferred-tools``). EVERY entry moved, and the whole table moved
+#: DOWN: ``create_tools`` now collapses an optional field's
+#: ``anyOf: [T, null]`` + ``default: null`` to ``T`` and the injected ``i``
+#: description is shorter, and the doc renders the schema it is given. Only
+#: two entries moved UP, and both are moves rather than growth: ``project``
+#: (1077 -> 1102) and ``todo`` (498 -> 524) gained the per-field/per-op prose
+#: their wire schemas gave up (pinned both ways in ``MOVED_WIRE_DETAIL``).
+#: ``send``/``ask`` also gained notes, but their shorter descriptions (which
+#: the doc renders too) outweigh them; ``sessions`` fell 981 -> 802 for the
+#: same reason.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 849,
-    "ask": 1205,
-    "ask_withdraw": 327,
-    "bash": 313,
-    "browser": 1365,
-    "console": 1141,
-    "edit": 372,
-    "eval": 379,
-    "glob": 94,
-    "grep": 346,
+    "agent": 786,
+    "ask": 1005,
+    "ask_withdraw": 318,
+    "bash": 304,
+    "browser": 1312,
+    "console": 1096,
+    "edit": 351,
+    "eval": 376,
+    "glob": 91,
+    "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
     # rewritten to say that pause/cancel RECORD it as the stop reason. The new
     # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
@@ -214,30 +225,30 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 677,
-    "jobs": 365,
-    "list_variables": 61,
-    "lsp": 303,
-    "monitor": 420,
-    "network": 877,
-    "patience": 361,
-    "project": 1077,
-    "project_delete": 98,
-    "read": 358,
-    "read_variable": 74,
-    "secret": 209,
-    "send": 728,
-    "sessions": 981,
-    "task": 509,
-    "team": 540,
-    "team_delete": 93,
-    "todo": 498,
-    "wait": 275,
-    "wake": 357,
-    "web_fetch": 367,
-    "web_read": 234,
-    "web_search": 202,
-    "write": 144,
+    "hub": 650,
+    "jobs": 350,
+    "list_variables": 58,
+    "lsp": 276,
+    "monitor": 357,
+    "network": 874,
+    "patience": 334,
+    "project": 1102,
+    "project_delete": 95,
+    "read": 349,
+    "read_variable": 71,
+    "secret": 188,
+    "send": 697,
+    "sessions": 802,
+    "task": 488,
+    "team": 489,
+    "team_delete": 90,
+    "todo": 524,
+    "wait": 272,
+    "wake": 312,
+    "web_fetch": 352,
+    "web_read": 225,
+    "web_search": 193,
+    "write": 141,
 }
 
 #: The SAME ledger's other arm: ``agent``/``task`` rendered against a
@@ -248,7 +259,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: 716 -> 855 and 585 -> 668, the same moved-here-on-purpose growth the clean
 #: arm documents (the per-op tables and notes now carry what the wire used
 #: to).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 878, "task": 672}
+#: 878/672 -> 815/639 (2026-10-08, context diet): the same collapse and
+#: intent-description cut as the canonical table above.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 639}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -622,8 +635,12 @@ MOVED_WIRE_DETAIL: dict[str, tuple[str, ...]] = {
     # test_project_tool.py::test_the_schema_text_names_the_cap_the_refusal_enforces),
     # so the both-ways assertion cannot hold for it. The milestone-rationale
     # phrase stays as this tool's representative move.
-    "project": ("derived, not stored",),
+    "project": ("derived, not stored", "<= 10 files, <= 5 MB each"),
+    # Context diet (deferred-tools PR): the delivery modes and the fresh
+    # session refusal left the description; the per-op prose left todo.op.
+    "send": ("is not a recipient: sends to it are refused",),
     "task": ("a registered profile or a packaged starter",),
+    "todo": ("Abandon items that are no longer needed",),
 }
 
 
