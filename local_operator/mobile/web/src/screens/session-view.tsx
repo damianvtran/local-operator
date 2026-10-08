@@ -38,7 +38,7 @@ import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
-import { navigate } from "../router";
+import { navigate, parseHash } from "../router";
 import { consumePendingFocus } from "../lib/pending-focus";
 import { pinRefusalText } from "../lib/pin-refusal";
 import { resumeRefusalText } from "../lib/refusal";
@@ -56,7 +56,29 @@ import {
 	useSessions,
 } from "../store";
 import { blockingPending, outstandingAsks } from "../lib/asks";
+import { askOpenPolicy, namesEveryOutstanding, readQueue } from "../lib/ask-open-policy";
 import type { SessionProjection } from "../types";
+
+/** A field the keyboard types into. The phone's reading of "the user is typing" is
+    FOCUS, not a draft sitting in storage (see the open-by-default block in
+    `SessionScreen`): a focused text field is a raised keyboard, and a modal sheet
+    opening over it would drop that keyboard out from under a sentence in progress.
+    Checkboxes and buttons are excluded because focusing one is not typing. */
+const TEXT_ENTRY_SELECTOR =
+	'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]), [contenteditable=""], [contenteditable="true"]';
+
+function aTextFieldHoldsTheKeyboard(): boolean {
+	const active = document.activeElement;
+	return active instanceof HTMLElement && active.matches(TEXT_ENTRY_SELECTOR);
+}
+
+/** Whether some other sheet is already up. Every picker on the phone is a `Sheet`
+    (model, effort, slash, gate), which renders `role="dialog"`, so asking the DOM
+    covers the ones whose open state lives in a child component this screen cannot
+    see. A second modal stacked over the first is never what a user asked for. */
+function anotherSheetIsOpen(): boolean {
+	return document.querySelector('[role="dialog"]') !== null;
+}
 
 /** The header strip's control box: a real 44x44 target.
 
@@ -466,7 +488,8 @@ export function SessionScreen({
 	   two doors to one sheet, so they state the same population in the same unit
 	   (the outstanding set — open plus still-answerable timeouts — counted in
 	   QUESTIONS, which is what §5.0's own bar copy counts). */
-	const askQuestionCount = outstandingAsks(projection?.asks).reduce(
+	const answerableAsks = outstandingAsks(projection?.asks);
+	const askQuestionCount = answerableAsks.reduce(
 		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
 		0,
 	);
@@ -491,16 +514,69 @@ export function SessionScreen({
 
 	   The entry carries no URL change (the hash router owns the address), so a
 	   pop re-renders the SAME route and the sheet's own listener is what reacts. */
-	const openAsks = useCallback(() => {
+	/* THE SHEET'S HISTORY ENTRY, claimed from one place so the door and the
+	   open-by-default path cannot spell it two ways. */
+	const claimAsksEntry = useCallback(() => {
 		window.history.pushState({ ...window.history.state, askSheet: true }, "");
-		setAsksOpen(true);
 	}, []);
+	/* THIS SCREEN'S ANSWERABLE ASK IDS, as of the latest render, for the two
+	   callbacks below that run on a gesture rather than on a render. Written during
+	   render (the idiom `ui/sheet.tsx` uses for its own `onCloseRef`) so a close
+	   always names the set the user was looking at when they closed. */
+	const answerableIdsRef = useRef<string[]>([]);
+	answerableIdsRef.current = answerableAsks.map((row) => row.ask_id);
+	/* OPEN BY DEFAULT, clause 4 of the shared open-policy contract (see
+	   `lib/ask-open-policy.ts`): a close the USER made while asks remain is
+	   remembered, per conversation and by ask id, so a later view of this
+	   conversation does not open the sheet over a question they already waved off.
+	   Recorded only from the three gestures below that are the user turning the
+	   sheet away — never from unmounting, never from navigating to another
+	   conversation (by the sheet's own `open` control or from outside), which say
+	   nothing about this one's asks. */
+	const noteAsksDismissed = useCallback(() => {
+		askOpenPolicy.noteUserClosed(sessionId, answerableIdsRef.current);
+	}, [sessionId]);
+	/* THE DOOR (the dock and the header entry). A user pressing it also settles the
+	   view's pending decision, so a frame that lands afterwards cannot open a sheet
+	   over them a second time (clause 6: opening by policy is not pressing the
+	   door, and pressing the door is not something the policy gets to repeat). */
+	const openAsks = useCallback(() => {
+		askOpenPolicy.noteUserOpened(sessionId);
+		claimAsksEntry();
+		setAsksOpen(true);
+	}, [sessionId, claimAsksEntry]);
+	/* THE POLICY'S OWN OPEN. The same sheet and the same Back behaviour as the
+	   door, minus the "a user pressed it" bookkeeping. The entry is claimed only if
+	   this history entry does not already carry one: React's StrictMode (the dev
+	   server) re-runs mount effects, which can reach here twice for one view, and a
+	   second entry would make Back close the sheet and then close it again.
+
+	   A KNOWN LIMIT OF CLAIMING THE ENTRY HERE, from the platform and not from this
+	   code: unlike the door, this `pushState` runs from an effect with no gesture
+	   behind it. Chromium's history-manipulation intervention marks a document's
+	   entries "skippable" for the browser's Back button when the document adds an
+	   entry without a user activation, and lifts that the moment the document
+	   receives one (chromium `docs/history_manipulation_intervention.md`, invariants
+	   2-4; it never touches `history.back()`, which is what ✕ and the scrim use).
+	   So on a page nobody has tapped yet (a cold deep link from a notification), the
+	   very first Back press can leave the page instead of closing the sheet; after
+	   any tap it closes the sheet as designed. Nothing is lost either way: the ask
+	   is still pending and the sheet has its own always-present close control.
+	   Claiming no entry would be worse in the common case (a tap on the session
+	   list came first), because Back would then leave the conversation with the
+	   sheet still up. Not reproduced here: a headless browser cannot press the
+	   browser's Back button. */
+	const openAsksByPolicy = useCallback(() => {
+		if (window.history.state?.askSheet !== true) claimAsksEntry();
+		setAsksOpen(true);
+	}, [claimAsksEntry]);
 	const closeAsks = useCallback(() => {
+		noteAsksDismissed();
 		setAsksOpen(false);
 		/* Give the entry back when the user closes by hand (✕, scrim, Escape), so
 		   the next Back is not eaten by a sheet that is already closed. */
 		if (window.history.state?.askSheet) window.history.back();
-	}, []);
+	}, [noteAsksDismissed]);
 	/* LEAVING THE SHEET FOR A FOREIGN CONVERSATION REPLACES ITS ENTRY.
 	 *
 	 * The sheet's own entry is the current one when this fires, so replacing it
@@ -523,10 +599,83 @@ export function SessionScreen({
 	}, []);
 	useEffect(() => {
 		if (!asksOpen) return;
-		const onPop = () => setAsksOpen(false);
+		const onPop = () => {
+			/* WHERE THE POP LANDED DECIDES WHETHER IT WAS A DISMISSAL. The phone's Back
+			   gesture is the primary escape from a modal (U2), and the sheet's entry
+			   carries no URL change, so a Back out of the sheet lands on THIS
+			   conversation's own route: the user turned the sheet away. A pop that lands
+			   anywhere else is a navigation, and it fires `popstate` too: the router's
+			   synthetic one when the sheet's own `open` control leaves for another
+			   conversation (dispatched while this listener is still attached, because the
+			   state update that detaches it has not rendered yet), and the browser's when
+			   a notification tap or a deep link changes the hash behind an open sheet.
+			   None of those is the user waving this conversation's asks off, and recording
+			   one would switch the open-by-default policy off for a conversation whose
+			   sheet nobody closed. The sheet still closes in every case, as it always did. */
+			const landed = parseHash(window.location.hash);
+			const here =
+				landed.name === "session" && landed.sessionId === sessionId && landed.jobId === undefined;
+			if (here) noteAsksDismissed();
+			setAsksOpen(false);
+		};
 		window.addEventListener("popstate", onPop);
 		return () => window.removeEventListener("popstate", onPop);
-	}, [asksOpen]);
+	}, [asksOpen, noteAsksDismissed, sessionId]);
+	/* OPEN BY DEFAULT — the phone's half of the shared open-policy contract. The six
+	   clauses are numbered in `lib/ask-open-policy.ts`; this block only gathers the
+	   facts and obeys the answer, so the screen carries no second copy of the rules.
+
+	   A VIEW BEGINS HERE, on every mount of the conversation root. `app.tsx` keys
+	   this screen by session and job, so opening a conversation, switching to
+	   another and coming back each mount it afresh; the policy lives in module
+	   state precisely so that what the user waved off survives those remounts. The
+	   agent route renders no asks sheet, so it never arms a view. */
+	useEffect(() => {
+		if (jobId) return;
+		askOpenPolicy.beginView(sessionId, Date.now());
+	}, [sessionId, jobId]);
+	/* THE ONE DECISION, taken from the first frame that can take it. `awaiting` is a
+	   single boolean once the view has decided, so the cost of running on every
+	   projection frame (the stream's rate, not the user's) is that read.
+
+	   `!connected` is a wait and not a refusal: a retained projection kept across a
+	   dropped link is the LAST good frame, not the queue's present state, and
+	   deciding on it would open the sheet over asks that may already be settled.
+
+	   `occupied` is clause 5's keyboard test, read here rather than cached because
+	   it is a fact about this instant:
+	     * a blocking APPROVAL card is up: a run is held, it outranks a question,
+	       and the modal sheet would hide it;
+	     * a text field holds focus: the keyboard is up, and a sheet that opens over
+	       it drops the keyboard out from under a sentence in progress (the sheet
+	       focuses its own close control and makes the column behind it inert);
+	     * another sheet is already open.
+
+	   A DRAFT SITTING IN STORAGE IS NOT "TYPING", and that is where this differs
+	   from the TUI. There the composer holds the caret all the time, so its text
+	   is the only observable sign of a sentence in progress. Here focus is
+	   observable, and a draft restored from a previous visit is not being typed
+	   into: opening the sheet takes nothing from it (drafts are written through to
+	   storage, so it is intact when the sheet closes). Vetoing on it would hide the
+	   sheet from every returning user who ever left a half-written message, which
+	   is the discoverability failure this feature exists to remove. */
+	useEffect(() => {
+		if (jobId || !projection || !connected) return;
+		if (!askOpenPolicy.awaiting(sessionId)) return;
+		const ids = answerableAsks.map((row) => row.ask_id);
+		const decision = askOpenPolicy.decide(
+			sessionId,
+			readQueue(projection.asks, projection.asks_open),
+			{
+				nowMs: Date.now(),
+				occupied:
+					blocking !== null || aTextFieldHoldsTheKeyboard() || anotherSheetIsOpen(),
+				surfaceOpen: asksOpen,
+				outstandingIds: namesEveryOutstanding(projection.asks_open, ids.length) ? ids : null,
+			},
+		);
+		if (decision === "open") openAsksByPolicy();
+	});
 	const rootRef = useRef<HTMLDivElement>(null);
 	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
 	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
@@ -826,15 +975,22 @@ export function SessionScreen({
 			) : null}
 
 			{/* THE MINIMIZED ASK BAR (§5.0, R7). It sits directly above the composer
-			    and is the only ask affordance on this screen: tapping it opens the
-			    asks sheet, which is where answering happens. It is absent at zero
+			    and is the persistent ask affordance on this screen: tapping it opens
+			    the asks sheet, which is where answering happens. (The sheet can also
+			    open by itself ONCE when a conversation is opened with asks already
+			    waiting, and stays shut after the user closes it; see the open-by-
+			    default block above. This bar is what remains when it is closed, and
+			    what announces an ask that arrives later.) It is absent at zero
 			    asks, and its presence CHANGES NOTHING about the composer beneath it —
 			    with the bar showing, the composer is an ordinary conversation
 			    composer, so a message typed there can never be sent as an answer.
-			    That is the half of §5.0's routing rule this screen enforces; the other
-			    half ("while EXPANDED the composer sends the answer") is enforced by the
-			    sheet being modal over this column: while it is open, the sheet's own
-			    answer fields are the only inputs that can receive a keystroke. */}
+			    That is the WHOLE of the routing rule this screen keeps: the composer is
+			    an ordinary conversation composer, and while the sheet is open the
+			    sheet's own answer fields are the only inputs that can receive a
+			    keystroke — the sheet is modal over this column — so a message typed
+			    here can never be sent as an answer. (The old design-doc half, "while
+			    EXPANDED the composer sends the answer", described a routing the sheet
+			    makes unreachable by construction; §5.0 is amended by #2056.) */}
 			<AskDock rows={projection.asks} onOpen={openAsks} />
 
 			<Composer

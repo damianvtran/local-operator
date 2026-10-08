@@ -659,6 +659,28 @@ def test_a_half_routing_row_still_stands_when_there_is_no_pin_to_keep(tmp_path: 
     assert identity.birth_owner == "host-only"
 
 
+def test_a_half_routing_row_never_replaces_the_profiles_half_pin(tmp_path: Path) -> None:
+    """The half-pin corner: a one-field profile pin is not up for replacement (F10).
+
+    The shipped gate protects ANY profile pin, not only a complete one: with the
+    profile pinning a host and the row pinning a DIFFERENT host, the profile's
+    ``google`` stands and the row's ``openai`` is ignored — a half row takes the
+    pin only when the profile pins nothing. Keying the gate on a COMPLETE pin
+    (mutation M25) lets the row's half replace this profile's half and reddens
+    this cell.
+    """
+    root = _root(tmp_path)
+    _make_agent(root, "half-role", tags=["role"], hosting="google")
+    _make_agent(root, "host-only", tags=[], hosting="openai")
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="half-role", agent_name="host-only"
+    )
+    assert refusal == ""
+    assert identity is not None and identity.birth is not None
+    assert (identity.birth.provider, identity.birth.model_id) == ("google", "")
+    assert identity.birth_owner == "half-role", "the profile kept the half pin, and says so"
+
+
 def test_check_expected_refuses_a_revision_that_moved(tmp_path: Path) -> None:
     """Pin the revision the requester reconciled, not "whatever is there now"."""
     root = _root(tmp_path)

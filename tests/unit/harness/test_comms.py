@@ -2544,8 +2544,12 @@ def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
     assert isinstance(block, TextContent)
     text = block.text
 
-    # The transcript id is shown with the command that actually takes it.
-    assert "lop --resume 9f2c1a0b7e44" in text
+    # The transcript id is labelled on its row, and the command that takes it is
+    # named ONCE in the footer rather than repeated under every row (a measured
+    # roster carried that two-line footer 254 times).
+    assert "transcript 9f2c1a0b7e44" in text
+    assert "`lop --resume <id>`" in text
+    assert text.count("lop --resume") == 1
     # And the resume instruction says which id it wants, so the transcript id
     # sitting above it is not read as the argument.
     assert "JOB id" in text

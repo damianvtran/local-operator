@@ -14,13 +14,16 @@ WHAT IS PINNED, and the finding each cell answers:
   (D2: "move ALL of them together"), so a future edit that moves one fails here;
 - a provider key's revoke keeps its OWN closing sentence, and the guide and the design
   scope the ceiling claim to say so (the author's own sweep of the round's universal
-  claims found the first draft's "every" false on that arm);
+  claims found the first draft's "every" false on that arm); the boundary read is on the
+  JOINED output, so the ceiling in either form fails it (F5);
 - a receipt says what the LEDGER holds, never what the world holds (D1);
 - one secret has one spelling in prose (D5) while ``--json`` keeps the
   placement key an integration reads;
 - ``mark`` receipts parse, carry the reachability qualifier, and do not claim a
   mark reaches a device that is already approved (D6, and the overclaim the
   remediation found: ``mark sync`` writes no holder row);
+- a bare ``secret:`` on ``mark`` is refused BY NAME, never with ``named ''`` and a
+  ``lop secret set `` remedy that cannot run (O-1);
 - the removal receipt names a copy a copy, in the right number (D8);
 - the two docs sentences that contradicted the ceiling and the at-rest facts
   are gone (D3, D4).
@@ -257,7 +260,8 @@ def test_a_provider_key_revoke_keeps_its_own_closing_sentence_and_the_docs_say_s
     that credential's own words and omits the first. The guide and the design doc therefore
     SCOPE the claim ("on a stored secret", "keeps the closing sentence it had before S4"), and
     this cell is what keeps that scoping true: the day the class-4 arm prints the two lines
-    too, or loses its own sentence, the documents that describe the boundary fail with it.
+    too, prints the JOINED sentence (F5), or loses its own sentence, the documents that
+    describe the boundary fail with it.
     """
     me = owner.identity.device_id
     document = placement_mod.PlacementDocument(NETWORK, root=owner.root, written_by=me)
@@ -276,8 +280,13 @@ def test_a_provider_key_revoke_keeps_its_own_closing_sentence_and_the_docs_say_s
 
     code, lines, _err = _run(capsys, "credential", "revoke", "openai", "--from", MEMBER_NAME)
     assert code == 0, lines
+    # F5: read the JOINED output, not whole list items. A ceiling printed as ONE
+    # line — the joined sentence, the call the old class-2 branch made — has no
+    # item equal to either line, so per-item membership cannot see it; a substring
+    # read sees both forms.
+    joined = "\n".join(lines)
     for ceiling_line in CEILING:
-        assert ceiling_line not in lines, lines
+        assert ceiling_line not in joined, lines
     assert (
         "a copy of the key taken out of that device never expires: to end it, "
         "rotate the 'openai' key at the provider"
@@ -589,6 +598,22 @@ def test_the_mark_refusal_quotes_a_runnable_remedy(
     assert "holds no secret named 'NO_SUCH_SECRET'" in err
     assert "store it first ('lop secret set NO_SUCH_SECRET')" in err
     assert "..." not in err
+
+
+def test_a_bare_secret_prefix_on_mark_is_refused_by_name(
+    owner: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O-1: the degenerate ``secret:`` spelling is refused like the empty argument.
+
+    The name inside a bare ``secret:`` is empty, so the no-such-secret arm used to
+    render ``named ''`` and a ``lop secret set `` remedy that cannot run — the one
+    residual of D8's own class (a remedy is a command you can paste).
+    """
+    code, _lines, err = _run(capsys, "credential", "mark", "secret:", "sync")
+    assert code == 1, err
+    assert "give the secret to mark by name" in err, err
+    assert "named ''" not in err, err
+    assert "lop secret set " not in err, err
 
 
 # ---------------------------------------------------------------------------

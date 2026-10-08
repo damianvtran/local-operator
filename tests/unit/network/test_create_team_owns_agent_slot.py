@@ -13,9 +13,10 @@ deliberate team-wins rule (which stays as it is for sidecars older builds wrote)
 The pair can never be honoured, so it is REFUSED, on both halves of the verb, and
 before anything moves:
 
-* the REQUESTING half refuses the flag pair it can see — ``--profile`` beside
-  ``--team`` — before ``definitions.push_to_peer``: a create that will be refused
-  must not mirror definitions onto the peer as a side effect of asking;
+* the REQUESTING half refuses what it can settle locally — ``--profile`` beside
+  ``--team``, and a held ``--agent`` row whose instructions are attachable —
+  before ``definitions.push_to_peer``: a create that will be refused must not
+  mirror definitions onto the peer as a side effect of asking;
 * the OWNING half refuses everything that would ATTACH both halves, after both
   names resolve (a name the device does not hold keeps its own, existing sentence)
   and before the mint, the stamp and the sidecar — a refused create leaves nothing
@@ -274,7 +275,10 @@ def test_the_requesting_half_refuses_a_held_attachable_row_before_it_mirrors(
     ``resolve_create_identity`` the owning device runs, so for a HELD row it is a
     fact, not a guess — and the refusal lands before the push exactly like the
     ``--profile`` form (agent review F3 / QA Q-2). A row this device does NOT
-    hold stays the owning device's call, after the push.
+    hold stays the owning device's call, after the push. The peer resolves for
+    the reason the sibling above documents (agent review F11): a refusal moved
+    past ``_resolve_peer`` must redden on the push recorder, never on the peer's
+    absence.
     """
     _mint(root)
     _make_team(root)
@@ -288,6 +292,9 @@ def test_the_requesting_half_refuses_a_held_attachable_row_before_it_mirrors(
         lambda *args, **kwargs: pushed.append((args, kwargs)) or {"ok": True},
     )
     server = _server(root)
+    # Resolvable, so a misplaced refusal reddens on ``pushed``, not on the peer's
+    # absence (F8's shape, repeated; agent review F11).
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: object())
 
     with pytest.raises(types.MeshRefusal) as refused:
         server._ctl_peer_create(
@@ -296,6 +303,76 @@ def test_the_requesting_half_refuses_a_held_attachable_row_before_it_mirrors(
 
     assert pushed == [], "a held attachable row must be refused before the push"
     assert refused.value.code == "bad_request"
+    assert str(refused.value) == (
+        "--agent cannot be combined with --team: a team owns the session's agent slot. "
+        + SESSION_SENTENCE_TAIL
+        + " Drop --agent or --team to create the session."
+    )
+
+
+def test_the_requesting_half_refuses_a_held_attachable_row_by_agent_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--agent-id`` settles the same way ``--agent`` does on this half (F9a).
+
+    The refusal reads attachability from the row the frame NAMES — by id or by
+    name — so an id this device HOLDS is refused before the push exactly like the
+    name door. Dropping the id half of that condition (mutation M22: ``if
+    agent_name or agent_id`` → ``if agent_name``) leaves the id-only frame
+    unrefused on this side; this cell reddens on the push recorder, which is
+    why the peer resolves (the F8/F11 shape: never on the peer's absence).
+    """
+    _mint(root)
+    _make_team(root)
+    _make_agent(root, "auditor", tags=["role"])
+    row = AgentRegistry(root).get_agent_by_name("auditor")
+    assert row is not None, "the id must name the fixture row"
+    pushed: list[Any] = []
+    from local_operator.network import definitions as definitions_mod
+
+    monkeypatch.setattr(
+        definitions_mod,
+        "push_to_peer",
+        lambda *args, **kwargs: pushed.append((args, kwargs)) or {"ok": True},
+    )
+    server = _server(root)
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: object())
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        server._ctl_peer_create(
+            {"peer": "cloud-node-1", "agent_id": str(row.id), "team": "release"}
+        )
+
+    assert pushed == [], "a held attachable row must be refused before the push"
+    assert refused.value.code == "bad_request"
+    assert str(refused.value) == (
+        "--agent cannot be combined with --team: a team owns the session's agent slot. "
+        + SESSION_SENTENCE_TAIL
+        + " Drop --agent or --team to create the session."
+    )
+
+
+def test_the_requesters_agent_sentence_names_the_team_canonically_when_it_holds_it(
+    root: Path,
+) -> None:
+    """The ``--agent`` door gets the canonical team too (F9c).
+
+    ``lop exec --team RELEASE`` prints ``team release`` for both doors, and the
+    requesting half resolves the typed spelling the same way for both; only the
+    ``--profile`` door's share of that was pinned, so an ``--agent`` refusal
+    composed from the TYPED token (mutation M10) survived every cell. This cell
+    pins the sentence byte-for-byte for the agent door's canonical spelling.
+    """
+    _mint(root)
+    _make_team(root)
+    _make_agent(root, "auditor", tags=["role"])
+    server = _server(root)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        server._ctl_peer_create(
+            {"peer": "cloud-node-1", "agent_name": "auditor", "team": "RELEASE"}
+        )
+
     assert str(refused.value) == (
         "--agent cannot be combined with --team: a team owns the session's agent slot. "
         + SESSION_SENTENCE_TAIL
@@ -344,6 +421,52 @@ def test_a_held_routing_only_row_beside_a_team_is_not_prerefused_and_travels(
         "teams": ["release"],
     }, "the frame's own names are the push's selector"
     assert sent and sent[0][0] == "net_session_create", "the frame travels"
+    assert detail["session_id"] == "s1"
+
+
+def test_an_unheld_attachable_row_beside_a_team_is_not_prerefused_and_travels(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row this device does NOT hold stays the owning device's call (F9b).
+
+    Attachability can be settled here only from this device's own registry, so an
+    unheld ``--agent ghost`` resolves to nothing locally and the frame travels —
+    attested by the push's names (the frame's own) and the create request
+    landing. Pre-refusing it too (mutation M21: refuse ``held is None`` as well)
+    stops the frame at this half, where the owning device's refusal was the
+    answer the caller was owed.
+    """
+    _mint(root)
+    _make_team(root)
+    pushed: list[Any] = []
+    sent: list[Any] = []
+    from local_operator.network import definitions as definitions_mod
+
+    monkeypatch.setattr(
+        definitions_mod,
+        "push_to_peer",
+        lambda *args, **kwargs: pushed.append((args, kwargs)) or {"ok": True},
+    )
+    server = _server(root)
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: object())
+    monkeypatch.setattr(
+        server,
+        "_local_peer_call",
+        lambda op, peer, **fields: sent.append((op, peer, fields))
+        or {"session_id": "s1", "agent": None, "team": {"name": "release"}},
+    )
+
+    detail = server._ctl_peer_create(
+        {"peer": "cloud-node-1", "agent_name": "ghost", "team": "release"}
+    )
+
+    assert pushed and pushed[0][1]["names"] == {
+        "agents": ["ghost"],
+        "teams": ["release"],
+    }, "the frame's own names are the push's selector"
+    assert sent and sent[0][0] == "net_session_create", "the frame travels"
+    assert sent[0][2]["agent_name"] == "ghost"
+    assert sent[0][2]["team"] == "release"
     assert detail["session_id"] == "s1"
 
 
@@ -507,6 +630,36 @@ def test_the_dropped_model_sentence_names_the_pin_owner_not_the_profile(root: Pa
     assert alone["model"]["detail"] == (
         "the agent 'auditor' pins openai/m-1, and an agent outranks a flag on its own "
         "device too, so the requested model was not applied"
+    )
+
+
+def test_a_row_named_like_the_profile_reads_as_the_profiles_pin(root: Path) -> None:
+    """The same-name ambiguity, pinned as ACCEPTED wording, not as a defect (F12).
+
+    ``birth_owner == agent_name`` compares by NAME, so a legacy row literally
+    named like the profile (a row ``reviewer`` beside seed ``--profile
+    reviewer``) reports the row's pin in profile-style wording — "the agent
+    'reviewer'" — although the ROW pinned. Ambiguous, not false: the name
+    printed is the same string under either attribution, and the receipt's own
+    ``agent:`` line is equally ambiguous for identically-named definitions. A
+    source tag on ``CreateIdentity`` would remove the class; until then this
+    cell pins the current reading so that fix updates it knowingly.
+    """
+    _mint(root)
+    _make_agent(root, "reviewer", tags=[], model="m-legacy", hosting="anthropic")
+    server = _warmed_server(root)
+
+    detail = server._op_session_create(
+        _link(),
+        _frame(
+            profile="reviewer",
+            agent_name="reviewer",
+            model={"provider": "openai", "model_id": "gpt-explicit"},
+        ),
+    )
+    assert detail["model"]["detail"] == (
+        "the agent 'reviewer' pins anthropic/m-legacy, and an agent outranks a flag "
+        "on its own device too, so the requested model was not applied"
     )
 
 
