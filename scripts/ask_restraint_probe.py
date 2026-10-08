@@ -221,6 +221,17 @@ async def main() -> int:
     if old_prompt == new_prompt:
         print("could not build the control arm: paragraph not found", file=sys.stderr)
         return 2
+    # The arms must differ in exactly ONE region. An empty or repeated slice
+    # makes `replace` rewrite the prompt in many places at once, which the
+    # equality check above cannot see.
+    _at = new_prompt.find(NEW_PARAGRAPHS)
+    if (
+        not NEW_PARAGRAPHS
+        or new_prompt.count(NEW_PARAGRAPHS) != 1
+        or old_prompt != (new_prompt[:_at] + OLD + new_prompt[_at + len(NEW_PARAGRAPHS) :])
+    ):
+        print("could not build the control arm: slice is not one region", file=sys.stderr)
+        return 2
 
     # The control arm must also carry the PRE-CHANGE tool description, which is
     # read from git rather than pasted here so the control cannot silently drift
@@ -380,8 +391,19 @@ if __name__ == "__main__":
     # this change added — so if the wording of that opening is retuned, the
     # slice must be retuned with it. It fails loudly on `.index` rather than
     # silently producing two identical arms.
+    #
+    # `_end` is the heading that CLOSES the ask section (`### Resources`), not
+    # the next paragraph in file order. It used to be "Most tools take `i`",
+    # and when the context diet moved that paragraph ABOVE the ask section the
+    # end index fell before the start: the slice came back "", and
+    # `str.replace("", OLD)` inserted OLD between every character of the control
+    # arm (56,537 chars against a 9,422-char prompt) while the equality guard in
+    # `main` stayed silent. Both orderings are therefore asserted here, and
+    # `main` checks that the control arm is exactly prefix + OLD + suffix.
     _start = _rendered.index("Deciding is your job")
-    _end = _rendered.index("Most tools take `i`")
+    _end = _rendered.index("### Resources", _start)
     NEW_PARAGRAPHS = _rendered[_start:_end].rstrip()
+    if not (_start < _end and NEW_PARAGRAPHS.startswith("Deciding is your job")):
+        raise SystemExit("could not slice the ask section: anchors out of order or empty")
 
     raise SystemExit(asyncio.run(main()))
