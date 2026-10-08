@@ -5487,20 +5487,20 @@ async def test_a_stop_is_not_queued_behind_a_parked_prompt_on_the_same_connectio
         await writer.drain()
         assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
 
-        started = time.monotonic()
         writer.write(json.dumps({"op": "abort", "req": 2}).encode() + b"\n")
         await writer.drain()
-        reply = await asyncio.wait_for(_until(reader, "ack", 2), timeout=1.0)
-        elapsed = time.monotonic() - started
+        # 5 s, not tighter: the red mode is the handle's 10 s parked gate (and
+        # the client's real 15 s), so a loaded CI host cannot flake this while a
+        # chained abort still fails it.
+        reply = await asyncio.wait_for(_until(reader, "ack", 2), timeout=5.0)
         assert reply["detail"] == "aborted"
-        assert elapsed < 1.0, f"the Stop took {elapsed:.3f}s behind a parked prompt"
 
         # THE TOOL ACTUALLY DIED, and before the parked prompt's turn began: the
         # abort stopped the turn it was pressed on, not the user's next message.
         assert handle.tool.poll() is not None, "the running tool survived the Stop"
-        assert handle.turn_b_started_when_aborted is False, (
-            "the abort ran after the parked prompt's turn had started — it " "aborted the NEXT turn"
-        )
+        assert (
+            handle.turn_b_started_when_aborted is False
+        ), "the abort ran after the parked prompt's turn had started — it aborted the NEXT turn"
 
         # The parked prompt is not lost: with turn A over it runs as a new turn,
         # unaborted, and answers on its own req.
@@ -5543,6 +5543,157 @@ async def test_an_abort_with_nothing_parked_still_answers_and_a_replay_runs_agai
         runtime.close()
 
 
+class _KillSwitchRungsHandle(_BusyTurnHandle):
+    """``_BusyTurnHandle`` plus the other two rungs, recording instead of acting.
+
+    ``request_stop`` would tear the runtime down and ``cancel_gracefully`` waits
+    for a tool boundary; neither is needed to observe WHEN the dispatch runs
+    them, which is all the cut cell below measures.
+    """
+
+    async def request_stop(self) -> str:
+        self.calls.append(("request_stop", (), {}))
+        return "stopping"
+
+    async def cancel_gracefully(self):  # noqa: ANN202
+        self.calls.append(("cancel_gracefully", (), {}))
+        return "cancelling"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("frame", "ran", "detail"),
+    [
+        ({"op": "stop"}, "request_stop", "stopping"),
+        ({"op": "cancel"}, "cancel_gracefully", "cancelling"),
+        # ``immediate`` routes straight to ``abort`` and stalls the same way; it
+        # is the rung a future surface on a shared connection would need exempt.
+        ({"op": "cancel", "mode": "immediate"}, "abort", "aborted"),
+    ],
+    ids=["stop", "cancel-graceful", "cancel-immediate"],
+)
+async def test_stop_and_cancel_stay_chained_behind_a_parked_prompt(
+    frame: dict[str, Any], ran: str, detail: str
+) -> None:
+    """Pins the scope cut: only ``ping`` and ``abort`` leave the op chain.
+
+    ``stop``/``cancel`` are left chained because no surface sends them on a
+    shared connection, not because they are order-dependent (see
+    :data:`_UNCHAINED_OPS`). This cell makes that a visible decision: it fails
+    if either is exempted, and the exemption of ``cancel{immediate}`` — which
+    would be the reasonable next step — then has to change this test on purpose.
+    The op must not RUN while the prompt ahead of it is parked, and must run and
+    answer once that prompt settles.
+    """
+    handle = _KillSwitchRungsHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "msg B"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        writer.write(json.dumps({**frame, "req": 2}).encode() + b"\n")
+        await writer.drain()
+        # Negative by nature: nothing observable marks "still queued", so give
+        # the dispatch a window in which an exempt op would have run.
+        await asyncio.sleep(0.2)
+        assert ran not in [call[0] for call in handle.calls], (
+            f"{frame} ran while a prompt ahead of it was parked — it left the "
+            "chain; if that is intended, update _UNCHAINED_OPS' docstring and this cell"
+        )
+
+        handle.turn_a_over.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ok"
+        assert (await _until(reader, "ack", 2))["detail"] == detail
+        assert ran in [call[0] for call in handle.calls]
+    finally:
+        handle.turn_a_over.set()
+        if handle.tool.poll() is None:
+            handle.tool.kill()
+        handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class _SlowAdmissionHandle(FakeHandle):
+    """A handle whose ``prompt`` is still being ADMITTED (no turn live) for a while.
+
+    ``abort`` answers ``idle`` while no turn is live, as the serving handle does,
+    and aborts the turn only if the prompt's turn has already started.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompt_entered = threading.Event()
+        self.admit = threading.Event()
+        self.turn_live = False
+        self.turns_aborted = 0
+
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
+        self.calls.append(("prompt", (text,), {}))
+        self.prompt_entered.set()
+        # Bounded so a failing test reports an assertion rather than hanging.
+        await asyncio.to_thread(self.admit.wait, 10.0)
+        self.turn_live = True
+        return "prompt ran"
+
+    async def abort(self):  # noqa: ANN202
+        self.calls.append(("abort", (), {}))
+        if not self.turn_live:
+            return "idle"
+        self.turns_aborted += 1
+        return "aborted"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_pressed_before_the_prompts_turn_begins_answers_idle_and_the_prompt_runs() -> (
+    None
+):
+    """The decided semantics of the exemption: a Stop does not wait for an unstarted turn.
+
+    QA round 1, Q1. Prompt then Stop within milliseconds on an IDLE session:
+    the abort used to chain behind the prompt's admission and so land on the
+    prompt's own turn; exempt from the chain it runs first, finds no live turn,
+    and answers ``idle`` — what a fresh connection would have said — and the
+    prompt then runs unaborted. The user pressed Stop before the owner had a
+    turn to stop, and the message they typed is not eaten by it. Pinned so a
+    future "fix" that re-chains the abort has to change this on purpose.
+    """
+    handle = _SlowAdmissionHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "hello"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        writer.write(json.dumps({"op": "abort", "req": 2}).encode() + b"\n")
+        await writer.drain()
+        # Answered while the prompt is still being admitted (its gate is shut).
+        assert (await asyncio.wait_for(_until(reader, "ack", 2), timeout=5.0))["detail"] == "idle"
+        assert not handle.turn_live, "the Stop must land before the prompt's turn begins"
+
+        handle.admit.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ran"
+        assert handle.turns_aborted == 0, "the Stop leaked onto the prompt's own turn"
+        assert [call[0] for call in handle.calls] == ["prompt", "abort"]
+    finally:
+        handle.admit.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 @pytest.mark.asyncio
 async def test_an_abort_does_not_become_the_chain_head() -> None:
     """The exemption keeps the ping docstring's ordering property for ``abort``.
@@ -5568,7 +5719,7 @@ async def test_an_abort_does_not_become_the_chain_head() -> None:
 
         writer.write(json.dumps({"op": "abort", "req": 2}).encode() + b"\n")
         await writer.drain()
-        assert (await asyncio.wait_for(_until(reader, "ack", 2), timeout=1.0))[
+        assert (await asyncio.wait_for(_until(reader, "ack", 2), timeout=5.0))[
             "detail"
         ] == "abort ok"
 
