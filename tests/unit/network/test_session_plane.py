@@ -3294,6 +3294,58 @@ def test_the_pending_field_reads_as_one_vocabulary() -> None:
     assert row.pending == NEEDS_ASK
 
 
+def test_a_stored_rows_needs_claim_is_never_a_claim() -> None:
+    """The stored half's no-claim rule, at the ROW boundary (2026-10-07).
+
+    A producer that predates the correction still mints a claim on a stored row
+    (``"ask"`` derived from the owner's ``unseen`` flag, or the legacy bool
+    before that spelling); the reader every sidebar is bounded by
+    (``PeerRow.from_json``) and the CLI's NEEDS cell both drop it, so a
+    mixed-version fleet paints one row one way — and no un-clearable
+    "needs you" mark reaches a human.
+    """
+    from local_operator.network.projection import PeerRow
+    from local_operator.network.types import row_needs_claim
+
+    assert row_needs_claim(state="stored", pending="ask") is None
+    assert row_needs_claim(state="stored", pending=True) is None
+    assert row_needs_claim(state="stored", pending=None) is None
+    assert row_needs_claim(state="live", pending="approval") == "approval"
+    assert row_needs_claim(state="", pending="ask") == "ask"
+    assert row_needs_claim(state=None, pending="ask") == "ask"
+
+    stored = PeerRow.from_json(
+        {"session_id": "s", "state": "stored", "pending": "ask"},
+        device_id="d_" + "e" * 32,
+    )
+    assert stored.pending is None
+    live = PeerRow.from_json(
+        {"session_id": "s", "state": "live", "pending": "approval"},
+        device_id="d_" + "e" * 32,
+    )
+    assert live.pending == "approval"
+
+    # AND THE DICT-LEVEL APPLICATION (agent review round 2, N1): the helper the
+    # machine payloads route through returns the ORIGINAL object when a row is
+    # already clean (no copy on the common path) and rewrites a legacy spelling
+    # on a copy when it is not — never mutating the row it was handed.
+    from local_operator.network.types import row_without_stored_claims
+
+    clean = {"session_id": "s", "state": "live", "pending": "approval"}
+    assert row_without_stored_claims(clean) is clean
+    blank = {"session_id": "s", "state": "live", "pending": None}
+    assert row_without_stored_claims(blank) is blank
+    legacy_row = {"session_id": "s", "state": "stored", "pending": "ask"}
+    fixed = row_without_stored_claims(legacy_row)
+    assert fixed is not legacy_row and fixed["pending"] is None
+    assert legacy_row["pending"] == "ask", "the helper mutated its input"
+    case_row = {"session_id": "s", "state": "live", "pending": " ASK "}
+    # ``normalise_pending`` strips surrounding whitespace and preserves the
+    # token's own case (the producers ship lowercase; the pin records the
+    # contract rather than an aspiration).
+    assert row_without_stored_claims(case_row)["pending"] == "ASK"
+
+
 # ---------------------------------------------------------------------------
 # QA round 1 (the desktop round that drove a REAL backend): the backend's half
 # ---------------------------------------------------------------------------
