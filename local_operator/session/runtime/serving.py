@@ -7562,11 +7562,11 @@ class ServingSessionHandle(SessionHandle):
                     text="this session cannot run a team, so there is no team to detach",
                     style="warning",
                 )
-            # Read BEFORE the call: `attach_team(None)` releases the agent slot
-            # only when a team was in force, and with none the verb is a true
-            # no-op — so the receipt may not claim anything moved (agent review
-            # + design round 1, D1).
-            attached_before = str(getattr(session, "active_team_name", "") or "")
+            # Read BEFORE the call, and off the OBJECT rather than its name
+            # (agent review round 2, MINOR-1): `attach_team`'s gate is
+            # ``active_team is not None``, so a nameless team in force is a team
+            # that was detached, not one that was never there.
+            attached_before = getattr(session, "active_team", None) is not None
             try:
                 detach(None)
             except Exception as exc:  # noqa: BLE001 — a failed detach is a notice

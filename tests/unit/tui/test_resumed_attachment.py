@@ -367,9 +367,12 @@ async def test_the_local_detach_verb_paints_both_segments(tmp_path) -> None:
 
     Two facts in one walk. When a team was in force, BOTH segments move — the
     roster and the manager name the team claimed for the agent slot — so the band
-    cannot disagree with what was released. And with NO team attached the verb is
-    a true no-op that KEEPS an attached profile (design round 1, D1), which the
-    routed cell in ``test_team_agent_precedence.py`` also pins.
+    cannot disagree with what was released. (The NO-team half — the verb as a true
+    no-op that keeps an attached profile, design round 1 D1 — is asserted on this
+    process's other two seams: ``test_slash_team_clear_with_no_team_keeps_the_
+    profile`` for the routed path and ``test_clearing_a_team_that_is_not_
+    attached_keeps_the_profile`` for the mutator itself; this cell is the
+    coverage the local seam needed at all, agent review round 1 MINOR-2.)
     """
     agents, teams = _registries(tmp_path)
     first = _session(tmp_path, agents, teams)
@@ -398,10 +401,17 @@ async def test_the_local_detach_verb_paints_both_segments(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_follower_detach_verb_returns_the_same_receipt(tmp_path) -> None:
-    """MINOR-1's seam: a follower's ``/team clear`` runs the SAME implementation
-    as the local handler, so it repaints both segments and returns the same
-    receipt — the two are documented mirrors, and they disagreed."""
+async def test_the_follower_detach_verb_repaints_in_the_same_turn(tmp_path) -> None:
+    """MINOR-1's seam, asserted the way it can actually fail (agent review round
+    2, MINOR-2).
+
+    The first version of this cell paused the pilot six times before asserting,
+    which is exactly enough for the frontend-state delta to repaint the agent
+    segment on its own — so it passed against the PREVIOUS head too and guarded
+    nothing. The band syncs synchronously inside the seam, so the assertion is
+    made in the SAME turn as the call: no `await` between them. The receipt and
+    the released state are checked afterwards.
+    """
     from local_operator.session.frontend_state import SlashResult
 
     agents, teams = _registries(tmp_path)
@@ -420,11 +430,43 @@ async def test_the_follower_detach_verb_returns_the_same_receipt(tmp_path) -> No
         assert app._status._agent_profile == "manager"
 
         result = app._team_attach_slash_result("clear", resumed.team_registry, SlashResult)
+
+        # SAME TURN: only the seam's own sync can have produced this.
+        assert app._status._team == ""
+        assert app._status._agent_profile == ""
+
         for _ in range(6):
             await pilot.pause()
 
         assert result.kind == "notice"
         assert result.text == "no team active; this session uses its base instructions."
         assert result.data["type"] == "team_attached"
-        assert app._status._team == ""
-        assert app._status._agent_profile == ""
+        assert resumed.active_team_name == ""
+
+
+@pytest.mark.asyncio
+async def test_the_team_listing_footer_advertises_the_detach_verb(tmp_path) -> None:
+    """Design round 1, D3: the verb that LEAVES the state is advertised where the
+    listing that invites the state is painted — mirroring ``Detach: /agent
+    clear`` — and disappears when no team is in force, so the hint cannot outlive
+    the attachment it describes."""
+    agents, teams = _registries(tmp_path)
+    first = _session(tmp_path, agents, teams)
+    first.attach_team(teams.get_team_by_name("lopdev"))
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+
+        assert app._team_listing_footer() == "Send: /team <name> <message> · Detach: /team clear"
+
+        app._cmd_team("clear", lambda _text: None)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert app._team_listing_footer() == "Send: /team <name> <message>"

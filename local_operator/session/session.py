@@ -6004,6 +6004,13 @@ class Session:
         the mixed team+agent state that had no defined winner. The rule itself
         lives in ``frontend_state.effective_identity_for``, shared with the
         ownerless (cold) producers that have no session to ask.
+
+        "In force" means ``active_team`` is set. Two things set it: ``attach_team``
+        (the user's own act) and ``harness/subagent.py``, which stamps a child's
+        lineage directly — so on a child this reads the lineage's team, whose
+        roster and briefs are NOT in that child's tail (agent review round 2,
+        NIT-3: latent, no shipped path reads it there, recorded so the next
+        reader knows what the predicate covers).
         """
         team = self.active_team_name
         from local_operator.session.frontend_state import effective_identity_for

@@ -19971,7 +19971,11 @@ class OperatorApp(App[None]):
                 "so there is no team to detach",
                 "warning",
             )
-        attached_before = str(getattr(session, "active_team_name", "") or "")
+        # Whether a team was IN FORCE is read off the OBJECT, not the name
+        # (agent review round 2, MINOR-1): ``attach_team``'s own gate is
+        # ``active_team is not None``, and a nameless team used to detach here
+        # under a receipt claiming nothing had happened.
+        attached_before = getattr(session, "active_team", None) is not None
         try:
             detach(None)
         except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
@@ -20023,7 +20027,13 @@ class OperatorApp(App[None]):
         # exists to prevent is shut exactly when the machine is degraded (agent
         # review round 1, NIT-3).
         head, _, tail = arg.partition(" ")
-        if arg and head.strip().lstrip("=").casefold() in ("clear", "none") and not tail.strip():
+        matched = head.strip()
+        # ONE leading `=` only, the grammar every other seam runs (agent review
+        # round 2, NIT-2): ``lstrip`` stripped all of them, so ``/team ==clear``
+        # detached here and reported an unknown name everywhere else.
+        if matched.startswith("="):
+            matched = matched[1:]
+        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
             text, style = self._team_detach_receipt()
             if style == "warning":
                 self._system_notice(text, style)
@@ -50206,6 +50216,24 @@ class OperatorApp(App[None]):
 
     def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
         registry = self._team_registry()
+        # The DETACH verb is answered before the availability guard, exactly as
+        # the local and routed seams do (agent review round 2, NIT-1): freeing
+        # the agent slot needs the SESSION, not the registry, so all three entry
+        # points must agree about what the verb requires.
+        head, _, tail = arg.partition(" ")
+        matched = head.strip()
+        # ONE leading `=` only, the grammar every other seam runs (agent review
+        # round 2, NIT-2).
+        if matched.startswith("="):
+            matched = matched[1:]
+        if arg and matched.casefold() in ("clear", "none") and not tail.strip():
+            text, style = self._team_detach_receipt()
+            return SlashResult(
+                kind="notice",
+                text=text,
+                style=style,
+                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
         if registry is None or not hasattr(registry, "list_teams"):
             return SlashResult(
                 kind="notice",
