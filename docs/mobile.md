@@ -263,6 +263,36 @@ does not exist.
 The route is READ-ONLY. Arm, edit and cancel stay on the terminal and the
 desktop plane until the phone's write half ships with its own review.
 
+### The checkpoint manifest — one conversation's rail ticks (`GET /api/sessions/{id}/checkpoints`)
+
+The transcript rail's ticks for one conversation: a tick for every user turn
+and for every completed agent turn, each with its outcome and, on completions,
+its naming state. The phone reads it because it cannot derive it from what it
+holds: the phone's transcript is a bounded tail window (the window
+`GET /api/sessions/{id}/history` back-fills), so a rail built from the frames a
+phone happens to carry would silently mark only the tail of the conversation —
+worse than no rail. The manifest is derived from the journal by
+`session/transcript_index.py` — the desktop rail's own derivation — and served
+in the desktop's own wire model (`session_id`, `index{state, built_at}`,
+`checkpoints[]` of `{id, kind, turn, ts, seq, text, outcome, naming}`), so the
+two surfaces cannot drift. It needs no runtime: a conversation nothing is
+serving still has its journal.
+
+`index.state` carries the honesty: `ready` (possibly with no ticks — a
+conversation with nothing written yet), `building` (a scan is in flight and
+`checkpoints` is the previous scan's; the client polls) or `error` (the last
+refresh failed — a journal that fails to read after a successful stat must
+never render as "no checkpoints"; the mobile suite pins the unreadable
+(`chmod 000`) file → `error`). The bound is exactly that: a journal that
+cannot be `stat`'ed at all still maps to `missing` → `ready` + `[]` in the
+shared derivation — pre-existing, deferred: the fix changes the desktop rail's
+and `find`'s semantics and ships separately (recorded on PR #2068).
+`unsupported` cannot arise here: a conversation this relay cannot see locally
+is a 404, not a state.
+
+Read-only by design: the naming warm (`sessions.checkpoints.warm`) is a
+desktop-plane spend and is not served on this route.
+
 ## Failure modes and rules
 
 - **Daemon down, TUI up**: the TUI is unaffected; the record sits unpublished
@@ -345,6 +375,7 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
+| Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
 | Move session | `move_picker` | move session | missing (phase 5) |
