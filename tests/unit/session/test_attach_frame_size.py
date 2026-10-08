@@ -541,6 +541,12 @@ _BOUNDED_COLLECTION_FIELDS = {
     # bounded conversation/token/anchor/kind plus a two-integer SQLite watermark.
     "attention": "fixed-shape latest outcome and read watermark, not accumulated history",
     "context_breakdown": "one entry per tool; bounded by the tool inventory",
+    # Issue #2014: three short identifiers (speaker / team / role_of_speaker),
+    # REBUILT from the session on every refresh rather than appended to. It can
+    # therefore neither grow with conversation length nor accumulate across
+    # turns, and its size is fixed by the name rules the values come from (a
+    # no-space role or team slug), not by what the user typed into the chat.
+    "effective_identity": "one speaker/team/role triple, replaced every refresh",
     "child_costs": "one float per job; O(1) bytes each",
     "queued_steering": "drains every turn",
     # Was "explicitly bounded by _fold_live_event", which stopped being true the
@@ -992,6 +998,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         ],
         "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
         "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
+        # Issue #2014: the identity triple at its WIDEST honest shape. The keys
+        # are fixed by the contract and the values are names, so this is three
+        # fields of a slug-sized string rather than a sample of a range — a
+        # sample here would understate nothing, which is why the entry is the
+        # worst case the field can hold rather than a round number.
+        "effective_identity": {
+            "speaker": "a-reviewer-role-name-at-its-longest-allowed-length",
+            "team": "a-team-name-at-its-longest-allowed-length-here",
+            "role_of_speaker": "manager",
+        },
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
         # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
         # 200 `message_update`s, which `_fold_live_event` dedupes to a single

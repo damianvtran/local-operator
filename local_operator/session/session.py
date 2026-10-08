@@ -5970,8 +5970,47 @@ class Session:
         Mirrors how ``agent_brief`` is surfaced — a read-only view onto the
         volatile tail's holder — so the front end never reaches into
         ``_goal_state`` for it.
+
+        A team's manager reads here too (issue #2014): ``attach_team`` claims
+        the slot for the manager, and that claim is a name WITHOUT a separate
+        brief because the manager's own preamble is already inside
+        ``team_brief``. So a non-empty name beside an empty brief is a normal
+        state, exactly as the A2 hollow profile is.
         """
         return self._goal_state.agent_name
+
+    @property
+    def effective_identity(self) -> dict[str, str]:
+        """WHO is answering this session, as one statement (issue #2014).
+
+        ``{"speaker": ..., "team": ..., "role_of_speaker": ...}``, always all
+        three keys so a client can render a sentence without inferring the
+        missing half from a falsy value:
+
+        * a team is attached — the speaker is that team's manager and
+          ``role_of_speaker`` is ``"manager"``. ``speaker`` falls back to the
+          team name if the team object cannot name its manager (a reduced test
+          double), so the field never reads as "nobody".
+        * otherwise — the speaker is the ``/agent`` profile in force (``""``
+          when none) and both ``team`` and ``role_of_speaker`` are ``""``. An
+          empty statement, not an absent one; the frontend state carries it
+          verbatim.
+
+        Read-only and derived, deliberately: the two slots it summarises are
+        the real state (``active_team`` / ``active_agent``), and a client that
+        wants to know which of them moved keeps reading those. This exists so
+        that "the team's manager, or the attached profile, or neither" is one
+        answer with one author instead of a rule each surface re-implements —
+        the mixed team+agent state that had no defined winner.
+        """
+        team = self.active_team_name
+        if self.active_team is not None:
+            return {
+                "speaker": self._team_manager_name() or team,
+                "team": team,
+                "role_of_speaker": "manager",
+            }
+        return {"speaker": self.active_agent, "team": "", "role_of_speaker": ""}
 
     @property
     def goal_status(self) -> str:
@@ -6205,6 +6244,14 @@ class Session:
         without rebuilding the session or invalidating the cached persona
         prefix. Children spawned after this inherit the same team via
         :attr:`active_team`.
+
+        A team OWNS the agent slot (issue #2014). Attaching one makes this
+        session's speaker that team's manager, replaces whatever ``/agent``
+        profile was attached before, and closes the slot to ``/agent`` until
+        the team is detached with ``/team clear`` — see
+        :meth:`_claim_agent_slot_for_team` for the rule and why the manager's
+        own instructions stay in ``team_brief`` rather than being stamped
+        twice. Passing ``None`` detaches the team and frees the slot.
         """
         self.active_team = team
         # Either branch is the user acting on the team slot, so a carried
@@ -6213,6 +6260,12 @@ class Session:
         self._clear_unresolved("team")
         if team is None:
             self._goal_state.team_brief = ""
+            # Detaching FREES the agent slot the team owned: the manager's
+            # identity arrived with the team, so it leaves with it and the
+            # session is back to its base instructions. Without this a detach
+            # would leave ``active_agent`` naming a manager no team backs —
+            # the same unreconcilable pair this rule exists to remove.
+            self._release_team_agent_slot()
             self._persist_attachment()
             self.refresh_frontend_state()
             return
@@ -6245,11 +6298,93 @@ class Session:
                     + (preamble or "")
                 )
         self._goal_state.team_brief = preamble or ""
+        # The team takes the agent slot (issue #2014), AFTER the brief so the
+        # claim can only ever describe a team that is fully attached.
+        self._claim_agent_slot_for_team()
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
         self._persist_attachment()
         self.refresh_frontend_state()
+
+    def _team_manager_name(self) -> str:
+        """The manager role name of the attached team ("" when none).
+
+        Read off the team object for the same reason :attr:`active_team_name`
+        is: the team is the source of truth, and a nameless test double must
+        resolve to "" rather than raise.
+        """
+        team = self.active_team
+        if team is None:
+            return ""
+        return str(getattr(team, "manager", "") or "")
+
+    def _claim_agent_slot_for_team(self) -> str:
+        """Make the attached team's manager this session's speaker.
+
+        THE rule from issue #2014, in one place: a session with a team attached
+        runs ONE persona — that team's manager — and the agent slot IS the
+        team's. Three things follow, and they are why this is a claim rather
+        than a second brief:
+
+        * The manager's own instructions are ALREADY in ``team_brief``: the
+          attach above resolves the manager profile through the shared
+          resolver and layers its preamble in front of the team brief. So the
+          slot takes the manager's NAME and no brief — stamping the profile
+          again would put one persona on the tail twice.
+        * Any profile the user attached BEFORE the team is replaced, not
+          stacked: the two-brief state this issue is about cannot survive the
+          attach. ``_attached_profile_tools`` goes with it for the reason
+          ``clear_agent_profile`` documents — a host that bounds itself on the
+          attached role must not keep honouring a role that is no longer the
+          speaker.
+        * ``agent_name`` is what the band and the desktop header read, so the
+          identity is visible from the ordinary surfaces rather than only from
+          :attr:`effective_identity`.
+        """
+        self._goal_state.agent_brief = ""
+        self._goal_state.agent_name = self._team_manager_name()
+        self._attached_profile_tools = ()
+        # The team's manager supersedes any carried unresolved agent name (R1),
+        # exactly as a successful ``/agent`` attach does.
+        self._clear_unresolved("agent")
+        return self._goal_state.agent_name
+
+    def _release_team_agent_slot(self) -> None:
+        """Free the agent slot a detached team owned (the ``/team clear`` half).
+
+        The mirror of :meth:`_claim_agent_slot_for_team`: the slot the team
+        claimed goes back to empty, so the session returns to its base
+        instructions and a later ``/agent`` is accepted again. Idempotent —
+        clearing a slot that was already empty costs nothing.
+        """
+        self._goal_state.agent_brief = ""
+        self._goal_state.agent_name = ""
+        self._attached_profile_tools = ()
+        self._clear_unresolved("agent")
+
+    def _team_agent_slot_refusal(self, action: str) -> str:
+        """The copy for a refused ``/agent`` while a team owns the slot.
+
+        Built here rather than in each front end so the TUI, the routed
+        runtime, the SDK and the ``lop exec`` preflight cannot word the same
+        refusal three ways. ``action`` is ``"attach"`` (a profile was named)
+        or ``"detach"`` (``/agent clear``), and both name the way out: the
+        team is the thing to move, so the remedy is ``/team clear``.
+        """
+        team = self.active_team_name
+        manager = self._team_manager_name()
+        if action == "detach":
+            named = f" ({manager} is the speaker)" if manager else ""
+            return (
+                f"team {team} owns this session's profile{named}, so there is nothing "
+                "to detach here. Run /team clear to detach the team."
+            )
+        identity = f"{manager} is the speaker" if manager else "its manager is the speaker"
+        return (
+            f"team {team} owns this session: {identity}, so /agent is closed. "
+            "Run /team clear to detach the team first."
+        )
 
     def _persist_attachment(self) -> None:
         """Journal the attached team/agent/goal beside the transcript.
@@ -6498,7 +6633,13 @@ class Session:
         # is still there (D2/R3). Both of those are also the transient cases the
         # carried-name recovery exists for.
         looked_up_and_absent = True
-        if stored.team and (not live_team or live_team == stored.team):
+        # The cross-slot half of the same guard (issue #2014): a stored TEAM is
+        # skipped when the live AGENT slot is non-empty, because the two cannot
+        # coexist any more — adopting the stored team would claim the slot and
+        # silently drop the profile this life just attached, which is exactly
+        # the revert F1 forbids. "The live state wins" is per SESSION here, not
+        # per slot, wherever the two slots are mutually exclusive.
+        if stored.team and not live_agent and (not live_team or live_team == stored.team):
             team = None
             registry = self.team_registry
             if registry is None:
@@ -6518,7 +6659,17 @@ class Session:
                 # ``active_team`` (what subagents inherit) is restored too, not
                 # just the prompt text.
                 self.attach_team(team)
-        if stored.agent and (not live_agent or live_agent == stored.agent):
+        # A stored agent name is SUPERSEDED, not missing, when the same sidecar
+        # named a team (issue #2014): the team owns the agent slot, so the
+        # manager ``attach_team`` just claimed IS this session's speaker.
+        # Attempting the stored name anyway would raise the slot refusal — and
+        # then record an ``_unresolved_agent`` that the next ``_persist_attachment``
+        # writes straight back into the sidecar, so every later resume would
+        # re-report a profile the rule deliberately replaced. The team wins
+        # quietly here because a RULE dropped it, not a failed lookup, and a
+        # "did not come back" notice would be about the wrong cause.
+        team_owns_slot = self.active_team is not None
+        if stored.agent and not team_owns_slot and (not live_agent or live_agent == stored.agent):
             resolved = None
             try:
                 resolved = self.attach_agent_profile(stored.agent)
@@ -6703,11 +6854,17 @@ class Session:
 
         The instructions ride the volatile tail (see ``build_system_blocks``)
         exactly like :meth:`attach_team`'s brief, so an attach mid-session
-        never invalidates the cached persona prefix. Interaction with a team
-        is deliberate: the two briefs live in SEPARATE fields and coexist — a
-        ``/team`` manager can adopt a specialist's voice without dropping the
-        roster — while a later ``/agent`` replaces only the earlier agent
-        brief, because the user is switching hats, not stacking them.
+        never invalidates the cached persona prefix. A later ``/agent``
+        replaces only the earlier agent brief, because the user is switching
+        hats, not stacking them.
+
+        A TEAM closes this slot (issue #2014). While ``active_team`` is set the
+        session's speaker IS that team's manager — the team claimed the slot at
+        ``attach_team`` — so every ``/agent`` is refused with an
+        :class:`AgentSlotOwnedByTeam` naming the team and the way out
+        (``/team clear``). The refusal is raised BEFORE resolution, on purpose:
+        with a team attached, a name that would not resolve is not the fact the
+        user needs, and reporting a typo would bury the rule.
 
         Resolution ORDER matters and must match ``_agent_profile_rows`` in the
         TUI, or listing and attach disagree. It is delegated to the ONE shared
@@ -6720,6 +6877,10 @@ class Session:
         by that name is a role or specialist (the caller reports it; a typo
         must not half-attach anything).
         """
+        if self.active_team is not None:
+            from local_operator.session.errors import AgentSlotOwnedByTeam
+
+            raise AgentSlotOwnedByTeam(self._team_agent_slot_refusal("attach"))
         kind, profile, specialist_prompt, display_name = self._resolve_profile_or_specialist(name)
         if kind in ("role", "seed") and profile is not None:
             # Recorded BEFORE the brief is stamped, and only on a resolved
@@ -6748,7 +6909,16 @@ class Session:
         without touching the cached prefix or the separately-held team brief.
         Idempotent — clearing when nothing is attached is a no-op the caller
         can still report plainly.
+
+        Refused while a team owns the slot (issue #2014), for the same reason
+        ``/agent <name>`` is: the profile in force is the team's manager, and
+        clearing it would leave the team attached with nobody named as the
+        speaker. ``/team clear`` is the verb that moves that state.
         """
+        if self.active_team is not None:
+            from local_operator.session.errors import AgentSlotOwnedByTeam
+
+            raise AgentSlotOwnedByTeam(self._team_agent_slot_refusal("detach"))
         self._goal_state.agent_brief = ""
         # The slot this recorded for the detached role goes with it: it is a
         # statement about the profile in force, and "no profile" has no tool

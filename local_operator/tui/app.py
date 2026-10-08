@@ -151,7 +151,7 @@ from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
 # (backend load report B-F10). They are imported at their call sites instead;
 # `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
-from local_operator.session.errors import RuntimeRetiring
+from local_operator.session.errors import AgentSlotOwnedByTeam, RuntimeRetiring
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
     ACTIVITY_PHASE_QUEUED,
@@ -20007,6 +20007,36 @@ class OperatorApp(App[None]):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # ``clear``/``none`` is the DETACH verb, mirroring ``/agent``'s own pair
+        # (and both follower seams, which run the same grammar). It exists
+        # because a team OWNS this session's agent slot (issue #2014): detaching
+        # is the only way to free that slot again, and without a verb for it the
+        # rule would be a one-way door. Only the bare verb detaches;
+        # ``/team clear <anything>`` is a mistyped attach and falls through to
+        # the lookup below, which reports the unknown name.
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "attach_team", None)
+            if not callable(detach):
+                # Same refusal shape as the attach guard below: name what this
+                # session can do instead of reporting a detach it never made.
+                self._system_notice(
+                    "this session can list and chart teams, but not run one, "
+                    "so there is no team to detach",
+                    "warning",
+                )
+                return
+            try:
+                detach(None)
+            except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
+                self._system_notice(f"could not detach the team: {exc}", "warning")
+                return
+            # BOTH segments move: the roster goes, and so does the manager name
+            # the team claimed for the agent slot (U2 keeps each synced FROM the
+            # session, so the band cannot disagree with what was released).
+            self._sync_team_band()
+            self._sync_agent_band()
+            notice("no team active; this session uses its base instructions.")
+            return
         try:
             team = registry.get_team_by_name(name)
         except Exception as exc:
@@ -20595,7 +20625,14 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the session's profile IS
+                # the team's manager, so the answer is the team's refusal (which
+                # names ``/team clear``), not "nothing to detach".
+                self._system_notice(str(refusal), "warning")
+                return
             # U2: the band's active-agent segment disappears on detach. Synced
             # from the session (the source of truth `clear_agent_profile` just
             # blanked), not by pushing "" directly, so the band and session can
@@ -20629,6 +20666,13 @@ class OperatorApp(App[None]):
             return
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            # Issue #2014: refused BEFORE resolution, so this is a rule
+            # statement rather than a report about the name the user typed.
+            # Raised by the session, so this copy is the same one the routed
+            # runtime and the ``lop exec`` preflight print.
+            self._system_notice(str(refusal), "warning")
+            return
         except Exception as exc:
             self._system_notice(f"could not attach agent {name!r}: {exc}", "warning")
             return
@@ -50194,6 +50238,31 @@ class OperatorApp(App[None]):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # The DETACH verb, byte-for-byte the grammar ``_cmd_team`` and
+        # ``serving.py`` run (issue #2014 added it because a team OWNS the
+        # agent slot, so detaching is the only way to free it again). A request
+        # after the verb is a mistyped attach and falls through to the lookup.
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "attach_team", None)
+            if not callable(detach):
+                return SlashResult(
+                    kind="notice",
+                    text="this session cannot run a team, so there is no team to detach",
+                    style="warning",
+                )
+            try:
+                detach(None)
+            except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
+                return SlashResult(
+                    kind="notice", text=f"could not detach the team: {exc}", style="warning"
+                )
+            self._sync_team_band()
+            return SlashResult(
+                kind="notice",
+                text="no team active; this session uses its base instructions.",
+                style="info",
+                data={"type": "team_attached", "team": "", "manager": "", "request": ""},
+            )
         try:
             team = registry.get_team_by_name(name)
         except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
@@ -50262,7 +50331,13 @@ class OperatorApp(App[None]):
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the refusal names the team
+                # and ``/team clear``, and it is raised from the session rather
+                # than rebuilt here so all three seams word it identically.
+                return SlashResult(kind="notice", text=str(refusal), style="warning")
             return SlashResult(
                 kind="notice",
                 text="this session uses its base instructions",
@@ -50276,6 +50351,8 @@ class OperatorApp(App[None]):
             )
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            return SlashResult(kind="notice", text=str(refusal), style="warning")
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"

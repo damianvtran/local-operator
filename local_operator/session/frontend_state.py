@@ -2856,6 +2856,20 @@ class FrontendSessionState(BaseModel):
     goal_history_truncated: bool = False
     active_agent: str = ""
     active_team: str = ""
+    #: WHO is answering, as ONE statement (issue #2014):
+    #: ``{"speaker", "team", "role_of_speaker"}``. The two fields above are
+    #: the state a client can see; this is the rule applied to it, produced by
+    #: ``Session.effective_identity`` so a surface can paint "who you are
+    #: talking to" without re-deriving that an attached team outranks an
+    #: attached profile. A dict rather than three scalars because the three
+    #: halves are one fact and a client should not be able to see two of them
+    #: disagree; ``{}`` means a host that predates the field (the pre-#2014
+    #: mixed state), never "nobody".
+    #:
+    #: Bounded by its own shape: three short identifiers, replaced (never
+    #: appended) on every refresh, so it cannot grow with conversation length
+    #: or child count — the classification this frame guard asks for.
+    effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
     last_usage: FrontendUsage | None = None
@@ -6466,6 +6480,11 @@ class FrontendStateStore:
             goal_history=getattr(session, "goal_history", []),
             active_agent=str(getattr(session, "active_agent", "") or ""),
             active_team=str(getattr(session, "active_team_name", "") or ""),
+            # The rule, applied HERE rather than left to the client (issue
+            # #2014). A reduced facade (an embedded SDK or a test double) has
+            # no ``effective_identity``; the empty dict is the documented
+            # "host predates the field" value, not a claim that nobody speaks.
+            effective_identity=dict(getattr(session, "effective_identity", None) or {}),
             selected_model=(
                 selected.model_dump(mode="json") if isinstance(selected, ModelSpec) else selected
             ),

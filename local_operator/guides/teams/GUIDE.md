@@ -144,14 +144,22 @@ its lead died still comes back under the pod's brief, not the root team's.
 
 ## Running a team
 
-`/team` lists teams. `/team <name> <request>` attaches the team to this session (the current agent becomes the manager of that roster) and sends the request as a real turn.
+`/team` lists teams. `/team <name> <request>` attaches the team to this session and sends the request as a real turn: **the team's manager becomes this session's speaker.**
 
-`/team chart [name]` opens a scrollable, zoomable **org chart** of a team: the manager at the top, members beneath, nested teams expanded recursively. `chart` is a reserved first-argument subcommand under `/team` (the same shape `/mcp login|logout|reauth` uses):
+A team OWNS this session's agent slot, so the two identities can never run at once:
+
+- Attaching a team claims the slot for its manager, and replaces any profile adopted earlier in the session.
+- While a team is attached, `/agent` is refused (and `--profile` alongside `--team` fails) with the reason and the way out; `/agent clear` is refused for the same reason.
+- `/team clear` (or `/team none`) detaches the team and frees the slot again, so `/agent` works once more.
+- Clients can read the resulting identity from the session's frontend state as `effective_identity: {speaker, team, role_of_speaker}` — the team's manager, or the attached profile, or neither.
+
+`/team chart [name]` opens a scrollable, zoomable **org chart** of a team: the manager at the top, members beneath, nested teams expanded recursively. `chart` is a reserved first-argument subcommand under `/team` (the same shape `/mcp login|logout|reauth` uses), and `clear`/`none` (the detach verb above) is the other:
 
 - `/team chart <name>` charts that team.
 - `/team chart` (bare) charts the team currently attached to this session, or explains how to name one.
 - `/team chart chart` charts a team literally named `chart` (the second token is the `[name]`).
 - `/team =chart <request>` TALKS to a team named `chart` — a leading `=` on the first token means "literal team name, never a subcommand" (`=` cannot appear in a real team name, so it never collides).
+- `/team clear <anything>` is a mistyped attach (only the bare verb detaches) and is reported as the unknown name it is.
 
 Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits to the viewport width (never collapsing past where the members are visible), `e` expands/collapses the whole canvas, `?` toggles a glyph legend (◆ manager, `?` unresolved, `↩` cycle, `⋯` depth-limit, `·N` members, `×N` copies). Arrows scroll a line; `shift+←/→` page horizontally and `PageUp/PageDown` vertically; `Home`/`End` jump to the top-left / bottom-right corner; `Esc` leaves. The chart is wide, so horizontal scroll (the `↔↕` footer hint) is the primary way to reach members off the right edge.
 

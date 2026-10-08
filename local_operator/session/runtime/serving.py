@@ -7541,6 +7541,35 @@ class ServingSessionHandle(SessionHandle):
         if name.startswith("="):
             name = name[1:]
         request = request.strip()
+        # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
+        # ``/agent``'s own pair: a team owns this session's agent slot (issue
+        # #2014), so detaching it is the ONE way to free that slot again, and a
+        # request after the verb is a mistyped attach that falls through to the
+        # ordinary name lookup below (which reports the unknown name).
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "attach_team", None)
+            if not callable(detach):
+                # Same shape as the attach guard below: state what this session
+                # can do rather than promising a detach it cannot perform.
+                return SlashResult(
+                    kind="notice",
+                    text="this session cannot run a team, so there is no team to detach",
+                    style="warning",
+                )
+            try:
+                detach(None)
+            except Exception as exc:  # noqa: BLE001 — a failed detach is a notice
+                return SlashResult(
+                    kind="notice", text=f"could not detach the team: {exc}", style="warning"
+                )
+            # Both segments move: the team NAME and the manager NAME the team
+            # claimed (see ``Session._release_team_agent_slot``).
+            self._notify()
+            return SlashResult(
+                kind="notice",
+                text="no team active; this session uses its base instructions.",
+                style="info",
+            )
         try:
             team = registry_team = session.team_registry.get_team_by_name(name)
         except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
@@ -7639,6 +7668,12 @@ class ServingSessionHandle(SessionHandle):
         grammar (review/UX round 1, U1: the switch was unreachable live because
         only the local half existed).
         """
+        # Imported here rather than at module scope, matching every other
+        # ``session.errors`` reader on this path (see ``_team_slash``'s
+        # neighbours): the error module pulls the runtime types module, and the
+        # serving module is imported by that tree's own boot closure.
+        from local_operator.session.errors import AgentSlotOwnedByTeam
+
         if not arg:
             from local_operator.agent_profiles import agent_listing_rows
 
@@ -7685,7 +7720,13 @@ class ServingSessionHandle(SessionHandle):
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
-            detach()
+            try:
+                detach()
+            except AgentSlotOwnedByTeam as refusal:
+                # A team owns the slot (issue #2014): the profile in force comes
+                # from the team, so this is the team's refusal and its remedy
+                # (``/team clear``), not "nothing to detach".
+                return SlashResult(kind="notice", text=str(refusal), style="warning")
             self._notify()
             return SlashResult(
                 kind="notice",
@@ -7700,6 +7741,13 @@ class ServingSessionHandle(SessionHandle):
             )
         try:
             resolved = attach(name)
+        except AgentSlotOwnedByTeam as refusal:
+            # Issue #2014: a team attached to this session owns the agent slot,
+            # so the refusal names the team and the way out rather than
+            # reporting a name nobody mistyped. Same sentence as the TUI's
+            # local path and as the ``lop exec`` preflight — it is raised from
+            # the ONE place the slot moves.
+            return SlashResult(kind="notice", text=str(refusal), style="warning")
         except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
             return SlashResult(
                 kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"
