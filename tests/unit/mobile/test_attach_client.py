@@ -1097,6 +1097,19 @@ class _RecordingWriter:
         pass
 
 
+class _RawRecordingWriter:
+    """The write half, kept as the exact BYTES that reached the socket."""
+
+    def __init__(self) -> None:
+        self.raw: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.raw.append(bytes(data))
+
+    async def drain(self) -> None:
+        pass
+
+
 async def _answered_aside_frame(client: AttachClient, **kwargs: Any) -> dict[str, Any]:
     """Send one ``complete_aside`` and return the frame that went out.
 
@@ -1608,17 +1621,35 @@ async def test_an_owner_without_the_capability_refuses_images_and_writes_no_fram
 @pytest.mark.asyncio
 async def test_an_old_owner_still_gets_a_text_only_answer_byte_for_byte() -> None:
     """OLD UI -> NEW core: the frame is exactly the pre-feature frame (no ``images`` key,
-    not even an empty one), to a capable owner and an incapable one alike."""
-    for supported in (False, True):
-        client = AttachClient(lambda p: None, lambda reason: None)
-        client._connected = True
-        client._ask_attachments_supported = supported
-        client._writer = cast(Any, _RecordingWriter())
+    not even an empty one), to a capable owner and an incapable one alike.
 
+    BYTES, not a parsed key set (review round 1, R6): the literal below is the line
+    ``origin/main`` writes for this call, captured from the pre-change client, so a
+    reordered key, an extra ``"images": []`` or a changed separator fails here --
+    exactly what "old UI -> new core is byte-identical" claims, and what a parsed
+    comparison would have let through.
+    """
+    expected = (
+        b'{"op": "ask_respond", "req": 1, "ask_id": "a-1", "answers": {"q1": ["yes"]}, '
+        b'"by": "desktop"}\n'
+    )
+    for supported in (False, True):
         for empty in (None, []):
-            frame = await _sent_ask_frame(client, by="desktop", images=empty)
-            assert set(frame) == {"op", "req", "ask_id", "answers", "by"}, (supported, frame)
-            assert frame["answers"] == {"q1": ["yes"]}
+            client = AttachClient(lambda p: None, lambda reason: None)
+            client._connected = True
+            client._ask_attachments_supported = supported
+            writer = _RawRecordingWriter()
+            client._writer = cast(Any, writer)
+
+            task = asyncio.create_task(
+                client.ask_respond("a-1", {"q1": ["yes"]}, by="desktop", images=empty)
+            )
+            await _wait_until(lambda: bool(client._pending))
+            ((req, future),) = client._pending.items()
+            future.set_result({"op": "ack", "req": req, "detail": "answered"})
+            await task
+
+            assert writer.raw == [expected], (supported, empty, writer.raw)
 
 
 @pytest.mark.asyncio
