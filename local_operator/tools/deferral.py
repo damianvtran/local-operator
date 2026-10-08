@@ -65,7 +65,21 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         "team",
         "lsp",
         "patience",
-        "ask_withdraw",
+        # ``ask_withdraw`` was deferred and was RE-ADMITTED after measurement
+        # (CI round 4). It exists for ONE moment — the user answered a QUEUED
+        # ask in chat, or the question went moot — and the only text that tells
+        # a model to use it then is its OWN description: neither the queued
+        # receipt nor ``ask``'s description names it. Withheld, that sentence
+        # never reaches the model. Measured live (claude-sonnet-5-5, a real
+        # queued ask answered in chat, one variable): deferred, the model
+        # settled the ask 0/3 and it stayed ``open``; published, 3/3 and it
+        # settled ``answered``. A deferred tool the model needs exactly when it
+        # does not know to look is not a saving.
+        #
+        # Un-deferring it is the same as "publish it whenever ``ask`` is", and
+        # needs no pairing rule: both tools gate on the same host ask hook
+        # (``Session.set_ask_handler`` merges and removes them together), so
+        # ``ask_withdraw`` is only ever held where ``ask`` is.
         "web_read",
         "project_delete",
         "team_delete",
@@ -85,7 +99,6 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "team": "author or list teams",
     "lsp": "code intelligence",
     "patience": "proactive reply-wait timers",
-    "ask_withdraw": "settle or withdraw an open ask",
     "web_read": "answer from already-searched pages",
     "project_delete": "delete a project row",
     "team_delete": "delete a team",
