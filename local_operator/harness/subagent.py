@@ -420,7 +420,7 @@ def read_model_choice() -> str:
     return DEFAULT_MODEL_CHOICE
 
 
-def model_may_choose_tier() -> bool:
+def model_may_choose_tier(delegation_depth: int = 0) -> bool:
     """May a DELEGATING MODEL pick the model a child runs on?
 
     The policy half of the ``task``/``agent`` schemas: when this is ``False``
@@ -428,8 +428,47 @@ def model_may_choose_tier() -> bool:
     for one anyway is refused at the tool-argument boundary with a message that
     says what to do instead. See :func:`read_model_choice` for why the default
     is the restrictive one.
+
+    ``delegation_depth`` is the hops between the asking session and the
+    top-level one (``Session._delegation_depth``): **a session that is itself a
+    subagent (depth >= 1) never may, whatever ``subagents.model_choice`` says**.
+    The key is the OPERATOR delegating the choice to the model they are talking
+    to, and that grant stops at the first hop. Measured incident (session
+    3463fc25dade): ``model_choice=model`` with ``models.hi`` on Claude Sonnet,
+    session model Radient auto. A depth-1 subagent launched five ``scout``
+    children with ``effort='hi'``; they ran on Sonnet (``owns_model=True``)
+    instead of inheriting Radient auto — roughly $5 of Sonnet spend against
+    $0.76 on auto, invisible in the panel rows, which show only the depth-1
+    child's own usage. The operator had agreed to the model they were driving
+    choosing tiers, not to a fan-out of delegated models re-deciding the bill
+    one level down, where nothing reviews the choice. So below the top the
+    policy is exactly ``operator``: children inherit the launching session's
+    model, and only an operator-authored ROLE pin (``profile.effort``, resolved
+    at launch by ``Session._resolve_subagent_model``) can still move a nested
+    child — that is the operator's own decision, not the model's, and it is
+    deliberately untouched here.
+
+    The default of ``0`` keeps every existing caller (and every top-level
+    session) on the pure config read.
     """
+    if delegation_depth >= 1:
+        return False
     return read_model_choice() == MODEL_CHOICE_MODEL
+
+
+def depth_closed_the_tier_choice(delegation_depth: int) -> bool:
+    """Is the picker closed BY DEPTH, i.e. would the key alone have left it open?
+
+    True only for a subagent under ``model_choice=model``. Under ``operator``
+    the key already closes the picker for everyone, so a nested session is
+    refused for the same reason the top level is, and the copy it is shown must
+    say so: telling it "only the top-level session may pick a tier" would be
+    false there (nobody on the model side can), and would drop the operator's
+    route (``subagents.model_choice``) that the operator-arm copy carries. The
+    nested wording exists for exactly the case where the key says "model" and a
+    reader would otherwise be told the picker is open to it.
+    """
+    return delegation_depth >= 1 and read_model_choice() == MODEL_CHOICE_MODEL
 
 
 def configured_effort_tiers() -> dict[str, str]:
@@ -858,7 +897,10 @@ def _session_lineage(session: "Session") -> tuple[str, ...]:
 
 def _session_depth(session: "Session") -> int:
     depth = getattr(session, "_delegation_depth", 0)
-    return depth if isinstance(depth, int) and depth >= 0 else 0
+    # ``type(...) is int``: a bool is an int, and ``True`` would be depth 1. The
+    # tool-side readers (``effort_validation_context``/``_delegation_depth``)
+    # apply the same rule, so every reader of a depth agrees on what one is.
+    return depth if type(depth) is int and depth >= 0 else 0
 
 
 def lookup_team(session: "Session", name: str) -> Any:
@@ -3306,6 +3348,17 @@ async def _construct_child_session(
         child.active_team = target.team
         child._team_lineage = tuple(target.team_lineage)
         child._delegation_depth = target.depth
+        # THE DEPTH LANDS AFTER THE TOOLS WERE BUILT. The constructor's
+        # capability merge rendered this child's ``task``/``agent`` at depth 0
+        # (``Session._delegation_depth`` defaults to 0), i.e. WITH the tier
+        # field under ``model_choice=model``. Re-render them now that the stamp
+        # is in, or a nested child is advertised a picker the call-time gate
+        # then refuses (see ``model_may_choose_tier`` for why it may not have
+        # one). Only tools already in the inventory are replaced, so a child
+        # whose ``task`` was pruned above stays without it; a no-op for the
+        # ``operator`` default, where the field was already absent.
+        if target.depth >= 1:
+            child._rebuild_effort_tier_tools()
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no
