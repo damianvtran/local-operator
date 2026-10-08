@@ -641,6 +641,51 @@ def test_a_tombstoned_id_is_refused_for_180_days(root: Path) -> None:
     assert again["state"] in {"requested", "expired"}
 
 
+def test_a_relay_start_reaps_a_terminal_record_without_a_new_request(root: Path) -> None:
+    """The 2026-10-07 seat: retention runs at relay start too.
+
+    The sweep rides the CREATE path (\u00a72.4: "no timer process"), so a device
+    that stops onboarding stops reaping \u2014 measured: nine terminal records
+    from one onboarding week sat untouched, none of them due to be touched
+    until the next request that may never come. The relay start is that
+    device's only reachable non-timer event, so one sweep runs there; this
+    cell drives the REAL ``relay.start`` and waits for the reap.
+    """
+    from local_operator.network import relay as mesh_relay
+
+    request_id = A.new_request_id()
+    record = A.create_request(**_device_request(request_id), root=root)
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 1.0, root=root)
+    path = root / "network" / "approvals" / f"{record['approval_id']}.json"
+    # BACKDATE the terminal moment: the boot sweep runs at REAL now, so the
+    # record must look the way one sitting past its 30-day window looks on the
+    # operator's disk.
+    raw = json.loads(path.read_text())
+    raw["decided_at"] = time.time() - A.TERMINAL_PRUNE_AGE_S - 10.0
+    path.write_text(json.dumps(raw))
+
+    server = mesh_relay.RelayServer(
+        root=root, settings=mesh_relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    server.start()
+    try:
+        deadline = time.time() + 30.0
+        while time.time() < deadline and path.exists():
+            time.sleep(0.1)
+        assert not path.exists(), "the boot sweep did not reap the terminal record"
+        # The tombstone the prune wrote is THIS record's: the assertion binds to
+        # the request rather than to "any tombstone at all", so a stray row from
+        # another test — or a rewrite that dropped ours — cannot pass it (agent
+        # review round 1, F2).
+        tombstones = [
+            row for row in A.read_index(root) if row.get("request_id") == record["request_id"]
+        ]
+        assert tombstones, "no tombstone row for the reaped request"
+        assert tombstones[-1].get("terminal_state") == "denied"
+    finally:
+        server.stop()
+
+
 # ---------------------------------------------------------------------------
 # F5 — one derivation, one owner for the anchor trio
 # ---------------------------------------------------------------------------
