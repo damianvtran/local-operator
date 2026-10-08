@@ -64,6 +64,7 @@ from textual.widget import Widget
 
 from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
 #: composer chip vocabulary already leaves free (``!`` is the sidebar's
@@ -776,6 +777,13 @@ def _clip_cells(text: str, room: int) -> str:
     return clipped + "…"
 
 
+#: The one key a PASSIVE list can honour from the composer (``AskQueueList(passive=True)``):
+#: Tab hands it the caret. Spelled with the card's own glyph (``TAB_HINT_KEY``) so the
+#: two ask surfaces name the same key the same way, and as a header hint so it sheds
+#: under the same width rule as every other hint rather than being a second line.
+PASSIVE_TAB_HINT = f"{TAB_HINT_KEY} answer here"
+
+
 @dataclass(frozen=True)
 class HeaderAtom:
     """One paintable piece of the list's ONE-LINE header.
@@ -875,6 +883,7 @@ class AskQueueList(Widget):
         "d decline",
         "enter answer",
         "x dismiss",
+        PASSIVE_TAB_HINT,
         "esc collapse",
     )
 
@@ -894,11 +903,25 @@ class AskQueueList(Widget):
         open_count: int | None = None,
         truncated: bool = False,
         session_titles: Mapping[str, str] | None = None,
+        passive: bool = False,
     ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
         self._index = 0
         self._now_ms = now_ms
+        #: True for a list the open-by-default policy put up and the user has not yet
+        #: engaged: the composer still holds the caret, so NONE of this list's keys
+        #: (arrows, Enter, ``d``, ``x``, the filter digits) can reach it. It is painted
+        #: as a read-only view of the queue — no ``❯`` marker, no key hints it cannot
+        #: honour — because a list that looked live over a dead keyboard is exactly the
+        #: dead end UX round 1 (U2) removed, and it says how to take the keyboard
+        #: instead (Tab, or a click on a row). Ends on an explicit user gesture
+        #: (:meth:`engage`), and NOT on merely receiving focus — Textual lends focus to
+        #: whatever is next when a neighbouring prompt is removed, and a list that
+        #: took that for engagement would paint a live ``❯`` and live key hints over a
+        #: composer that holds the caret (see ``AskPickerScreen._passive``). A
+        #: door-opened list (f4, the bar) takes focus at mount and is never passive.
+        self._passive = passive
         # The three-way filter is CLIENT-LOCAL view state (§5.0's rule for the
         # EXPANDED state): which slice of one surface's list the reader is
         # looking at has no wire meaning, and persisting it would be a second
@@ -1237,6 +1260,11 @@ class AskQueueList(Widget):
         `pending`.
         """
         event.stop()
+        # The user chose this list: end its passivity for good (see :meth:`engage`),
+        # not only while the click's own focus is on it.
+        if self._passive:
+            self._passive = False
+            self.refresh(layout=True)
         y = int(event.y)
         segment = self._segment_at(int(event.x), y)
         if segment is not None:
@@ -1250,6 +1278,40 @@ class AskQueueList(Widget):
         target = self.visible_rows[row]
         if target.answerable and target.ask_id not in self._in_flight:
             self.post_message(self.Picked(target.ask_id))
+
+    def on_focus(self, event: events.Focus) -> None:  # type: ignore[override]
+        """Repaint: a focused list paints live, an unfocused passive one does not.
+
+        :attr:`passive` includes "not holding the caret", so the look changes with
+        focus and has to be repainted on both edges (see :meth:`on_blur`). It does NOT
+        end passivity — only :meth:`engage` does, because focus also arrives by
+        accident.
+        """
+        if self._passive:
+            self.refresh(layout=True)
+
+    def on_blur(self, event: events.Blur) -> None:  # type: ignore[override]
+        if self._passive:
+            self.refresh(layout=True)
+
+    @property
+    def passive(self) -> bool:
+        """Whether the list is up, un-engaged, and NOT holding the caret.
+
+        The same two-part reading as ``AskPickerScreen.passive``, for the same reason:
+        un-engaged alone would paint a list passive while the user is driving it,
+        focus alone would paint it live for the one frame Textual lends it the caret.
+        """
+        return self._passive and not self.has_focus
+
+    def engage(self) -> None:
+        """The user chose this list: end its passivity and give it the caret.
+
+        The Tab handover from the composer and a click both come through here.
+        """
+        self._passive = False
+        self.refresh(layout=True)
+        self.focus()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:  # type: ignore[override]
         """Hover moves the highlight, so the row under the pointer is the one
@@ -1288,6 +1350,15 @@ class AskQueueList(Widget):
         """
         visible = self.visible_rows
         live = {"esc collapse"}
+        if self.passive:
+            # A PASSIVE list owns no key: the composer holds the caret, so `enter`,
+            # `d` and `x` would type into the composer, not act on a row. It names
+            # the one key that works (Tab hands it the caret) and `esc`, which the
+            # app handles for the whole surface, so the header never advertises a
+            # key the keyboard cannot deliver.
+            if any(row.answerable for row in visible):
+                live.add(PASSIVE_TAB_HINT)
+            return tuple(hint for hint in self.HEADER_HINTS if hint in live)
         if any(row.answerable for row in visible):
             live |= {"enter answer", "d decline"}
         if any(row.moved_on for row in visible):
@@ -1464,7 +1535,11 @@ class AskQueueList(Widget):
             # (design round 2, D1).
             text.append(sentence, style=muted)
         for index, row in enumerate(visible):
-            selected = index == self._index
+            # A PASSIVE list marks no row: `❯` says "Enter acts on this one", and the
+            # keyboard is not here. The column is kept (two blank cells) so a row's
+            # question starts where it will once the list takes the caret, and the
+            # frame does not shift when Tab hands it over.
+            selected = index == self._index and not self.passive
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append("❯ " if selected else "  ", style=bold if selected else muted)
             chip = settled_chip(row) if row.settled else delivering_chip(row)
