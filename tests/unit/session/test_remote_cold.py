@@ -2666,3 +2666,54 @@ async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
         }
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_cold_fallback_names_the_team_when_the_registry_cannot_be_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cold path's VISIBLE LIMIT, pinned because a UI lane keys on it.
+
+    The speaker's NAME comes from this machine's team registry, and that lookup is
+    best-effort on purpose: an unreadable or absent registry must cost a user a
+    roster at worst, never their conversation. When it cannot answer, the TEAM
+    names itself — so a client painting "who is speaking" from ``speaker`` alone
+    sees a roster name where the warm frame would show the manager's profile name
+    (agent review on the follow-up, which found this row had no cell at all while
+    the contract block published it).
+
+    The KIND is unaffected and that is the point of the contract's advice: a team
+    is in force either way, ``role_of_speaker`` still reads ``"manager"``, and
+    ``/agent`` is still refused. Here the team is simply not in this machine's
+    registry, which is the ordinary way the lookup comes up empty.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    # No _write_team: the checkpoint knows the team's NAME, this machine cannot
+    # resolve it, and the open must still succeed.
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="manager",
+            active_team="lopdev",
+        ),
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.effective_identity == {
+            "speaker": "lopdev",
+            "team": "lopdev",
+            "role_of_speaker": "manager",
+        }
+    finally:
+        await viewer.dispose()
