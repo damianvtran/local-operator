@@ -202,7 +202,7 @@ owns the session's agent slot (the same rule `lop exec` refuses that pair with),
 `--profile` beside `--team` is refused — by the creating device before anything is
 sent, and by the owning device in the same sentence if it arrives anyway (the
 creating device names the team's manager only when it holds that team; otherwise
-it says "its manager is the speaker") — and no session is made. An `--agent` row
+it says `its manager is the speaker`) — and no session is made. An `--agent` row
 beside a team is refused when that row's instructions are attachable (a role or a
 specialist) — the creating device refuses it too when it holds that row, and the
 owning device refuses it in every case; a routing-only legacy row beside a team is
@@ -259,8 +259,10 @@ quietly dropped:
   arrived.
 - **A pinned model outranks `--model`**, which is this product's precedence on a local
   create too (agent > flag > config). The receipt says the requested model was not
-  applied and names what pinned it: the profile on its own, or — when a create names
-  both halves — the `--agent` row, whose routing outranks the profile's own model.
+  applied and names what pinned it: the profile on its own, or — when the `--agent` row
+  carries both its own hosting and its own model — the row, whose routing then outranks
+  the profile's own model (a row carrying only one of the two keeps the profile's pin,
+  or takes the pin as a half when the profile pins nothing).
 - **An edited copy is never overwritten.** Each device remembers what it mirrored; if
   the local copy has been edited since, a later push REFUSES that row by name (`the
   copy of that name here has local edits`) and leaves the edit alone. A row this device
