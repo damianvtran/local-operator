@@ -1,5 +1,10 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "note": "enforced = blocking scope (path prefixes or exact paths); findings elsewhere are advisory (report-only) until the area's extraction slice adds its prefix. files = per-file literal ceilings (shrink-only; new files start at 0). See scripts/i18n/check.py.",
+  "enforced": [
+    "local_operator/i18n/",
+    "scripts/i18n/"
+  ],
   "files": {
     "local_operator/action_class.py": 2,
     "local_operator/agent_profiles.py": 2,
@@ -35,6 +40,7 @@
     "local_operator/exec_startup.py": 13,
     "local_operator/exec_worker.py": 11,
     "local_operator/harness/comms.py": 1,
+    "local_operator/harness/jobs.py": 4,
     "local_operator/harness/loop.py": 10,
     "local_operator/harness/rows.py": 1,
     "local_operator/harness/secret_sinks.py": 11,
@@ -191,6 +197,8 @@
     "local_operator/web_search/providers.py": 2,
     "local_operator/web_search/read_tool.py": 1,
     "local_operator/web_search/service.py": 4,
-    "local_operator/web_search/tool.py": 2
+    "local_operator/web_search/tool.py": 2,
+    "scripts/i18n/check.py": 26,
+    "scripts/i18n/generate.py": 12
   }
 }

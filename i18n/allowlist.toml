@@ -18,5 +18,12 @@
 # call whose arguments carry the literal — its first through last line — so a
 # multi-line call takes one comment instead of one per argument. One-off sites
 # use a pragma; this file is for a file that is SYSTEMATICALLY not user copy.
+#
+# INTERPLAY WITH ENFORCEMENT (RFC §9: P1 ships ADVISORY). The ratchet FAILS
+# only for findings under the `enforced` list in i18n/baseline.json; findings
+# elsewhere print as `advisory:` lines and exit 0. Activation (adding an area's
+# prefix to `enforced`) is how an area becomes blocking; this file silences a
+# path EVERYWHERE, so for a path whose extraction is merely LATER, prefer
+# activation over a blanket exemption.
 
 entries = []
