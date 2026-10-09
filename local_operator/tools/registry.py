@@ -20,6 +20,7 @@ from local_operator.network.tool import build_network_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
@@ -106,6 +107,13 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # and subagents pay zero schema for it (design ask-nonblocking.md §12).
     # Appended at the END of both tables for the same cache-prefix reason.
     "ask_withdraw": lambda context: builtin.build_ask_withdraw_tool(context),
+    # createIf: rung 3 — present only where an image provider is reachable
+    # (`imagegen.availability`: persisted rows / store rows / env; sync and
+    # socket-free), so a session that cannot generate pays no schema for it
+    # (design image-gen §2.4/D9). Appended at the END of both tables on
+    # purpose: appending never shifts a provider-visible array prefix, which
+    # is what the prompt cache keys on.
+    "generate_image": lambda context: build_generate_image_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -147,6 +155,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "monitor",
     "sessions",
     "ask_withdraw",
+    "generate_image",
 ]
 
 
