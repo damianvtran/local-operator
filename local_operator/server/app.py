@@ -46,6 +46,7 @@ from local_operator.server.routes import (
     desktop_approvals,
     desktop_catalogues,
     desktop_claim,
+    desktop_code_requests,
     desktop_hub,
     desktop_lifecycle,
     desktop_mcp,
@@ -796,6 +797,14 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
+# and MRs this conversation touched, and the refresh affordance. Registered after the
+# approvals block for the reason each block above gives — FastAPI matches in declaration
+# order — and its templates (`/v1/desktop/sessions/{id}/code-requests` and its
+# `/refresh` child) collide with nothing declared earlier: the sessions router has no
+# `/code-requests` child of a session, and the two-segment `/refresh` path is declared
+# after its own parent here, so the literal suffix cannot be swallowed.
+app.include_router(desktop_code_requests.router)
 
 # Add CORS middleware
 app.add_middleware(

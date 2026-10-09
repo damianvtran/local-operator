@@ -35,6 +35,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         max_inactive_days=None,
         max_total_bytes=None,
         remove_empty=None,
+        delegated_max_age_hours=None,
         json=False,
     )
     base.update(overrides)
@@ -88,12 +89,16 @@ def test_dry_run_lists_with_the_switch_off_and_says_so(store: Path, capsys: Any)
     assert sessions_cleanup_command(_args(dry_run=True)) == 0
     out = capsys.readouterr().out
     assert "session.cleanup.enabled is off" in out and "preview only" in out
-    assert out.count("would remove") == 3 + 1  # three rows plus the summary line
+    rows = [line for line in out.splitlines() if line.startswith("  would remove ")]
+    assert len(rows) == 3 and "would remove 3" in out  # three rows plus the summary line
     assert "nothing was removed (dry run)" in out
     assert _count(store) == 18
 
 
-def test_no_limits_names_the_switch_and_json_is_always_json(store: Path, capsys: Any) -> None:
+def test_no_limits_and_delegated_off_names_the_switch_and_json_is_always_json(
+    store: Path, capsys: Any
+) -> None:
+    _config(store, delegated={"enabled": False})
     assert sessions_cleanup_command(_args()) == 1
     assert "session.cleanup.enabled is off" in capsys.readouterr().err
     assert sessions_cleanup_command(_args(json=True)) == 1
@@ -109,7 +114,7 @@ def test_enabled_run_lists_first_then_asks_then_removes(
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert sessions_cleanup_command(_args()) == 0
     out = capsys.readouterr().out
-    assert out.index("about to remove 3") < out.index("will remove") < out.index("removed 3")
+    assert out.index("will remove 3") < out.index("will remove  ") < out.index("removed 3")
     assert _count(store) == 15
     rows = [
         json.loads(line)
@@ -167,3 +172,165 @@ def test_negative_limits_are_rejected_by_the_parser() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         _non_negative_int("-3")
     assert _non_negative_int("0") == 0
+
+
+# -- the two classes ---------------------------------------------------------
+
+
+def _delegated(root: Path, name: str, *, age_h: float = 100.0, origin: str = "subagent") -> Path:
+    directory = root / "sessions" / name
+    directory.mkdir()
+    (directory / "origin.json").write_text(json.dumps({"origin": origin}))
+    transcript = directory / "transcript.jsonl"
+    transcript.write_text('{"type":"message"}\n')
+    stamp = time.time() - age_h * 3600
+    os.utime(transcript, (stamp, stamp))
+    return directory
+
+
+def test_dry_run_prints_one_section_per_class_with_the_parent_class_off(
+    store: Path, capsys: Any
+) -> None:
+    """Today this exits 1 'no limits configured'; the delegated class needs no limits."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-new-0001", age_h=1)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert out.index("== Your conversations (parent sessions) ==") < out.index(
+        "== Delegated work (subagents and background sessions) =="
+    )
+    assert "parent class: off" in out
+    assert "policy: on, remove delegated sessions idle over 48h" in out
+    assert "would remove kid-old-0001" in out and "kept         kid-new-0001" in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "a dry run removes nothing"
+
+
+def test_a_real_run_removes_the_delegated_rows_and_leaves_the_users_sessions(
+    store: Path, capsys: Any
+) -> None:
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "removed      kid-old-0001" in out and not (store / "sessions" / "kid-old-0001").exists()
+    assert _count(store) == 18, "the 15 transcripts and 3 empties are the parent class, untouched"
+    rows = [json.loads(x) for x in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()]
+    assert [(r["session"], r["policy"], r["actor"]) for r in rows] == [
+        ("kid-old-0001", "delegated_max_age", "cli")
+    ]
+
+
+def test_the_age_override_widens_and_narrows_the_window(store: Path, capsys: Any) -> None:
+    _delegated(store, "kid-60h-00001", age_h=60)
+    assert sessions_cleanup_command(_args(dry_run=True, delegated_max_age_hours=72)) == 0
+    assert "kept         kid-60h-00001" in capsys.readouterr().out
+    assert sessions_cleanup_command(_args(dry_run=True, delegated_max_age_hours=24)) == 0
+    assert "would remove kid-60h-00001" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", ["1", "721", "abc", "0", "-5"])
+def test_the_age_override_is_validated_like_the_setting(text: str) -> None:
+    from local_operator.cli import _delegated_hours
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _delegated_hours(text)
+    assert _delegated_hours("2") == 2 and _delegated_hours("720") == 720
+
+
+def test_json_keeps_its_old_keys_and_gains_per_class_objects(store: Path, capsys: Any) -> None:
+    _delegated(store, "kid-old-0001")
+    _config(store, enabled=True, remove_empty=True)
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {
+        "outcome",
+        "enabled",
+        "forced",
+        "dry_run",
+        "scanned",
+        "removed",
+        "protected",
+        "errors",
+        "skipped",
+        "confirmed",
+        "record",
+    } <= set(payload)
+    assert {c["session"] for c in payload["removed"]} == {"e00", "e01", "e02", "kid-old-0001"}
+    assert payload["parent"]["removed"] and payload["delegated"]["enabled"] is True
+    assert [c["session"] for c in payload["delegated"]["removed"]] == ["kid-old-0001"]
+    assert payload["delegated"]["max_age_hours"] == 48
+    # F3: ONE population, every directory once — the old sum added the parent
+    # class to the delegated pass's whole-store count (18 + 19 = 37 here; 15 +
+    # 18 = 33 in the review's probe). Asserts the VALUE, not just the key.
+    assert payload["scanned"] == _count(store) == 19
+
+
+def test_parent_limits_with_the_switch_off_refuse_even_though_delegated_is_on(
+    store: Path, capsys: Any
+) -> None:
+    """Delegated being on must not turn a refused parent run into 'nothing to remove'."""
+    _config(store, enabled=False, max_sessions=3)
+    assert sessions_cleanup_command(_args()) == 2
+    assert "session.cleanup.enabled is off" in capsys.readouterr().err
+    assert _count(store) == 18
+
+
+def test_a_force_run_with_the_delegated_switch_off_still_honours_force(store: Path) -> None:
+    _config(store, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    assert (store / "sessions" / "kid-old-0001").exists()
+    assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
+    assert not (store / "sessions" / "kid-old-0001").exists()
+
+
+# -- a class that will not run reads "would remove" (F1) ----------------------
+
+
+def test_a_real_run_with_the_parent_switch_off_previews_the_parent_rows(
+    store: Path, capsys: Any
+) -> None:
+    """F1: parent off + delegated on — the parent rows are a PREVIEW, and the
+    listing must say so ("would remove" + the off-note), not promise them."""
+    _config(store, enabled=False, remove_empty=True)
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section = out.split("== Delegated work")[0]
+    assert "note: session.cleanup.enabled is off" in parent_section
+    assert "this is a preview only" in parent_section
+    assert "would remove 3" in parent_section
+    assert "will remove" not in parent_section
+    assert "removed      kid-old-0001" in out
+    assert not (store / "sessions" / "kid-old-0001").exists()
+    assert (store / "sessions" / "e00").exists(), "the parent class was not run"
+
+
+def test_a_real_run_with_the_delegated_switch_off_previews_its_rows(
+    store: Path, capsys: Any
+) -> None:
+    """The mirror: delegated off + parent on."""
+    _config(store, enabled=True, remove_empty=True, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section, delegated_section = out.split("== Delegated work")
+    assert "will remove 3" in parent_section
+    assert "note: delegated cleanup is off in config; this is a preview only" in delegated_section
+    assert "would remove kid-old-0001" in delegated_section
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "the delegated class was not run"
+    assert not (store / "sessions" / "e00").exists(), "the parent class did run"
+
+
+def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, capsys: Any) -> None:
+    """F1's probe: delegated off with rows to show and nothing removable in the
+    running class used to print "will remove 3" and then "nothing to remove"."""
+    _config(store, enabled=True, max_sessions=999, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "nothing to remove" in out
+    assert "would remove kid-old-0001" in out
+    assert "note: delegated cleanup is off in config; this is a preview only" in out
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists()

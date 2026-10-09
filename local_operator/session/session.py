@@ -27,7 +27,7 @@ Ported semantics:
   that prune,
   trigger on ``compaction_context_tokens`` against the single resolved
   threshold ``min(threshold_percent * window, threshold_tokens)`` (defaults
-  80% and 600k, resolved only by ``compaction.thresholds``), strategy
+  80% and 400k, resolved only by ``compaction.thresholds``), strategy
   resolution with snapcompact preferred for vision models, and the recovery
   band gating auto-continuation.
 - ``agent_start``/``agent_end`` carry a per-session monotonic ``generation``
@@ -13963,6 +13963,22 @@ class Session:
         """
         from local_operator.hook_forwarding import HookIdentity, run_post_tool_hooks
 
+        # CODE-REQUEST DETECTION rides this seam rather than a hook of its own, and it
+        # is deliberately independent of the operator's hooks: the interesting fact is
+        # "this call created PR #1904", which must be recorded whether or not a hook is
+        # configured. It writes one small ledger row and returns no notes, so the tool
+        # result the model sees is byte-identical to what it would have been; a detector
+        # failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a hook
+        # must never break a turn).
+        #
+        # CHEAPEST TESTS FIRST, because this runs for EVERY tool result of EVERY session:
+        # ``could_matter`` is a handful of substring checks, while the two loads below are
+        # worker-thread hops that read the operator's gh/glab/tea config and the MCP server
+        # list. Gating first means an ordinary ``ls`` costs the substring scan and nothing
+        # else — review round 1 (F4) caught the loads running ahead of the gate, which put
+        # two executor hops on the hottest path in the runtime.
+        await self._detect_code_requests(tool_name, args, call_id, result)
+
         is_child = self._job_id is not None
         transcript_path: str | None = None
         with contextlib.suppress(Exception):
@@ -13986,6 +14002,42 @@ class Session:
             is_error=result.is_error,
             duration_s=result.duration_s,
         )
+
+    async def _detect_code_requests(
+        self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
+    ) -> None:
+        """Record any code request this tool result proves the session opened or acted on.
+
+        The detection itself (``code_requests/hook.py``) owns every rule; this method is
+        the session's half: what it may write, and where it must NOT intrude. Nothing is
+        written for a session without a transcript directory (a speculative runtime), and
+        a failure is a debug line rather than a warning, because an unknown session id or
+        a read-only directory is not an operator-visible fault.
+        """
+        try:
+            if self._transcript.directory is None:
+                return
+            from local_operator.code_requests import hook as code_requests_hook
+
+            if not code_requests_hook.could_matter(tool_name, args, result.text):
+                return
+            context = await code_requests_hook.load_context_async(self._cwd)
+            servers = await asyncio.to_thread(code_requests_hook.load_mcp_servers, self._cwd)
+            detections = code_requests_hook.classify(
+                self,
+                tool_name,
+                args,
+                result.text,
+                is_error=result.is_error,
+                context=context,
+                mcp_servers=servers,
+            )
+            if detections:
+                await code_requests_hook.record_detections(
+                    self, detections, tool=tool_name, call_id=call_id
+                )
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks a turn
+            logger.debug("code-request detection skipped", exc_info=True)
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -14045,11 +14097,6 @@ class Session:
             # the inherit line named the fallback for a child that would run
             # the selected spec (review round 2, MINOR 1).
             session_model_label=self.model_label,
-            # Stamped on a child by ``_build_child_session`` AFTER construction,
-            # which is why that function rebuilds the effort-tier tools once
-            # the stamp lands. Read per turn here so the tool-argument gate
-            # sees the live value even on a tool object built before it.
-            delegation_depth=self._delegation_depth,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s
@@ -16506,7 +16553,7 @@ class Session:
            context size and the local estimate).
         3. Threshold: whatever ``compaction.thresholds.resolve_threshold_tokens``
            resolves for this window — ``min(threshold_percent * context_window,
-           threshold_tokens)``, defaults 80% and 600k. The gate never derives
+           threshold_tokens)``, defaults 80% and 400k. The gate never derives
            it here; a mirrored formula in the session is how a 1M-context
            session ended up compacting at ~235k.
         4. Strategy resolution: snapcompact for vision models (archive stored

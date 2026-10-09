@@ -1395,19 +1395,6 @@ class ToolContext(BaseModel):
     # rather than probed off the launcher's bound session — a tool that has to
     # read a session off a bound method is a coupling nobody declared.
     session_model_label: str = ""
-    # How many delegation hops sit between this session and the top-level one:
-    # 0 for the session an operator talks to, 1 for a subagent it launched, 2
-    # for that subagent's own subagent, and so on. A snapshot taken when this
-    # context is built (``Session._build_tool_context`` re-reads it per turn).
-    #
-    # Its consumer is the ``task``/``agent`` effort policy: a model-chosen
-    # tier is the TOP-LEVEL session's to make and nobody else's (see
-    # ``harness.subagent.model_may_choose_tier`` and the incident recorded at
-    # ``tools.builtin._nested_task_rejection``), so the tool builders and the
-    # tool-argument gate need to know whether the caller is itself a child.
-    # Declared rather than probed off the launcher's bound session, for the
-    # reason ``session_model_label`` above is.
-    delegation_depth: int = 0
     # The DELEGATED-WORK label, set only on a subagent's context: the short
     # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
     #

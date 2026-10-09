@@ -42,8 +42,11 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the two 1 s invalidation probes are NOT in that four-stat
-figure, and the authoring one is O(profiles). The catalogue probe is a readdir
+COST, CONTINUED — the THREE 1 s invalidation probes are NOT in that four-stat
+figure: the catalogue's, the authoring one (O(profiles)), and the code-request one
+(one ``readdir`` of the derived code-request index plus one ``os.stat`` per session
+WITH rows — usually zero, since most sessions never touch a pull request, and one
+small file read per CHANGED index). The catalogue probe is a readdir
 and two stats. The authoring probe cannot be, because the rows it watches are
 FILES whose CONTENT is what changes: its price is one ``readdir`` of each
 registry plus one ``os.stat`` per row (a few dozen stats on a machine with a few
@@ -58,6 +61,15 @@ a probe whose stat memory is warm costs 0.31 ms and ZERO file reads — 36
 per-file term to "restore" the four-stat profile would re-open the defect this
 channel closes, so the count is stated here, in ``docs/DESKTOP_API.md`` and in the
 budget test beside it.
+
+THE CODE-REQUEST CHANNEL. ``code_requests`` frames carry ``{revision}`` and a
+``session_id``, and say that ONE conversation's list of pull requests moved: a subagent
+opened one, a background scan finished, the operator's own terminal ran ``gh pr create``
+in the same session. The frame is the authoring channel's shape with a session attached,
+because the client's answer is a refetch of that session's rows rather than of a list it
+already holds. It watches the derived INDEX and not the scan cache beside it: the writer's
+order is cache first, index second, and a frame published on the cache would announce a
+change before there was an answer to fetch.
 
 THE AUTHORING CHANNEL. ``authoring`` frames say that the PROFILE and TEAM
 registries moved — a role an agent just authored from inside a session, a team
@@ -164,6 +176,14 @@ HEARTBEAT_INTERVAL_S = 15.0
 #: ``sessions.list`` poll this replaces and keeps the feed's own I/O profile
 #: where the design bounds it (four stats per tick).
 CATALOGUE_PROBE_INTERVAL_S = 1.0
+
+#: The derived code-request index's directory name, under the config root
+#: (``code_requests/ledger.py``'s ``INDEX_DIRNAME``, spelled here because this module
+#: deliberately constructs no product object). The probe watches this directory only —
+#: not the scan cache beside it under ``cache/``: the cache is the probe's own input and
+#: the index is the answer, and the writer's order is cache first, index second, so a
+#: frame published on the cache would announce a change before the answer existed.
+CODE_REQUESTS_DIRNAME = "code_requests"
 
 #: The two AUTHORING registries under the config dir, and the file each row's
 #: metadata lives in. Spelled here rather than imported: ``AgentRegistry`` and
@@ -558,6 +578,32 @@ class DesktopFeed:
         #: per probe from the rows that probe actually saw, so a deleted row cannot
         #: leave an entry behind.
         self._authoring_files: dict[Path, tuple[tuple[int, int, int] | None, int | None]] = {}
+
+        # -- the code-request channel (per session) -----------------------------
+        #: The derived code-request index's directory, watched by its own probe. The
+        #: reader rule applies here as everywhere in this module: an absent directory
+        #: is an empty row set, and nothing on this path creates one.
+        self.code_requests_dir = root / CODE_REQUESTS_DIRNAME
+        #: PER-SESSION fingerprints, keyed by session id, because this channel's frames
+        #: name WHICH conversation moved: ``{session_id, revision}``. A single token
+        #: would say "some conversation has a new code request" and leave the client to
+        #: refetch every session it knows about.
+        self._code_requests_tokens: dict[str, tuple[int, int]] = {}
+        #: Per-session revisions (the index's own ``updated_at`` in ms) and the last tick
+        #: each published in. Bounded exactly as the tokens are: pruned to the sessions
+        #: that still have an index, so a backend up for weeks does not accumulate one
+        #: entry per session ever seen.
+        self._code_requests_revisions: dict[str, int] = {}
+        self._code_requests_emitted: dict[str, int] = {}
+        #: When the probe last ran. Its own clock, like the authoring probe's, so the two
+        #: can be gated independently in a test while both run at the same cadence.
+        self._code_requests_probed_at = 0.0
+        #: ``name -> (stat fingerprint, row count, revision)`` for the per-session index
+        #: read. A file whose stat did not move is never re-read, so an idle probe reads
+        #: nothing.
+        self._code_requests_counts: dict[str, tuple[Any, int, int]] = {}
+        #: Sessions whose token moved and whose frame has not been published yet.
+        self._code_requests_invalidated: set[str] = set()
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -1026,6 +1072,11 @@ class DesktopFeed:
         # than the clock means the first tick re-probes and still publishes
         # nothing — so a change landing in that first second is still caught.
         self._authoring_token = self._authoring_probe()
+        # The CODE-REQUEST baseline, per session and on the same rule: priming the tokens
+        # (not the clock) means the first tick re-probes and still publishes nothing for a
+        # list the client is already loading, while a change landing inside that first
+        # second is still caught.
+        self._code_requests_tokens = self._code_requests_probe()
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1158,6 +1209,12 @@ class DesktopFeed:
         # test rather than left to be read as a regression of the four-stat tick
         # above — it runs on the 1 s cadence, not on the tick.
         await self._maybe_emit_authoring()
+        # 7. THE CODE-REQUEST INVALIDATION, per session. Outside the doorbell branch for
+        # the authoring channel's reason and one of its own: the index lives under the
+        # CONFIG root, which this tick's four-stat doorbell never looks at, and it is
+        # written by a scan that may be running in a different process entirely (the
+        # desktop backend and a session runtime share the config root).
+        await self._maybe_emit_code_requests()
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
@@ -1690,6 +1747,140 @@ class DesktopFeed:
         self._authoring_emitted_tick = self._tick_index
         self._authoring_revision += 1
         self._publish("authoring", {"revision": self._authoring_revision})
+
+    async def _maybe_emit_code_requests(self) -> None:
+        """The per-session code-request invalidation: a conversation's PR list moved.
+
+        WHY A FRAME AT ALL, when the list is local and small. The list changes WITHOUT the
+        client doing anything: a subagent opens a pull request in the background, a scan
+        finishes after the pane's own read, the operator's terminal runs ``gh pr create``
+        in the same session. Before this channel the rail's count and the pane's rows moved
+        only on a focus, a remount or a 30 s safety poll, so the feature's most valuable
+        moment — "the PR you asked for now exists" — arrived late on exactly the surface
+        the operator was looking at.
+
+        The frame carries ``{session_id, revision}``: the SESSION is what makes a targeted
+        refetch possible instead of "invalidate everything". A burst is at most one frame
+        per session per probe, and the once-per-tick guard applies to the channel as a
+        whole, so a scan that writes several sessions at once costs one refetch each.
+
+        ``CATALOGUE_PROBE_INTERVAL_S``, the module's one cadence for list invalidations:
+        a person cannot distinguish one second from live, and a second clock would be a
+        second number to keep in step for no gain (the authoring probe's own argument).
+        """
+        now = time.monotonic()
+        if now - self._code_requests_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
+            self._code_requests_probed_at = now
+            tokens = await asyncio.to_thread(self._code_requests_probe)
+            for session_id, token in tokens.items():
+                if self._code_requests_tokens.get(session_id) != token:
+                    self._code_requests_invalidated.add(session_id)
+                    # The frame carries the revision the ROUTE also reports for this
+                    # session — the index's own ``updated_at`` in milliseconds — rather
+                    # than a counter local to this process, so a client comparing the two
+                    # is comparing one number in one currency. A counter here would mean
+                    # the same field name carried two scales, which is exactly how two
+                    # surfaces come to disagree about one value.
+                    self._code_requests_revisions[session_id] = token[1]
+            # A session whose index DISAPPEARED (rows removed, or the session deleted) is
+            # an invalidation too — the client must drop the row it is drawing.
+            for session_id in set(self._code_requests_tokens) - set(tokens):
+                self._code_requests_invalidated.add(session_id)
+            self._code_requests_tokens = tokens
+        if not self._code_requests_invalidated:
+            return
+        for session_id in sorted(self._code_requests_invalidated):
+            if self._code_requests_emitted.get(session_id) == self._tick_index:
+                continue
+            self._code_requests_emitted[session_id] = self._tick_index
+            revision = self._code_requests_revisions.get(session_id, 0)
+            self._publish(
+                "code_requests",
+                {"revision": revision},
+                session_id=session_id,
+            )
+        self._code_requests_invalidated.clear()
+
+    def _code_requests_probe(self) -> dict[str, tuple[int, int]]:
+        """``{session_id: (fingerprint, revision)}`` for sessions with an index.
+
+        The fingerprint is the row COUNT plus the file's ``(ino, size, mtime_ns)``: the
+        count is what the client's badge shows, and the stat triple is what catches an edit
+        in place — a rescan that rewrote the same rows with a new timestamp or an answer
+        that changed without changing the count. One ``readdir`` plus one ``os.stat`` per
+        session WITH rows (rare: most sessions never touch a pull request), and nothing at
+        all when no session has any.
+
+        A READER in the strong sense, like every other probe here: an absent directory is an
+        empty mapping, an unreadable one is the same answer, and nothing on this path
+        creates, repairs or touches anything.
+        """
+        out: dict[str, tuple[int, int]] = {}
+        try:
+            with os.scandir(self.code_requests_dir) as entries:
+                names = [entry.name for entry in entries if not entry.name.startswith(".")]
+        except OSError:
+            return out
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            session_id = name[: -len(".json")]
+            fingerprint = _fingerprint(self.code_requests_dir / name)
+            if fingerprint is None:
+                continue
+            # The index's own row count rides in the token so a rewrite that changes WHAT
+            # is listed without changing the file's length still publishes (a row edited in
+            # place), while an unrelated rewrite of the same bytes does not (the triple).
+            # The fingerprint is passed IN rather than re-taken by the count helper: two
+            # stats per file per second would be exactly the kind of quiet cost this
+            # module's docstring budgets for.
+            count, revision = self._code_requests_meta(name, fingerprint)
+            out[session_id] = (
+                zlib.crc32((repr(fingerprint) + "|" + str(count)).encode()),
+                revision,
+            )
+        # The revision memories are pruned to the sessions that still HAVE an index, for
+        # the catalogue probe's own reason: what they may hold is bounded by the store as
+        # it is, not by every session the machine has ever run.
+        live = set(out)
+        self._code_requests_revisions = {
+            key: value for key, value in self._code_requests_revisions.items() if key in live
+        }
+        self._code_requests_emitted = {
+            key: value for key, value in self._code_requests_emitted.items() if key in live
+        }
+        return out
+
+    def _code_requests_meta(self, name: str, fingerprint: Any) -> tuple[int, int]:
+        """``(row count, revision)`` for one index file, read only when its stat moved.
+
+        Reading every index every second would make this probe O(sessions) in file READS,
+        which is exactly the cost the authoring probe's stat memory exists to avoid. The
+        memory here is keyed by file NAME and holds the fingerprint it was read under: an
+        unchanged file is never re-read, and an idle probe reads nothing at all. Both
+        values come from the ONE read — the count rides in the token so a rewrite that
+        changes what is listed still publishes, and the revision is the index's own
+        ``updated_at`` in milliseconds, which is the value the ROUTE reports for the same
+        session (one number, one currency, so a client can compare the two).
+        """
+        path = self.code_requests_dir / name
+        cached = self._code_requests_counts.get(name)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1], cached[2]
+        count = 0
+        revision = 0
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(raw, dict):
+                rows = raw.get("rows")
+                count = len(rows) if isinstance(rows, list) else 0
+                updated = raw.get("updated_at")
+                if isinstance(updated, (int, float)) and not isinstance(updated, bool):
+                    revision = int(float(updated) * 1000)
+        except (OSError, ValueError):
+            count, revision = 0, 0
+        self._code_requests_counts[name] = (fingerprint, count, revision)
+        return count, revision
 
     def _authoring_probe(self) -> int:
         """A cheap invalidation token for the PROFILES and TEAMS registries.

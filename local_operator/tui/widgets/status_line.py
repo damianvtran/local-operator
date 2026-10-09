@@ -2626,10 +2626,12 @@ class StatusLine:
             # means configured tools are missing, and `▦` in red means the
             # context is at or past its compaction trigger OR past the absolute
             # re-send-cost rung. Those two coincide only where the window is
-            # small enough for the proportional ladder to govern: above ~625k
-            # the absolute rung fires at 500k while the resolved trigger is
-            # capped at 600k, so a 1M session shows red for a band of ~100k
-            # before a pass is actually due. It is the weakest of the three
+            # small enough for the proportional ladder to govern. Above ~500k
+            # the default absolute trigger (400k) sits BELOW the 500k red rung,
+            # so under defaults a pass is due before the rung is reached and a
+            # 1M session never shows red from it; only a user who raised
+            # `compaction.threshold_tokens` past 500k sees red before a pass is
+            # due. It is the weakest of the three
             # either way (compaction resolves it without the user acting), which
             # is why it is the only one gated behind a threshold rather than
             # being a state the segment can simply be in.
