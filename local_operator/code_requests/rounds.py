@@ -105,7 +105,7 @@ _HEADER_NO_ROUND = re.compile(
 )
 
 _FIELD = re.compile(
-    r"^\W*(?P<name>reviewer|scope|head(?:\s+under\s+test)?|head|verdict)\W*\s*[:"
+    r"^\W*(?P<name>reviewer|scope|head(?:\s+under\s+test)?|verdict)\W*\s*[:"
     rf"{_DASH}]\s*(?P<value>.*)$",
     re.IGNORECASE,
 )
@@ -397,8 +397,8 @@ def parse_comment(comment: Comment) -> ReviewPass | None:
         kind = "remediation" if plain.group("remediation") else "review"
         round_number = None
         qualifier = ""
-    fields, verdict_heading = _scan_fields(lines)
-    verdict = fields.get("verdict", "") or verdict_heading
+    fields = _scan_fields(lines)
+    verdict = fields.get("verdict", "")
     head_field = fields.get("head", "")
     scope = fields.get("scope", "")
     reviewed_head = _reviewed_head(scope, head_field)
@@ -465,7 +465,7 @@ def _strip_wrapping_parens(text: str) -> str:
     return text
 
 
-def _scan_fields(lines: Sequence[str]) -> tuple[dict[str, str], str]:
+def _scan_fields(lines: Sequence[str]) -> dict[str, str]:
     """The ``Reviewer:``/``Scope:``/``Head:``/``Verdict:`` fields, first spelling wins.
 
     ``first`` rather than ``last`` because a review quotes its own prompt further
@@ -473,22 +473,12 @@ def _scan_fields(lines: Sequence[str]) -> tuple[dict[str, str], str]:
     the real comments always put the fields at the top.
     """
     fields: dict[str, str] = {}
-    verdict_heading = ""
-    for index, line in enumerate(lines[1:FIELD_SCAN_LINES]):
+    for line in lines[1:FIELD_SCAN_LINES]:
         stripped = line.strip()
         if _VERDICT_HEADING.match(stripped) is not None:
-            # Handled after this loop: the heading is the one field scanned past
-            # the top-lines bound (see this function's docstring).
+            # The heading carries no text of its own, and it is the one field NOT
+            # bounded to these top lines, so the whole-body pass below owns it.
             break
-        if _VERDICT_HEADING.match(stripped) and "verdict" not in fields:
-            # The heading carries no text: the verdict is the next non-empty line,
-            # which in the real comments is a bold paragraph (``**Not safe to merge…**``).
-            for following in lines[index + 2 : index + 6]:
-                if following.strip():
-                    verdict_heading = following.strip()
-                    break
-            fields.setdefault("verdict", verdict_heading)
-            continue
         match = _FIELD.match(stripped)
         if match is None:
             continue
@@ -511,8 +501,7 @@ def _scan_fields(lines: Sequence[str]) -> tuple[dict[str, str], str]:
                 continue
             following = next((item for item in lines[index + 1 : index + 6] if item.strip()), "")
             if following.strip():
-                verdict_heading = following.strip()
-                fields.setdefault("verdict", verdict_heading)
+                fields.setdefault("verdict", following.strip())
             break
     if "verdict" not in fields:
         # No ``Verdict:`` label: a standalone bold verdict paragraph is the third
@@ -526,7 +515,7 @@ def _scan_fields(lines: Sequence[str]) -> tuple[dict[str, str], str]:
             if _BARE_VERDICT.match(bare):
                 fields["verdict"] = stripped
                 break
-    return fields, verdict_heading
+    return fields
 
 
 def _strip_markup(text: str) -> str:
@@ -552,10 +541,6 @@ def classify_verdict(verdict: str) -> str:
         return STATE_UNSTATED
     first = text.split(" ")[0] if text else ""
     if _VERDICT_OPEN.match(text):
-        return STATE_FINDINGS_OPEN
-    if text.lower().startswith("fail") and not re.match(r"^fail(ed)?\b.*\b0\s+fail", text, re.I):
-        # ``FAIL — 3 findings`` is a failing verdict; ``PASS — 0 FAIL`` is not (its
-        # leading token is PASS and it never reaches here).
         return STATE_FINDINGS_OPEN
     if _VERDICT_CLEAN.match(text):
         return STATE_TERMINAL if _TERMINAL_WORD.search(text) else STATE_CLEAN

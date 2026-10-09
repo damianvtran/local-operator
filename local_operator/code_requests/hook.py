@@ -236,12 +236,12 @@ def _via_for(session: Any) -> dict[str, Any] | None:
     job_id = getattr(session, _JOB_ID_ATTR, None)
     if not job_id:
         return None
-    path: list[str] = [
-        str(item) for item in (getattr(session, "_delegation_path", None) or ())
-    ]
+    # The path starts as this child's own label. Outer levels PREPEND theirs as the event
+    # is re-propagated upward, so there is no stored delegation-path attribute to read:
+    # one existed as a guess in the first cut and nothing in the tree ever assigned it
+    # (review round 1, N1).
     label = str(getattr(session, _JOB_LABEL_ATTR, "") or "")
-    if label and label not in path:
-        path.append(label)
+    path: list[str] = [label] if label else []
     return {
         "job_id": str(job_id),
         "label": label,
@@ -319,8 +319,14 @@ def stamp_origin_parent(session_dir: Path, parent_id: str) -> None:
         return
     try:
         import json
+        import os
 
-        path = Path(session_dir) / "origin.json"
+        # The file name comes from the module that owns it, so there is one spelling of
+        # it in the tree; the import is inside the function because this runs once per
+        # delegated child and must not put ``resume`` on the session boot path.
+        from local_operator.resume import ORIGIN_NAME
+
+        path = Path(session_dir) / ORIGIN_NAME
         try:
             payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
@@ -329,11 +335,28 @@ def stamp_origin_parent(session_dir: Path, parent_id: str) -> None:
             payload = {}
         if payload.get("parent") == parent_id:
             return
-        payload["parent"] = parent_id
+        # WRITTEN THE WAY ``resume.mark_session_origin`` WRITES IT, and for the same
+        # documented reason: the marker is bookkeeping ABOUT a session, so the session
+        # directory's mtime — which readers use for recency — must not move. That
+        # function itself cannot be called here because it REPLACES the payload, and this
+        # must MERGE one key into a marker it did not create (the subagent stamp already
+        # holds ``label``/``agent``, and losing those breaks the ``/resume`` picker).
+        #
+        # It is deliberately NOT a tmp+``os.replace``: the guard in
+        # ``tests/unit/session/test_no_session_deletion.py`` exists because a rename or
+        # replace of a session directory is a deletion by another name, and a marker
+        # write has no need to introduce that call shape into a module that never deletes
+        # anything (review round 1, Q2). A torn write is survivable by contract — the
+        # reader tolerates a truncated marker and reports the session as the user's own.
+        try:
+            previous = Path(session_dir).stat().st_mtime
+        except OSError:
+            previous = None
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
+        payload["parent"] = parent_id
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
     except Exception:  # noqa: BLE001 - provenance is never a gate
         logger.debug("could not stamp the origin parent for %s", session_dir, exc_info=True)
 

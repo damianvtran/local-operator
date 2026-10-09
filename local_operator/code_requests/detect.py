@@ -979,17 +979,18 @@ def detect_bash(command: str, result_text: str, context: HostContext) -> list[De
         return []
     detections: list[Detection] = []
     names = [command_word(words) for words in stages]
-    for words in stages:
+    for index, words in enumerate(stages):
         name = command_word(words)
         rest = words[1:]
+        stage = {"stages": stages, "index": index}
         if name == "gh" and len(rest) >= 2 and rest[0] == "pr" and rest[1] in _GH_CREATE:
-            detections.extend(_create_by_cli(result, context, "gh pr create", "github"))
+            detections.extend(_create_by_cli(result, context, "gh pr create", "github", **stage))
         elif name == "glab" and len(rest) >= 2 and rest[0] == "mr" and rest[1] in _GLAB_CREATE:
-            detections.extend(_create_by_cli(result, context, "glab mr create", "gitlab"))
+            detections.extend(_create_by_cli(result, context, "glab mr create", "gitlab", **stage))
         elif name == "tea" and len(rest) >= 2 and rest[0] in _TEA_PULLS and rest[1] in _TEA_CREATE:
-            detections.extend(_create_by_cli(result, context, "tea pulls create", "gitea"))
+            detections.extend(_create_by_cli(result, context, "tea pulls create", "gitea", **stage))
         elif name == "az" and rest[:3] == ["repos", "pr", "create"]:
-            detections.extend(_create_by_az(result, context))
+            detections.extend(_create_by_az(result, context, stages=stages, index=index))
         elif name == "gh" and len(rest) >= 2 and rest[0] == "pr" and rest[1] in _GH_ACTS:
             ref = _github_target(rest[2:], context)
             if ref is not None:
@@ -1040,39 +1041,118 @@ def detect_bash(command: str, result_text: str, context: HostContext) -> list[De
 
 
 def _create_by_cli(
-    result: BashResult, context: HostContext, verb: str, forge: str
+    result: BashResult,
+    context: HostContext,
+    verb: str,
+    forge: str,
+    *,
+    stages: list[list[str]],
+    index: int,
 ) -> list[Detection]:
+    """The URL a create CLI's own stage printed, or the honest `unknown` instead.
+
+    WHERE THE URL COMES FROM, and why it is not simply "the last line of stdout". The
+    bash tool reports ONE stdout for the whole command, so a compound stage
+    (``gh pr create -f && gh pr comment 5 --body hi``) puts two CLIs' output in the same
+    buffer — and reading its last line recorded the COMMENT's URL as the PR this call
+    created (review round 1, F1: PR #5 was recorded `opened` while the PR the call
+    actually created, #4, was not a row at all). Attribution now has three rules:
+
+    1. **A create prints a BARE url**: no fragment and no query. ``#issuecomment-…``,
+       ``#note_…``, ``#diff-…`` and ``/files`` are other commands' shapes, so a line
+       carrying one is never read as a creation.
+    2. **A later stage naming a same-forge URL in its own ARGUMENTS** (``… ; echo <url>``,
+       ``… && curl <url>``) makes this stdout unattributable — the create cannot be
+       separated from the echo — and the answer is `unknown` ("possibly opened"),
+       never `opened`.
+    3. **A later forge-CLI stage** (gh/glab/tea/az) may print a URL of its own
+       (``gh pr view 5 --json url``), so the FIRST bare URL line is taken rather than the
+       last: the create runs before it. With a single stage — or stages that are not
+       forge CLIs — the last bare URL line is the create's, which is the shape gh and
+       glab both print.
+    """
     stem = _rule_stem(verb)
-    if forge == "github":
-        # gh's own shape: the URL is the LAST non-empty stdout line ("Creating
-        # pull request for …" goes to stderr).
-        ref = _line_ref(_last_line(result.stdout), context, (forge,))
-    else:
-        # glab prints "Creating merge request for …" on stdout first. tea prints
-        # a summary. Either way, the URL is a line of its own.
-        ref = None
-        for line in result.stdout.splitlines():
-            found = _line_ref(line, context, (forge,))
-            if found is not None:
-                ref = found
-    if ref is not None:
-        return [Detection(KIND_OPENED, ref, f"{stem}-stdout", verb, 0)]
-    loose = _last_url_ref(result.stdout, context, (forge,))
-    if loose is None:
-        return []
-    return [
-        Detection(
-            KIND_UNKNOWN,
-            loose,
-            f"{stem}-unshaped",
-            verb,
-            0,
-            reason=f"{verb} ran, but its URL is not in the CLI's own stdout shape",
-        )
+    ambiguous = _later_stage_names_a_url(stages, index, context, forge)
+    if ambiguous:
+        loose = _last_url_ref(result.stdout, context, (forge,))
+        if loose is None:
+            return []
+        return [
+            Detection(
+                KIND_UNKNOWN,
+                loose,
+                f"{stem}-unattributed",
+                verb,
+                0,
+                reason=(
+                    f"{verb} ran, but a later stage of the same command names a URL of "
+                    "its own, so this call's output cannot be attributed to the create"
+                ),
+            )
+        ]
+    candidates = [
+        ref
+        for line in result.stdout.splitlines()
+        for ref in [_line_ref(line, context, (forge,))]
+        if ref is not None and not _has_fragment_or_query(line)
     ]
+    if not candidates:
+        loose = _last_url_ref(result.stdout, context, (forge,))
+        if loose is None:
+            return []
+        return [
+            Detection(
+                KIND_UNKNOWN,
+                loose,
+                f"{stem}-unshaped",
+                verb,
+                0,
+                reason=f"{verb} ran, but its URL is not in the CLI's own stdout shape",
+            )
+        ]
+    # glab prints its "Creating merge request for …" herald on stdout before the URL, so
+    # the LAST candidate is its own either way; with a later forge CLI in the command the
+    # FIRST is the create's, because the create ran first.
+    later_forge = any(command_word(words) in _FORGE_CLIS for words in stages[index + 1 :])
+    ref = candidates[0] if later_forge else candidates[-1]
+    return [Detection(KIND_OPENED, ref, f"{stem}-stdout", verb, 0)]
 
 
-def _create_by_az(result: BashResult, context: HostContext) -> list[Detection]:
+def _has_fragment_or_query(line: str) -> bool:
+    """Does this stdout line carry a URL FRAGMENT or query? Then it is another's shape."""
+    return "#" in line or "?" in line
+
+
+def _later_stage_names_a_url(
+    stages: list[list[str]], index: int, context: HostContext, forge: str
+) -> bool:
+    """Does any stage AFTER ``index`` name a same-forge URL in its arguments?"""
+    for words in stages[index + 1 :]:
+        for word in words[1:]:
+            for ref in iter_urls(word, context):
+                if ref.forge == forge:
+                    return True
+    return False
+
+
+def _create_by_az(
+    result: BashResult,
+    context: HostContext,
+    *,
+    stages: list[list[str]],
+    index: int,
+) -> list[Detection]:
+    """``az repos pr create``: its own JSON document, which aggregation cannot fake.
+
+    Unlike the CLI rules there is no line-attribution problem to solve: the rule parses
+    the WHOLE stdout as one JSON object, so a compound command whose later stage prints
+    anything at all fails the parse and yields nothing. The stage list is taken only so
+    that a later stage naming a URL is refused in the same way the CLI rules refuse it —
+    ``azure`` hosts are detect-and-link, so a wrong `opened` here would be unrecoverable
+    by a fetch (there is none).
+    """
+    if _later_stage_names_a_url(stages, index, context, "azure"):
+        return []
     value = _json_object(result.stdout)
     if not isinstance(value, dict):
         return []

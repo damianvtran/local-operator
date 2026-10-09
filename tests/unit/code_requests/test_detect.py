@@ -406,3 +406,81 @@ def test_parse_bash_result_reads_the_harness_shapes():
 def test_load_mcp_servers_never_raises_on_this_machine(tmp_path):
     assert isinstance(load_mcp_servers(str(tmp_path)), tuple)
     assert isinstance(load_mcp_servers(None), tuple)
+
+
+# -- review round 1, F1: a compound command's stdout is not one CLI's ---------
+
+
+def test_a_later_stage_url_is_not_read_as_the_creation():
+    """``gh pr create -f && gh pr comment 5`` printed #4 and then #5's COMMENT url.
+
+    Before the fix the last stdout line was taken, so the call recorded ``opened #5``
+    and the PR it actually created (#4) was not a row at all. A create prints a BARE
+    url; a fragment (``#issuecomment-…``) is another command's shape.
+    """
+    created = "https://github.com/damianvtran/local-operator/pull/4"
+    commented = "https://github.com/damianvtran/local-operator/pull/5#issuecomment-123"
+    detections = _bash("gh pr create -f && gh pr comment 5 --body hi", f"{created}\n{commented}")
+    assert _kinds(detections) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None),
+        ("acted", "gh-pr-act", "github.com/damianvtran/local-operator#5", "comment"),
+    ]
+
+
+def test_a_later_stage_naming_a_url_makes_the_stdout_unattributable():
+    """``gh pr create -f; echo <url of #5>`` cannot be told apart from a create.
+
+    Fail closed: ``unknown`` (possibly opened by this call), never ``opened``.
+    """
+    echoed = "https://github.com/damianvtran/local-operator/pull/5"
+    detections = _bash(f"gh pr create -f; echo {echoed}", echoed)
+    assert _kinds(detections) == [
+        ("unknown", "gh-pr-create-unattributed", "github.com/damianvtran/local-operator#5", None)
+    ]
+    assert "cannot be attributed" in (detections[0].reason or "")
+
+
+def test_a_later_forge_stage_means_the_first_url_is_the_create():
+    """``gh pr view 5 --json url`` prints a bare url of its own — the create ran first."""
+    created = "https://github.com/damianvtran/local-operator/pull/4"
+    viewed = "https://github.com/damianvtran/local-operator/pull/5"
+    detections = _bash("gh pr create -f && gh pr view 5 --json url", f"{created}\n{viewed}")
+    assert _kinds(detections) == [
+        ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
+    ]
+
+
+def test_benign_compounds_still_open_the_pr_they_created():
+    created = "https://github.com/damianvtran/local-operator/pull/4"
+    for command in (
+        "gh pr create -f",
+        "gh pr create -f && gh pr view --web",
+        "cd ~/wt && gh pr create --title t",
+        "gh pr create -f | cat",
+    ):
+        assert _kinds(_bash(command, created)) == [
+            ("opened", "gh-pr-create-stdout", "github.com/damianvtran/local-operator#4", None)
+        ], command
+
+
+def test_glab_compound_create_still_reads_its_own_herald_and_url():
+    """The herald line is glab's own, and a later stage's #note_ url is not the create."""
+    body = (
+        "exit code: 0\n--- stdout ---\n\nCreating merge request for docs/x into main in "
+        "minervaai/minerva-skills\n\n"
+        "https://gitlab.com/minervaai/minerva-skills/-/merge_requests/53\n"
+        "https://gitlab.com/minervaai/minerva-skills/-/merge_requests/53#note_1\n"
+        "\n--- stderr ---\n(empty)"
+    )
+    detections = detect_bash(
+        "glab mr create --source-branch docs/x && glab mr note 53 -m hi", body, GITLAB_CWD
+    )
+    # The create is attributed to the merge request; the ``note`` stage's own act lands on
+    # the same ref, which is what its arguments say.
+    assert [(item.kind, item.rule, item.act) for item in detections] == [
+        ("opened", "glab-mr-create-stdout", None),
+        ("acted", "glab-mr-act", "comment"),
+    ]
+    created = detections[0].ref
+    assert created is not None and created.number == 53
+    assert created.project == "minervaai/minerva-skills"
