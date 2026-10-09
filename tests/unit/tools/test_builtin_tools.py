@@ -42,6 +42,7 @@ from local_operator.harness.types import (
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
     SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_PATH_ENV,
@@ -3439,23 +3440,25 @@ async def test_a_pad_past_its_entry_cap_is_flagged_as_a_tree(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("command", "relative", "clause"),
+    ("command", "relative", "clause", "tail"),
     [
         (
             'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build" && echo x > '
             '"$LOCAL_OPERATOR_SCRATCHPAD/build/notes.md"',
             "build/notes.md",
             "'build' is a build or dependency directory",
+            SCRATCHPAD_ELSEWHERE_SHORT,
         ),
         (
             'cp /etc/hosts "$LOCAL_OPERATOR_SCRATCHPAD/art.o"',
             "art.o",
             "'.o' is a compiled, archived or model artefact",
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
         ),
     ],
 )
 async def test_a_refused_name_created_by_the_command_is_flagged(
-    tmp_path, monkeypatch, command, relative, clause
+    tmp_path, monkeypatch, command, relative, clause, tail
 ) -> None:
     """The shape arm, on the REAL result and against a HEALTHY pad: the line
     comes from the name the command created, not from the pad's size — the
@@ -3466,7 +3469,7 @@ async def test_a_refused_name_created_by_the_command_is_flagged(
 
     text = await _run_bash(context, command)
 
-    expected = f"[scratch] {clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({relative})."
+    expected = f"[scratch] {clause} — {tail} ({relative})."
     assert text.splitlines()[1] == expected, text
     assert (pad / relative).exists(), "the command itself really ran"
 
@@ -3546,15 +3549,30 @@ _TAR_GZ_CLAUSE = "'.tar.gz' is a compiled, archived or model artefact"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("command_template", "relative", "clause"),
+    ("command_template", "relative", "clause", "tail"),
     [
         # The pad as `cp`/`mv` DESTINATION — the ordinary way to copy into it —
         # creates the SOURCE's basename, a name no operand spells, so these
         # were silent on every pad (review round 1, F2: the silent class was
         # exactly the refused material, archives and trees, arriving this way).
-        ('cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"', "x.tar.gz", _TAR_GZ_CLAUSE),
-        ('cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD"', "x.tar.gz", _TAR_GZ_CLAUSE),
-        ('mv "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"', "x.tar.gz", _TAR_GZ_CLAUSE),
+        (
+            'cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"',
+            "x.tar.gz",
+            _TAR_GZ_CLAUSE,
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
+        ),
+        (
+            'cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD"',
+            "x.tar.gz",
+            _TAR_GZ_CLAUSE,
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
+        ),
+        (
+            'mv "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"',
+            "x.tar.gz",
+            _TAR_GZ_CLAUSE,
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
+        ),
         # The control: an explicit destination file name fired before this
         # round and still does — the derivation widened the arm, it did not
         # replace it.
@@ -3562,6 +3580,7 @@ _TAR_GZ_CLAUSE = "'.tar.gz' is a compiled, archived or model artefact"
             'cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/x2.tar.gz"',
             "x2.tar.gz",
             _TAR_GZ_CLAUSE,
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
         ),
         # Multiple sources: the FIRST refused derived child is the one the
         # single line reports.
@@ -3569,6 +3588,7 @@ _TAR_GZ_CLAUSE = "'.tar.gz' is a compiled, archived or model artefact"
             'cp "{iso}/x.tar.gz" "{iso}/notes.md" "$LOCAL_OPERATOR_SCRATCHPAD/"',
             "x.tar.gz",
             _TAR_GZ_CLAUSE,
+            SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
         ),
         # A tree copied into a directory BELOW the pad: the created child
         # carries the refused parent segment — the tree half of F2's "refused
@@ -3578,11 +3598,12 @@ _TAR_GZ_CLAUSE = "'.tar.gz' is a compiled, archived or model artefact"
             ' && cp -R "{iso}/tree" "$LOCAL_OPERATOR_SCRATCHPAD/build"',
             "build/tree",
             "'build' is a build or dependency directory",
+            SCRATCHPAD_ELSEWHERE_SHORT,
         ),
     ],
 )
 async def test_a_name_copied_into_the_pad_is_flagged(
-    tmp_path, monkeypatch, command_template, relative, clause
+    tmp_path, monkeypatch, command_template, relative, clause, tail
 ) -> None:
     """The destination-derivation arm, on the REAL tool: a copy whose
     destination is the pad root (or a directory below it) lands the source's
@@ -3601,7 +3622,7 @@ async def test_a_name_copied_into_the_pad_is_flagged(
 
     text = await _run_bash(context, command_template.format(iso=source))
 
-    expected = f"[scratch] {clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({relative})."
+    expected = f"[scratch] {clause} — {tail} ({relative})."
     assert text.splitlines()[1] == expected, text
     assert (pad / relative).exists(), "the command itself really ran"
 
@@ -3629,6 +3650,116 @@ async def test_a_copy_to_a_directory_outside_the_pad_is_not_derived_into_a_line(
     assert "[scratch]" not in text, text
 
 
+# ---------------------------------------------------------------------------
+# Unjudgeable paths: a MISS, never a crash (review round 2, R2-1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_destination_the_scan_cannot_stat_is_skipped_not_a_crash(tmp_path) -> None:
+    """R2-1, the unreadable-destination half, on the REAL tool: EVERY ``cp``/``mv``
+    destination operand in a pad-naming command is a derivation candidate, and a
+    destination under a mode-0 directory makes ``Path.is_dir()`` raise on
+    3.12/3.13 (``PermissionError``; ENAMETOOLONG the same way; 3.14 returns
+    False). Uncaught, the raise settled the whole result as "Tool 'bash' failed
+    unexpectedly", losing the command's own exit code and streams on the one
+    channel whose contract is advisory-only. The audit may miss or stay silent —
+    never crash: the result is normal and carries no line.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "report.md").write_text("x")
+    locked = tmp_path / "locked"
+    (locked / "sub").mkdir(parents=True)
+    locked.chmod(0o000)
+    try:
+        text = await _run_bash(context, f'cp "{pad}/report.md" "{locked}/sub/"')
+    finally:
+        locked.chmod(0o700)  # restore so the tmp-path teardown can remove it
+
+    assert "[scratch]" not in text, text
+    assert "Permission denied" in text, "the command itself really ran and failed"
+
+
+@pytest.mark.asyncio
+async def test_a_derived_child_that_cannot_resolve_is_skipped_not_a_crash(tmp_path) -> None:
+    """R2-1, the derived-child half: the pad holds a symlink loop (``a -> b ->
+    a``), so ``cp <src>/a "$PAD/"`` derives ``$PAD/a``, whose ``resolve()``
+    raises ``RuntimeError`` on 3.12 (3.13+ returns the path instead of raising,
+    and the leaf is not a refused name — either way, no line). Uncaught, the
+    raise crashed the result exactly as the directory test above does; the
+    guard skips the source — the MISS direction. The copy itself fails with
+    ELOOP, which is the command's own business, not the audit's.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a").symlink_to("b")
+    (pad / "b").symlink_to("a")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "a").write_bytes(b"x" * 16)
+
+    text = await _run_bash(context, f'cp "{source}/a" "{pad}/"')
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_spelled_loop_target_is_skipped_not_a_crash(tmp_path) -> None:
+    """R2-1's sweep, on the spelling side: a loop target the command SPELLS
+    (``mkdir "$LOCAL_OPERATOR_SCRATCHPAD/x"``, ``x -> y -> x``) resolves — and
+    on 3.12 raises ``RuntimeError`` — in BOTH channels that meet it: the
+    nudge's ``_temp_root_target`` (runs first; it is where the pre-fix crash of
+    this command was measured) and the audit's ``_pad_target`` (raises the same
+    way when reached — measured at the helper directly). Post-guard both skip:
+    result normal, no line, on every interpreter (3.13+ resolves the loop to
+    the path and the leaf is not a refused name).
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "x").symlink_to("y")
+    (pad / "y").symlink_to("x")
+
+    text = await _run_bash(context, 'mkdir "$LOCAL_OPERATOR_SCRATCHPAD/x"')
+
+    assert "[scratch]" not in text, text
+
+
+def test_a_loop_target_is_a_miss_not_a_raise_under_a_temp_root(tmp_path, monkeypatch) -> None:
+    """R2-1's sweep on the nudge (``_temp_root_target``): before the guard, a
+    loop target under a scanned temp root raised ``RuntimeError`` on 3.12 with
+    the audit gated off — the same crash, one channel over. The invariant
+    pinned here is the guard's: the helper RETURNS (``None`` on 3.12; the
+    resolved path on 3.13+, where a loop returns rather than raising) and the
+    raise cannot escape. The tool-result row next door already pins that a
+    returned path is a nudge, not a crash.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    (temp_root / "x").symlink_to("y")
+    (temp_root / "y").symlink_to("x")
+
+    target = builtin._temp_root_target(f"{temp_root}/x", builtin._temp_scratch_roots())
+
+    assert target is None or target == temp_root.resolve() / "x"
+
+
+def test_a_loop_target_is_a_miss_not_a_raise_in_a_scratch_named_directory(
+    tmp_path, monkeypatch
+) -> None:
+    """The sweep's third site (``_scratch_dir_target``), same invariant as its
+    sibling above: a loop target spelled in a scratch-named directory returns
+    (``None`` on 3.12, the resolved path on 3.13+) instead of raising.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    directory = _incident_dir(tmp_path, "tmp")
+    (directory / "x").symlink_to("y")
+    (directory / "y").symlink_to("x")
+
+    target = builtin._scratch_dir_target(f"{directory}/x", None, builtin._temp_scratch_roots())
+
+    assert target is None or target == directory.resolve() / "x"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("spelling", ["~/", "$HOME/", "${HOME}/"])
 async def test_a_home_spelled_pad_is_flagged(tmp_path, monkeypatch, spelling) -> None:
@@ -3651,7 +3782,7 @@ async def test_a_home_spelled_pad_is_flagged(tmp_path, monkeypatch, spelling) ->
 
     expected = (
         f"[scratch] '.o' is a compiled, archived or model artefact — "
-        f"{SCRATCHPAD_ELSEWHERE_SHORT} (art.o)."
+        f"{SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT} (art.o)."
     )
     assert text.splitlines()[1] == expected, text
     assert (pad / "art.o").exists(), "the home spelling really landed in the pad"

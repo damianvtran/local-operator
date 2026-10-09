@@ -635,19 +635,35 @@ SCRATCHPAD_ELSEWHERE = (
 )
 
 #: The SAME alternative said shorter, for the sentence whose audience is a
-#: cropped card rather than prose: where :data:`SCRATCHPAD_ELSEWHERE` costs 268
+#: card row rather than prose: where :data:`SCRATCHPAD_ELSEWHERE` costs 268
 #: cells, this costs 60.
 #:
-#: It exists because the two tails are drawn at different widths. Every
+#: It exists because the two tails are drawn for different readers. Every
 #: :data:`SCRATCHPAD_ELSEWHERE` consumer is a ``write``/``edit`` REFUSAL — read
 #: as prose and whole — while :func:`scratchpad_refusal`'s line is painted as a
-#: captured row in a TUI card that crops per line at the frame's measure (design
-#: review round 1, D1: the long tail started past cell 140 on those lines, past
-#: every standard width). So the audit sentence composes the same refused-name
-#: CLAUSE — the finding and the rule, which must never drift — with this tail,
-#: and the refusals keep the long one: the two differ only in how much of the
-#: alternative is spelled out, never in what was refused or why.
+#: captured row in a TUI card bounded by rows and cells (design review round 1,
+#: D1: the long tail started past cell 140 on those lines, past every standard
+#: width; since the ``[scratch]``-led carve-out those rows wrap inside
+#: ``REASON_MAX_ROWS``/``REASON_MAX_CELLS``, review round 2, so the short tail
+#: is what keeps the whole sentence inside that budget). So the audit sentence
+#: composes the same refused-name CLAUSE — the finding and the rule, which must
+#: never drift — with one of the short tails below, and the refusals keep the
+#: long one: the tails differ only in how much of the alternative is spelled
+#: out, never in what was refused or why.
 SCRATCHPAD_ELSEWHERE_SHORT = "build/dependency trees belong in a git worktree, not the pad"
+
+#: The suffix arm's own short tail, and it is its own because the tree remedy
+#: points an archive at the wrong home: this arm's material — compiled,
+#: archived and model artefacts — is what :data:`SCRATCHPAD_ELSEWHERE`'s long
+#: tail files under "a throwaway binary, an archive", sent to ``bash mktemp
+#: -d`` rather than a git worktree (design review round 2, D1-r2, whose frame
+#: showed the shared tree tail landing on the archive arm). Same scale as
+#: :data:`SCRATCHPAD_ELSEWHERE_SHORT` — 70 cells against 60 — so the composed
+#: line stays inside the card's budget the same way, and the same discipline:
+#: the finding leads, the home follows, never the other way round.
+SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT = (
+    "a throwaway binary or archive belongs in `bash mktemp -d`, not the pad"
+)
 
 
 def _relative_parts(path: Path, root: Path) -> tuple[str, ...] | None:
@@ -768,17 +784,26 @@ def scratchpad_footprint(root: Path) -> tuple[int, bool, bool]:
     return held, held > SCRATCHPAD_TOTAL_BUDGET_BYTES, truncated
 
 
-def _refused_name_clause(below: tuple[str, ...]) -> str | None:
-    """The CLAUSE every refusal sentence is built from, or ``None``.
+def _refused_name_clause(below: tuple[str, ...]) -> tuple[str, str] | None:
+    """The CLAUSE every refusal sentence is built from, and the arm that matched,
+    or ``None``.
 
     Names WHAT is refused and the rule its name breaks — ``"'build' is a build
     or dependency directory"`` — with no verdict and no tail, because two
     sentences compose around it and must agree about the finding: the write
     refusal (:func:`check_scratchpad_write`, via :func:`_content_refusal`) and
-    the shell audit (:func:`scratchpad_refusal`, with
-    :data:`SCRATCHPAD_ELSEWHERE_SHORT`). A second hand-written copy is how the
-    two would drift apart about what a refused name is; only the tail and the
-    audience they are drawn for may differ.
+    the shell audit (:func:`scratchpad_refusal`, with one of the two short
+    tails below). A second hand-written copy is how the two would drift apart
+    about what a refused name is; only the tail and the audience they are drawn
+    for may differ.
+
+    The second element — ``"segment"`` or ``"suffix"`` — is the ARM that
+    matched, carried because the audit tails the two differently: a refused
+    TREE's home is a git worktree while a refused ARCHIVE's is ``bash mktemp
+    -d`` (design review round 2, D1-r2), and re-deriving which arm fired in the
+    caller would be the drifting copy this clause exists to prevent. The write
+    path reads the clause and ignores the arm: its long tail names both homes
+    already.
 
     Parent parts are judged by :func:`_is_refused_segment` and the LEAF by
     :func:`_refused_suffix`, and never the other way round: the dot after a
@@ -789,10 +814,10 @@ def _refused_name_clause(below: tuple[str, ...]) -> str | None:
     """
     for segment in below[:-1]:
         if _is_refused_segment(segment):
-            return f"'{segment}' is a build or dependency directory"
+            return f"'{segment}' is a build or dependency directory", "segment"
     suffix = _refused_suffix(below[-1]) if below else None
     if suffix is not None:
-        return f"'{suffix}' is a compiled, archived or model artefact"
+        return f"'{suffix}' is a compiled, archived or model artefact", "suffix"
     return None
 
 
@@ -804,9 +829,12 @@ def _content_refusal(below: tuple[str, ...]) -> str | None:
     sentence, and only the tail composition is allowed to differ between the
     channels (see :func:`_refused_name_clause`).
     """
-    clause = _refused_name_clause(below)
-    if clause is None:
+    matched = _refused_name_clause(below)
+    if matched is None:
         return None
+    # The arm is the audit's business — its two short tails differ by it; the
+    # write refusal keeps ONE long tail that already names both homes.
+    clause, _arm = matched
     return f"{clause}, not scratch. {SCRATCHPAD_ELSEWHERE}"
 
 
@@ -815,13 +843,17 @@ def scratchpad_refusal(path: Path, root: Path) -> str | None:
 
     The clause the write path refuses with, COMPOSED FOR THE CARD the audit's
     line lands in (``tools.builtin._bash_pad_write_check``): the finding leads —
-    the refused segment or suffix, not the address — then the short tail
-    (:data:`SCRATCHPAD_ELSEWHERE_SHORT`), with the pad-RELATIVE path in the
-    closing parenthesis. Two measured reasons, design review round 1 (D1/D2):
-    a leading absolute path pushed the actionable half past the card's crop at
-    every standard width, and the long tail cost cells the crop never gave
-    back. The clause itself is shared, so the advisory and the next ``write``'s
-    refusal cannot disagree about what was refused.
+    the refused segment or suffix, not the address — then the SHORT tail for
+    the material's own home (:data:`SCRATCHPAD_ELSEWHERE_SHORT` for a tree,
+    :data:`SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT` for a compiled, archived or
+    model artefact — design review round 2, D1-r2), with the pad-RELATIVE path
+    in the closing parenthesis. Two measured reasons, design review round 1
+    (D1/D2): a leading absolute path pushed the actionable half past the card's
+    crop at every standard width, and the long tail cost cells the crop never
+    gave back. The clause itself is shared, so the advisory and the next
+    ``write``'s refusal cannot disagree about what was refused; which arm
+    matched is carried by the clause builder, so the two cannot disagree about
+    which home to name either.
 
     ``None`` also when ``path`` cannot be placed inside ``root`` — unlike the
     write path, which refuses an unplaceable path, the audit can only report,
@@ -830,10 +862,12 @@ def scratchpad_refusal(path: Path, root: Path) -> str | None:
     below = _relative_parts(path, root)
     if below is None:
         return None
-    clause = _refused_name_clause(below)
-    if clause is None:
+    matched = _refused_name_clause(below)
+    if matched is None:
         return None
-    return f"{clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({'/'.join(below)})."
+    clause, arm = matched
+    tail = SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT if arm == "suffix" else SCRATCHPAD_ELSEWHERE_SHORT
+    return f"{clause} — {tail} ({'/'.join(below)})."
 
 
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:

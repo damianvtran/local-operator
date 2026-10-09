@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import time
 import unicodedata
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -2364,6 +2365,124 @@ def test_a_scratch_advisory_stays_bounded_on_a_narrow_frame() -> None:
 
     assert len(rows) == REASON_MAX_ROWS + 1, rows
     assert rows[-1].startswith("… "), rows
+
+
+#: The five shipped ``[scratch]`` sentence SHAPES, each built by its own shipped
+#: builder — the four audit arms (``_pad_budget_line``'s two, and
+#: ``scratchpad_refusal``'s two) and the pre-existing nudge. Built here, never
+#: hand-typed (review round 2, R2-2), so a rewrite that moves an opening turns
+#: the two tests below red until the card's own leads move with it.
+def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """The five shapes against real fixtures; the budget and cap arms run on a
+    patched-down threshold (a test-scale pad cannot reach 256 MiB), which
+    changes the numbers in the sentence, never its lead. The segment and suffix
+    arms come from ``_bash_pad_write_check`` — the audit entry that composes
+    the line the tool result actually carries — on the same command texts the
+    tools suite uses, and the nudge from ``_bash_scratch_hint``, the bash
+    channel's own composer."""
+    from local_operator import scratchpad as scratchpad_mod
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin as builtin_mod
+
+    pad = tmp_path / "sessions" / "sess-pad" / "scratchpad"
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 64)
+
+    monkeypatch.setattr(builtin_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 100)
+    monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 100)
+    budget = builtin_mod._pad_budget_line(pad)
+
+    monkeypatch.setattr(builtin_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 1 << 30)
+    monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 1 << 30)
+    (pad / "e2").write_bytes(b"")
+    (pad / "e3").write_bytes(b"")
+    monkeypatch.setattr(builtin_mod, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
+    cap = builtin_mod._pad_budget_line(pad)
+
+    context = ToolContext(cwd=str(tmp_path), session_id="card-shapes", scratchpad_dir=str(pad))
+    segment = builtin_mod._bash_pad_write_check(
+        f'mkdir -p "{pad}/build" && echo x > "{pad}/build/notes.md"', context
+    )
+    suffix = builtin_mod._bash_pad_write_check(f'cp /etc/hosts "{pad}/art.o"', context)
+
+    # pytest's tmp_path lives under the machine's real $TMPDIR, and the name arm
+    # declines everything inside a temp root — aim the roots at a root this test
+    # owns, the same fixture the nudge's own tests use, so the row fires for the
+    # reason it names rather than passing on the wrong silence.
+    misplaced_root = tmp_path / "shared-tmp"
+    misplaced_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        builtin_mod,
+        "_temp_scratch_roots",
+        lambda: ((misplaced_root.resolve(), "the test's own reason"),),
+    )
+    nudge = builtin_mod._bash_scratch_hint(f'touch "{tmp_path}/minervaai/tmp/gen.py"', context)
+
+    shapes: dict[str, str] = {}
+    for name, line in (
+        ("budget", budget),
+        ("cap", cap),
+        ("segment", segment),
+        ("suffix", suffix),
+        ("nudge", nudge),
+    ):
+        assert line.startswith("[scratch] "), (name, line)
+        shapes[name] = line
+    return shapes
+
+
+def test_every_shipped_advisory_shape_wraps_and_rides_the_advisory_ink(
+    tmp_path, monkeypatch
+) -> None:
+    """R2-2's recognition half, from the REAL builders: the four audit arms and
+    the pre-existing nudge — the five shipped sentence shapes — must each still
+    wrap whole and ride ``tool.live.advisory`` after the leads were narrowed to
+    the sentences' own openings. The four arms render as design round 2
+    approved them; the narrowing changed whom the carve-out RECOGNISES, never
+    how it paints the harness's own lines."""
+    shapes = _shipped_advisory_shapes(tmp_path, monkeypatch)
+
+    for name, line in shapes.items():
+        card = ToolCard("t", "bash", {"command": "cp x.tar.gz $LOCAL_OPERATOR_SCRATCHPAD/"})
+        card.mark_done("exit code: 0\n" + line + "\n--- stdout ---\n(empty)")
+        card.toggle_expanded()
+
+        content = card._build_content(80)
+        rows = _advisory_rows(content.plain.splitlines()[2:])
+
+        # Compared against the wrap itself, not a re-join of the rows: the
+        # nudge carries a resolved path longer than the measure, and wrap_cells
+        # hard-breaks a word that cannot fit — the join would insert a space the
+        # sentence does not carry. Equality here is the contract the carve-out
+        # owes: every cell of the sentence is painted, hard breaks and all,
+        # nothing cropped.
+        full_wrap = wrap_cells(line, 80 - 2 - OUTPUT_INDENT)
+        assert rows == full_wrap, (name, rows, full_wrap)
+        assert len(rows) > 1, (name, rows)  # every shipped shape exceeds one row at 80
+        assert all(not row.rstrip().endswith("…") for row in rows), (name, rows)
+        assert _style_at(content, "[scratch]") == bindings.style("tool.live.advisory"), name
+
+
+def test_a_programs_scratch_prefixed_stdout_line_stays_captured_bytes() -> None:
+    """R2-2 / D2-r2: the tag alone is not provenance. A PROGRAM's stdout line
+    that merely begins ``[scratch] `` used to inherit the wrap and the amber —
+    measured, 60 of them made 160 card rows at 80 columns — reading as if the
+    harness wrote it. With the leads narrowed to the shipped sentences, such a
+    line crops and dims exactly like every other captured byte."""
+    line = "[scratch] step 01 " + "x" * 200
+    card = ToolCard("t", "bash", {"command": "python3 report.py"})
+    card.mark_done("exit code: 0\n" + line + "\n--- stdout ---\n(empty)")
+    card.toggle_expanded()
+
+    content = card._build_content(80)
+    body = content.plain.splitlines()[2:]
+    matches = [row for row in body if "[scratch]" in row]
+
+    assert len(matches) == 1, body
+    assert matches[0].rstrip().endswith("…"), matches
+    assert _style_at(content, "[scratch]") == bindings.style("tool.output.dim"), matches
+    assert _style_at(content, "[scratch]") != bindings.style("tool.live.advisory")
 
 
 def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:

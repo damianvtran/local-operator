@@ -77,7 +77,9 @@ Left in their tree, this is litter they cannot tell apart from output.
   but a command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its path, or a
   leading `~/`, `$HOME/` or `${HOME}/` spelling of it) carries a `[scratch]`
   line when it took the pad over its budget or entry cap, or put a refused name
-  in it — whether the command spelled the name or copied it in. The `eval`
+  in it — whether the command spelled the name or copied it in. A copied name
+  is judged as the copy WOULD have created it: the check reads the command,
+  not the disk, so a copy whose source is missing still reports. The `eval`
   kernel gets the budget and entry-cap line only. It reports; it cannot undo
   what a shell has already put there.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
