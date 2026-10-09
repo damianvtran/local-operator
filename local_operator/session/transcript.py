@@ -52,6 +52,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
 )
 from local_operator.harness.types import (
+    ATTACHMENT_KINDS,
     AgentMessage,
     AudioContent,
     CustomMessage,
@@ -441,6 +442,11 @@ def encode_message_payload(
 #: the bytes back before replay, and an older build reading a row that
 #: carries it simply ignores the unknown key — the block still parses as an
 #: image with an empty ``data``, which degrades like any missing media.
+#:
+#: :class:`~local_operator.harness.types.AttachmentContent` spells the same
+#: key as a DECLARED field — there the digest is durable payload, not an
+#: encoding convention, which is why neither pass below ever touches an
+#: artifact block's reference.
 ATTACHMENT_KEY = "attachment"
 
 #: Placeholder ``data`` an unresolvable reference is rehydrated with. Empty
@@ -497,12 +503,20 @@ def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentSto
     for block in content:
         if not isinstance(block, dict):
             continue
+        # An ARTIFACT block is ref-based by construction — its bytes were
+        # cached by its producer before the block existed — so there is
+        # nothing to externalize, and the guard is explicit rather than by
+        # accident of shape: ``data`` is not a field it carries, and the
+        # ``attachment`` key it does carry is the reference itself.
+        if block.get("kind") in ATTACHMENT_KINDS:
+            continue
         # Identify media blocks by the ``data`` key, NOT by ``type``: the
         # encoder dumps with ``exclude_defaults``, and ``type`` IS the
-        # pydantic default on both content models, so the discriminant is
+        # pydantic default on every content model, so the discriminant is
         # absent from the encoded row (audio blocks are stamped back by
-        # ``_stamp_audio_discriminants``; image blocks are not, and never
-        # needed to be). A text block never carries ``data``.
+        # ``_stamp_audio_discriminants``; the attachment model's ``kind`` is
+        # required precisely so it cannot be dropped the same way). A text
+        # block never carries ``data``.
         data = block.get("data")
         if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
             continue
@@ -534,6 +548,18 @@ def _resolve_attachments(payload: dict[str, Any], attachments: AttachmentStore) 
         return
     for block in content:
         if not isinstance(block, dict):
+            continue
+        # Artifact blocks are NOT resolved here, deliberately. This pass
+        # inlines bytes for consumers that need them in memory and, for a
+        # legacy image block, POPS the digest as it goes — correct where the
+        # digest is an encoding detail of the row. An artifact's digest is
+        # THE durable fact (provenance, name and content type hang off it),
+        # and its bytes have a served route of their own, so popping it here
+        # would both lose the reference at the next ``compact_file`` fold and
+        # base64-inline media — video included — into every replay. Consumers
+        # read the store on demand instead (the TUI's mount, the desktop UI's
+        # digest route, the mobile daemon).
+        if block.get("kind") in ATTACHMENT_KINDS:
             continue
         digest = block.pop(ATTACHMENT_KEY, None)
         if not isinstance(digest, str):

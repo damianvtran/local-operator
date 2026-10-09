@@ -52,7 +52,7 @@ import os
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 from local_operator.paths import (
     AGENT_HOME_DIRNAME,
@@ -60,6 +60,14 @@ from local_operator.paths import (
     CONFIG_DIR_ENV,
     DEFAULT_CONFIG_DIRNAME,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Type-resolution only, never executed: ``from __future__ import
+    # annotations`` makes every annotation in this file a string, and the
+    # import-cheap contract above governs the RUNTIME import surface (the
+    # fresh-interpreter probe is its guard). Imported rather than respelled
+    # so this spec's schema vocabulary cannot drift from ``OutputContract``'s.
+    from local_operator.output_contract import OutputSchemaValue
 
 __all__ = [
     "ApprovalPolicy",
@@ -435,7 +443,7 @@ class SessionSpec:
     #: ``pydantic.TypeAdapter`` accepts — or a raw JSON Schema mapping.
     #: Validation is ``OutputContract``'s, so ``output_schema`` without
     #: ``output_format`` is refused below rather than silently inert.
-    output_schema: object | None = None
+    output_schema: OutputSchemaValue = None
     #: Max retries after a rejected final response (0-5; default 2).
     output_retries: int | None = None
 

@@ -7,7 +7,7 @@
  * The row itself is the state indicator: composing/running glyphs pulse,
  * there is no separate spinner.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatElapsed } from "../lib/format";
 import type { TranscriptEntry } from "../types";
@@ -77,7 +77,21 @@ function DiffBlock({ diff }: { diff: string | string[] }) {
     block is dropped and only the diff (+ any output) shows. */
 const DIFF_FIRST_TOOLS = new Set(["write", "edit", "apply_patch", "patch"]);
 
-export function ToolRow({ entry }: { entry: TranscriptEntry }) {
+export function ToolRow({
+	entry,
+	children,
+}: {
+	entry: TranscriptEntry;
+	/* Extra content rendered inside the row's own container, below the row
+	   button and above any expansion. Exactly one caller has anything to put
+	   here — the image-generation card, whose progress figure must sit on the
+	   SAME ground and border as its row so the pair reads as one object — and
+	   doing it through the container rather than beside it keeps the
+	   state-to-background mapping (raised while live, danger-wash on failure)
+	   in this one place. Absent for every other tool, so their DOM is
+	   unchanged. */
+	children?: ReactNode;
+}) {
 	/* Bang-mode (`! cmd`) opens EXPANDED, matching the TUI: the user typed
 	   this command themselves and is waiting to read its output, so making
 	   them tap to see it asks for a gesture to reveal the thing they asked
@@ -181,6 +195,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 					</span>
 				) : null}
 			</button>
+			{children}
 			{open && hasDetails ? (
 				/* Cap the WHOLE expansion, not just its blocks: intent + error +
 				   args + diff + output stack, and unbounded they could still

@@ -550,6 +550,67 @@ def test_tool_rows_gate_on_what_the_session_actually_holds() -> None:
     assert [row.name for row in rows] == ["send"]
 
 
+def test_the_generate_image_row_is_appended_last_and_membership_gated(
+    monkeypatch,
+) -> None:
+    """The image restore's roster row, pinned both ways (round-1 finding).
+
+    Appended AFTER the session-management set — the tuple's comment says why
+    (the block reads as one family, and a session without the tool never sees
+    the row) — described by the tool's OWN first sentence, and absent entirely
+    from a session whose createIf gate does not pass.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import image_tool
+    from local_operator.tools.registry import create_tools
+
+    monkeypatch.setattr(
+        image_tool.image_availability, "image_provider_reachable", lambda *a, **k: True
+    )
+    held = create_tools(
+        ToolContext(
+            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_comms=_StubComms(),
+            jobs=_StubJobs(),
+        ),
+        ["sessions", "send", "hub", "task", "wait", "jobs", "generate_image"],
+    )
+
+    rows = session_factory._tool_roster_rows(held)
+
+    assert [row.name for row in rows] == [
+        "sessions",
+        "send",
+        "hub",
+        "task",
+        "wait",
+        "jobs",
+        "generate_image",
+    ], "appended at the END, after the session-management set"
+    assert rows[-1].resource_url == "tool://generate_image"
+    # The tool's own first sentence (design §2.3 measured it at 117 chars),
+    # within the per-row cap the classification block bounds.
+    assert len(rows[-1].description) == 117
+    assert held[-1].description.startswith(rows[-1].description)
+    assert len(rows[-1].description) <= session_factory._TOOL_ROSTER_DESCRIPTION_LIMIT
+
+    # Membership is the gate: with the provider predicate false the builder
+    # returns None, the session holds no such tool, and no row appears.
+    monkeypatch.setattr(
+        image_tool.image_availability, "image_provider_reachable", lambda *a, **k: False
+    )
+    without = create_tools(
+        ToolContext(
+            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_comms=_StubComms(),
+            jobs=_StubJobs(),
+        ),
+        ["sessions", "send", "hub", "task", "wait", "jobs", "generate_image"],
+    )
+    assert "generate_image" not in {tool.name for tool in without}
+    assert "generate_image" not in {row.name for row in session_factory._tool_roster_rows(without)}
+
+
 def test_the_roster_carries_tool_rows_and_appends_them() -> None:
     """The wiring half: hooks with tool rows, and the neighbours unmoved."""
     index = _FakeIndex(

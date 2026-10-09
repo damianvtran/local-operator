@@ -190,16 +190,49 @@ def _forced_console_backend() -> Iterator[None]:
         namespace[name] = saved
 
 
+@contextmanager
+def _forced_image_backend() -> Iterator[None]:
+    """Make ``build_generate_image_tool`` say yes regardless of stored keys.
+
+    The THIRD capability whose gate probes the machine rather than reading the
+    ``ToolContext`` (browser, console, and now the image cascade): the tool
+    exists only where some image provider credential is reachable, so on a CI
+    runner — and on any host without a signed-in provider — it would be gated
+    off and the measured surface one tool lighter than a session that HAS one.
+    Same green-by-fiction the two above prevent, same fix.
+
+    Patched on the module object the builder's globals actually hold
+    (``image_availability``), so the attribute the builder resolves at call
+    time is the one patched — the dual-module-copy hazard the browser leg
+    documents at length is why the patch goes through ``__globals__``.
+    """
+    from local_operator.tools.image_tool import build_generate_image_tool
+
+    namespace = build_generate_image_tool.__globals__
+    availability = namespace["image_availability"]
+    saved = availability.image_provider_reachable
+    availability.image_provider_reachable = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        availability.image_provider_reachable = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
     DETERMINISTIC across hosts: the count must not depend on whether the
-    machine running the benchmark happens to have cmux or the desktop app. See
-    :func:`_forced_browser_backend` and :func:`_forced_console_backend`. Callers
+    machine running the benchmark happens to have cmux, the desktop app, or an
+    image provider credential. See :func:`_forced_browser_backend`,
+    :func:`_forced_console_backend` and :func:`_forced_image_backend`. Callers
     that report a measurement should also report ``len()`` of this, so a drop
     below the full surface is visible rather than silent.
     """
-    with _forced_browser_backend(), _forced_console_backend():
+    with (
+        _forced_browser_backend(),
+        _forced_console_backend(),
+        _forced_image_backend(),
+    ):
         return registry.create_tools(build_real_tool_context(cwd))
 
 
