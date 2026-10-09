@@ -418,6 +418,30 @@ class TestTheRoutedCommands:
         assert session.active_agent == MANAGER
 
     @pytest.mark.asyncio
+    async def test_slash_agent_refusal_degrades_with_no_manager_to_name(self, routed) -> None:
+        """The middle clause the contract comment labels unpinned, pinned here.
+
+        A reduced team double cannot name a manager, and the refusal states the
+        rule without claiming a speaker this device cannot know — the fallback
+        arm of ``team_owns_the_agent_slot_message``. Driven through the ROUTED
+        seam, so the copy a live terminal prints is pinned, not only the
+        exception the session raised.
+        """
+        handle, session = routed
+        # A raw double, because the real ``Team`` model rejects an empty manager
+        # — the reduced-facade case the fallback exists for.
+        session.attach_team(SimpleNamespace(name="bare", manager=""))
+
+        outcome = await handle.run_slash_authoritative("agent", "scout", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["style"] == "warning"
+        assert outcome["text"] == (
+            "team bare owns this session: its manager is the speaker, so /agent is "
+            "closed. Run /team clear to detach the team first."
+        )
+
+    @pytest.mark.asyncio
     async def test_slash_agent_clear_is_refused_the_same_way(self, routed) -> None:
         handle, session = routed
         await handle.run_slash_authoritative("team", "lopdev", [])
@@ -464,6 +488,29 @@ class TestTheRoutedCommands:
             "was detached. Run /agent clear to drop it."
         )
         assert session.active_agent == "scout"
+
+    @pytest.mark.asyncio
+    async def test_slash_team_clear_with_nothing_attached_is_the_bare_no_op(self, routed) -> None:
+        """The contract's bare no-op receipt, pinned on the routed host.
+
+        No team and no profile: the verb moved nothing, and the sentence says
+        exactly that — no clause about a surviving speaker because there is
+        nobody to name — and the ``team_attached`` data rides it so the follower
+        host's band keys stay in agreement with this one.
+        """
+        handle, _ = routed
+
+        outcome = await handle.run_slash_authoritative("team", "clear", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["style"] == "info"
+        assert outcome["text"] == "no team is attached, so nothing was detached."
+        assert outcome["data"] == {
+            "type": "team_attached",
+            "team": "",
+            "manager": "",
+            "request": "",
+        }
 
     @pytest.mark.asyncio
     async def test_slash_agent_clear_receipt_is_pinned_on_the_routed_host(self, routed) -> None:
@@ -531,6 +578,40 @@ class TestTheRoutedCommands:
 
         assert outcome["text"].endswith(" Replaced profile scout; manager now speaks.")
         assert session.active_agent == MANAGER
+
+    @pytest.mark.asyncio
+    async def test_slash_team_with_no_manager_omits_the_speaker_tail(
+        self, routed, registries, monkeypatch
+    ) -> None:
+        """The clause's no-manager half the contract labels unpinned, pinned here.
+
+        A team that cannot name a manager (a reduced double) still replaces the
+        profile, and the clause names what was displaced without claiming a
+        speaker — the ``; … now speaks`` half is OMITTED, not emptied, so the
+        receipt ends on the bare statement about the profile.
+        """
+        handle, session = routed
+        await handle.run_slash_authoritative("agent", "scout", [])
+        assert session.active_agent == "scout"
+
+        # The reduced-facade case ``teams.replaced_profile_clause`` documents:
+        # the real ``Team`` model rejects an empty manager, so the registry
+        # answers a raw double for this one lookup.
+        _, teams = registries
+        monkeypatch.setattr(
+            teams,
+            "get_team_by_name",
+            lambda name: SimpleNamespace(name="pod", manager="", label=""),
+        )
+
+        outcome = await handle.run_slash_authoritative("team", "pod", [])
+
+        assert outcome["kind"] == "notice"
+        assert outcome["text"].endswith(" Replaced profile scout.")
+        # OMITTED entirely — the emptied half (``; .``) would be a different,
+        # broken receipt.
+        assert "now speaks" not in outcome["text"]
+        assert session.active_team_name == "pod"
 
     @pytest.mark.asyncio
     async def test_slash_team_announces_nothing_when_nothing_was_replaced(self, routed) -> None:

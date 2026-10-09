@@ -843,6 +843,168 @@ async def test_served_list_order_is_the_catalogs_rank(tmp_path):
     assert served == ["armed", "newest", "middle"]
 
 
+# ---------------------------------------------------------------------------
+# ``last_user_at``: the Running section's clock, on the SERVED rows.
+#
+# The tracker's own behaviour is pinned in tests/unit/session/test_last_user.py;
+# these assertions are about the WIRE half — the projection that decides which
+# rows buy a scan, and the always-present key the renderer's merge rule needs.
+# ---------------------------------------------------------------------------
+
+
+def _typed_user_row(text: str, ts: float) -> dict[str, Any]:
+    """One typed user row in the writer's compact shape (``TranscriptEntry``)."""
+    return {
+        "id": "u" * 24,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "message", "role": "user", "content": [{"text": text}]},
+    }
+
+
+def _assistant_row(text: str, ts: float) -> dict[str, Any]:
+    return {
+        "id": "a" * 24,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": text}]},
+    }
+
+
+def _append_transcript(session_dir: Path, *entries: dict[str, Any]) -> None:
+    with (session_dir / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_path):
+    """The key is ALWAYS PRESENT on every local row — `pinned`'s rule.
+
+    Both populations come from ONE projection (see ``list()``'s comment), so the
+    off-page pinned row carries exactly the fields a page row carries. With no
+    live record on any session, the value is ``null`` — and ``null`` here is the
+    key's own answer ("not computed"), stated rather than omitted, because the
+    renderer's merge reads an absent key as no claim.
+    """
+    from local_operator.tui.sidebar_pins import read_pins, set_pin
+    from tests.unit.server.test_desktop_feed import _listable_session
+
+    for index in range(4):
+        sid = f"user{index:08x}"
+        directory = _listable_session(tmp_path, sid)
+        (directory / "created_at.json").write_text(str(1000.0 + index))
+        _append_transcript(directory, _typed_user_row("hello", 1000.0 + index))
+    pinned_sid = "user00000000"  # the OLDEST: below a page of 2
+    set_pin(tmp_path, pinned_sid, True)
+    assert read_pins(tmp_path) == [pinned_sid]
+
+    page = await DesktopSessions(tmp_path).list(2)
+
+    assert [row["id"] for row in page.pinned_off_page] == [pinned_sid]
+    for row in (*page.rows, *page.pinned_off_page):
+        assert "last_user_at" in row
+        assert row["last_user_at"] is None, (
+            "no live record on any row: the value is not computed, and null is "
+            "the key's own answer rather than an omission"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_running_rows_value_is_the_newest_typed_ts_and_activity_does_not_move_it(
+    tmp_path,
+):
+    """A float for a live row, and it moves on a SEND, not on a response.
+
+    This is the operator's report in one test: ``mtime`` advances when any row
+    lands, so a response streaming in re-sorted the Running section; this value
+    must not. The append half is asserted through the real listing twice, so
+    both the cold read and the memoised warm read are on the path.
+    """
+    from tests.unit.server.test_desktop_feed import _listable_session, _record_publish
+
+    sid = "busy00000001"
+    directory = _listable_session(tmp_path, sid)
+    _append_transcript(directory, _typed_user_row("the question", 100.0))
+    _record_publish(tmp_path, sid, busy=True)
+
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["status"]["code"] == "busy"
+    assert row["last_user_at"] == 100.0
+    assert isinstance(row["last_user_at"], float)
+
+    # A RESPONSE STREAMING IN MUST NOT MOVE THE ORDER.
+    _append_transcript(directory, _assistant_row("working", 150.0), _assistant_row("more", 160.0))
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["last_user_at"] == 100.0
+
+    # A SEND DOES.
+    _append_transcript(directory, _typed_user_row("a second question", 200.0))
+    page = await DesktopSessions(tmp_path).list(50)
+    row = next(row for row in page.rows if row["id"] == sid)
+    assert row["last_user_at"] == 200.0
+
+
+@pytest.mark.asyncio
+async def test_delegating_is_covered_and_idle_is_not_computed(tmp_path):
+    """The predicate question the design memo left open, answered on the wire.
+
+    The concern: a ``delegating`` row (subagents_running/queued > 0) might carry
+    an empty ``live_state`` and be missed by a ``live_state or pending`` test.
+    It cannot be: ``delegating`` is a property of counts only a LIVE record
+    reports, and a live record always yields a non-empty ``live_state`` (the
+    assertion below pins "idle" for exactly this row). The exact five-code set
+    still ships rather than that superset, because the superset also covers
+    ``attached``/``idle`` rows — the UI's Today section — and would pay a cold
+    scan per resident session for a value no reader consumes.
+    """
+    from local_operator.server.utils.desktop_sessions import RUNNING_STATUS_CODES
+    from tests.unit.server.test_desktop_feed import (
+        _FOREIGN_LIVE_PID,
+        _extra_live_pid,
+        _listable_session,
+        _record_publish,
+    )
+
+    assert RUNNING_STATUS_CODES == {"busy", "delegating", "approval", "answer", "wedged"}
+
+    delegating = _listable_session(tmp_path, "deleg0000002")
+    _append_transcript(delegating, _typed_user_row("delegate this", 222.0))
+    approval = _listable_session(tmp_path, "appr00000003")
+    _append_transcript(approval, _typed_user_row("approve?", 333.0))
+    idle = _listable_session(tmp_path, "idle00000004")
+    _append_transcript(idle, _typed_user_row("old chat", 444.0))
+
+    # Three records need three LIVE pids; one pid holds one record.
+    with _extra_live_pid() as spawned_pid:
+        _record_publish(
+            tmp_path, "deleg0000002", pid=spawned_pid, detached=True, subagents_running=1
+        )
+        _record_publish(
+            tmp_path, "appr00000003", pid=_FOREIGN_LIVE_PID, detached=True, pending="approval"
+        )
+        _record_publish(tmp_path, "idle00000004", pid=os.getpid(), detached=True)
+        page = await DesktopSessions(tmp_path).list(50)
+
+    by_id = {row["id"]: row for row in page.rows}
+    covered = by_id["deleg0000002"]
+    assert covered["status"]["code"] == "delegating"
+    assert covered["last_user_at"] == 222.0, "a delegating row IS a Running row"
+    assert covered["live_state"] == "idle", (
+        "not empty — so even `live_state or pending` would have covered it; the "
+        "exact set is chosen for cost, not to dodge a miss"
+    )
+    pending = by_id["appr00000003"]
+    assert pending["status"]["code"] == "approval"
+    assert pending["last_user_at"] == 333.0
+    resident = by_id["idle00000004"]
+    assert resident["status"]["code"] == "idle"
+    assert "last_user_at" in resident
+    assert resident["last_user_at"] is None, "idle rows are Today's, and pay no scan"
+
+
 @pytest.mark.asyncio
 async def test_durable_attachment_is_readable_without_starting_an_owner(tmp_path):
     """A digest from a history row resolves to bytes on a cold conversation.

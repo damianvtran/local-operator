@@ -9636,9 +9636,47 @@ def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--yes", action="store_true", help="Confirm --replace")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would change; write nothing"
+        "--dry-run", action="store_true", help="Show what would change; write no agent rows"
     )
     parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
+
+
+def _prepare_sync_flags(args: argparse.Namespace) -> str | None:
+    """Normalise and validate the sync flag surface ONCE, before any write.
+
+    WHY THIS IS NOT INSIDE ``_hub_sync_run`` ANY MORE: the seed arm runs
+    BEFORE the hub arm in ``agents_sync_command``, so validation that lived
+    there ran AFTER seeds had already applied — an unconfirmed ``--replace``
+    exited 1 having rewritten clean-but-behind rows (agent review round 1,
+    R1-5 / QA round 1, Q2), and ``--check --replace`` was refused only once
+    the seed arm had already reported. Every caller now runs this FIRST;
+    normalisation is idempotent, so ``_hub_sync_run``'s second call (agents
+    sync) and its only call (teams sync) see the same flags and the
+    ``--force`` deprecation warning prints exactly ONCE per run.
+
+    Returns ``None`` when the flags are fine (possibly after normalising
+    ``--force`` into ``--replace --yes``); otherwise the error sentence the
+    caller prints and exits 1 with.
+    """
+
+    if getattr(args, "force", False):
+        print(
+            "\033[1;33m--force is deprecated: it replaces your copy with the hub text; "
+            "prefer a merge (the default) or --replace\033[0m",
+            file=sys.stderr,
+        )
+        args.replace, args.yes = True, True
+        # Consumed: the second call must not re-warn — and must still apply
+        # the normalised --replace --yes answer to the --check refusal below.
+        args.force = False
+    replace = bool(getattr(args, "replace", False))
+    if replace and not getattr(args, "yes", False):
+        return "--replace discards your copy; confirm with --yes."
+    if getattr(args, "check", False) and (
+        replace or getattr(args, "prefer", None) or getattr(args, "accept_unknown_baseline", False)
+    ):
+        return "--check only reports; drop the other merge flags."
+    return None
 
 
 def _hub_sync_run(
@@ -9652,22 +9690,11 @@ def _hub_sync_run(
 
     from local_operator.hub_sync import service as svc
 
-    replace: str | None = None
-    if getattr(args, "force", False):
-        print(
-            "\033[1;33m--force is deprecated: it replaces your copy with the hub text; "
-            "prefer a merge (the default) or --replace\033[0m",
-            file=sys.stderr,
-        )
-        args.replace, args.yes = True, True
-    if getattr(args, "replace", False):
-        if not getattr(args, "yes", False):
-            print("\n\033[1;31mError: --replace discards your copy; confirm with --yes.\033[0m")
-            return None
-        replace = "remote"
-    if getattr(args, "check", False) and (replace or args.prefer or args.accept_unknown_baseline):
-        print("\n\033[1;31mError: --check only reports; drop the other merge flags.\033[0m")
+    problem = _prepare_sync_flags(args)
+    if problem is not None:
+        print(f"\n\033[1;31mError: {problem}\033[0m")
         return None
+    replace: str | None = "remote" if getattr(args, "replace", False) else None
     config_manager = ConfigManager(base_dir)
     ctx = svc.sync_context(config_manager)
     ctx.agent_registry, ctx.team_registry = registries
@@ -9696,12 +9723,16 @@ def agents_sync_command(
 ) -> int:
     """Update installed starters, then merge hub updates into pulled agents.
 
-    The seed arm is unchanged (an unedited starter updates in place). The hub arm
-    is now a THREE-WAY MERGE (design B2) instead of refuse-or-clobber: your edits
-    and deliberate deletions survive, the hub's changes land, and a genuine
-    conflict is left for you (`--prefer`). Rendering comes from
-    ``hub_sync.report`` so this surface cannot grow a second opinion about what a
-    verdict means.
+    The seed arm updates in place when the row is provably unedited — a
+    revision-ledger match, or the recorded install fingerprint under either
+    shipped formula — and REFUSES an edited row without ``--replace --yes``
+    (the pair the refusal copy names). Under ``--check``/``--dry-run`` the arm
+    classifies read-only and reports "update available" without writing
+    anything. The hub arm is a THREE-WAY MERGE (design B2) instead of
+    refuse-or-clobber: your edits and deliberate deletions survive, the hub's
+    changes land, and a genuine conflict is left for you (``--prefer``).
+    Rendering comes from ``hub_sync.report`` so this surface cannot grow a
+    second opinion about what a verdict means.
     """
 
     # Lazy: the sync machinery pulls the agent registry module (dill, yaml) and the
@@ -9713,11 +9744,36 @@ def agents_sync_command(
     # ``--all`` is READ, not decorative: it names "every installed row" — the same
     # set the absence of --name selects (agent review round 1, n1).
     names = None if getattr(args, "all", False) or not getattr(args, "name", None) else [args.name]
-    seed_verdicts = []
-    if not getattr(args, "check", False):
-        seed_verdicts = sync_installed_seeds(
-            agent_registry, names=names, force=bool(getattr(args, "force", False))
-        )
+
+    # THE FLAG SURFACE IS VALIDATED BEFORE THE SEED ARM CAN WRITE ANYTHING.
+    # It used to be validated inside ``_hub_sync_run`` — AFTER this command's
+    # seed arm had already applied clean-but-behind rows — so an unconfirmed
+    # ``--replace`` exited 1 having changed things, contradicting the refusal
+    # text and the addendum's "changes nothing" promise (agent review round
+    # 1, R1-5 / QA round 1, Q2). The helper is idempotent, so the hub arm's
+    # second call neither re-warns nor re-refuses.
+    flag_problem = _prepare_sync_flags(args)
+    if flag_problem is not None:
+        print(f"\n\033[1;31mError: {flag_problem}\033[0m")
+        return 1
+
+    # The seed arm now honours the whole flag surface it is documented with.
+    # ``--replace --yes`` is the pair the divergence copy names (``--force``
+    # is hidden and deprecated); ``--check``/``--dry-run`` write no agent
+    # rows — the arm classifies with ``apply=False`` — so a behind starter is
+    # REPORTED instead of silently skipped ("nothing to sync" was the
+    # reported lie, F2 of #2060), and ``--dry-run`` stops writing (it wrote
+    # until this change). "No agent-row writes" is the precise claim, not
+    # "writes nothing": the hub arm refreshes ``hub/status.json`` and the
+    # seam's class backfill may repair a row, both pre-existing and
+    # documented (agent review round 1, R1-6 / QA O1).
+    seed_force = bool(getattr(args, "force", False)) or (
+        bool(getattr(args, "replace", False)) and bool(getattr(args, "yes", False))
+    )
+    read_only = bool(getattr(args, "check", False)) or bool(getattr(args, "dry_run", False))
+    seed_verdicts = sync_installed_seeds(
+        agent_registry, names=names, force=seed_force, apply=not read_only
+    )
     from local_operator.teams import TeamRegistry
 
     outcome = _hub_sync_run(
@@ -13644,6 +13700,113 @@ def _process_label(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _tui_requested(args: argparse.Namespace) -> bool:
+    """Whether this launch is headed for the full-screen TUI.
+
+    ONE definition, shared by the startup seam's surface tag
+    (:func:`_startup_surface`) and the ``use_tui`` decision in :func:`main`,
+    so the two cannot drift into disagreeing about which surface is running.
+    The arms are the historical expression verbatim: ``--tui`` forces the TUI
+    (CL-13), ``--no-tui`` disarms it, and otherwise it is a tty question. A
+    ``--tui`` launch whose build lacks the app falls back to the REPL after
+    this answers True; that one accept is documented on ``_startup_surface``.
+    """
+
+    return bool(getattr(args, "tui", False)) or (
+        not getattr(args, "no_tui", False) and sys.stdout.isatty()
+    )
+
+
+#: Foreground ``serve`` forms: ``(subcommand, dest-of-its-subparser)``. Every one
+#: of these is a long-running process whose stderr is a log file nobody reads
+#: (the desktop backend, and the supervised units the installers register), so
+#: a startup notice shown there is a notice no person saw. ``mobile start`` /
+#: ``restart`` are deliberately NOT here: they are control commands a person
+#: types and whose output they read.
+_DAEMON_SERVE_FORMS = (
+    ("wake", "wake_command"),
+    ("mobile", "mobile_command"),
+    ("browser", "browser_command"),
+    ("tunnel", "tunnel_command"),
+    ("network", "network_command"),
+)
+
+
+def _is_daemon_launch(args: argparse.Namespace) -> bool:
+    """Whether this invocation is a long-running daemon, not a human surface.
+
+    ``lop serve`` itself, and the ``serve`` verb of each subcommand that has
+    one (see ``_DAEMON_SERVE_FORMS``). Pure and cheap: it only reads the
+    already-parsed namespace.
+    """
+
+    subcommand = getattr(args, "subcommand", None)
+    if subcommand == "serve":
+        return True
+    return any(
+        subcommand == name and getattr(args, dest, None) == "serve"
+        for name, dest in _DAEMON_SERVE_FORMS
+    )
+
+
+def _startup_surface(args: argparse.Namespace) -> str:
+    """The surface the startup seam tags its notices for: "tui", "cli" or "daemon".
+
+    Every SUBCOMMAND returns above the interactive fall-through in
+    :func:`main` (and none of them can open the TUI), so only the bare launch
+    — ``lop``, ``lop --resume ID`` — can be a TUI, and there the
+    ``use_tui`` gate decides. A ``--tui`` launch that turns out to lack the
+    app falls back to the REPL with its notices already routed for the TUI;
+    that is the single accepted drift: a build without the TUI has no notice
+    consumer either way, and the file queue is the safe side of the accept.
+
+    DAEMON LAUNCHES ARE NOT HUMAN SURFACES (agent review round 1, R1-1 /
+    design D3): ``serve`` and the foreground ``serve`` forms of ``wake``,
+    ``mobile``, ``browser``, ``tunnel`` and ``network`` run for hours with
+    their stderr in a log nobody reads, so a notice shown there is a notice
+    nobody saw. The pass treats such a launch as REPORT-ONLY: it writes
+    nothing, records nothing and logs at DEBUG, so the first human surface
+    applies the update and tells the person. (A daemon that applied and then
+    recorded nothing would lose the applied notice for good - the next launch
+    finds the row current and says nothing.) Every other terminal command,
+    ``agents list`` and ``mobile start`` included, keeps the ``cli`` slot: a
+    person reads its stderr.
+    """
+
+    if getattr(args, "subcommand", None) is not None:
+        return "daemon" if _is_daemon_launch(args) else "cli"
+    return "tui" if _tui_requested(args) else "cli"
+
+
+def _seed_sync_command(args: argparse.Namespace) -> str | None:
+    """The canonical command spelling the startup seam must recognise.
+
+    TWO carve-outs, both because the command's own promise is "change
+    nothing": ``agents sync`` (its ``--check``/``--dry-run`` write no agent
+    rows, which a startup auto-apply under the same invocation would break —
+    and would race the very state the command is checking), and ``config
+    edit agents.auto_update.seeds`` — the one command whose purpose is to SET
+    this pass's switch, where a startup pass racing the edit would
+    pre-apply under the old value before the user's choice takes effect (UX
+    round 1, U6b). No other command promises no-write, so nothing else is
+    carved out. The seam matches these names via
+    ``config_migrations._NO_WRITE_COMMANDS``; keep the spellings in sync.
+    """
+
+    if (
+        getattr(args, "subcommand", None) == "agents"
+        and getattr(args, "agents_command", None) == "sync"
+    ):
+        return "agents sync"
+    if (
+        getattr(args, "subcommand", None) == "config"
+        and getattr(args, "config_command", None) == "edit"
+        and getattr(args, "key", None) == "agents.auto_update.seeds"
+    ):
+        return "config edit agents.auto_update.seeds"
+    return None
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -13849,7 +14012,17 @@ def main() -> int:
         # construction — see ``local_operator.config_migrations``.
         from local_operator.config_migrations import run_startup_migrations
 
-        run_startup_migrations(base_dir)
+        # ``surface``/``command`` feed the startup seam's seed-update arm only:
+        # the surface picks its notice channel and the command spelling skips
+        # the arm for `agents sync`, whose own body owns read-only/apply work.
+        # The surface comes from the SAME helper the ``use_tui`` decision below
+        # reads, so a launch the app runs as a TUI can never be tagged "cli"
+        # here (see ``_startup_surface`` for the one accepted drift).
+        run_startup_migrations(
+            base_dir,
+            surface=_startup_surface(args),
+            command=_seed_sync_command(args),
+        )
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never
@@ -14607,7 +14780,7 @@ def main() -> int:
         # preflight now needs the answer: only the TUI path may open in a
         # first-run setup state instead of failing, so ``use_tui`` gates that.
         force_tui = bool(getattr(args, "tui", False))
-        use_tui = force_tui or (not getattr(args, "no_tui", False) and sys.stdout.isatty())
+        use_tui = _tui_requested(args)
         run_tui = None
         if use_tui:
             try:

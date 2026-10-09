@@ -11,7 +11,8 @@ as the system prompt).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, NamedTuple
 
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
@@ -149,6 +150,106 @@ DEFAULT_TOOL_NAMES: list[str] = [
 ]
 
 
+_NULL_BRANCH: dict[str, Any] = {"type": "null"}
+
+
+class CollapsedSchema(NamedTuple):
+    """A rewritten schema plus the TOP-LEVEL property names it rewrote.
+
+    The two travel together because they must: the loop's validator has to skip
+    exactly the properties this rewrite put a top-level ``type`` on, and two
+    functions computing that independently would drift. ``unchecked`` is a flat
+    name set because the validator checks top-level arguments only — a property
+    inside a nested ``$defs`` entry still reports its own name, which is the
+    key the loop would look it up by.
+    """
+
+    parameters: dict[str, Any]
+    unchecked: frozenset[str]
+
+
+def collapse_optional_nulls(schema: Any) -> CollapsedSchema:
+    """Rewrite pydantic's optional-field shape to the plain type it wraps.
+
+    Every ``x: T | None = None`` field renders as
+    ``{"anyOf": [<T>, {"type": "null"}], "default": null, "description": …}``.
+    The null branch and the ``default: null`` restate what NOT listing the
+    property in ``required`` already says — the model may leave it out — and
+    the default surface carried 121 of them (123 declarations of that shape, of
+    which two are REQUIRED and therefore kept). This rewrites each optional one
+    to ``{<T>, "description": …}``.
+
+    ONLY the optional, single-branch case: a REQUIRED nullable property (where
+    ``null`` is a meaningful value the model must be able to send) and a
+    multi-branch union are left exactly as generated.
+
+    EVERY REWRITE IS REPORTED in :attr:`CollapsedSchema.unchecked` and the
+    loop's validator SKIPS that property. ``unchecked`` holds the ROOT-level
+    names only, because ``validate_tool_arguments`` reads the root
+    ``properties`` and nothing else — a rewrite inside a nested ``$defs`` entry
+    is never type-checked by the loop in the first place, so reporting it would
+    put a name in the set that no lookup can match. That is what keeps the rewrite honest:
+    an optional ``T | None`` had no top-level ``type``, so the loop checked
+    nothing and the tool's own pydantic model decided — including coercers tools
+    ship on purpose (``hub``'s ``to`` takes a bare id or its JSON; ``jobs``'
+    ``job_id`` takes a number). Without it the collapsed ``type`` would make the
+    loop enforce a type the tool would have coerced, refusing the call before
+    the tool ran (review round 1, MAJOR-1). The names stay HOST-SIDE on
+    ``AgentTool.optional_null_unions``: an in-schema marker rode every published
+    request for a third of this feature's saving (review round 2, MAJOR-2).
+
+    Builtins only: called from :func:`create_tools`, never on an MCP server's
+    schema, which is the server's contract to state.
+    """
+    unchecked: set[str] = set()
+
+    def walk(node: Any, *, root: bool = False) -> Any:
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        out: dict[str, Any] = {}
+        required = set(node.get("required") or ())
+        for key, value in node.items():
+            if key == "properties" and isinstance(value, Mapping):
+                properties: dict[str, Any] = {}
+                for name, prop in value.items():
+                    if name in required:
+                        properties[name] = walk(prop)
+                        continue
+                    collapsed, changed = _collapse_one(prop)
+                    if changed and root:
+                        unchecked.add(name)
+                    properties[name] = walk(collapsed)
+                out[key] = properties
+            else:
+                out[key] = walk(value)
+        return out
+
+    return CollapsedSchema(walk(schema, root=True), frozenset(unchecked))
+
+
+def _collapse_one(prop: Any) -> tuple[Any, bool]:
+    """``(property, collapsed)`` for one optional-null union; unchanged otherwise."""
+    if not isinstance(prop, dict):
+        return prop, False
+    branches = prop.get("anyOf")
+    if not isinstance(branches, list) or len(branches) != 2 or _NULL_BRANCH not in branches:
+        return prop, False
+    if "default" in prop and prop["default"] is not None:
+        return prop, False
+    kept = [branch for branch in branches if branch != _NULL_BRANCH]
+    if len(kept) != 1 or not isinstance(kept[0], dict):
+        return prop, False
+    if set(kept[0]) & set(prop) - {"anyOf"}:
+        # A key on both levels (a description inside the branch AND beside it)
+        # would have to be merged by preference; not a shape pydantic emits, so
+        # leave it rather than guess.
+        return prop, False
+    collapsed = {key: value for key, value in prop.items() if key not in ("anyOf", "default")}
+    return {**kept[0], **collapsed}, True
+
+
 def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> list[AgentTool]:
     """Build the tool list for one session.
 
@@ -177,6 +278,10 @@ def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> 
             # only prepends a property inside `parameters`; the tool list this
             # function returns keeps its order, which the prompt cache depends
             # on (see the module docstring).
-            tool.parameters = apply_intent_schema(tool.parameters)
+            collapsed = collapse_optional_nulls(tool.parameters)
+            # The names stay on the tool and OFF the wire: the validator reads
+            # them here, and ``exclude=True`` keeps them out of every dump.
+            tool.optional_null_unions = collapsed.unchecked
+            tool.parameters = apply_intent_schema(collapsed.parameters)
             tools.append(tool)
     return tools

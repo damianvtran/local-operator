@@ -113,7 +113,12 @@ def _effort(schema: dict[str, Any], *path: str) -> dict[str, Any] | None:
 
 
 def _enum(prop: dict[str, Any]) -> list[str]:
-    return prop["anyOf"][0]["enum"]
+    # ``create_tools`` collapses an optional field's ``anyOf: [T, null]`` to
+    # ``T`` (``tools.registry.collapse_optional_nulls``), so the enum sits at
+    # the top level on the wire; a raw ``model_json_schema()`` keeps the union.
+    if "anyOf" in prop:
+        return prop["anyOf"][0]["enum"]
+    return prop["enum"]
 
 
 def _enum_nodes(node: Any) -> list[list[Any]]:
@@ -480,9 +485,11 @@ def test_one_tier_is_the_whole_enum_and_names_its_model(config_dir, tmp_path) ->
     assert _enum(item) == ["hi"]
     assert "hi → anthropic/claude-opus-5" in single["description"]
     assert "Omit to inherit" in single["description"]
-    # The nullable shape pydantic renders for ``Literal | None`` is kept, so
-    # providers see the field they always saw with different members.
-    assert single["anyOf"][1] == {"type": "null"}
+    # The optional field reaches the wire as its plain enum: ``create_tools``
+    # drops pydantic's ``anyOf: [T, null]`` + ``default: null`` scaffolding for
+    # an optional property (``tools.registry.collapse_optional_nulls``), and the
+    # loop's validator still accepts an explicit null for it.
+    assert single.get("type") == "string" and "anyOf" not in single
 
 
 def test_three_tiers_list_all_three_with_their_models(config_dir, tmp_path) -> None:

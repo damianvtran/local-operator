@@ -11561,16 +11561,10 @@ class InitPhase(BaseModel):
 class TodoParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Per-op semantics live in ``read tool://todo`` (``TOOL_NOTES["todo"]``):
+    # the enum literals are self-describing and this text rode every request.
     op: Literal["init", "add", "done", "block", "drop", "view"] = Field(
-        description=(
-            "init: replace the whole list, optionally grouped into named phases "
-            "(pass `phases`); add: append newly discovered work without "
-            "rewriting the list, optionally into a named `phase`; done: mark "
-            "items finished; block: "
-            "mark items that cannot proceed until a user decides or an "
-            "external service answers (requires 'reason'); drop: abandon "
-            "items that are no longer needed; view: show the list."
-        )
+        description="init replaces the list; block needs 'reason'. Per-op: `read tool://todo`."
     )
     items: list[str] = Field(
         default_factory=list,
@@ -13165,24 +13159,14 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
         name="send",
         label="Peer send",
         describe_approval=_describe_send_approval,
+        # The addressing rules live ONCE, on ``target``; delivery modes, the
+        # mesh and the fresh-session refusal are in ``read tool://send``
+        # (``TOOL_NOTES["send"]``) — the description rode every request.
         description=(
-            "Hand a message to another local lop session on this machine (no cmux). "
-            "Address the peer by EXACTLY ONE of `target` (name/cwd substring), `pid` "
-            "(exact), or `session` (exact session id) — they are alternatives, and "
-            "passing a `target` together with a `pid`/`session` is refused as an "
-            "ambiguous recipient rather than resolved. The `sessions` tool lists "
-            "what is running (`lop sessions` is the fallback; `--all` adds "
-            "stored ones), and `target` "
-            "matches them by name. By default the message lands in the peer's "
-            "mailbox AND wakes the peer if it is idle, so an idle peer responds "
-            "right away; `wake=False` is the quiet "
-            "mailbox drop (read on the peer's next turn), and `now=True` steers "
-            "mid-turn (opens a turn if the peer is idle). The result says how the "
-            "peer received it. A session with no message sent in it yet (a fresh "
-            "`/new`) is not a recipient: sends to it are refused. With `peer`, the "
-            "target addresses a session on that device (mesh): the send drives a turn "
-            "there and returns the owner's reply; `wake`/`now`/`patience`/`model` are "
-            "local-only and refused."
+            "Message another local lop session (or, with `peer`, one on another "
+            "device). Address it by exactly one of `target`, `pid` or `session`. "
+            "Default delivery wakes an idle peer; `wake=False` is a quiet drop, "
+            "`now=True` steers mid-turn. Details: `read tool://send`."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
@@ -14147,15 +14131,12 @@ def _sessions_tool_description() -> str:
         "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
         " `hub`'s)."
         f" Inputs per op (anything else is refused) — {summary}."
-        " `spawn` opens a listed workstream for USER-requested work"
-        " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
-        " stored/stopped session headlessly, or a SET (`paused`/`failed`/`all`)"
-        " as a bounded batch; `stop` ends gracefully; `peek` reads a"
-        " transcript window"
-        "; `peer` acts on another device's session over the mesh (`list` shows those"
-        " rows beside local ones; `scope` filters them). Address exactly one of"
-        " `session` (id), `target`"
-        " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
+        # What each op DOES (spawn for user-requested work, resume's batch SET,
+        # peek's window, the mesh `peer`) is the ``op='help'`` reference's
+        # per-op summary; restating it here rode every request (context diet).
+        # The per-op INPUTS above stay: they are the incident fix.
+        " `spawn` is for USER-requested work. Address exactly one of `session`"
+        " (id), `target` (name/cwd) or `pid`. What each op does: op='help'."
     )
 
 
@@ -14305,6 +14286,9 @@ def _sessions_reference_body() -> str:
         "Address a session with exactly one of `session` (exact id), `target`"
         " (name/id/cwd substring; live, then stored) or `pid`. Anything outside"
         " the accepted set below is refused, and the refusal names the set.",
+        # Moved here from the tool description (context diet): the steer path
+        # is a different tool, and this reference is where a caller looks.
+        "Steering a session mid-turn is `send` with now=True, not this tool.",
         "",
     ]
     for op in _SESSIONS_OP_ORDER:
@@ -22871,8 +22855,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # to `read tool://browser`.
             "Drive the user's REAL browser — the desktop app's tab by default, their "
             "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'): open/goto, read, snapshot, click, type, scroll, logs, styles, "
-            "hit_test, ancestors, screenshot, tabs, close. Cookies and logins persist "
+            "'open'; actions: `read tool://browser`). Cookies and logins persist "
             "across calls and sessions, and the user can sign in by hand when you ask "
             "them to, so this reaches authenticated pages a throwaway browser cannot. "
             "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
@@ -27681,20 +27664,16 @@ def _ask_report(
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run "
-    "it, or delegate it to a subagent and decide yourself, then report what you "
-    "chose. Use this when the action is destructive or irreversible and the "
-    "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
-    "two plausible readings and no evidence picks between them, when you need "
-    "something only the user has (a credential, an access decision), or when "
-    "the answer is genuinely theirs to state (a preference, a name, a roster). "
-    "Two technical approaches is not ambiguity: weigh them, pick one, and say "
-    "why. Work the user already asked for is authorized: do not stop to confirm "
-    "it, re-ask what the conversation answered, or seek permission to continue "
-    "— but that never extends to an irreversible step by implication. "
-    "Once you have decided a question is needed, this tool is the only channel: "
-    "never put the question in your reply text. Not stopping for an answer? Then "
-    "do not phrase it as a question; full mechanics are in `read tool://ask`."
+    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run it, "
+    "or delegate it to a subagent and decide yourself, then report what you chose. "
+    "Ask only when: the action is destructive or irreversible and the user has not "
+    "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
+    "and no evidence picks between them; you need something only the user has (a "
+    "credential, an access decision); or the answer is genuinely theirs to state. "
+    "Two technical approaches is not ambiguity. Work the user already asked for is "
+    "authorized: do not stop to confirm it — but that never extends to an "
+    "irreversible step by implication. Never put the question in your reply text; "
+    "mechanics: `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -27734,27 +27713,14 @@ _ASK_DESCRIPTION_INLINE = (
 #: urgent case needs its own instruction (resolve it another way) because the
 #: timeout notice repeats it.
 _ASK_DESCRIPTION_QUEUED = (
-    "Ask everything you need in ONE call. This call returns at once "
-    "with a RECEIPT: it confirms the ask is queued and when it will time out. "
-    "The ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not "
-    "run anything the ask was meant to authorise until the answer arrives. "
-    "Continue with work that does not depend on it; if nothing else remains, "
-    "end the turn saying what is queued rather than idling. Set `timeout` to how "
-    "long this should really wait — 1 h (3600) is routine, 5-10 minutes when "
-    "someone is expected to answer now, up to 24 h for something genuinely "
-    "non-urgent; the floor is 2 minutes. When the deadline passes with no answer "
-    "you get a timeout notice: take your own recommendation then, say in one "
-    "line what you assumed, and carry on. A late answer still reaches you and "
-    "says it was late. An urgent ask's timeout notice also tells you to resolve "
-    "the question without the operator (a `task` subagent); do that rather than "
-    "waiting. At most 8 asks can be open at once — do not re-ask a question you "
-    "already queued, and a second ask with identical question text, or a second "
-    "open secret question for a key already asked for, is refused. "
-    "For a credential, password or API key, set secret=true on that question "
-    "(options empty, id = the env-var name): the value reaches session memory "
-    "when the user answers it and is injected into bash — only the key name is "
-    "returned, and it never appears in this conversation. persist=true also "
-    "saves it to the operator's encrypted long-term store."
+    "Ask everything you need in ONE call. It returns at once with a RECEIPT; the "
+    "ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not run "
+    "anything the ask was meant to authorise until the answer arrives — continue "
+    "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
+    "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
+    "(floor 2 min); on a timeout notice take your own recommendation and say what "
+    "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
 
