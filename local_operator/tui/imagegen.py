@@ -10,15 +10,17 @@ place to change when the harness lane freezes the wire details:
 - :data:`IMAGE_GEN_TOOLS` / :func:`is_image_gen_tool` — the detection set. The
   card keys its whole variant off this predicate, so a rename reaches every
   renderer by editing one line.
-- :func:`live_from_details` — the ADAPTER. The structured live fields (stage,
-  queue position, progress fraction, log tail, provider error payload,
-  artifact reference) ride the existing tool-execution update events'
-  ``details`` mapping, and their key names are FROZEN as of PR #2089
-  (``feat(media): emit the canonical progress fields``): every update carries
-  every key, ``None`` where no provider supplied a value. The adapter never
-  invents a value — an absent or malformed field renders as the reduced
-  state — and a null ``progress_fraction`` is INDETERMINATE (the canvas),
-  never a synthesized bar.
+- :func:`live_from_details` — the ADAPTER. The canonical live fields ride the
+  existing tool-execution update events' ``details`` mapping, and their key
+  names are FROZEN as of PR #2089 (``feat(media): emit the canonical progress
+  fields``): the canonical six — ``stage``, ``queue_position``,
+  ``progress_fraction``, ``log_lines``, ``error``, ``error_type`` — are
+  carried by every update, ``None`` where no provider supplied a value. (The
+  artifact reference this adapter also reads is NOT one of the six: it belongs
+  to the attachment contract, separately — see :data:`_ARTIFACT_KEY`.) The
+  adapter never invents a value — an absent or malformed field renders as the
+  reduced state — and a null ``progress_fraction`` is INDETERMINATE (the
+  canvas), never a synthesized bar.
 - :func:`imagegen_state_word` — the state vocabulary, mapped from the card's
   own lifecycle states in one place. The live card paints the live arms
   (``queued`` / ``running`` / ``cancelling``); the settled arms are the
