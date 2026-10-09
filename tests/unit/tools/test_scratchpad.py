@@ -36,6 +36,8 @@ from local_operator.scratchpad import (
     parse_scratchpad_url,
     scratchpad_dir_of,
     scratchpad_env_injection,
+    scratchpad_footprint,
+    scratchpad_refusal,
     scratchpad_root,
 )
 
@@ -780,6 +782,115 @@ def test_the_walk_never_follows_a_symlink_out_of_the_pad(
         check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", headroom + 8)
 
     assert f"the pad holds {held:,} bytes" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The footprint: what the pad HOLDS, for the channels that cannot refuse
+# ---------------------------------------------------------------------------
+#
+# The write tools REFUSE before the material lands; the shell channels run after
+# the fact and can only report, so they read the same walk with the same
+# thresholds and comparisons through ``scratchpad_footprint``.
+
+
+def test_the_footprint_is_over_only_past_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The READER's arm of the total: exactly at the budget is under it (where
+    the last legitimate write lands), one byte less is over — the write path's
+    own ``>`` comparison. The boundary is set FROM the pad's allocated size, so
+    it is exact on any block size."""
+    root = _pad(tmp_path)
+    filled = _fill_pad(root, 4096)
+    held = _allocated(filled)
+
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held)
+    assert scratchpad_footprint(root) == (held, False, False)
+
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
+    total, over, truncated = scratchpad_footprint(root)
+
+    assert over is True and truncated is False
+    assert total == held, "the walk stopped on the file it counted, not on a guess"
+
+
+def test_the_footprint_truncates_rather_than_claiming_a_full_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the entry cap the answer is ``truncated`` and the number is what
+    the walk actually counted — the same bounded contract the write path refuses
+    on, which is what lets the shell line say "a tree rather than a pad" without
+    inventing a total it stopped measuring."""
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 3)
+    root = _pad(tmp_path)
+    written = [_fill_pad(root, 4096, name=f"f{index}.dat") for index in range(4)]
+
+    total, over, truncated = scratchpad_footprint(root)
+
+    assert truncated is True
+    assert over is False
+    assert total == 3 * _allocated(written[0]), "the count stops where the walk stopped"
+
+
+def test_the_footprint_counts_a_symlink_as_the_link_and_never_its_target(
+    tmp_path: Path,
+) -> None:
+    """The same rule as the write path's walk, and it IS the same walk: a pad
+    holding a symlink to an over-budget tree reports the LINK's bytes, so a link
+    out of the pad cannot decide whether every later command gets a line."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _fill_pad(outside, 8192, name="big.dat")
+    root = _pad(tmp_path)
+    link = root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    total, over, truncated = scratchpad_footprint(root)
+
+    assert (total, over, truncated) == (_allocated(link), False, False)
+
+
+def test_a_fresh_pad_footprints_at_zero(tmp_path: Path) -> None:
+    """The ordinary answer for a pad nobody has abused — and the one every
+    pad-naming shell command relies on to stay silent."""
+    root = _pad(tmp_path)
+
+    assert scratchpad_footprint(root) == (0, False, False)
+
+
+# ---------------------------------------------------------------------------
+# The refusal clause: the shell channel's reuse of the write path's sentence
+# ---------------------------------------------------------------------------
+
+
+def test_scratchpad_refusal_is_the_write_paths_own_sentence(tmp_path: Path) -> None:
+    """The shell audit's reuse point, pinned to byte-identity: the clause it
+    returns is exactly what ``check_scratchpad_write`` raises behind ``{url}:``,
+    for both name arms — so the after-the-fact line cannot say something the
+    write path would not."""
+    root = _pad(tmp_path)
+    segment = f"'build' is a build or dependency directory, not scratch. {SCRATCHPAD_ELSEWHERE}"
+    suffix = f"'.o' is a compiled, archived or model artefact, not scratch. {SCRATCHPAD_ELSEWHERE}"
+
+    assert scratchpad_refusal(root / "build" / "x.md", root) == segment
+    assert scratchpad_refusal(root / "art.o", root) == suffix
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "build" / "x.md", root, "scratchpad://build/x.md")
+
+    assert str(excinfo.value) == f"scratchpad://build/x.md: {segment}"
+
+
+def test_scratchpad_refusal_is_silent_where_nothing_is_refused(tmp_path: Path) -> None:
+    """``None`` in the two cases the audit must stay quiet about: an allowed
+    name (``build.log`` is a file TYPE) and a path that cannot be placed inside
+    the pad — the write path REFUSES an unplaceable path, but the audit can only
+    report, and a path it cannot relate to this pad is not evidence about it."""
+    root = _pad(tmp_path)
+
+    assert scratchpad_refusal(root / "build.log", root) is None
+    assert scratchpad_refusal(root / "notes.md", root) is None
+    assert scratchpad_refusal(tmp_path / "elsewhere.md", root) is None
 
 
 def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) -> None:

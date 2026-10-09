@@ -620,6 +620,12 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     artefacts, archives, anything the shell built) rather than as "build output"
     alone: a dependency tree is the largest single shape in the audit and calling
     it build output is what let it read as somebody else's problem.
+
+    The boundary MOVED when the shell channel gained its own after-the-fact
+    check: the tools still refuse BEFORE the write, while a pad-touching command
+    now gets a ``[scratch]`` line on its result when it took the pad over its
+    budget or entry cap, or added a refused name — reported, never undone. The
+    pin covers that new pair for the same reason it covered the old one.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -632,9 +638,10 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
 
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
-    # The boundary: the tools are checked, a shell is not.
-    assert "enforced at the TOOLS and not in a shell" in collapsed
-    assert "NOT policed" in collapsed
+    # The boundary: a write is refused before it lands; the shell channel is
+    # checked AFTER the command and can only be reported on.
+    assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
+    assert "it cannot undo" in collapsed
 
 
 def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:

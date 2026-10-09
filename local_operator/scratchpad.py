@@ -668,8 +668,12 @@ def _relative_parts(path: Path, root: Path) -> tuple[str, ...] | None:
         return None
 
 
-def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple[int, bool]:
+def _pad_bytes_below(root: Path, replaced: Path | None, budget: int, cap: int) -> tuple[int, bool]:
     """``(bytes under ``root`` excluding a file at ``replaced``, whether the walk hit ``cap``)``.
+
+    ``replaced`` may be ``None`` for a plain FOOTPRINT
+    (:func:`scratchpad_footprint`), which excludes nothing: the audits ask what
+    the pad holds, not what a write would leave it holding.
 
     Stops as soon as ``budget`` is exceeded — the rest of the tree cannot change
     the answer — and at ``cap`` entries otherwise, so the cost of measuring is a
@@ -706,7 +710,11 @@ def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(Path(entry.path))
                         continue
-                    if entry.name == replaced.name and entry.path == str(replaced):
+                    if (
+                        replaced is not None
+                        and entry.name == replaced.name
+                        and entry.path == str(replaced)
+                    ):
                         # An overwrite REPLACES these bytes rather than adding to
                         # them, so counting them and then adding the payload would
                         # refuse a write that leaves the pad SMALLER. The caller
@@ -720,6 +728,79 @@ def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple
                 if total > budget:
                     return total, False
     return total, False
+
+
+def scratchpad_footprint(root: Path) -> tuple[int, bool, bool]:
+    """``(bytes, over budget, truncated)`` for the pad at ``root``.
+
+    The READER side of the content policy: the write tools REFUSE the material
+    before it lands (:func:`check_scratchpad_write`), while the shell channels —
+    which run after the fact and cannot refuse anything — report through this.
+    Both thresholds and the comparison are the write path's own
+    (:data:`SCRATCHPAD_TOTAL_BUDGET_BYTES`, :data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`),
+    so the line a shell result carries cannot disagree with the refusal the next
+    ``write`` would raise.
+
+    ``bytes`` is a LOWER BOUND when ``over budget`` is true: the walk stops the
+    moment the budget is crossed (:func:`_pad_bytes_below`), because the rest of
+    the tree cannot change the answer — more precision would cost a full walk of
+    the pad's worst state to say the same thing. It is the walk's allocated-bytes
+    unit, and a truncated walk reports what it counted before the entry cap.
+    """
+    held, truncated = _pad_bytes_below(
+        root, None, SCRATCHPAD_TOTAL_BUDGET_BYTES, SCRATCHPAD_BUDGET_SCAN_ENTRIES
+    )
+    return held, held > SCRATCHPAD_TOTAL_BUDGET_BYTES, truncated
+
+
+def _content_refusal(below: tuple[str, ...]) -> str | None:
+    """The sentence refusing a path ``below`` the pad root, or ``None`` when it may stay.
+
+    ONE spelling of the two name arms, because two channels sentence from it:
+    :func:`check_scratchpad_write` (which RAISES it, ``{url}:``-prefixed) and
+    :func:`scratchpad_refusal` (which hands the clause to the shell audit) — a
+    second hand-written copy is how the two would drift apart about what a
+    refused name is.
+
+    Parent parts are judged by :func:`_is_refused_segment` and the LEAF by
+    :func:`_refused_suffix`, and never the other way round: the dot after a
+    token at a leaf is a file TYPE (``out.json``, ``build.log`` are ordinary
+    scratch) while in a parent it is a qualifier (``out/…``, ``build/…`` are
+    the trees) — and a write cannot name a directory, so a leaf is always a
+    file name.
+    """
+    for segment in below[:-1]:
+        if _is_refused_segment(segment):
+            return (
+                f"'{segment}' is a build or dependency directory, not scratch. "
+                f"{SCRATCHPAD_ELSEWHERE}"
+            )
+    suffix = _refused_suffix(below[-1]) if below else None
+    if suffix is not None:
+        return (
+            f"'{suffix}' is a compiled, archived or model artefact, not scratch. "
+            f"{SCRATCHPAD_ELSEWHERE}"
+        )
+    return None
+
+
+def scratchpad_refusal(path: Path, root: Path) -> str | None:
+    """The refusal sentence for ``path`` under ``root``, or ``None`` when nothing
+    about its name is refused.
+
+    The shell channel's reuse point (``tools.builtin._bash_pad_write_check``): a
+    command that already ran cannot be refused, but whether it put a refused
+    NAME in the pad is judged by the write path's own rule and sentence, so the
+    advisory and the next ``write``'s refusal cannot disagree.
+
+    ``None`` also when ``path`` cannot be placed inside ``root`` — unlike the
+    write path, which refuses an unplaceable path, the audit can only report,
+    and a path it cannot relate to this pad is not evidence about it.
+    """
+    below = _relative_parts(path, root)
+    if below is None:
+        return None
+    return _content_refusal(below)
 
 
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
@@ -752,25 +833,12 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"{url}: this write could not be placed inside the pad, so it is refused "
             f"rather than judged. {SCRATCHPAD_ELSEWHERE}"
         )
-    # The PARENT parts only (``below[:-1]``): an arm that judged the LEAF would
-    # apply directory rules to a file name, where the dot after a token is a file
-    # TYPE rather than a qualifier — ``out.json`` and ``build.log`` are ordinary
-    # scratch while ``out/…`` and ``build/…`` are not — and it would refuse them
-    # as "a build or dependency directory", which is false about the shape. The
-    # leaf is judged by the suffix rules below, and a write cannot name a
-    # directory (``_scratchpad_target`` refuses a directory URL first).
-    for segment in below[:-1]:
-        if _is_refused_segment(segment):
-            raise ScratchpadContentError(
-                f"{url}: '{segment}' is a build or dependency directory, not scratch. "
-                f"{SCRATCHPAD_ELSEWHERE}"
-            )
-    suffix = _refused_suffix(below[-1]) if below else None
-    if suffix is not None:
-        raise ScratchpadContentError(
-            f"{url}: '{suffix}' is a compiled, archived or model artefact, not scratch. "
-            f"{SCRATCHPAD_ELSEWHERE}"
-        )
+    # The name arms sentence from ONE place (``_content_refusal``) so the write
+    # refusal and the shell audit's line cannot drift apart; its docstring owns
+    # why parent parts and the leaf are judged by different rules.
+    refusal = _content_refusal(below)
+    if refusal is not None:
+        raise ScratchpadContentError(f"{url}: {refusal}")
     if size is not None and size > SCRATCHPAD_MAX_WRITE_BYTES:
         raise ScratchpadContentError(
             f"{url}: {size} bytes is over the {SCRATCHPAD_MAX_WRITE_BYTES}-byte ceiling for a "

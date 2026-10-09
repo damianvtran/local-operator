@@ -3356,6 +3356,186 @@ async def test_a_bash_creation_inside_the_pad_is_never_nudged(tmp_path, monkeypa
         assert "[scratch]" not in text, text
 
 
+# ---------------------------------------------------------------------------
+# The pad write AUDIT: the shell channel reports what the tools would have refused
+# ---------------------------------------------------------------------------
+#
+# ``write``/``edit`` refuse build output BEFORE it lands; a shell cannot be
+# refused after the fact. These rows pin the after arm: ONE [scratch] line on
+# the real tool result when a pad-naming command left the pad over budget, past
+# its entry cap, or holding a refused name — and silence, with no filesystem
+# walk at all, for a command that never names the pad. The budget/cap fixtures
+# patch BOTH bindings of the constants (the walk reads them off
+# ``local_operator.scratchpad``, the sentence off this module's import of them)
+# so the arm under test is the one that fires, not a neighbour.
+
+
+def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
+    """A pad holding ONE real file, with the budget patched one byte under it.
+
+    ``size`` real bytes and not a truncate: the walk sums ALLOCATED blocks, so
+    a sparse file measures 0 and the arm would pass against a walk that counted
+    nothing.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    filled = pad / "bulk.dat"
+    filled.write_bytes(b"x" * size)
+    held = filled.stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
+    return context, pad, held
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["$LOCAL_OPERATOR_SCRATCHPAD", "${LOCAL_OPERATOR_SCRATCHPAD}"])
+async def test_a_pad_over_budget_is_flagged_on_the_real_result(
+    tmp_path, monkeypatch, spelling
+) -> None:
+    """The channel the guide used to call unpoliced, driven through the REAL
+    bash tool: the command took the pad over budget, and the result says so —
+    in the head window (line 2, under the exit code), one line, naming the
+    bytes held and the budget its tools enforce.
+
+    Both variable spellings, because either is how a session writes the pad and
+    a gate that missed one would be silent exactly half the time.
+    """
+    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+
+    text = await _run_bash(context, f'mkdir -p "{spelling}/logs"')
+
+    expected = (
+        f"[scratch] The pad now holds at least {held:,} bytes — over the "
+        f"{held - 1:,}-byte budget its tools enforce, which now refuse further writes. "
+        f"{SCRATCHPAD_ELSEWHERE}"
+    )
+    assert text.splitlines()[1] == expected, text
+
+
+@pytest.mark.asyncio
+async def test_a_pad_past_its_entry_cap_is_flagged_as_a_tree(tmp_path, monkeypatch) -> None:
+    """The other budget arm: the walk STOPS at the entry cap and the result says
+    "a tree rather than a pad" with the cap that actually stopped it — the
+    patched one, not the shipped one."""
+    cap = 3
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_BUDGET_SCAN_ENTRIES", cap)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", cap)
+    for index in range(4):
+        (pad / f"f{index}.md").write_text("x")
+
+    text = await _run_bash(context, 'mkdir "$LOCAL_OPERATOR_SCRATCHPAD/logs"')
+
+    expected = (
+        f"[scratch] The pad holds more than {cap:,} entries, a tree rather than a pad. "
+        f"{SCRATCHPAD_ELSEWHERE}"
+    )
+    assert text.splitlines()[1] == expected, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "relative", "clause"),
+    [
+        (
+            'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build" && echo x > '
+            '"$LOCAL_OPERATOR_SCRATCHPAD/build/notes.md"',
+            "build/notes.md",
+            "'build' is a build or dependency directory, not scratch.",
+        ),
+        (
+            'cp /etc/hosts "$LOCAL_OPERATOR_SCRATCHPAD/art.o"',
+            "art.o",
+            "'.o' is a compiled, archived or model artefact, not scratch.",
+        ),
+    ],
+)
+async def test_a_refused_name_created_by_the_command_is_flagged(
+    tmp_path, monkeypatch, command, relative, clause
+) -> None:
+    """The shape arm, on the REAL result and against a HEALTHY pad: the line
+    comes from the name the command created, not from the pad's size — and it
+    is the write tools' own sentence, ``[scratch]``-tagged, so the after arm
+    cannot say something the write path would not."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, command)
+
+    target = (pad / relative).resolve()
+    expected = f"[scratch] {target}: {clause} {SCRATCHPAD_ELSEWHERE}"
+    assert text.splitlines()[1] == expected, text
+    assert (pad / relative).exists(), "the command itself really ran"
+
+
+@pytest.mark.asyncio
+async def test_the_shape_line_wins_over_the_budget_line_and_there_is_only_one(
+    tmp_path, monkeypatch
+) -> None:
+    """At most one line per result, and the shape line is the one — it
+    attributes the change to THIS command while the budget line reports state
+    the pad already had. Pinned because the alternative (a second line, or the
+    budget line first) is what a later "improvement" reaches for."""
+    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+
+    text = await _run_bash(
+        context,
+        'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build"'
+        ' && echo x > "$LOCAL_OPERATOR_SCRATCHPAD/build/notes.md"',
+    )
+
+    assert text.count("[scratch]") == 1, text
+    assert "'build' is a build or dependency directory" in text.splitlines()[1], text
+
+
+@pytest.mark.asyncio
+async def test_the_literal_pad_path_is_named_too(tmp_path, monkeypatch) -> None:
+    """The gate's second arm: the literal path — what a receipt prints and a
+    session copies from one — names the pad exactly as the variable does."""
+    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+
+    text = await _run_bash(context, f'mkdir -p "{pad}/logs"')
+
+    assert text.splitlines()[1].startswith("[scratch] The pad now holds at least"), text
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_pad_naming_command_stays_silent(tmp_path, monkeypatch) -> None:
+    """The negative half: the ordinary pad write — a small file, a clean name,
+    the pad far under budget — draws NO line. A check that fired here would tax
+    every legitimate shell write with an advisory about its own answer."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(
+        context,
+        'mkdir -p "${LOCAL_OPERATOR_SCRATCHPAD}/logs"'
+        ' && echo note > "${LOCAL_OPERATOR_SCRATCHPAD}/logs/run.md"',
+    )
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_does_not_name_the_pad_is_never_walked(tmp_path, monkeypatch) -> None:
+    """The no-latency guarantee, asserted the only way that means anything: a
+    spy on the walk. The pad is left OVER BUDGET, so silence can only come from
+    the gate — and the spy proves zero filesystem work happened."""
+    context, pad, _ = _pad_over_budget(tmp_path, monkeypatch)
+    walked = []
+    real_footprint = builtin.scratchpad_footprint
+
+    def spy(root):
+        walked.append(root)
+        return real_footprint(root)
+
+    monkeypatch.setattr(builtin, "scratchpad_footprint", spy)
+
+    text = await _run_bash(context, "echo hello")
+
+    assert "[scratch]" not in text, text
+    assert walked == []
+
+
 def test_an_unexpanded_target_names_the_scratch_named_directory(tmp_path, monkeypatch) -> None:
     """The root arm of the second arm. `for i in 1 2 3; do echo x > <dir>/f$i; done`
     creates files the scan cannot name, so the subject becomes the directory — which
