@@ -1402,8 +1402,8 @@ def test_a_frame_queued_before_its_link_closed_is_still_written(
     WHAT THE ASSERTION READS IS THE WRITER'S OWN SEALED FRAMES, not a count of them.
     An earlier revision compared ``frames_out`` for equality, on the premise that
     "nothing else is due to be written in this window"; CI measured the premise to be
-    false (shard failures 2026-10-08, runs 37848588800 and 37843170163 — "2 written, 1
-    expected" with the pre-close count at 0). A fresh link starts a
+    false (shard failures 2026-10-08 — runs 37848588800: "2 written, 1 expected",
+    37843170163: "3 written, 1 expected"; pre-close count at 0). A fresh link starts a
     ``net_member_list`` pull over the same socket the moment it is established
     (``_pull_members``, on the accepting side), so whether that pull's write lands
     inside this window is a scheduling gap, and the count equality was a bet on it.
@@ -1419,10 +1419,11 @@ def test_a_frame_queued_before_its_link_closed_is_still_written(
     assert link_a is not None, "the peer's dial did not install a link on this side"
 
     # WHAT THE WRITER ACTUALLY SEALED, frame by frame — not a count of it. The count
-    # equality this replaces was measured wrong on CI (shard runs 37848588800 and
-    # 37843170163: "2 written, 1 expected"): the establishment pull's write and the
-    # frame's own landed in the same window, and which adds to the tally is a race.
-    # Recording the frames the writer seals makes the assertion about THE frame.
+    # equality this replaces was measured wrong on CI (shard runs 37848588800: "2
+    # written, 1 expected"; 37843170163: "3 written, 1 expected"): the establishment
+    # pull's write and the frame's own landed in the same window, and which adds to
+    # the tally is a race. Recording the frames the writer seals makes the assertion
+    # about THE frame.
     written: list[dict[str, Any]] = []
     flush = link_a._write  # noqa: SLF001 — the writer's own write path, wrapped below
 

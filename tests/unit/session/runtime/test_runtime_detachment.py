@@ -153,12 +153,19 @@ def _log_text(config_dir: Path) -> str:
 
 
 def _capture_text(child: Any) -> str:
-    """Whatever the child wrote to the stdio capture, for a failure message."""
+    """Whatever the child wrote to the stdio capture, for a failure message.
+
+    THE WINDOW IS THE TAIL — the right end for an ordered exit's last words, the
+    wrong end for a faulthandler report, whose "Fatal Python error: …" header and
+    innermost frames sit at the top. The 8000-byte window carries the measured dumps
+    whole: a 52-frame boot crash is 5,773 B. A deeper dump still loses its top here,
+    and the capture file remains the full record while it lives.
+    """
     path = getattr(child, "lop_capture_path", None)
     if path is None:
         return ""
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")[-2000:]
+        return Path(path).read_text(encoding="utf-8", errors="replace")[-8000:]
     except OSError:
         return ""
 
@@ -183,7 +190,7 @@ def _exit_summary(child: Any) -> str:
             name = signal.Signals(-rc).name
         except ValueError:  # an unnamed signal number: the rc alone still reads
             name = f"signal {-rc}"
-        return f"died of {name} (rc={rc}) — a signal death, not an exit"
+        return f"died of {name} (rc={rc}), a signal death rather than an exit"
     return f"exited (rc={rc})"
 
 
@@ -245,7 +252,7 @@ def _wait_for_record(
                 return record
         if child is not None and child.poll() is not None:
             raise AssertionError(
-                f"the runtime {_exit_summary(child)} before publishing its record, "
+                f"the runtime {_exit_summary(child)}, before publishing its record, "
                 f"so no wait can succeed:\n{_log_text(config_dir)[-1200:]}"
             )
         time.sleep(0.05)
@@ -344,7 +351,7 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
         deadline = time.monotonic() + _WAIT_S
         while "state: streaming=" not in _log_text(config_dir):
             assert child.poll() is None, (
-                f"the runtime {_exit_summary(child)} before it armed its signal "
+                f"the runtime {_exit_summary(child)}, before it armed its signal "
                 f"handlers. Readiness is the child's own SIGUSR1 dump, and a probe "
                 f"sent before arming is discarded by the inherited SIG_IGN — so "
                 f"this is a DEATH before arming, distinct from the never-armed shape "
