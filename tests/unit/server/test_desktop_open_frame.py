@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -362,35 +363,52 @@ async def test_head_cut_is_true_when_a_cap_stops_the_extension(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_runs_arrive_once_an_index_exists_and_are_absent_before(tmp_path: Path) -> None:
-    """``building`` then ``ready``: the facts never cost the open a scan.
+async def test_the_first_frame_waits_briefly_for_its_facts(tmp_path: Path) -> None:
+    """The facts are worth a bounded wait, and the wait is never open-ended.
 
-    The first read of an unindexed conversation answers without facts (and starts
-    the refresh); the next one carries per-run counts, because the resident index
-    is revalidated with a stat rather than rebuilt.
+    A frame that waited forever for an index scan would be a read that hangs on a
+    118 MB journal; one that never waited would make every first open condense a
+    run twice. So the frame awaits the refresh for its own small budget (the same
+    one the rail's first paint gives), and the two arms are both stated here: a
+    scan that lands inside it answers READY with facts, a scan that does not
+    answers ``building`` and leaves the client on today's path until the next
+    frame.
     """
     async with _Harness(tmp_path) as harness:
         harness.seed(turns=4)
         assert harness.client is not None
         url = f"/v1/desktop/sessions/{harness.session_id}/history"
-        cold = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
+
+        first = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
             "result"
         ]
-        assert cold["runs_state"] == "building"
-        assert cold["runs"] == []
-        await harness.warm()
-        warm = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
-            "result"
-        ]
-        assert warm["runs_state"] == "ready"
-        settled = [run for run in warm["runs"] if run["settled"]]
-        assert settled, warm["runs"]
-        # The counters are exact for a settled run, and the live tail states none.
-        assert settled[-1]["action_count"] >= 1
-        assert settled[-1]["worked_seconds"] is not None
-        live = [run for run in warm["runs"] if not run["settled"]]
-        for run in live:
-            assert run["action_count"] is None and run["worked_seconds"] is None
+        assert first["runs_state"] == "ready"
+        settled = [run for run in first["runs"] if run["settled"]]
+        assert settled and settled[-1]["action_count"] >= 1
+        # A live tail is listed and states NO counts.
+        for run in first["runs"]:
+            if not run["settled"]:
+                assert run["action_count"] is None and run["worked_seconds"] is None
+
+        # A scan that cannot land inside the budget is not waited on.
+        ti._reset_for_tests()
+
+        def slow_refresh(*_: Any, **__: Any) -> Any:
+            time.sleep(2.0)
+            return None
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(ti, "refresh_index", slow_refresh)
+            started = time.monotonic()
+            slow = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
+                "result"
+            ]
+            elapsed = time.monotonic() - started
+        assert slow["runs_state"] == "building" and slow["runs"] == []
+        # Bounded by the budget, not by the scan (2 s) and not by the request
+        # deadline: the frame answers without its facts rather than making the
+        # open pay for them.
+        assert elapsed < 1.5
 
 
 @pytest.mark.asyncio

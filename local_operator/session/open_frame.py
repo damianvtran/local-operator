@@ -60,21 +60,35 @@ OPEN_FRAME_MAX_ROWS = 400
 #: an order of magnitude below it.
 OPEN_FRAME_MAX_BYTES = 1_572_864
 
-#: How many older raw pages one frame read may pull: one for the ``limit`` and
-#: one for the head hunt.
+#: How long a frame may WAIT for its run facts when no index is resident, before
+#: answering ``runs_state: "building"``.
 #:
-#: THE SECOND PAGE IS THE WHOLE EXTENSION BUDGET, and the measurement is why
-#: rather than a round number. A run whose head is within about a page of the
-#: window is reached, which is the ordinary tool-heavy turn, and the bar is then
-#: exact without any facts at all. A run that is longer — the operator's own
-#: case is 600 rows — CANNOT be reached by any budget small enough to serve: on
-#: the S3 fixture a three-page walk returned 231 paintable rows and 264 KB with
-#: ``head_cut: true``, i.e. 2.4x today's payload for no exactness, because the
-#: run's head was still 370 rows above the page. For that shape the FACTS are
-#: the answer (``action_count`` and ``worked_seconds`` are exact for every
-#: settled run, however long), so the walk stops after two pages and pays the
-#: smaller price.
-OPEN_FRAME_MAX_RAW_PAGES = 2
+#: The same budget ``checkpoints_view`` gives its own first paint, and the same
+#: reasoning: a refresh that has a usable cache file costs 3/19/62 ms at
+#: 5.9/35/118 MB (measured), so awaiting it is cheaper than making the client
+#: condense a run twice; a genuinely COLD scan costs 28/169/559 ms at those sizes
+#: (measured), which lands inside this budget for everything up to about 35 MB
+#: and does not for the largest journals — those answer ``building`` and the next
+#: frame carries the facts. Paying it once per session per process is the price of
+#: an exact bar on the first paint, which is what this whole contract is for.
+OPEN_FRAME_FACTS_WAIT_S = 0.2
+
+#: How many rows the head hunt may ADD to the page beyond ``limit``.
+#:
+#: A ROW BUDGET, NOT A PAGE COUNT, and the first draft's page count was measured
+#: wrong on this machine's own fixtures: with "one more page" the walk reached a
+#: run's opening user row for almost nothing (runs of about five rows need a few
+#: rows of slack, not a hundred) while every OTHER page paid 1.6-2.9x today's
+#: bytes and still reported ``head_cut``. Stated in rows, the ordinary shape
+#: reaches its head and the payload grows by the few rows it took; the cap is
+#: what keeps a pathologically long run from pulling the whole journal.
+OPEN_FRAME_MAX_EXTRA_ROWS = 100
+
+#: A hard ceiling on the walk, whatever the budget: the page cannot cost more
+#: reads than this for ONE frame. It cannot bind while the caps hold — the row
+#: and byte caps below stop the walk far sooner — and it exists so no combination
+#: of a large ``limit`` and a long run can turn one open into an unbounded walk.
+OPEN_FRAME_MAX_RAW_PAGES = 6
 
 #: ``provider_payload`` keys that no surface paints, and the byte share each one
 #: holds on the real tail pages. The desktop reducer reads ``details``,
@@ -235,6 +249,40 @@ def paintable(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def tail_head_reachable(
+    index: TranscriptIndex,
+    *,
+    limit: int,
+    extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
+) -> bool:
+    """Whether the TAIL run's opening user row can be reached by the head hunt.
+
+    THE CHEAPEST GUARD IN THE FRAME, and the one that keeps a long run from
+    taxing every page. Without it the walk is blind and pays its whole budget
+    discovering that a run of 600 rows has no head within reach — measured on the
+    S3 fixture as 231 paintable rows and 264 KB against today's 100 rows and
+    110 KB, for a ``head_cut: true`` answer either way. With it, the index (which
+    already counts every row) answers the question in one subtraction BEFORE the
+    extra reads: if the tail run's head is further above the journal's end than
+    the walk could go, the frame serves today's row count and lets ``runs`` carry
+    the run's true size — which is exact, and free.
+
+    ``False`` for a tail run with no opening user row (a wake or hub run): there
+    is no head to reach, so extending is pure cost. ``scan.rows`` is the
+    journal's own row count in the same ordinal space as a run's ``first_seq``.
+    """
+    if not index.runs:
+        return False
+    tail = index.runs[-1]
+    if not tail.opening_user_id:
+        return False
+    rows_above_head = max(0, index.scan.rows - tail.first_seq)
+    # One row of slack for the ordinals themselves: ``scan.rows`` is a COUNT, so
+    # the last row's ordinal is one less, and a run whose head sits exactly at the
+    # budget's edge should be reached rather than refused.
+    return rows_above_head <= limit + extra_rows + 1
+
+
 def head_reached(paintable_rows: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the page's oldest row is a run's opening user row.
 
@@ -253,6 +301,32 @@ def head_reached(paintable_rows: Sequence[Mapping[str, Any]]) -> bool:
         and isinstance(payload, Mapping)
         and str(payload.get("role") or "") == "user"
     )
+
+
+def trim_to_limit(rows: Sequence[Mapping[str, Any]], limit: int) -> list[Mapping[str, Any]]:
+    """The newest ``limit`` PAINTABLE rows of ``rows``, oldest first.
+
+    THE HONEST ANSWER WHEN THE HEAD HUNT FAILS. A page whose oldest run could not
+    be completed — the operator's 600-row run, whose head is 500 rows above
+    anything a sane budget reaches — is a page whose oldest run is a fragment
+    either way, so the rows the extension added buy the client nothing: it still
+    cannot condense that run from them, and ``runs`` states its true size. Serving
+    them anyway was measured at 2.3x the payload of the page the client asked for
+    on the S3 fixture (231 paintable rows, 264 KB against 100 rows and 114 KB) for
+    no boundary and no exactness.
+
+    The trim runs from the NEWEST end for the same reason the caps do: the rows a
+    reader cannot lose are the recent ones.
+    """
+    kept: list[Mapping[str, Any]] = []
+    for row in reversed(list(rows)):
+        if strip_entry(row) is None:
+            continue
+        kept.append(row)
+        if len(kept) >= limit:
+            break
+    kept.reverse()
+    return kept
 
 
 def served_bytes(entries: Sequence[Mapping[str, Any]]) -> int:
