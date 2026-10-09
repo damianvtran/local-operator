@@ -1260,6 +1260,117 @@ def read_transcript_page(
     return TranscriptPage(entries=rows, has_more=len(retained) > limit)
 
 
+#: How far back from a needle hit the reader will look for that row's opening
+#: newline. Bounded by the writer's own batching — the largest row measured on
+#: the real store is a 0.9 MB checkpoint — so 4 MiB is an order of magnitude of
+#: headroom, and a candidate whose start is further back is reported UNVERIFIABLE
+#: rather than absent. The safe direction: the caller falls back to the walk.
+_CUSTOM_NEEDLE_LOOKBACK_BYTES = 4 << 20
+
+#: Chunk the needle scan reads at a time, shared with the line walker so the two
+#: readers of one file pay the same syscall shape.
+_CUSTOM_NEEDLE_CHUNK_BYTES = _BACKWARD_CHUNK_BYTES
+
+
+def find_row_for_custom_type(
+    directory: str | Path, custom_type: str
+) -> tuple[int, TranscriptEntry] | None:
+    """The newest CUSTOM row of ``custom_type``, found by BYTES, with its offset.
+
+    Returns ``(offset, entry)`` for the row's first byte, or ``None``. This is the
+    fast path :func:`read_latest_custom_entry` and the durable fold's roster
+    fallback both use, and it is a SCAN, not a parse: it walks the file's chunks
+    backward looking for the bytes every row of this type carries, and JSON-decodes
+    only the candidate rows it finds. Measured on the real store's 118 MB journal:
+    66 ms to scan the whole file, against 457 ms for the parse walk's answer.
+
+    THE NEEDLE IS EXACT FOR THIS FORMAT, which is what makes that safe rather than
+    optimistic: ``TranscriptEntry.to_json`` has serialized with compact separators
+    since the format was introduced (5cf2814a4f), so a row of this type contains
+    ``"custom_type":"<type>"`` verbatim — the same assumption
+    :func:`_cursor_needle` already makes for row ids. A type whose ESCAPED spelling
+    differs from its literal one (a quote, a backslash, a control character) cannot
+    be searched for by bytes at all, and answers ``None`` without reading, which is
+    why the callers keep their parse walk as the authority for that case.
+
+    ``None`` therefore means "no row of this type, spelled the way this format
+    spells it" — and a caller that needs the stronger claim (a journal written by
+    something that re-serialized it) uses the walk, exactly as
+    :func:`read_latest_custom_entry` documents.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return None
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                    ):
+                        return row_offset, entry
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return None
+
+
+def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | None:
+    """The complete row containing byte ``offset``, with its first byte offset.
+
+    ``None`` when the row's start is further back than
+    :data:`_CUSTOM_NEEDLE_LOOKBACK_BYTES` (an unverifiable candidate, not an
+    absence) or when the row does not parse.
+    """
+    block = 64 << 10
+    position = offset
+    while True:
+        start = max(0, position - block)
+        handle.seek(start)
+        window = handle.read(position - start)
+        # THE LAST newline before the hit, not the first: the row's first byte is
+        # the one after the newline that TERMINATES the row above it, and the
+        # leftmost newline in this window is some earlier row's terminator — a
+        # mistake that slices the wrong row and answers a whole-journal question
+        # with an older row (measured: it made ``_latest_entry_id`` return the
+        # previous snapshot, which the monitors' post-append guard correctly
+        # refused as "the conversation changed while your change was applied").
+        boundary = window.rfind(b"\n")
+        if boundary >= 0:
+            row_start = start + boundary + 1
+            break
+        if start == 0:
+            row_start = 0
+            break
+        if offset - start > _CUSTOM_NEEDLE_LOOKBACK_BYTES:
+            return None
+        position = start
+    handle.seek(row_start)
+    raw = handle.readline()
+    entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+    if entry is None:
+        return None
+    return row_start, entry
+
+
 def read_latest_custom_entry(directory: str | Path, custom_type: str) -> TranscriptEntry | None:
     """Newest custom row of ``custom_type``, without parsing the journal above it.
 
@@ -1320,6 +1431,9 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
     so the sentence cannot drift away from the behaviour.
     """
+    located = find_row_for_custom_type(directory, custom_type)
+    if located is not None:
+        return located[1]
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         return None

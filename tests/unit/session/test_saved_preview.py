@@ -423,3 +423,37 @@ async def test_preview_degrades_when_the_store_sidecar_is_not_an_object(tmp_path
     assert len(blocks) == 1
     assert blocks[0].data == ""
     assert any("previewed [Image #1]" in message.text for message in preview.messages)
+
+
+def test_the_row_cap_bounds_a_pathological_journal_and_says_so(tmp_path, monkeypatch):
+    """F6: the byte ceiling does not bound the DECODES, so a row cap does.
+
+    Review round 1 measured 37-106 ms of this reader on a 132.5 MB journal whose
+    tail is a long run of bookkeeping rows, against 1.2-2.1 ms before the reader
+    existed. Both ceilings are checked at CHUNK boundaries, so the bound is "the
+    cap plus the rows of one chunk" — the fixture below is deliberately more than
+    one chunk (2.5 MB of 4 KB bookkeeping rows) with the only message at the very
+    top, so a walk that respected the cap cannot reach it.
+    """
+    monkeypatch.setattr("local_operator.session.saved_preview.PREVIEW_SCAN_ROWS", 200)
+    pad = "z" * 4096
+    entries = [message("m0", "an older turn")]
+    entries.extend(
+        TranscriptEntry(
+            f"k{index}",
+            0,
+            "custom",
+            {"custom_type": "frontend_state_checkpoint_v1", "details": {"state": pad}},
+        )
+        for index in range(600)
+    )
+    journal(tmp_path, entries)
+    assert (tmp_path / "transcript.jsonl").stat().st_size > (2 << 20)
+
+    result = read_saved_preview(tmp_path)
+
+    # Nothing displayable within the cap, so the answer is the honest excerpt —
+    # flagged, which is what the sidebar renders as "connect to load", never a
+    # silent empty pane.
+    assert result.messages == []
+    assert result.partial is True

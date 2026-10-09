@@ -20617,6 +20617,18 @@ class Session:
         all. One row per RUNTIME LIFE is the whole cost, against a per-turn row
         for a session a user is watching.
 
+        AND IT IS WRITTEN BY EVERY RUNTIME, not once per session (review round 1,
+        F1). The first revision skipped a journal that already carried a row its
+        session recognised, which fixed the N1 lowering but froze the row: after
+        one headless runtime the newest checkpoint stayed at that runtime's
+        reading — a cold open painted ``context_tokens: 51000`` while the journal's
+        own receipts said 121000 — and, because the reader must reach the newest
+        checkpoint row, the C3(b) bound decayed with every later runtime and was
+        gone entirely after a compaction (measured: 100% of a 5.08 MB journal read
+        again). The row is therefore written every time and MERGED over the row it
+        read (``frontend_state.closing_state_overrides``), so nothing is lowered
+        while what this runtime observed is current.
+
         WHY THE CLOCK IS HELD STILL. The row is appended with
         ``preserve_mtime=True``, so it does not move
         ``retention.session_activity`` — the one ranking clock the picker and
@@ -20636,21 +20648,14 @@ class Session:
           runtimes that only looked at a conversation, and a session a user
           merely opened must not gain a row for it (the same principle the cold
           viewer states: opening a terminal is not work).
-        * **A journal that already carries a checkpoint is left alone**, and this
-          gate is the one CI found rather than the one I designed
-          (``test_headless_turn_preserves_a_rich_frontend_checkpoint``): the
-          durable row is REPLACEMENT state, so a runtime that writes its own view
-          over a richer one can LOWER it — that test's TUI-era title and its
-          300.0 s of accrued duration went to "" and to a re-derived zero for a
-          headless turn whose store had already been handed the rich values.
-          Readers take the NEWEST row, so "anchor anyway" is not a trade, it is
-          the N1 defect (a scheduler turn must never lower the TUI's durable
-          state). A session that has one is bounded by it already, and the replay
-          cache makes its repeat cost free; a session that has none — the 15 of
-          the 40 largest real journals this method exists for — gets its anchor.
-          ``checkpoint_id`` is the cheap proof a row exists: it is set when a
-          checkpoint is RESTORED (``from_checkpoint``) and when one is written,
-          and by nothing else.
+        * **Nothing the durable row already holds richer is lowered.** Readers
+          take the NEWEST row, so this write is replacement state: the row it read
+          is merged UNDER this runtime's view field by field
+          (``frontend_state.closing_state_overrides`` — money and tokens take the
+          larger, a blank title or todo list never overwrites a set one, the
+          attached operator's ``active_duration_s`` survives a headless turn, and
+          identity fields stay this runtime's so a fork cannot inherit a parent's
+          children back).
         * **The write is bounded and best-effort**, like every other teardown
           transcript write: a wedged mount must not hang disposal, and a lost
           closing row costs one open the cost this method exists to remove —
@@ -20662,8 +20667,7 @@ class Session:
         transcript = getattr(self, "_transcript", None)
         if store is None or transcript is None:
             return
-        if store.state.checkpoint_id is not None:
-            return
+        self._merge_closing_state(store, transcript)
         try:
             await asyncio.wait_for(
                 store.checkpoint(transcript, preserve_mtime=True),
@@ -20671,6 +20675,56 @@ class Session:
             )
         except (Exception, asyncio.TimeoutError):  # noqa: BLE001 — teardown must proceed
             logger.warning("closing checkpoint did not land", exc_info=True)
+
+    def _merge_closing_state(self, store: Any, transcript: Any) -> None:
+        """Carry the durable row's richer fields into this runtime's state.
+
+        Reads the NEWEST checkpoint row through ``read_latest_custom_entry`` — a
+        byte scan of the journal's chunks, not a parse (measured 66 ms on the
+        118 MB reference journal) — and applies
+        ``frontend_state.closing_state_overrides`` through the store's own
+        ``mutate``, so the row that follows is current where this runtime observed
+        something newer and unchanged where the durable row was richer. Silent on
+        every failure: a status row is never worth failing a teardown for, and the
+        row that follows is this runtime's own view — the pre-merge behaviour.
+        """
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+            closing_state_overrides,
+        )
+        from local_operator.session.transcript import read_latest_custom_entry
+
+        try:
+            # THE TRANSCRIPT'S OWN DIRECTORY, not a path rebuilt from the config
+            # dir: they are the same thing for a session this process owns
+            # (``<config>/sessions/<id>``), but a session built on a transcript
+            # somewhere else — a relocated home, a test's tmp tree, a
+            # ``--session-dir`` run — writes its rows where its transcript is, and
+            # a lookup against the config path would then read a DIFFERENT journal
+            # (or none) and merge nothing. ``Transcript.directory`` is the writer's
+            # answer to "where does this session live", which is the only one that
+            # can be right.
+            directory = Path(getattr(transcript, "directory", "") or "")
+            if not directory:
+                directory = self._config_dir / "sessions" / self._session_id
+            entry = read_latest_custom_entry(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            if entry is None:
+                return
+            details = entry.payload.get("details") or {}
+            payload = details.get("state")
+            if not isinstance(payload, dict):
+                return
+            durable = FrontendSessionState.model_validate(payload)
+            overrides = closing_state_overrides(
+                store.state,
+                durable,
+                attached=bool(self._has_ui or store.has_subscribers),
+            )
+            if overrides:
+                store.mutate(**overrides)
+        except Exception:  # noqa: BLE001 — a merge is not worth failing a teardown for
+            logger.debug("closing checkpoint merge skipped", exc_info=True)
 
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.

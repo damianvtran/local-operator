@@ -127,6 +127,7 @@ from local_operator.session.protocol import (
 )
 from local_operator.session.replay_cache import (
     ColdReplay,
+    ReplayKey,
     cached_replay,
     load_cold_replay,
     publish_replay,
@@ -6122,6 +6123,7 @@ class AttachedSession:
                 key,
                 lambda: asyncio.to_thread(
                     self._cold_replay,
+                    key=key,
                     want_checkpoint=want_checkpoint,
                     through_id=through_id,
                     strict_cut=strict_cut,
@@ -6143,6 +6145,7 @@ class AttachedSession:
     def _cold_replay(
         self,
         *,
+        key: "ReplayKey | None",
         want_checkpoint: bool,
         through_id: str | None,
         strict_cut: bool,
@@ -6156,13 +6159,10 @@ class AttachedSession:
         directory = self._config_dir / "sessions" / self._session_id
         checkpoint_types = (FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()
         opportunistic = (SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()
-        key = replay_key(
-            directory,
-            through_id=through_id,
-            strict_cut=strict_cut,
-            checkpoint_types=checkpoint_types,
-            opportunistic_types=opportunistic,
-        )
+        # NO SECOND STAT (review round 1, F5): the key was taken by the caller
+        # before this read was scheduled, and taking it again here would only
+        # measure a different moment. What matters is the OTHER end of the read —
+        # see the re-check before publishing below.
         suffix = read_replay_suffix(
             directory,
             through_id=through_id,
@@ -6228,6 +6228,24 @@ class AttachedSession:
             "bytes_read": suffix.bytes_read,
         }
         if key is None:
+            return ColdReplay(messages=tuple(messages), retained=0, **values)
+        # RE-STAT AFTER THE READ, and publish only for the version still on disk.
+        # An append that lands mid-read leaves this answer describing the journal
+        # as it was when the read STARTED, which is the version ``key`` names — but
+        # ``_write_entries``' rollback (``os.truncate`` + a restored mtime for a
+        # bookkeeping batch) can bring that exact ``(ino, size, mtime_ns)`` back
+        # with different bytes, so an entry stored for it could be served over a
+        # journal it does not describe. One stat closes that: if the file moved on,
+        # the caller still gets this answer and nothing is cached under a key that
+        # no longer names it.
+        fresh = replay_key(
+            directory,
+            through_id=through_id,
+            strict_cut=strict_cut,
+            checkpoint_types=checkpoint_types,
+            opportunistic_types=opportunistic,
+        )
+        if fresh != key:
             return ColdReplay(messages=tuple(messages), retained=0, **values)
         return publish_replay(key, messages=messages, **values)
 

@@ -1878,3 +1878,27 @@ def test_set_pins_answers_what_the_reader_reports(tmp_path, monkeypatch) -> None
     assert table.set_pins("gone-1", True) is False
     assert json.loads((cfg / PINS_FILE).read_text()) == ["gone-1"]
     assert table.pins == ()
+
+
+def test_a_legacy_roster_above_the_old_ceiling_still_reaches_the_phone(tmp_path, monkeypatch):
+    """QA round 1 (Q1): the 32 MiB line lost a legacy roster on a 35.5 MB journal.
+
+    The shape: no sidecar, the roster's only row near the head, and a journal
+    larger than the old bound. Base served 4 subagent rows here; the 32 MiB gate
+    served 0. The lookup now finds its row by bytes (``find_row_for_custom_type``),
+    so the ceiling is a sanity bound far above every real journal and the answer
+    is the one every other reader gives.
+    """
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    _write_custom(directory, "subagent_roster", {"jobs": [{"id": "legacy"}], "records": []})
+    # More than the old 32 MiB ceiling, below the new sanity bound.
+    _write_turns_bulky(directory, 180, pad=100_000)
+    assert (directory / "transcript.jsonl").stat().st_size > 32 * 1024 * 1024
+    assert not (directory / "subagent-roster.v1.json").exists()
+
+    state = DurableFoldCache().load(directory)
+    assert state.latest_customs["subagent_roster"] == {"jobs": [{"id": "legacy"}], "records": []}

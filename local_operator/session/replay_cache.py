@@ -263,7 +263,16 @@ def publish_replay(key: ReplayKey, **values: Any) -> ColdReplay:
     """
     messages = tuple(values.pop("messages"))
     retained = 0
-    sized = retained_bytes(messages, REPLAY_CACHE_BYTES)
+    # THE WHOLE VALUE IS SIZED, not just its messages (review round 1, F4): the
+    # checkpoint dict is durable state and is not small — measured 0.3-1.4 MB per
+    # entry on four real journals, 10-34% of the entry — so accounting only the
+    # messages left the ceiling at 48 MiB PLUS up to eight unaccounted checkpoint
+    # dicts. The instrument walks dataclasses, dicts and containers, so one call
+    # over the parts that will be retained is the whole job.
+    sized = retained_bytes(
+        (messages, values.get("checkpoint"), values.get("checkpoints"), values.get("order")),
+        REPLAY_CACHE_BYTES,
+    )
     if sized is None:
         # Over budget on its own: hand the caller the value WITHOUT caching it,
         # so the answer is never affected by the bound.
@@ -274,15 +283,6 @@ def publish_replay(key: ReplayKey, **values: Any) -> ColdReplay:
         _REPLAY_CACHE.put(key, value)
         return value
     return ColdReplay(messages=messages, retained=retained, **values)
-
-
-def invalidate(directory: str | Path) -> None:
-    """Drop every cached replay for ``directory`` (any version, any cut)."""
-    target = str(Path(directory))
-    with _REPLAY_CACHE._lock:
-        for key in [key for key in _REPLAY_CACHE._entries if key.directory == target]:
-            entry = _REPLAY_CACHE._entries.pop(key)
-            _REPLAY_CACHE._bytes -= entry.retained
 
 
 async def load_cold_replay(
@@ -321,7 +321,6 @@ __all__ = [
     "REPLAY_CACHE_ENTRIES",
     "ReplayKey",
     "cached_replay",
-    "invalidate",
     "load_cold_replay",
     "publish_replay",
     "replay_cache",

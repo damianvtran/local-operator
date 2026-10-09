@@ -241,25 +241,23 @@ def test_the_checkpoint_type_is_bookkeeping_in_the_transcript_vocabulary():
 
 
 @pytest.mark.asyncio
-async def test_a_journal_that_already_carries_a_checkpoint_is_not_re_anchored(tmp_path):
-    """A closing row must never LOWER the durable state a richer row already holds.
+async def test_a_closing_row_never_lowers_the_durable_state_it_read(tmp_path):
+    """The N1 invariant, now that EVERY runtime writes a closing row.
 
-    Found by CI rather than by design (``test_headless_turn_preserves_a_rich_frontend_checkpoint``):
-    the durable row is REPLACEMENT state, so a runtime that writes its own view
-    over a richer one hands every reader — who takes the NEWEST row — the poorer
-    state. The gate is ``checkpoint_id``: set when a checkpoint is restored and
-    when one is written, and by nothing else, so it is the cheap proof that a row
-    exists. A session that has one is bounded by it already (and the replay cache
-    makes its repeat cost free).
+    This test used to pin the opposite mechanism — the first revision SKIPPED a
+    journal that already carried a row, which fixed the lowering and froze the row
+    (review round 1, F1: a cold open then painted the FIRST runtime's
+    ``context_tokens`` forever, and the read bound decayed with every later
+    runtime until a compaction took it back to BOF). The row is written every
+    time now and MERGED over the row it read, so the richer durable fields survive
+    the write: the title a TUI set, the spend, and the operator's (surface-
+    observed) active duration.
     """
     directory = tmp_path / "sess"
     transcript = Transcript(directory)
     await transcript.append_message(Message.user("prior work"))
-    # The durable row names THIS session (the transcript's directory), as a
-    # resume leaves it. A row naming another session is a FORK's, and the store
-    # rightly clears its ``checkpoint_id`` — see ``_inherited_identity_fixups``.
     rich = FrontendSessionState(
-        session_id="sess",
+        session_id="conv",
         epoch="tui-epoch",
         conversation_title="Real title",
         conversation_title_user_set=True,
@@ -275,10 +273,67 @@ async def test_a_journal_that_already_carries_a_checkpoint_is_not_re_anchored(tm
     finally:
         await session.dispose()
 
-    state = FrontendSessionState.model_validate(
-        Transcript(directory).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)["state"]
-    )
-    assert state.conversation_title == "Real title", "the closing row lowered the durable title"
+    restored = Transcript(directory).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert isinstance(restored, dict)
+    state = FrontendSessionState.model_validate(restored["state"])
+    assert len(checkpoint_rows(directory)) == 2, "the closing row must be written"
+    assert state.conversation_title == "Real title", "the closing row lowered the title"
     assert state.cumulative_parent_cost == 12.34
-    assert state.active_duration_s == 300.0
-    assert len(checkpoint_rows(directory)) == 1, "a second anchor was written anyway"
+    assert state.active_duration_s == 300.0, "a headless turn invented active duration"
+
+
+@pytest.mark.asyncio
+async def test_twelve_runtimes_and_a_compaction_keep_the_read_bounded(tmp_path):
+    """F1's other half, and the reason write-once had to go.
+
+    A closing row written ONCE and then skipped forever leaves the newest
+    checkpoint where the first runtime wrote it: the reader must reach it, so the
+    bound decays with every later runtime, and a compaction landing above it puts
+    the reader back at BOF (review round 1 measured `bytes_read` at 100% of a
+    5.08 MB journal after 12 runtimes, a compaction and 2 more). This is that
+    case, with the two things that matter pinned: the read stays bounded, and the
+    tokens the newest row carries are the LAST runtime's reading.
+
+    The turns are bulky on purpose — the read walks in 1 MiB chunks, so a journal
+    smaller than one chunk cannot show whether it was bounded.
+    """
+    directory = tmp_path / "sess"
+    last_tokens = 0
+    for turn in range(12):
+        session = make_session(directory)
+        try:
+            await session.prompt("x" * 100_000 + f" turn {turn}")
+            last_tokens = int(session.frontend_state.context_tokens or 0)
+        finally:
+            await session.dispose()
+
+    # A compaction that keeps only the recent rows — the shape a real pass leaves
+    # behind, and the one that lets the reader stop early.
+    transcript = Transcript(directory)
+    await transcript.append_compaction(
+        "summary of the early turns", transcript.entries()[-1].id, tokens_before=1000
+    )
+    for turn in range(2):
+        session = make_session(directory)
+        try:
+            await session.prompt("x" * 100_000 + f" post-compaction turn {turn}")
+            last_tokens = max(last_tokens, int(session.frontend_state.context_tokens or 0))
+        finally:
+            await session.dispose()
+
+    path = directory / "transcript.jsonl"
+    assert path.stat().st_size > (1 << 20), "the fixture must exceed one read chunk"
+    suffix = read_replay_suffix(directory, checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,))
+    assert suffix.bytes_read < path.stat().st_size, (
+        "the read reached the whole journal again: the newest checkpoint is not at " "the tail"
+    )
+    assert suffix.checkpoint is not None, "the newest row must carry the checkpoint"
+    # ``ReplaySuffix.checkpoint`` is the ROW's details — the same shape
+    # ``_restore_cold_details`` reads — so the state is the ``state`` key.
+    newest = FrontendSessionState.model_validate(suffix.checkpoint["state"])
+    rows = checkpoint_rows(directory)
+    assert len(rows) >= 2, "every runtime that ended a turn owes a row"
+    assert newest.context_tokens == last_tokens, (
+        "the newest row carries a stale context reading: "
+        f"{newest.context_tokens} != {last_tokens}"
+    )

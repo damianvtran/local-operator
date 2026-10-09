@@ -71,6 +71,7 @@ from local_operator.session.transcript import (
     TranscriptEntry,
     _entry_to_message,
     _journal_injection_ids,
+    find_row_for_custom_type,
     read_latest_custom_entry,
     read_replay_suffix,
 )
@@ -107,22 +108,22 @@ _ROSTER_SIDECAR_VERSION = 1
 #: Ceiling above which the fold will NOT go back into the journal for the roster
 #: when the window and the sidecar both came up empty.
 #:
-#: WHY A CEILING AT ALL. That lookup is ``read_latest_custom_entry``, bounded by
-#: the answer's DISTANCE FROM EOF and by nothing the caller can choose — correct
-#: for its own contract (a caller today always gets an answer) and expensive for
-#: a cold fold that asks it for a type which is usually ABSENT: measured 457 ms
-#: on a 118 MB journal with neither a sidecar nor a roster row, against a 20 ms
-#: window read and a 310 ms fold. Paying that per cold phone open would be the
-#: exact regression this module's window read exists to remove.
+#: WHY A CEILING AT ALL, AND WHY IT IS NO LONGER 32 MiB. QA round 1 (Q1) measured
+#: the previous 32 MiB line LOSING data: a 35.5 MB journal with no sidecar and its
+#: only ``subagent_roster`` row above the replay window served 0 subagent rows on
+#: this branch and 4 on main. The line existed because the lookup was
+#: ``read_latest_custom_entry``, whose cost is the ANSWER'S DISTANCE FROM EOF — a
+#: parse of every row it steps over, measured at 457 ms on a 118 MB journal with
+#: neither a sidecar nor a roster row.
 #:
-#: WHY 32 MiB. Below it the lookup is bounded by a file that small, so the scan
-#: costs what the whole-file parse it replaces costs (~5 ms/MB) and a legacy
-#: journal keeps its roster rows. Above it the roster comes from the sidecar,
-#: which is the roster's own store and the fresher of the two — the same
-#: precedence ``AttachedSession._restore_cold_subagents`` applies. The real store
-#: sits below the line: of the 40 largest real journals, every one WITHOUT a
-#: sidecar was at most 27.2 MB.
-_TRANSCRIPT_LOOKUP_MAX_BYTES = 32 * 1024 * 1024
+#: That lookup now finds its row by BYTES (``transcript.find_row_for_custom_type``,
+#: the same needle the anchor lane uses): it scans chunks backward for the string
+#: every row of the type carries and JSON-decodes only the candidate, measured at
+#: 66 ms for the whole 118 MB journal — 7x cheaper, and no longer proportional to
+#: how many rows it steps over. So the ceiling is now only a sanity bound against
+#: a pathological file, set far above every journal that exists here (the largest
+#: real one is 129 MB) rather than below a population that needs its roster.
+_TRANSCRIPT_LOOKUP_MAX_BYTES = 256 * 1024 * 1024
 
 #: Bound on cached durable folds, in sessions. One entry holds the replayed
 #: history plus the UNCAPPED render rows (the history endpoint serves the full
@@ -420,13 +421,17 @@ class DurableFoldCache:
         if roster is not None:
             latest_customs[ROSTER_CUSTOM_TYPE] = roster
         elif fingerprint.size <= _TRANSCRIPT_LOOKUP_MAX_BYTES:
-            # Only the ROSTER goes back into the journal, and only for a session
-            # small enough that the scan is bounded by the file it scans. It is
-            # the one tracked type with a consumer (``daemon._durable_projection``
-            # reads it to rebuild the child rows), and a session with no sidecar
-            # is a legacy one whose roster row sits near the head of the journal
-            # — written once, before the sidecar existed — so nothing nearer than
-            # a backward scan can answer it.
+            # Only the ROSTER goes back into the journal. It is the one tracked
+            # type with a consumer (``daemon._durable_projection`` reads it to
+            # rebuild the child rows), and a session with no sidecar is a legacy
+            # one whose roster row sits near the head of the journal — written
+            # once, before the sidecar existed — so nothing nearer than a
+            # backward scan can answer it. That scan is now a BYTE scan (see
+            # ``_TRANSCRIPT_LOOKUP_MAX_BYTES``), which is why the ceiling is a
+            # sanity bound rather than a population filter: QA round 1 (Q1) caught
+            # the 32 MiB line losing a legacy roster on a 35.5 MB journal, and a
+            # served roster is worth 66 ms of one-off scanning on the two journals
+            # out of this store's forty that have no sidecar at all.
             #
             # THE TODO SNAPSHOT DELIBERATELY DOES NOT, and that is a trade rather
             # than an oversight. It IS harvested from the window whenever the
@@ -629,6 +634,11 @@ class _CustomSnapshotEntry:
     inode: int
     size: int
     customs: dict[str, dict[str, Any]]
+    #: Which types this entry has actually looked for. A miss is only a miss for
+    #: a type that was SEARCHED: the reads are per-type now (see ``_scan``), so an
+    #: entry built for ``todo_snapshot`` says nothing about ``subagent_roster``
+    #: until that type is asked for too.
+    scanned: set[str] = field(default_factory=set)
 
 
 class CustomSnapshotCache:
@@ -664,41 +674,62 @@ class CustomSnapshotCache:
         key = str(directory)
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and entry.inode == stat.st_ino and entry.size == stat.st_size:
+            if (
+                entry is not None
+                and entry.inode == stat.st_ino
+                and entry.size == stat.st_size
+                and custom_type in entry.scanned
+            ):
                 self._entries.move_to_end(key)
                 return entry.customs.get(custom_type)
-        customs = self._scan(path)
+        details = self._scan(directory, custom_type)
         with self._lock:
+            held = self._entries.get(key)
+            if held is not None and held.inode == stat.st_ino and held.size == stat.st_size:
+                # Another thread asked for a different type of the same version
+                # while this one scanned: keep its answer.
+                held.customs.update(details)
+                held.scanned.add(custom_type)
+                self._entries.move_to_end(key)
+                return held.customs.get(custom_type)
             self._entries[key] = _CustomSnapshotEntry(
-                inode=stat.st_ino, size=stat.st_size, customs=customs
+                inode=stat.st_ino,
+                size=stat.st_size,
+                customs=details,
+                scanned={custom_type},
             )
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
-        return customs.get(custom_type)
+        return details.get(custom_type)
 
     @staticmethod
-    def _scan(path: Path) -> dict[str, dict[str, Any]]:
-        """One forward pass keeping the newest details per tracked type.
+    def _scan(directory: Path, custom_type: str) -> dict[str, dict[str, Any]]:
+        """The newest details for ONE tracked type, found by BYTES.
 
-        Streaming and retaining nothing but the answer dicts: the scan must
-        not materialize a child's whole transcript just to find one snapshot.
+        WHY NOT A FORWARD PARSE (review round 1, F2). This used to stream the
+        whole transcript, JSON-decoding every row to keep the newest snapshot of
+        each tracked type in one pass. That was cheap enough while the roster it
+        served had one record; once the roster came from its sidecar (all 255 of
+        them), ``_durable_projection`` called this per child and ``_scan`` measured
+        **2.15 s** of the phone's 3.31 s cold projection — a 2-3x regression on the
+        first open of a real session, against a 300 ms target.
+
+        The question is still "what does the newest row of this type say", so it
+        is answered by the same needle reader the fold's roster fallback uses:
+        chunked backward over the file, decoding only the candidate rows. Measured
+        against the parse on the same children: ~7x cheaper, and proportional to
+        BYTES rather than to rows.
+
+        A missing row is still a real absence: the needle is exact for this
+        format's spelling (``transcript.find_row_for_custom_type`` documents that
+        assumption and keeps the parse walk as the authority for a type it cannot
+        spell), and this reader's callers ask for types whose absence is normal.
         """
-        customs: dict[str, dict[str, Any]] = {}
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    entry = TranscriptEntry.from_json(line)
-                    if entry is None or entry.type != ENTRY_CUSTOM:
-                        continue
-                    custom_type = entry.payload.get("custom_type")
-                    if custom_type in _TRACKED_CUSTOM_TYPES:
-                        customs[str(custom_type)] = dict(entry.payload.get("details", {}))
-        except OSError:
-            pass
-        return customs
+        located = find_row_for_custom_type(directory, custom_type)
+        if located is None:
+            return {}
+        return {custom_type: dict(located[1].payload.get("details", {}))}
 
 
 def _read_roster_sidecar(directory: Path) -> dict[str, Any] | None:

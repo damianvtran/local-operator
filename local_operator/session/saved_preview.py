@@ -102,6 +102,19 @@ from local_operator.session.transcript import (
 #: clears the worst real case with room to spare and still bounds the walk.
 PREVIEW_SCAN_BYTES = 32 * 1024 * 1024
 
+#: Rows the walk may parse, whichever comes first with the byte ceiling.
+#:
+#: The byte ceiling alone is not a bound on the WORK: a journal whose tail is a
+#: long run of bookkeeping rows costs one JSON decode per row, and review round 1
+#: (F6) measured 37-106 ms on a 132.5 MB journal against 1.2-2.1 ms before this
+#: reader existed. 40,000 rows is far above the newest 120 display rows of every
+#: journal measured here (the 40 largest real journals reach them within a few
+#: hundred rows) and far below the tens of millions a 132 MB journal can hold, so
+#: it binds only on the pathological shape — and it binds HONESTLY: the preview
+#: comes back as the excerpt it is, with ``partial`` set, rather than paying an
+#: unbounded decode loop on the sidebar's first-paint path.
+PREVIEW_SCAN_ROWS = 40_000
+
 
 @dataclass(frozen=True)
 class SavedPreview:
@@ -134,6 +147,7 @@ def read_saved_preview(directory: Path) -> SavedPreview:
         boundary_seen = False
         at_start = False
         bytes_walked = 0
+        rows_parsed = 0
         for chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
             # Priced from the chunk last consumed, exactly as
             # ``read_replay_suffix`` prices its own read: what matters is the
@@ -142,6 +156,7 @@ def read_saved_preview(directory: Path) -> SavedPreview:
             for raw in lines:
                 if not raw.strip():
                     continue
+                rows_parsed += 1
                 entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
                 if entry is None:
                     # Malformed rows are dropped individually, as every other
@@ -161,7 +176,7 @@ def read_saved_preview(directory: Path) -> SavedPreview:
             replayable = not boundary_seen or first_kept is None or first_kept in seen_ids
             if at_start or (display_rows >= DISPLAY_HISTORY_MESSAGES and replayable):
                 break
-            if bytes_walked >= PREVIEW_SCAN_BYTES:
+            if bytes_walked >= PREVIEW_SCAN_BYTES or rows_parsed >= PREVIEW_SCAN_ROWS:
                 break
     if not rows:
         # A journal whose every row is unparseable, or a scan that hit the
