@@ -250,7 +250,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "secret": 188,
     "send": 697,
     "sessions": 802,
-    "task": 488,
+    "task": 484,
     "team": 489,
     "team_delete": 90,
     "todo": 524,
@@ -272,7 +272,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: to).
 #: 878/672 -> 815/639 (2026-10-08, context diet): the same collapse and
 #: intent-description cut as the canonical table above.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 639}
+#: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
+#: the model_choice note is gone again (revert of the nested tier-choice gate).
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 635}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
