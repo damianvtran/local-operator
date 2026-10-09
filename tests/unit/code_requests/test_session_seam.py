@@ -146,10 +146,13 @@ async def test_the_acted_seam_kicks_a_refresh_pass(tmp_path: Path, monkeypatch) 
 
     scheduled: dict[str, object] = {}
 
-    def fake_schedule(config_dir, session_id, rows, *, keys=None, force=False):
+    def fake_schedule(config_dir, session_id, rows, *, keys=None, force=False, chain=False):
         scheduled["config_dir"] = str(config_dir)
         scheduled["session_id"] = session_id
         scheduled["keys"] = list(keys or [])
+        # N6: the seam has no cached read to fall back on, so a joined kick
+        # must chain a follow-on pass rather than be lost.
+        scheduled["chain"] = chain
         return True
 
     monkeypatch.setattr(cr_service, "schedule_session_refresh", fake_schedule)
@@ -170,4 +173,5 @@ async def test_the_acted_seam_kicks_a_refresh_pass(tmp_path: Path, monkeypatch) 
             break
         await asyncio.sleep(0.01)
     assert scheduled.get("keys") == [REF.key], scheduled
+    assert scheduled.get("chain") is True, scheduled
     assert scheduled.get("session_id") == SESSION

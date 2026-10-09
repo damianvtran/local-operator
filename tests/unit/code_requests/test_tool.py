@@ -295,3 +295,36 @@ async def test_show_promotes_a_qualified_ref_when_the_pull_exists(tmp_path: Path
     promoted = seen["ref"]
     assert getattr(promoted, "full", False) is True
     assert seen["session_id"] == SESSION, "the dirty-mark arm needs the session id"
+
+
+@pytest.mark.asyncio
+async def test_the_tool_renders_the_hint_and_cooling_lines(tmp_path: Path) -> None:
+    """Q15: the model must see the two fields the route already carries."""
+    # A detect-and-link host: never fetched, per-forge hint, no cooling.
+    result = await code_requests_tool.execute_code_requests(
+        "c12",
+        {"op": "show", "ref": "https://codeberg.org/o/r/pulls/3"},
+        None,
+        None,
+        _context(tmp_path),
+    )
+    assert not result.is_error
+    assert "hint: Link only — this host isn't tracked yet." in result.text
+    assert "cooling:" not in result.text
+
+    # A cooling host: the sentence matches the route's wording verbatim.
+    cache.note_rate_limited("github.com", retry_after=120.0)
+    try:
+        result = await code_requests_tool.execute_code_requests(
+            "c13",
+            {"op": "show", "ref": "https://github.com/o/r/pull/7"},
+            None,
+            None,
+            _context(tmp_path),
+        )
+    finally:
+        cache._reset_for_tests()
+    assert not result.is_error
+    assert "cooling: this host is rate-limited until " in result.text
+    assert "nothing was fetched yet" in result.text
+    assert "hint: Link only — sign in with the gh CLI to track this one." in result.text
