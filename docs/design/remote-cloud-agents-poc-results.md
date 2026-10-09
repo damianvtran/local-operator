@@ -211,11 +211,13 @@ OK: no RUNNING or PENDING tasks in lop-poc; 27 tagged lop-poc resources at 2026-
 (a re-read at 2026-10-08T03:02:18Z returned the same 27 — the count moves with record ageing,
 caveat 2 below.)
 
-**Not closed by this run.** Item 6 moves from **computed** to **measured, not reconciled** (Test 6
-below): the Cost Explorer lag blocking it has cleared for the 2026-10-07 billing day, so the
-billed figures now exist — but the tag-filtered query the criterion names still cannot work in
-this account and the usable slice does not reconcile within 20%, so the verdict is a PARTIAL, not
-a PASS, and this run's 109.353 s is still not inside the measured day. Item 7 stays **NOT RUN** — the stack is still up and teardown still awaits
+**Not closed by this run.** Item 6 is now **measured with its service proxy reconciled** (Test 6
+below): the Cost Explorer lag has cleared for both billed days, so the settled figures exist — the
+two-day Fargate gross prices at −1.7% against the model's own 40-task estimate, inside the
+criterion's 20% band. The tag-filtered query the criterion names still cannot work in this
+account, so the verdict remains a PARTIAL, not a PASS. This run's
+109.353 s bills into the 2026-10-08 bucket, which now carries 0.0194 task-hours (≈70 s) and is
+still `Estimated: true`, so that bucket may not yet hold the whole run. Item 7 stays **NOT RUN** — the stack is still up and teardown still awaits
 approval. Nothing here relaxes the isolation findings, the `ps` residual (SEC-11) or the
 security caveats in the divergences and the design doc's §7.
 
