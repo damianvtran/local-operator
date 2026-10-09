@@ -27,7 +27,7 @@ Nothing here raises. A price is never worth a broken frame.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 
 def _resolve_for_paint(provider: str, model_id: str):
@@ -164,7 +164,10 @@ def cost_summary(
 
 
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
-    """What one subagent job has spent so far, or ``None`` when unpriceable.
+    """What one subagent job's OWN calls have cost, or ``None`` when unpriceable.
+
+    Direct spend only. A row on screen shows :func:`job_subtree_cost`, which adds
+    the job's descendants; this stays for callers that want the job alone.
 
     ``job`` is duck-typed: anything carrying ``usage`` and ``model_label``, which
     in production is an :class:`~local_operator.harness.jobs.AsyncJob`. A job with
@@ -203,3 +206,80 @@ def job_cost(job: Any, *, default_model_label: str | None = None) -> float | Non
     except Exception:  # noqa: BLE001 — an unreadable job is not a render error
         return None
     return turn_cost(label or default_model_label or "", usage)
+
+
+class SubtreeComponents(NamedTuple):
+    """One row's gathered, not yet priced, subtree spend.
+
+    Split from pricing so the two halves can run where each is safe: gathering
+    reads the live job manager and must stay on the loop that owns it, pricing is
+    pure arithmetic over detached values and may run on the panel's worker thread.
+    """
+
+    components: list[Any]
+    #: False when the live child branch could not be read, so the figure built
+    #: from these components is a lower bound and must be marked as one.
+    complete: bool = True
+
+
+def subtree_components(job: Any) -> SubtreeComponents:
+    """Gather what one task row's whole subtree has spent, from the ledger's own rollup.
+
+    ``harness.jobs.job_subtree_components`` is the single definition of "a row's
+    subtree" (own calls, settled descendants, the LIVE child manager), shared with
+    ``AsyncJobManager.accounting_components`` — this module only prices it. Never
+    raises. Must run on the loop that owns the job manager (see that function).
+    """
+    from local_operator.harness.jobs import job_subtree_summary
+
+    try:
+        return SubtreeComponents(job_subtree_summary(job))
+    except Exception:  # noqa: BLE001 — the live branch failed; keep the settled part
+        try:
+            return SubtreeComponents(job_subtree_summary(job, live=False), False)
+        except Exception:  # noqa: BLE001
+            return SubtreeComponents([], False)
+
+
+def subtree_cost(
+    subtree: SubtreeComponents, *, default_model_label: str | None = None
+) -> tuple[float | None, bool]:
+    """``(known spend, any part unknown)`` for a gathered subtree.
+
+    Each component is priced at ITS OWN serving identity (a Sonnet child under a
+    Radient parent costs Sonnet rates; a provider receipt beats a table estimate),
+    through :func:`cost_summary`, so ``None`` still means "no price anywhere" and
+    never ``0.0``, and a priced sibling survives an unpriced one as a lower bound.
+    ``default_model_label`` only prices a component that carries no identity of
+    its own (a child that inherited the parent's spec and recorded none).
+    """
+    total, unknown = cost_summary(subtree.components, model_label=default_model_label or "")
+    return total, unknown or not subtree.complete
+
+
+def job_subtree_cost(
+    job: Any, *, default_model_label: str | None = None
+) -> tuple[float | None, bool]:
+    """What one task row's whole subtree has spent: ``(cost, lower_bound)``.
+
+    The figure a ROW shows, so that a parent's row and the session footer agree:
+    own spend plus every descendant, settled or still running. Same non-blocking
+    contract as :func:`job_cost` (paint-safe pricing, no I/O); loop-only for the
+    reason :func:`subtree_components` gives.
+    """
+    return subtree_cost(subtree_components(job), default_model_label=default_model_label)
+
+
+def carry_floor(prior: float | None, cost: float | None, lower_bound: bool) -> float | None:
+    """The figure to store for a row whose subtree is only partly priceable this tick.
+
+    A row's spend only grows, and a price can be briefly unknown (a cold memo
+    answers ``None`` for one tick, see :func:`job_cost`). Storing the priced part
+    of a lower bound would make the number dip and recover; keeping the larger of
+    it and what was already shown does not. ``None`` means "nothing to store".
+    """
+    if cost is None:
+        return None
+    if lower_bound and prior is not None:
+        return max(prior, cost)
+    return cost
