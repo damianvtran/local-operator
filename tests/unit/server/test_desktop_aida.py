@@ -6,13 +6,15 @@ isolated config root, and pins each clause the UI was written against:
 ``GET`` never creates, ``open``/``greet`` ensure, ``greet`` is idempotent,
 ``pause``/``resume`` move the flag, a disabled install answers ``enabled: false``
 on GET and 409 ``aida_disabled`` on POST, a store lock held for the whole wait
-refuses with the TUI's own sentence (QA-O1), and the read payload carries her
-configured ``name`` (the renameable-chief-of-staff contract, 2026-09-28).
+refuses with 409 ``aida_store_busy`` carrying the TUI's own sentence (QA-O1), and
+the read payload carries her configured ``name`` (the renameable-chief-of-staff
+contract, 2026-09-28).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -147,65 +149,92 @@ async def test_a_resume_refused_by_a_held_store_lock_says_so(
 
 
 @pytest.mark.asyncio
-async def test_a_lock_held_for_the_whole_wait_answers_the_tuis_sentence(
+async def test_a_lock_held_for_the_whole_wait_refuses_with_the_tuis_sentence(
     client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """QA-O1: a refused op answers the TUI's sentence — not a 500, not a copy.
+    """QA-O1: a refused op is 409 + a code carrying the TUI's own sentence.
 
     ``pause``/``resume`` take the aida store lock as their first act, so a peer
     that holds it for the whole wait raises ``WakeLockBusy`` out of both: the
     route used to let that reach FastAPI as a 500, an internal-error page for a
-    miss the operator clears by trying again. "Not a 500" is not enough to hold
-    the fix — the refusal has to read on the desktop as it already reads in the
-    terminal. So this cell drives the ROUTE and the TUI's own ``/aida`` handler
-    against the SAME held lock and asserts the two sentences are equal byte for
-    byte; a re-worded copy on either side fails here.
+    miss the operator clears by trying again. A 200 receipt is not the answer
+    either — the desktop client reads only ``envelope.result`` on a 2xx
+    (``local-operator-ui``'s ``desktop-api.ts::desktopResult``), so it would paint
+    the ACTION's success copy with nothing carried out — so the refusal keeps
+    this module's declared shape (409 + ``code``) and the sentence is the SAME
+    one the TUI's own handler renders for an identical refusal.
 
-    The hold is a real peer take of the real lock (``flock``: a second
-    descriptor contends even inside one process, and ``tests/unit/wakes/
-    test_lock`` drives the cross-interpreter case). The retry WINDOW is
-    shortened to a single attempt on purpose: its length is that file's subject,
-    the refusal is this cell's. The TUI half is the real handler on an
-    UNCOMPOSED app whose notice sink is a recorder — the refusal arm's only
-    collaborator — because booting Textual would test Textual, not the sentence.
+    Both directions are checked against the STATE rather than the status alone,
+    because "not a 500" would also be satisfied by a body claiming an op that
+    never ran: with the lock held, a refused ``pause`` leaves her unpaused and a
+    refused ``resume`` leaves her paused — each the opposite of what that same op
+    reports on success, so the two cannot be confused.
+
+    The hold is a real peer take of the real lock (``flock``: a second descriptor
+    contends even inside one process, and ``tests/unit/wakes/test_lock`` drives
+    the cross-interpreter case). The retry WINDOW is shortened to a single
+    attempt on purpose: its length is that file's subject, the refusal is this
+    cell's. The TUI half is the real handler on an UNCOMPOSED app whose notice
+    sink is a recorder — the refusal arm's only collaborator — because booting
+    Textual would test Textual, not the sentence.
     """
     from local_operator.aida import state as aida_state
     from local_operator.tui.app import OperatorApp
 
-    # A single attempt instead of ``LOCK_WAIT_S`` of retries: same lock, same
-    # refusal, same sentence — the peer below still holds a real flock.
     real_locked = aida_state.locked
     monkeypatch.setattr(aida_state, "locked", lambda root, **_kw: real_locked(root, timeout_s=0.0))
 
+    async def paused_now(http: httpx.AsyncClient) -> bool:
+        """``paused`` as the renderer reads it — the GET, never the refusal body."""
+        state = await http.get("/v1/desktop/aida")
+        return bool(state.json()["result"]["paused"])
+
+    notices: list[str] = []
+    app = OperatorApp.__new__(OperatorApp)
+    setattr(app, "_system_notice", lambda body, kind="info": notices.append(body))
+    refused: dict[str, Any] = {}
+
     async with client as http:
         await http.post("/v1/desktop/aida", json={"op": "open"})
-        await http.post("/v1/desktop/aida", json={"op": "pause"})
 
+        # 1) A REFUSED PAUSE, while she is UNPAUSED: success reports paused.
         peer = aida_state.wake_lock(isolated_root)
         peer.acquire()
         try:
-            resume_reply = await http.post("/v1/desktop/aida", json={"op": "resume"})
-            pause_reply = await http.post("/v1/desktop/aida", json={"op": "pause"})
-            notices: list[str] = []
-            app = OperatorApp.__new__(OperatorApp)
-            setattr(app, "_system_notice", lambda body, kind="info": notices.append(body))
-            for word, reply in (("resume", resume_reply), ("pause", pause_reply)):
-                notices.clear()
-                await app._aida_control(word, lambda body, kind="info": None)
-                assert reply.status_code == 200, reply.text
-                assert len(notices) == 1, notices
-                assert reply.json()["message"] == notices[0], (word, reply.json(), notices)
-                # THE OP DID NOT RUN, and the receipt may not imply otherwise: a
-                # refused resume leaves her paused, and no live owner carries
-                # the op out on her behalf.
-                assert reply.json()["result"]["paused"] is True, reply.json()
-                assert reply.json()["result"]["held"] is False, reply.json()
+            refused["pause"] = await http.post("/v1/desktop/aida", json={"op": "pause"})
+            assert await paused_now(http) is False, "a refused pause must not pause her"
         finally:
             peer.release()
 
-    refused = resume_reply.json()["message"]
-    assert "could not resume Aida: " in refused, refused
-    assert "Try again in a moment" in refused, refused
+        # The op that DOES run, so the resume direction has an opposite to hold.
+        await http.post("/v1/desktop/aida", json={"op": "pause"})
+        assert await paused_now(http) is True
+
+        # 2) A REFUSED RESUME, while she IS PAUSED: success reports active.
+        peer = aida_state.wake_lock(isolated_root)
+        peer.acquire()
+        try:
+            refused["resume"] = await http.post("/v1/desktop/aida", json={"op": "resume"})
+            assert await paused_now(http) is True, "a refused resume must not resume her"
+            for word in ("pause", "resume"):
+                notices.clear()
+                await app._aida_control(word, lambda body, kind="info": None)
+                assert len(notices) == 1, notices
+                reply = refused[word]
+                assert reply.status_code == 409, reply.text
+                # ``detail`` is compared WHOLE: the code is what the client
+                # classifies on and the message is what it renders.
+                assert reply.json()["detail"] == {
+                    "code": "aida_store_busy",
+                    "message": notices[0],
+                }, (word, reply.json(), notices)
+        finally:
+            peer.release()
+
+    sentence = refused["resume"].json()["detail"]["message"]
+    assert sentence.startswith("could not resume Aida: "), sentence
+    assert "Try again in a moment" in sentence, sentence
+    assert refused["pause"].json()["detail"]["message"].startswith("could not pause Aida: ")
 
 
 @pytest.mark.asyncio
