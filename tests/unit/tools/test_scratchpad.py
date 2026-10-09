@@ -23,6 +23,7 @@ from local_operator import scratchpad as scratchpad_module
 from local_operator.scratchpad import (
     SCRATCHPAD_DIRNAME,
     SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT,
     SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_NAMESPACE,
@@ -872,7 +873,9 @@ def test_scratchpad_refusal_is_the_shared_clause_composed_for_the_card(tmp_path:
     path about what was refused. Only the tail and the address differ, because
     one sentence is drawn for a cropped card row and the other lands in a
     refusal (design review round 1, D1: finding first, short tail, pad-relative
-    subject)."""
+    subject) — and since round 2 the audit's two arms tail differently from
+    each other too (D1-r2: a refused tree to a git worktree, a refused archive
+    to `bash mktemp -d`), so each arm's tail is pinned with the finding here."""
     root = _pad(tmp_path)
     write_segment = (
         f"'build' is a build or dependency directory, not scratch. {SCRATCHPAD_ELSEWHERE}"
@@ -884,7 +887,8 @@ def test_scratchpad_refusal_is_the_shared_clause_composed_for_the_card(tmp_path:
         f"'build' is a build or dependency directory — {SCRATCHPAD_ELSEWHERE_SHORT} (build/x.md)."
     )
     audit_suffix = (
-        f"'.o' is a compiled, archived or model artefact — {SCRATCHPAD_ELSEWHERE_SHORT} (art.o)."
+        f"'.o' is a compiled, archived or model artefact — "
+        f"{SCRATCHPAD_ELSEWHERE_ARTEFACT_SHORT} (art.o)."
     )
 
     assert scratchpad_refusal(root / "build" / "x.md", root) == audit_segment

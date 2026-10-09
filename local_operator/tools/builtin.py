@@ -6957,17 +6957,22 @@ def _temp_scratch_line(
     the clause is visible only when the whole line fits anyway.
 
     KNOWN LIMIT, recorded here because this is the one builder all the advisories
-    share (design review round 1, D1). The line is rendered in a TUI card whose
-    lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
-    behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
-    so the REMEDY is what gets clipped below ~52 columns, and the whole remedy
-    needs ~73. That bound is not this line's: the ``write``/``edit`` line has the
-    same prologue, so the identical edge already applied to it before this
-    change, which is why the wording (approved in #1374, with a cell-pinning
-    test) is not re-opened for it. Two things keep it a display matter only: the
-    MODEL is unaffected — the tool result carries the full line, and the card
-    clips a rendering of it, never the text the model reads — and the fix, if
-    the edge ever matters, is a shorter prologue rather than a shorter remedy.
+    share (design review round 1, D1; refreshed when the card's carve-out
+    landed, review round 2). The line is rendered in a TUI card whose lane body
+    budget is ``width - 8`` cells, and the remedy starts at cell 38 — behind the
+    fixed ``[scratch] `` tag and ``Your own scratch belongs in `` — so the
+    REMEDY is what used to get clipped below ~52 columns, and the whole remedy
+    needs ~73. The carve-out retired that cut for this family: a ``[scratch]``-led
+    line now WRAPS under the card's advisory budget — ``REASON_MAX_ROWS`` rows
+    and ``REASON_MAX_CELLS`` cells, the reason block's own pair, measured at
+    three rows for the shipped nudge sentence at 80 columns — and below the
+    width where the budget binds the card ends the block with its ``… N more
+    lines`` marker, never a mid-sentence crop. Two things keep any remaining
+    narrow-width case a display matter only: the MODEL is unaffected — the tool
+    result carries the full line, and the card paints a rendering of it, never
+    the text the model reads — and the fix, if the edge ever matters, is a
+    shorter prologue rather than a shorter remedy. The wording itself (approved
+    in #1374, with a cell-pinning test) is not re-opened by any of this.
     """
     subject = (
         f"writing directly under {resolved} puts scratch in {trap}"
@@ -7450,7 +7455,17 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
       skipped because the copy failed there and created nothing — and a
       derived child that is itself a refused SEGMENT-shaped leaf stays silent
       exactly like the bare ``mkdir`` above: a copied tree and a file of the
-      same name are indistinguishable, and the file is allowed.
+      same name are indistinguishable, and the file is allowed. The derivation
+      judges the NAME the copy would create, not what the copy did create
+      (review round 2, R2-3): source existence is deliberately not checked — a
+      stat per source on every pad-naming command is latency the mention gate
+      exists to avoid — so a copy that FAILED (a missing source, an unmatched
+      glob) still reports the refused name it would have created; the GUIDE
+      says the same in one clause. A destination that cannot be judged a
+      directory, or a derived child that cannot be resolved (EACCES,
+      ENAMETOOLONG, a symlink loop on 3.12/3.13), is SKIPPED: the MISS
+      direction, never a crash and never a line about an unjudgeable name
+      (review round 2, R2-1).
     * BUDGET arm: ONE bounded walk (``scratchpad.scratchpad_footprint``) — over
       budget or past the entry cap, one line. At most ONE line from THIS AUDIT
       per result: a shape hit returns without walking, because it attributes
@@ -7479,13 +7494,34 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
         clause = scratchpad_refusal(target, pad)
         if clause is not None:
             return f"[scratch] {clause}"
-        if not sources or not (target == pad or target.is_dir()):
+        if not sources:
+            continue
+        try:
+            directory = target == pad or target.is_dir()
+        except (OSError, RuntimeError):
+            # A destination this scan cannot judge is a MISS, never a crash:
+            # ``is_dir`` re-raises PermissionError/ENAMETOOLONG on 3.12/3.13
+            # (it returns False on 3.14), and an uncaught raise would settle
+            # the whole bash result as a tool failure — losing the command's
+            # exit code and streams over an advisory that exists to REPORT
+            # (review round 2, R2-1).
+            continue
+        if not directory:
             continue
         for source in sources:
             name = Path(source).name
             if name in ("", ".", ".."):
                 continue
-            clause = scratchpad_refusal((target / name).resolve(), pad)
+            try:
+                derived = (target / name).resolve()
+            except (OSError, RuntimeError):
+                # The same guard for the derived child: ``resolve`` raises
+                # RuntimeError for a symlink loop on 3.12/3.13, and an
+                # unreadable component raises OSError — skip that source, the
+                # MISS direction, never a line about a name it could not read
+                # (review round 2, R2-1).
+                continue
+            clause = scratchpad_refusal(derived, pad)
             if clause is not None:
                 return f"[scratch] {clause}"
     return _pad_budget_line(pad)
@@ -7652,6 +7688,11 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
     asked by ``scratchpad.scratchpad_refusal`` (which owns the symlinked-root
     second attempt), so this helper stays pure spelling and its name promises
     nothing about containment.
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``:
+    the caller skips the candidate, a MISS, never a crash (review round 2,
+    R2-1).
     """
     text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     text = _expand_scratchpad_spellings(text, pad)
@@ -7661,7 +7702,7 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
         return None
     try:
         return Path(text.rstrip("/") or "/").resolve()
-    except OSError:  # pragma: no cover - a path that cannot be resolved
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
         return None
 
 
@@ -7859,6 +7900,11 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     What is left alone is a RELATIVE path and anything carrying a scheme: neither
     names a temp-root target, and the scan has no cwd to resolve the relative one
     against.
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``:
+    the caller moves on, a MISS, never a crash of the result being nudged
+    (review round 2, R2-1).
     """
     text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
@@ -7867,7 +7913,7 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
         return None
     try:
         resolved = Path(text.rstrip("/") or "/").resolve()
-    except OSError:  # pragma: no cover - a path that cannot be resolved
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
         return None
     return resolved if resolved.parent in roots else None
 
@@ -7896,6 +7942,11 @@ def _scratch_dir_target(
     (an absolute path handed to a subagent) is the one they both catch. The GUIDE
     states this, because it is the copy an agent reads before choosing where to
     write (round 1, R4).
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``
+    for the same reason its sibling refuses one: the caller moves on, a MISS,
+    never a crash (review round 2, R2-1).
     """
     text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
@@ -7904,7 +7955,7 @@ def _scratch_dir_target(
         return None
     try:
         resolved = Path(text.rstrip("/") or "/").resolve()
-    except OSError:  # pragma: no cover - a path that cannot be resolved
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
         return None
     return resolved if _in_scratch_named_dir(resolved, scratchpad_root, temp_roots) else None
 

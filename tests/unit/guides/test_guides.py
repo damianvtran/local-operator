@@ -630,7 +630,11 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     line only. The precise trigger and the channel split are pinned together
     with the claim (design review round 1, D4): "pad-touching" read as every
     command, and the reader who sees no line on an alias spelling or a
-    Python-side creation must not take that for a clean run.
+    Python-side creation must not take that for a clean run. Review round 2
+    (R2-3) added the over-read's other half to the copy clause: the check
+    reads the COMMAND, not the disk, so a copy that failed still reports the
+    name it would have created — pinned so the sentence cannot be quietly
+    re-tightened into a promise the layer does not keep.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -649,6 +653,7 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
     assert "a command that names the pad" in collapsed
     assert "copied it in" in collapsed
+    assert "reads the command, not the disk" in collapsed
     assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
     assert "it cannot undo" in collapsed
 
