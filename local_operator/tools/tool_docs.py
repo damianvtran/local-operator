@@ -192,6 +192,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "options do not have to be exhaustive.\n"
             "- Ask everything you need in ONE call; large option lists and "
             "calibration all live in the field descriptions below.\n"
+            "- Timeouts: a late answer still reaches you and says it was late. "
+            "An urgent ask's timeout notice tells you to resolve the question "
+            "without the operator (a `task` subagent); do that rather than "
+            "waiting. A second ask with identical question text, or a second "
+            "open secret question for a key already asked for, is refused.\n"
             "- Credentials: set ``secret=true`` on that question (options "
             "empty, id is the env-var name). The value is stored in session "
             "memory and injected into ``bash``; you will only ever see the key "
@@ -378,11 +383,56 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "call that prints the summary — not ten `read` calls."
         ),
     ),
+    # Wire cut (context diet, deferred-tools PR): the ``op`` field's per-op
+    # prose. The enum literals stay on the wire and are self-describing.
     "todo": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="init",
+                blurb="Replace the whole list, optionally grouped into named phases "
+                "(pass `phases`).",
+            ),
+            ToolDocOp(
+                op="add",
+                blurb="Append newly discovered work without rewriting the list, "
+                "optionally into a named `phase`.",
+            ),
+            ToolDocOp(op="done", blurb="Mark items finished."),
+            ToolDocOp(
+                op="block",
+                blurb="Mark items that cannot proceed until a user decides or an "
+                "external service answers (requires 'reason').",
+            ),
+            ToolDocOp(op="drop", blurb="Abandon items that are no longer needed."),
+            ToolDocOp(op="view", blurb="Show the list."),
+        ),
         notes=(
             "`block` a pending item with a reason naming the decision or "
             "service it is waiting on; `add` a mid-turn requirement instead of "
             "rewriting the list."
+        ),
+    ),
+    # -- send ---------------------------------------------------------------
+    # Wire cut (context diet, deferred-tools PR): the description's restatement
+    # of the addressing rules (kept once, on the ``target`` field) and the
+    # mesh/fallback detail.
+    "send": ToolDocNotes(
+        notes=(
+            "Moved off the wire (context diet):\n"
+            "\n"
+            "- Delivery: by default the message lands in the peer's mailbox AND "
+            "wakes the peer if it is idle, so an idle peer responds right away; "
+            "`wake=False` is the quiet mailbox drop (read on the peer's next "
+            "turn), and `now=True` steers mid-turn (opens a turn if the peer is "
+            "idle). The result says how the peer received it.\n"
+            "- Finding a peer: the `sessions` tool lists what is running "
+            "(`lop sessions` is the fallback; `--all` adds stored ones), and "
+            "`target` matches them by name.\n"
+            "- A session with no message sent in it yet (a fresh `/new`) is not a "
+            "recipient: sends to it are refused.\n"
+            "- With `peer`, the target addresses a session on that device (mesh): "
+            "the send drives a turn there and returns the owner's reply; "
+            "`wake`/`now`/`patience`/`model` are local-only and refused there."
         ),
     ),
     # -- project ------------------------------------------------------------
@@ -405,7 +455,28 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "the freshness clock; a near-identical line is NEW — it appends. "
             "Write a line only for real movement.\n"
             "- Deleting a project is its own tool, ``project_delete`` (write "
-            "tier); delete artifacts are never touched."
+            "tier); delete artifacts are never touched.\n"
+            "\n"
+            "Field rules moved off the wire (context diet):\n"
+            "\n"
+            "- ``''`` clears an optional text/date field (owner, team, title, "
+            "start_date, target_date, completed_at, milestone_target_date).\n"
+            "- Dates are ISO YYYY-MM-DD; ``target_date`` is never before "
+            "``start_date``.\n"
+            "- ``status='done'`` needs every milestone complete (or "
+            "``force_done=true``) and stamps ``completed_at`` unless given.\n"
+            "- ``progress``: one dated line (markdown); a NEW line appends and "
+            "moves the freshness clock.\n"
+            "- ``estimate``: > 0 and <= 1000, fractional allowed; "
+            "``estimate_unit`` is 'points' (default) or 'days'.\n"
+            "- ``milestones``: create stores the list (<= 20, names unique); "
+            "update replaces the WHOLE list and is refused unless "
+            "``replace_milestones=true``. Use op='milestone' for one, "
+            "add-or-update by name; ``milestone_completed`` true sets "
+            "``completed_at`` to today, false clears it.\n"
+            "- ``attach``: local file paths (screenshots/evidence) stored on "
+            "the history entry the NEW progress line appends; <= 10 files, "
+            "<= 5 MB each."
         ),
     ),
     # -- task ---------------------------------------------------------------
@@ -761,6 +832,7 @@ def _url_name(url: str) -> str:
 
 def make_tool_doc_resolver(
     inventory: Callable[[], Sequence[AgentTool]],
+    on_tool_read: Callable[[str], str | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``tool://`` adapter for the ``read`` tool.
 
@@ -776,15 +848,29 @@ def make_tool_doc_resolver(
     A hidden tool is omitted from LISTINGS but still served on a direct hit —
     hidden tools remain callable (``prompts_api``), and a reader who knows the
     name is asking precisely because it is not listed.
+
+    ``on_tool_read(name)`` runs after a SUCCESSFUL doc hit and may return a
+    line to append. The session uses it to publish a deferred tool's schema
+    (``tools/deferral.py``): reading a tool's reference is the explicit
+    request for it, the way ``mcp://server/tool`` is for an MCP tool. A hook
+    that raises appends nothing — the doc still answers.
     """
 
     def resolver(url: str) -> str | None:
         if not url.startswith(TOOL_DOC_SCHEME):
             return None
         try:
-            return _resolve_tool_url(url, inventory)
+            doc = _resolve_tool_url(url, inventory)
         except Exception as exc:  # noqa: BLE001 — the resolver contract is "never raises"
             return f"Tool reference unavailable: {exc}"
+        name = _url_name(url)
+        if on_tool_read is None or not name or not any(t.name == name for t in inventory()):
+            return doc
+        try:
+            note = on_tool_read(name)
+        except Exception:  # noqa: BLE001 — a hook failure must not cost the doc
+            return doc
+        return f"{doc}\n\n{note}" if note else doc
 
     return resolver
 
@@ -874,6 +960,8 @@ def unwrap_tool_docs(value: object) -> Callable[[str], str | None] | None:
 def chain_tool_docs(
     base: Callable[[str], str | None] | None,
     inventory: Callable[[], Sequence[AgentTool]],
+    *,
+    on_tool_read: Callable[[str], str | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Put the ``tool://`` resolver AHEAD of ``base``; every other scheme
     reaches ``base`` exactly as before, and with no base configured the
@@ -885,6 +973,7 @@ def chain_tool_docs(
     or subagent, each with its own live inventory — answers ``tool://`` without
     touching the factory chain or the subagent wiring. Returns a
     :class:`ToolDocsLink` rather than a bare closure so the identity-sensitive
-    parity guard can recognise it (see the class docstring).
+    parity guard can recognise it (see the class docstring). ``on_tool_read``:
+    see :func:`make_tool_doc_resolver`.
     """
-    return ToolDocsLink(base, make_tool_doc_resolver(inventory))
+    return ToolDocsLink(base, make_tool_doc_resolver(inventory, on_tool_read))

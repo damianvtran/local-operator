@@ -3492,6 +3492,11 @@ def _make_system_blocks_provider(
             channel,
             tuple((tool.name, tool.description) for tool in tools),
         )
+        # ``deferred_tools`` is deliberately NOT passed here and NOT part of
+        # ``key``: this render is the CACHED head only, and the session
+        # re-renders block 1 against its own deferral state every turn
+        # (``Session._reconcile_tool_inventory``). Threading it in would put
+        # deferral state into a cache key that has no way to see an activation.
         if key == cached_key:
             return list(cached_blocks)
         cached_blocks = build_system_blocks(

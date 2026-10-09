@@ -458,6 +458,11 @@ jobs:
       - name: Check start-of-session context budget
         run: python scripts/bench_context_budget.py --verbose
 
+      # The SUBAGENT arm: children are ~93% of sessions and carry their own
+      # deferral set (tools/deferral.py), so they get their own ratchet.
+      - name: Check subagent start context budget
+        run: python scripts/bench_context_budget.py --verbose --kind child
+
   filesystem-boundaries-windows:
     needs: [changes]
     if: >-

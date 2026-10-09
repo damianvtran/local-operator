@@ -27,7 +27,7 @@ well-defined.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from importlib.resources import files
 from typing import Any, Literal, TypeAlias
 
@@ -385,6 +385,7 @@ def render_tool_inventory_block(
     *,
     host_has_browser: bool | None = None,
     host_has_console: bool | None = None,
+    deferred: Collection[str] = (),
 ) -> str:
     """The complete "## Available tools" block for ``tools``.
 
@@ -412,8 +413,16 @@ def render_tool_inventory_block(
     questions about the tool list, never about visibility: a hidden tool is
     still callable, and telling the model a capability does not exist while one
     answers would be worse than saying nothing.
+
+    ``deferred`` names the tools whose schema is NOT in the request's tools
+    array until activated (``tools/deferral.py``). They leave the bullet list
+    and appear instead on ONE "schema on demand" line with a purpose phrase
+    each, because a bare name with no schema behind it gives the model no
+    reason to reach for the tool. The line lists the DEFERRABLE set, never
+    the still-unpublished remainder, so an activation does not move this
+    block (and costs no ``[session-state]`` delta).
     """
-    block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools)}"
+    block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools, deferred)}"
     # Membership, not visibility, for both capabilities; see the docstring.
     if host_has_browser is None:
         host_has_browser = _host_browser_backend_available()
@@ -428,7 +437,7 @@ def render_tool_inventory_block(
     return block
 
 
-def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
+def _render_tool_inventory(tools: Sequence[AgentTool], deferred: Collection[str] = ()) -> str:
     """One line per visible tool: the NAME only, deliberately.
 
     NAMES ONLY — do not "restore" the descriptions here. This block used to
@@ -450,6 +459,13 @@ def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     ``ask`` run to several hundred tokens each — which is why duplicating them
     was expensive rather than merely redundant.
 
+    ``deferred`` tools are the ONE sanctioned exception to the names-only rule,
+    and the reason is the rule's own premise: a name earns its line because the
+    ``tools`` array already carries the description beside it, which is NOT true
+    of a deferred tool — its schema is absent, so a bare name would give the
+    model no reason to reach for it. They therefore get a purpose PHRASE on the
+    single "schema on demand" line (``tools/deferral.py``), never a description.
+
     Filtered on ``hidden`` ALONE. While a line was ``- {name}: {description}``
     a description-less tool was rightly skipped, since its line would have
     trailed a bare colon; now that the line is just the name there is nothing
@@ -457,7 +473,18 @@ def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     list that says what exists. MCP servers may legitimately omit a
     description, so this is reachable rather than theoretical.
     """
-    return "\n".join(f"- {tool.name}" for tool in tools if not tool.hidden)
+    held = {tool.name for tool in tools}
+    deferred_held = [name for name in deferred if name in held]
+    listed = "\n".join(
+        f"- {tool.name}" for tool in tools if not tool.hidden and tool.name not in deferred_held
+    )
+    if not deferred_held:
+        return listed
+    # Lazy import: the deferral module is a leaf, but this keeps the prompt
+    # builder's import surface what it was for every caller passing nothing.
+    from local_operator.tools.deferral import render_deferred_tools_line
+
+    return f"{listed}\n\n{render_deferred_tools_line(deferred_held)}"
 
 
 #: Appended to the tool inventory when the session has no browser tool. The
@@ -895,6 +922,7 @@ def build_system_blocks(
     channel: str | None = None,
     host_has_browser: bool | None = None,
     host_has_console: bool | None = None,
+    deferred_tools: Collection[str] = (),
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -1065,8 +1093,15 @@ def build_system_blocks(
             "direct instruction in the conversation still wins.\n\n"
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
+    # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
+    # re-renders this block against its own deferral state
+    # (``Session._reconcile_tool_inventory``), so only a caller with no session
+    # behind it (the context-budget benchmark) needs to pass it here.
     inventory = render_tool_inventory_block(
-        tools, host_has_browser=host_has_browser, host_has_console=host_has_console
+        tools,
+        host_has_browser=host_has_browser,
+        host_has_console=host_has_console,
+        deferred=deferred_tools,
     )
     env_block = f"Today is {date_str}."
     if env_details:

@@ -3462,13 +3462,14 @@ class AgentLoop:
 
         errors = validate_tool_arguments(tool, args, call.raw_arguments)
         if errors:
+            text = self._with_deferred_hint(
+                "Invalid arguments: " + "; ".join(errors), tool.name, config
+            )
             return _PlannedCall(
                 call=call,
                 tool=tool,
                 failure=self._synthetic_result(
-                    call,
-                    "Invalid arguments: " + "; ".join(errors),
-                    details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                    call, text, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
                 ),
             )
         # A tool's OWN plan-time refusal, after the schema check: the ordering
@@ -3521,6 +3522,37 @@ class AgentLoop:
                 # barrier; a failed optimization must never create a race.
                 logger.debug("tool resource identity failed for %s", call.name, exc_info=True)
         return _PlannedCall(call=call, tool=tool, args=args, intent=intent, resources=resources)
+
+    @classmethod
+    def _with_deferred_hint(cls, text: str, name: str, config: LoopConfig) -> str:
+        """Point a MODEL fault at ``tool://<name>`` when the schema was withheld.
+
+        A DEFERRED tool (see ``tools/deferral.py``) was called without its schema
+        having been sent, so the model guessed the shape. Name the door to the
+        real one — the host publishes the schema from the next turn on the
+        strength of the same failure. No-op for a published schema, or when the
+        text already carries the pointer.
+        """
+        if cls._schema_was_published(name, config) or f"tool://{name}" in text:
+            return text
+        return text + f". Its schema was not in your tool list: read tool://{name}"
+
+    @staticmethod
+    def _schema_was_published(name: str, config: LoopConfig) -> bool:
+        """Whether ``name``'s schema is in the array this turn advertised.
+
+        ``True`` when the host publishes no separate array (``get_tools`` unset:
+        the array IS ``context.tools``) or the read fails — the hint this gates
+        is advice, so an unknown answer says nothing rather than something
+        wrong. Reading ``get_tools`` here is free on the session host: planning
+        runs after the turn's first provider call, which latched the array.
+        """
+        if config.get_tools is None:
+            return True
+        try:
+            return any(tool.name == name for tool in config.get_tools())
+        except Exception:  # noqa: BLE001 — advice must never fail a call
+            return True
 
     async def _runner_result(
         self,
@@ -3984,6 +4016,23 @@ class AgentLoop:
             # fact here keeps every later presenter from timing its own paint.
             if duration_s is not None:
                 result.duration_s = max(0.0, duration_s)
+            # THE SECOND CALL-CLASS THAT CAN REFUSE A DEFERRED CALL, and the one
+            # ``_plan_call`` cannot see: a tool whose OWN pydantic model rejects
+            # the arguments (``extra="forbid"``, an enum, a constrained int)
+            # returns an ``invalid_arguments`` result from its BODY, so the
+            # plan-time hint never ran and the model got no pointer to a schema
+            # it was never sent (QA round 1, Q2). Park is where every
+            # model-emitted call's result passes exactly once — dispatched,
+            # refused, denied or aborted — which is why the append lives here
+            # rather than being repeated in each tool.
+            if (
+                item.tool is not None
+                and result.is_error
+                and (result.details or {}).get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+            ):
+                hinted = self._with_deferred_hint(result.text, item.tool.name, config)
+                if hinted != result.text:
+                    result.content = [*result.content, TextContent(text=hinted[len(result.text) :])]
             results_by_slot[slot] = result
             # A call that never STARTED never gets an end. Planning failures —
             # an unknown tool, or a duplicate id whose twin won the slot — are
@@ -4970,12 +5019,29 @@ def validate_tool_arguments(
         return []
     errors: list[str] = []
     properties = schema.get("properties", {}) or {}
-    for name in schema.get("required", []) or []:
+    required = schema.get("required", []) or []
+    for name in required:
         if name not in arguments:
             errors.append(f"missing required argument '{name}'")
     for name, value in arguments.items():
         prop_schema = properties.get(name)
         if not isinstance(prop_schema, dict):
+            continue
+        if name in tool.optional_null_unions:
+            # A property ``tools.registry.collapse_optional_nulls`` rewrote from
+            # ``anyOf: [T, null]``. Base semantics are restored here rather than
+            # the collapsed type being enforced: the union shape is what this
+            # loop has always read as "not mine to check" (no top-level
+            # ``type``), and several tools ship coercers that accept forms this
+            # collapsed type would refuse — ``hub``'s ``to`` takes a bare job id
+            # or its JSON, ``jobs``' ``job_id`` takes a number. Enforcing it
+            # refused those calls before the tool ever ran (review round 1,
+            # MAJOR-1). The tool's own params model is the gate.
+            #
+            # SCOPED TO MARKED PROPERTIES, deliberately: an unmarked optional
+            # property is a schema this harness did not rewrite (an MCP server's
+            # own), so it keeps the base treatment, including the error that
+            # carries the deferred-tool hint (review round 1, MINOR-1).
             continue
         expected = prop_schema.get("type")
         if expected is None:

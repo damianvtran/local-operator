@@ -98,33 +98,19 @@ class ProjectParams(BaseModel):
             f"(<= {DESCRIPTION_MAX} chars)."
         ),
     )
-    owner: str | None = Field(
-        default=None, description="create/update: who owns the stream; '' clears it."
-    )
-    team: str | None = Field(
-        default=None, description="create/update: the team managing it; '' clears it."
-    )
+    owner: str | None = Field(default=None, description="create/update: owner.")
+    team: str | None = Field(default=None, description="create/update: managing team.")
     title: str | None = Field(
         default=None,
-        description=(
-            "create/update: short display name (``name`` stays the addressing "
-            "key); '' clears it."
-        ),
+        description="create/update: display name (`name` stays the key).",
     )
     status: ProjectStatus | None = Field(
         default=None,
-        description=(
-            "create/update: 'done' needs every milestone complete (or "
-            "force_done=true) and stamps completed_at unless given."
-        ),
+        description="create/update: 'done' needs milestones complete or force_done.",
     )
     progress: str | None = Field(
         default=None,
-        description=(
-            "update: one dated line (markdown), not a transcript; a NEW line "
-            "appends and moves the freshness clock (an identical re-send is a "
-            "refresh — prefer op='refresh')."
-        ),
+        description="update: one dated line, not a transcript; nothing moved: op='refresh'.",
     )
     tags: list[str] | None = Field(
         default=None,
@@ -133,61 +119,44 @@ class ProjectParams(BaseModel):
     session_id: str | None = Field(
         default=None, description="link/unlink: defaults to THIS session."
     )
-    start_date: str | None = Field(
-        default=None, description="create/update: ISO YYYY-MM-DD; '' clears it."
-    )
+    start_date: str | None = Field(default=None, description="create/update: YYYY-MM-DD.")
     target_date: str | None = Field(
         default=None,
-        description="create/update: ISO YYYY-MM-DD, never before start_date; '' clears it.",
+        description="create/update: YYYY-MM-DD, not before start_date.",
     )
     completed_at: str | None = Field(
         default=None,
-        description="create/update: ISO YYYY-MM-DD the work finished; '' clears it.",
+        description="create/update: YYYY-MM-DD the work finished.",
     )
-    estimate: float | None = Field(
-        default=None, description="create/update: > 0 and <= 1000 (fractional allowed)."
-    )
+    estimate: float | None = Field(default=None, description="create/update: > 0, <= 1000.")
     estimate_unit: Literal["points", "days"] | None = Field(
-        default=None, description="create/update: 'points' (default) or 'days'."
+        default=None, description="create/update."
     )
     milestones: list[ProjectMilestone] | None = Field(
         default=None,
-        description=(
-            "create: the list to store (<= 20, names unique). update: replaces "
-            "the WHOLE list unless replace_milestones=true; use op='milestone' "
-            "for one."
-        ),
+        description="create; update needs replace_milestones. One: op='milestone'.",
     )
     replace_milestones: bool = Field(
         default=False,
-        description=(
-            "update: pass true to DELIBERATELY replace the whole milestones "
-            "list; supplying 'milestones' without it is refused (use "
-            "op='milestone' for one)."
-        ),
+        description="update: true to replace the WHOLE milestones list.",
     )
     force_done: bool = Field(
         default=False,
-        description="create/update: close a 'done' status although milestones are incomplete.",
+        description="create/update: allow 'done' with open milestones.",
     )
-    milestone: str | None = Field(
-        default=None, description="milestone: its name (add-or-update by name)."
-    )
+    milestone: str | None = Field(default=None, description="milestone: name (add-or-update).")
     milestone_target_date: str | None = Field(
         default=None,
-        description="milestone: ISO YYYY-MM-DD; '' clears it.",
+        description="milestone: YYYY-MM-DD.",
     )
     milestone_completed: bool | None = Field(
         default=None,
-        description="milestone: True sets completed_at to today, False clears it.",
+        description="milestone: true = done today, false clears.",
     )
     remove: bool = Field(default=False, description="milestone: remove the named milestone.")
     attach: list[str] | None = Field(
         default=None,
-        description=(
-            "update: local file paths (screenshots/evidence) stored on the history "
-            "entry the NEW progress line appends; <= 10 files, <= 5 MB each."
-        ),
+        description="update: evidence file paths for the new progress line.",
     )
     history: int | None = Field(
         default=None,

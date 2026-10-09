@@ -127,6 +127,7 @@ def _consumer_defaults() -> dict[str, object]:
         SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
     )
+    from local_operator.tools.deferral import DEFAULT_TOOL_DEFERRAL
     from local_operator.tools.query_budget import (
         QUERY_BUDGET_ENABLED_DEFAULT,
         QUERY_BUDGET_SECONDS_DEFAULT,
@@ -188,6 +189,7 @@ def _consumer_defaults() -> dict[str, object]:
         # the reader in tools/builtin.py, so this mapping is what stops the
         # registry default and the code default drifting.
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        "tools.defer": DEFAULT_TOOL_DEFERRAL,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The three query_budget keys, whose consumer constants live in
