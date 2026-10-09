@@ -3546,6 +3546,26 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     )
 
 
+@router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
+async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
+    """The assembled HTML document of one stored supplement component, as ``{html}``.
+
+    A C0 STUB: it answers 404 for every well-formed request so the contract (path, digest
+    shape, JSON-not-``text/html`` reply) is frozen and lane C2 can fill it in without a
+    route-table change. The real route (``docs/design/turn-supplements.md`` §2.7) resolves
+    the blob through the attachment store, hands it to
+    ``supplements.document.assemble_document`` and returns ``{html}`` -- JSON, never a
+    navigable ``text/html`` URL, because no host may point a frame at a URL (§4.1) -- with
+    409 ``attachment_on_peer`` passed through for a digest held by another device.
+
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the attachment route
+    beside it: a non-matching path is a 422 before any handler code runs.
+    """
+    raise HTTPException(
+        404, {"code": "supplement_unavailable", "message": "Highlights are not available yet."}
+    )
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/messages", response_model=CRUDResponse[MessageAdmission]
 )
