@@ -305,7 +305,9 @@ async def test_a_session_gate_suppresses_a_non_material_change(
             await asyncio.sleep(0)
 
         clock[0] += 70_000  # past the interval plus the scheduler's jitter
-        watch.write_text("A\nB\nC\n", encoding="utf-8")
+        # An EDIT, not an append: a pure addition skips the gate by design
+        # (``is_pure_addition``), so only a changed line proves this plumbing.
+        watch.write_text("A\nC\n", encoding="utf-8")
         await session._monitors.pump(now_ms=clock[0] + 5_000)
         for _ in range(30):
             await asyncio.sleep(0)
