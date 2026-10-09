@@ -131,7 +131,19 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     recorder = _Recorder()
     handle = image_rungs.CancelHandle()
     progress: list[tuple[str, dict[str, Any]]] = []
-    async with _client(_radient_handler(recorder)) as client:
+    async with _client(
+        _radient_handler(
+            recorder,
+            statuses=[
+                {"status": "IN_QUEUE", "queue_position": 2},
+                {
+                    "status": "IN_PROGRESS",
+                    "logs": [{"message": "step 1 of 4", "timestamp": 1700000000}],
+                },
+                {"status": "COMPLETED"},
+            ],
+        )
+    ) as client:
         result = await image_rungs.run_radient(
             prompt="a cat",
             base_url="https://hub.test",
@@ -196,7 +208,27 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     }, "flat passthrough, nothing invented"
 
     stages = [details["stage"] for _, details in progress]
-    assert "queued" in stages and "downloading" in stages
+    assert "queued" in stages and "in_progress" in stages
+    assert (
+        "downloading" not in stages
+    ), "the download phase folds into in_progress (Q7 canonical vocabulary)"
+    # The canonical field set (Q7 wire scope) rides EVERY update; a value no
+    # provider supplied is an honest None, never a synthesized stand-in.
+    canonical = {"stage", "queue_position", "progress_fraction", "log_lines", "error", "error_type"}
+    assert all(canonical <= set(details) for _, details in progress)
+    assert all(
+        details["progress_fraction"] is None for _, details in progress
+    ), "no provider reports a fraction; None, never synthesized"
+    assert all(
+        details["error"] is None and details["error_type"] is None for _, details in progress
+    )
+    queued_update = next(details for _, details in progress if details["stage"] == "queued")
+    assert queued_update["queue_position"] == 2
+    assert queued_update["log_lines"] is None, "no logs on that payload -> null, not []"
+    running_update = next(details for _, details in progress if details["stage"] == "in_progress")
+    assert running_update["log_lines"] == [
+        {"message": "step 1 of 4", "timestamp": 1700000000}
+    ], "the provider's logs list passes through verbatim"
     assert all(details["provider"] == "radient" for _, details in progress)
     # Terminal: nothing left for a cancel to do.
     assert handle.provider is None

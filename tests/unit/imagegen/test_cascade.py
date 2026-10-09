@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -128,8 +129,13 @@ async def test_a_failed_rung_fails_forward(monkeypatch: pytest.MonkeyPatch, tmp_
         {ImageRoute.RADIENT: failure, ImageRoute.FAL: _result("fal-ai/flux/dev")}
     )
     monkeypatch.setattr(cascade, "_run_route", fake)
+    updates: list[tuple[str, dict[str, Any]]] = []
 
-    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+    outcome = await cascade.run_image_cascade(
+        prompt="a cat",
+        config_dir=tmp_path,
+        emit=lambda text, details: updates.append((text, details)),
+    )
 
     assert calls == [ImageRoute.RADIENT, ImageRoute.FAL]
     assert outcome.route == ImageRoute.FAL
@@ -138,6 +144,17 @@ async def test_a_failed_rung_fails_forward(monkeypatch: pytest.MonkeyPatch, tmp_
     assert first.reason_class == "insufficient_credits"
     assert first.status_code == 402
     assert outcome.attempts[1].outcome == "ok"
+    # The failure update rides the SAME classification as the attempt beside
+    # it (Q7: "map sensibly alongside attempts[].reason_class; don't
+    # duplicate/contradict") — and no canonical stage names a mid-walk
+    # failure, so the pair carries the semantics alone.
+    assert len(updates) == 1
+    text, details = updates[0]
+    assert text == "Generating via Radient: failed — out of credits"
+    assert details["error"] == "out of credits"
+    assert details["error_type"] == first.reason_class == "insufficient_credits"
+    assert details["stage"] is None
+    assert details["provider"] == "radient"
 
 
 @pytest.mark.asyncio
@@ -169,9 +186,14 @@ async def test_all_rungs_failed_carries_every_attempt(
         }
     )
     monkeypatch.setattr(cascade, "_run_route", fake)
+    updates: list[tuple[str, dict[str, Any]]] = []
 
     with pytest.raises(cascade.ImageGenerationUnavailable) as caught:
-        await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+        await cascade.run_image_cascade(
+            prompt="a cat",
+            config_dir=tmp_path,
+            emit=lambda text, details: updates.append((text, details)),
+        )
 
     exc = caught.value
     assert calls == [ImageRoute.RADIENT, ImageRoute.FAL, ImageRoute.OPENAI]
@@ -180,6 +202,11 @@ async def test_all_rungs_failed_carries_every_attempt(
     assert "Radient: r down" in text
     assert "FAL: f down" in text
     assert "OpenAI: o down" in text
+    # One failure update per failed rung, each carrying EXACTLY the attempt's
+    # classification and message — the pair can never drift from the record.
+    assert [(d["error_type"], d["error"]) for _, d in updates] == [
+        (attempt.reason_class, attempt.message) for attempt in exc.attempts
+    ]
 
 
 @pytest.mark.asyncio
