@@ -258,6 +258,10 @@ def test_json_keeps_its_old_keys_and_gains_per_class_objects(store: Path, capsys
     assert payload["parent"]["removed"] and payload["delegated"]["enabled"] is True
     assert [c["session"] for c in payload["delegated"]["removed"]] == ["kid-old-0001"]
     assert payload["delegated"]["max_age_hours"] == 48
+    # F3: ONE population, every directory once — the old sum added the parent
+    # class to the delegated pass's whole-store count (18 + 19 = 37 here; 15 +
+    # 18 = 33 in the review's probe). Asserts the VALUE, not just the key.
+    assert payload["scanned"] == _count(store) == 19
 
 
 def test_parent_limits_with_the_switch_off_refuse_even_though_delegated_is_on(
@@ -277,3 +281,56 @@ def test_a_force_run_with_the_delegated_switch_off_still_honours_force(store: Pa
     assert (store / "sessions" / "kid-old-0001").exists()
     assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
     assert not (store / "sessions" / "kid-old-0001").exists()
+
+
+# -- a class that will not run reads "would remove" (F1) ----------------------
+
+
+def test_a_real_run_with_the_parent_switch_off_previews_the_parent_rows(
+    store: Path, capsys: Any
+) -> None:
+    """F1: parent off + delegated on — the parent rows are a PREVIEW, and the
+    listing must say so ("would remove" + the off-note), not promise them."""
+    _config(store, enabled=False, remove_empty=True)
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section = out.split("== Delegated work")[0]
+    assert "note: session.cleanup.enabled is off" in parent_section
+    assert "this is a preview only" in parent_section
+    assert "would remove 3" in parent_section
+    assert "will remove" not in parent_section
+    assert "removed      kid-old-0001" in out
+    assert not (store / "sessions" / "kid-old-0001").exists()
+    assert (store / "sessions" / "e00").exists(), "the parent class was not run"
+
+
+def test_a_real_run_with_the_delegated_switch_off_previews_its_rows(
+    store: Path, capsys: Any
+) -> None:
+    """The mirror: delegated off + parent on."""
+    _config(store, enabled=True, remove_empty=True, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section, delegated_section = out.split("== Delegated work")
+    assert "will remove 3" in parent_section
+    assert "note: delegated cleanup is off in config; this is a preview only" in delegated_section
+    assert "would remove kid-old-0001" in delegated_section
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "the delegated class was not run"
+    assert not (store / "sessions" / "e00").exists(), "the parent class did run"
+
+
+def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, capsys: Any) -> None:
+    """F1's probe: delegated off with rows to show and nothing removable in the
+    running class used to print "will remove 3" and then "nothing to remove"."""
+    _config(store, enabled=True, max_sessions=999, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "nothing to remove" in out
+    assert "would remove kid-old-0001" in out
+    assert "note: delegated cleanup is off in config; this is a preview only" in out
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists()

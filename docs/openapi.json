@@ -625,6 +625,28 @@
         }
       }
     },
+    "/v1/desktop/delegated-cleanup-notice/ack": {
+      "post": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Ack Delegated Cleanup Notice",
+        "description": "Acknowledge the one-time delegated-cleanup notice, so it is never served again.\n\nThe write half of the pair whose read half rides ``GET /v1/desktop/sessions``\n(which only PEEKS: every list read \u2014 the app's own attach and auth probes\namong them \u2014 must not consume a once-per-store notice). The renderer calls\nthis after it has shown the band. Idempotent: acknowledging twice, an\nalready-acknowledged record, or no record at all all answer\n``{\"acknowledged\": true}`` \u2014 the state the caller asked for, the sibling\npin/archive convention; a client that needs the store's own answer re-reads\nthe listing, where the notice is simply gone. A store this process cannot\nwrite logs and the notice repeats rather than erroring.",
+        "operationId": "ack_delegated_cleanup_notice_v1_desktop_delegated_cleanup_notice_ack_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_dict_str__Any__"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/sessions": {
       "get": {
         "tags": [

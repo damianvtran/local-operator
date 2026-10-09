@@ -82,7 +82,12 @@ THE ONE-TIME NOTICE
 ``sessions/.delegated-retention.json`` counts what has been removed and records
 whether the user was told. The first pass that removes anything sets
 ``first_removal_at``; ONE viewer announces it and flips ``notice_acknowledged``;
-every later removal is silent (the jsonl log keeps the record). It is a file
+every later removal is silent (the jsonl log keeps the record). The TUI
+consumes it on show (``take_unannounced_delegated_notice``); the desktop
+renderer acknowledges it explicitly (``acknowledge_delegated_notice``), because
+its list route is polled by many readers — the app's own attach and auth probes
+among them — so a read must only PEEK (``peek_unannounced_delegated_notice``;
+the UI PR's round-1 review). It is a file
 separate from ``last-cleanup.json`` on purpose: that record is re-armed by
 every removing pass of the PARENT class, and reusing it would announce each
 hourly delegated sweep.
@@ -762,8 +767,23 @@ def run_delegated_pass(
     freed = 0
     recorded = 0
     in_batch = 0
+    refused = 0
     while position < len(todo):
         if should_stop is not None and should_stop():
+            break
+        if deadline is not None and time.monotonic() > deadline and refused >= batch_size:
+            # THE ONE WALK THE BATCH GATE CANNOT BOUND, bounded (review F2). A
+            # batch boundary is ``batch_size`` SUCCESSFUL removals, so a pass
+            # whose removals keep failing — a foreign/read-only store, persistent
+            # EACCES — never reached one, and walked the whole candidate list
+            # with the deadline never consulted. A full batch of REFUSED attempts
+            # is the same evidence in the failure direction: once it exists the
+            # deadline can end the pass, reporting the backlog for the drain to
+            # come back to. (A walk of KEPT candidates deliberately stays
+            # governed by the batch gate alone: ending every pass at the same
+            # head-of-queue keeps would stall the drain, the failure the
+            # removal-counting batch exists to prevent.)
+            result.budget_exhausted = True
             break
         if not dry_run and in_batch >= batch_size:
             # A BATCH IS ``batch_size`` REMOVALS, not ``batch_size`` candidates
@@ -772,9 +792,10 @@ def run_delegated_pass(
             # that stays active), so counting examined rows let a handful of
             # permanent keeps at the head of the queue consume every batch and the
             # drain removed nothing, pass after pass (seen in the drain evidence).
-            # Counting removals also gives the progress guarantee: a pass that has
-            # a removable candidate removes at least ``batch_size`` of them before
-            # the budget can end it, however small the budget.
+            # Counting removals also gives the progress guarantee: a pass that
+            # can complete a batch of removals does so before the budget can end
+            # it, however small the budget (the top-of-loop refusal window is the
+            # only earlier exit, review F2).
             if len(result.removed) > recorded:
                 _record_progress(
                     sessions_dir,
@@ -849,6 +870,7 @@ def run_delegated_pass(
         except OSError as exc:
             logger.warning("session cleanup: cannot remove %s: %s", cand.path.name, exc)
             result.errors += 1
+            refused += 1
             continue
         if done:
             freed += size
@@ -858,6 +880,10 @@ def run_delegated_pass(
             _forget_monitor_entry(config_dir, cand.path.name)
             if removal_pause_s > 0:
                 time.sleep(removal_pause_s)
+        else:
+            # A refusal (unmarked/foreign store, symlink, EACCES class; the
+            # remover logged its reason): evidence toward the top-of-loop window.
+            refused += 1
     if not dry_run and len(result.removed) > recorded:
         _record_progress(
             sessions_dir,
@@ -954,19 +980,13 @@ def _record_progress(
     _write_record(sessions_dir / STATE_NAME, state)
 
 
-def take_unannounced_delegated_notice(
-    sessions_dir: Path, *, runtime_pid: int | None = None, defer_to_writer: bool = True
-) -> dict[str, Any] | None:
-    """The progress record if no viewer has announced it yet, marking it announced.
+def _unannounced_payload(state: dict[str, Any]) -> dict[str, Any] | None:
+    """The record IF it is still unannounced, else ``None``. Read-only.
 
-    Same viewer rule as ``cleanup.take_unannounced_cleanup`` (the runtime that
-    removed defers to its own viewer while it lives) with one switch for a
-    viewer that has no runtime of its own, the desktop server:
-    ``defer_to_writer=False`` takes it at once. ONE announcement per store, ever;
-    a malformed or absent record announces nothing.
+    The one validity rule shared by the peek, the consume and the ack paths: a
+    record that is absent, unreadable (``read_state`` gives ``{}``), already
+    acknowledged, or carries no positive removal count announces nothing.
     """
-    path = sessions_dir / STATE_NAME
-    state = read_state(sessions_dir)
     removed = state.get("removed_total")
     if (
         not state
@@ -975,6 +995,39 @@ def take_unannounced_delegated_notice(
         or isinstance(removed, bool)
         or removed <= 0
     ):
+        return None
+    return dict(state)
+
+
+def peek_unannounced_delegated_notice(sessions_dir: Path) -> dict[str, Any] | None:
+    """The notice record while nobody has announced it yet, WITHOUT consuming it.
+
+    A read that flips nothing, for surfaces a GET must not mutate: the desktop
+    list route is polled by many readers — the app's own attach and auth probes
+    among them — and a consume-on-read there ate the once-per-store notice
+    before the renderer could render it. The GET returns the notice while the
+    record stays unacknowledged; the renderer flips it explicitly through
+    ``acknowledge_delegated_notice``.
+    """
+    return _unannounced_payload(read_state(sessions_dir))
+
+
+def take_unannounced_delegated_notice(
+    sessions_dir: Path, *, runtime_pid: int | None = None, defer_to_writer: bool = True
+) -> dict[str, Any] | None:
+    """The progress record if no viewer has announced it yet, marking it announced.
+
+    Same viewer rule as ``cleanup.take_unannounced_cleanup`` (the runtime that
+    removed defers to its own viewer while it lives) with one switch for a
+    viewer that has no runtime of its own: ``defer_to_writer=False`` takes it
+    at once. ONE announcement per store, ever; a malformed or absent record
+    announces nothing. The TUI's consume-on-show uses this; the desktop does
+    NOT (a GET must not consume — it peeks and acknowledges separately).
+    """
+    path = sessions_dir / STATE_NAME
+    state = read_state(sessions_dir)
+    announced = _unannounced_payload(state)
+    if announced is None:
         return None
     writer = state.get("first_removal_pid")
     if (
@@ -986,11 +1039,33 @@ def take_unannounced_delegated_notice(
         and _process_alive(writer)
     ):
         return None
-    announced = dict(state)
     state["notice_acknowledged"] = True
     if not _write_record(path, state):
         logger.debug("session cleanup: %s is not writable; the notice will repeat", path)
     return announced
+
+
+def acknowledge_delegated_notice(sessions_dir: Path) -> bool:
+    """Flip ``notice_acknowledged`` so the notice is never announced again.
+
+    The write half of the desktop pair (``peek_unannounced_delegated_notice``
+    is the read half): the renderer calls this once it has SHOWN the notice,
+    because the list route itself must not consume it. Idempotent — a second
+    call, an already-acknowledged record, or no record at all all answer
+    ``True``, the state the caller asked for (the sibling pin/archive
+    convention); a client that needs the store's own answer re-reads the
+    listing. A store this process cannot write logs and the notice repeats on
+    a later read rather than erroring here.
+    """
+    state = read_state(sessions_dir)
+    if state and state.get("notice_acknowledged") is not True:
+        state["notice_acknowledged"] = True
+        if not _write_record(sessions_dir / STATE_NAME, state):
+            logger.debug(
+                "session cleanup: %s is not writable; the notice will repeat",
+                sessions_dir / STATE_NAME,
+            )
+    return True
 
 
 #: How the notice names the removal record: home-relative, as the parent
@@ -1028,6 +1103,8 @@ def format_delegated_notice(payload: Any) -> str:
 def notice_wire(payload: dict[str, Any]) -> dict[str, Any]:
     """The desktop wire form of the one-time notice (additive on ``GET /v1/desktop/sessions``).
 
+    The GET PEEKS (it never consumes; the renderer acknowledges through the ack
+    route), so the same payload rides every listed read until acknowledged.
     ``message`` is the finished sentence group (the same text the terminal shows),
     so a client can render it verbatim; the numbers ride beside it for a client
     that wants its own layout. ``in_progress`` is the "so far" flag.

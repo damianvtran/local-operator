@@ -4719,6 +4719,20 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     ) -> None:
         both = [parent] + ([delegated] if delegated is not None else [])
 
+        # ``scanned`` is ONE population, every directory once (review F3):
+        # ``parent.scanned`` counts the parent class and ``delegated.scanned``
+        # the WHOLE store, so summing them double-counted every delegated
+        # directory (an 18-directory store reported 33). The delegated figure is
+        # the whole-store count whenever its pass scanned; when it did not (an
+        # early refusal, or an apply result that re-scanned nothing) the class
+        # counts stand in — still one count per directory, never two.
+        if delegated is None:
+            scanned = parent.scanned
+        elif delegated.scanned:
+            scanned = delegated.scanned
+        else:
+            scanned = parent.scanned + getattr(delegated, "delegated_total", 0)
+
         def klass(result: CleanupResult) -> dict[str, Any]:
             return {
                 "scanned": result.scanned,
@@ -4733,7 +4747,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             "enabled": policy.enabled,
             "forced": force,
             "dry_run": parent.dry_run,
-            "scanned": sum(r.scanned for r in both),
+            "scanned": scanned,
             "removed": [dataclasses.asdict(c) for r in both for c in r.removed],
             "protected": [{"session": n, "guard": g} for r in both for n, g in r.protected],
             "errors": sum(r.errors for r in both),
@@ -4809,16 +4823,29 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         "wake/monitor or unpushed git work keeps them)"
     )
 
-    def sections(verb: str, parent: CleanupResult, delegated: DelegatedResult) -> None:
+    def sections(
+        verb: str,
+        parent: CleanupResult,
+        delegated: DelegatedResult,
+        parent_runs: bool,
+        delegated_runs: bool,
+    ) -> None:
+        # A class the run will NOT actually execute renders its rows as
+        # "would remove" with the off-note a dry run prints (review F1): showing
+        # "will remove" for a class whose switch is off promised rows the run
+        # then left on disk — a real run could print "will remove 3" and then
+        # "nothing to remove" in the same output.
+        parent_verb = verb if parent_runs else "would remove"
+        delegated_verb = verb if delegated_runs else "would remove"
         print("== Your conversations (parent sessions) ==")
         print(parent_policy_line)
         if parent.skipped == "no limits configured":
             print("parent class: off")
         else:
-            if not policy.enabled and verb == "would remove":
+            if not policy.enabled and parent_verb == "would remove":
                 print(f"note: {switch_hint}; this is a preview only")
-            print(f"scanned {parent.scanned} sessions; {verb} {len(parent.removed)}")
-            _print_cleanup_rows(parent.removed, verb)
+            print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
+            _print_cleanup_rows(parent.removed, parent_verb)
             _print_kept(parent.protected)
         print()
         print("== Delegated work (subagents and background sessions) ==")
@@ -4826,27 +4853,27 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         if delegated.skipped and delegated.skipped.startswith("skipped:"):
             print(f"{delegated.skipped} (nothing removed; fail-closed)")
         else:
-            if not policy.delegated_enabled and verb == "would remove":
+            if not policy.delegated_enabled and delegated_verb == "would remove":
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
-                f"newer than {delegated.hours}h (kept); {verb} {len(delegated.removed)}"
+                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
             )
-            _print_cleanup_rows(delegated.removed, verb)
+            _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
 
     if args.dry_run:
         if args.json:
             emit_json(parent_preview, delegated_preview, outcome="dry-run")
             return 0
-        sections("would remove", parent_preview, delegated_preview)
+        sections("would remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
     if not args.json:
-        if parent_runs is False and policy.has_any_limit:
-            print(f"parent class not run: {switch_hint}")
-        sections("will remove", parent_preview, delegated_preview)
+        # A non-running class states it in its own section ("would remove" + the
+        # off-note); no separate "not run" line beside it (review F1).
+        sections("will remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
     parent_rows = len(parent_preview.removed) if parent_runs else 0
     delegated_rows = len(delegated_preview.removed) if delegated_runs else 0
     if policy.has_any_limit and not parent_runs and not delegated_rows:
