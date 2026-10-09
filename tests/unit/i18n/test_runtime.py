@@ -118,6 +118,26 @@ class TestValueNormalisation:
             with pytest.raises(runtime.MessageFormatError):
                 render("{n, plural, one {# f} other {# fs}}", {"n": bad})
 
+    def test_non_numeric_number_binding_is_a_format_error(self) -> None:
+        # round-2 M2: the number/percent branch still surfaced the formatter's
+        # own decimal.InvalidOperation instead of the runtime's error type.
+        for bad in ("abc", True):
+            with pytest.raises(runtime.MessageFormatError):
+                render("{n, number}", {"n": bad})
+        with pytest.raises(runtime.MessageFormatError):
+            render("{n, number, percent}", {"n": True})
+
+    def test_non_numeric_date_binding_is_a_format_error(self) -> None:
+        # round-2 Q2-1: the date branch leaked AttributeError from the layer.
+        for bad in (True, "abc"):
+            with pytest.raises(runtime.MessageFormatError):
+                render("{d, date}", {"d": bad})
+
+    def test_non_numeric_time_binding_is_a_format_error(self) -> None:
+        for bad in (True, "abc"):
+            with pytest.raises(runtime.MessageFormatError):
+                render("{t, time}", {"t": bad})
+
     def test_select_matches_integral_floats_like_the_ts_surfaces(self) -> None:
         # round-1 m1: JS cannot express 3.0 as distinct from 3, so the TS
         # surfaces select `3`; Python's str(3.0) would miss it.

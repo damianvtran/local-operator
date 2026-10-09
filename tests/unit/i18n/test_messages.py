@@ -19,6 +19,8 @@ def fixture_catalogues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             {
                 "wire.errors.model_unavailable": "Model {model} is unavailable.",
                 "wire.errors.files": "{n, plural, one {# file} other {# files}}",
+                "wire.errors.count": "{n, number} items",
+                "wire.errors.when": "on {d, date}",
                 "wire.errors.broken": "{unclosed",
             }
         ),
@@ -81,6 +83,21 @@ def test_non_numeric_plural_binding_degrades_instead_of_raising(
         assert got["params"] == {"n": bad}
         assert got["text"] == "wire.errors.files"
     assert messages.envelope("wire.errors.files", {"n": 3})["text"] == "3 files"
+
+
+def test_non_numeric_number_and_date_bindings_degrade(fixture_catalogues: None) -> None:
+    # round-2 M2 + Q2-1: the never-raise contract must hold for the number and
+    # date branches too, not only plurals.
+    for code, params in (
+        ("wire.errors.count", {"n": "abc"}),
+        ("wire.errors.count", {"n": True}),
+        ("wire.errors.when", {"d": "abc"}),
+        ("wire.errors.when", {"d": True}),
+    ):
+        got = messages.envelope(code, params)
+        assert got["text"] == code
+        assert got["params"] == params
+    assert messages.envelope("wire.errors.count", {"n": 1234})["text"] == "1,234 items"
 
 
 def test_msg_carries_code_and_params(fixture_catalogues: None) -> None:

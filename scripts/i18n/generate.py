@@ -127,11 +127,22 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
     lines = [GENERATED_HEADER]
     body: list[str] = []
     needs_datetime = False
+    seen_fnames: dict[str, str] = {}
     for key in sorted(messages):
         params = _param_types(messages[key])
         if any(annotation == "datetime" for _, annotation in params):
             needs_datetime = True
         fname = _fn_name(namespace, key)
+        # Two legal keys can sanitise to one function name (`demo.x.class` /
+        # `demo.x.class_`, `demo.x.foo-bar` / `demo.x.foo_bar`); emitting both
+        # would silently SHADOW one def (round-2 m5) — refuse instead, like the
+        # keyword-argument collision below.
+        if fname in seen_fnames:
+            raise SystemExit(
+                f"generate.py: {namespace}: keys {seen_fnames[fname]!r} and {key!r} emit the "
+                f"same function name {fname!r}; rename one in the catalogue"
+            )
+        seen_fnames[fname] = key
         if params:
             # Sanitise the ARGUMENT identifiers too (m2) and refuse a
             # sanitisation collision loudly rather than emitting duplicate
