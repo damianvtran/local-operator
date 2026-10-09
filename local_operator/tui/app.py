@@ -13639,67 +13639,41 @@ class OperatorApp(App[None]):
         # Re-armed with the rest of the resume state: a new conversation's
         # first arrival at the top owes a page (see `_resume_in_zone`).
         self._resume_in_zone = False
-        # VIEWPORT FIRST, THEN THE REST OF THE SAME WINDOW (B-F3). The 80-message
-        # frame is ~85 blocks, and building + mounting them before the first
-        # paint was the whole of a 0.6-1.3 s open: measured on the real app over
-        # a 2,000-message session, render CPU 93-147 ms at 80 messages against
-        # 34 ms at 20, first paint 386-478 ms against 91-133 ms. So the first
-        # paint carries only what one screen shows, and the remainder of the
-        # window mounts as ONE page after that paint.
+        # ONE PASS, ONE PAINTED FRAME. The projection is the WHOLE render
+        # window, mounted before the first paint, so the block list, the extent
+        # and the scrollbar the reader sees are final in the frame that arrives:
+        # no backfill page, no second state. The operator's target for this
+        # project is exactly that ("the first paint IS the final layout"), and
+        # measured over this bench's fixtures the launch's second state WAS this
+        # split — its other deltas are chrome (the status band's attach line and
+        # the scrollbar thumb), reported separately.
         #
-        # Both cuts come from the SAME snapping rule (`_resume_tail_start`), and
-        # the remainder is exactly `history[full_cut:first_cut]`, so once it has
-        # mounted the transcript holds the identical block list, the identical
-        # `_resume_pending_head`, and the identical head notice the one-shot
-        # projection produced — and the ordinary fill then runs from the state it
-        # always ran from. That identity is what makes the settled frame the
-        # frame main paints, rather than a lookalike built by a second rule.
+        # THIS REPLACES A VIEWPORT-FIRST SPLIT (B-F3), which painted one
+        # screenful and mounted the rest of the window as one page after that
+        # paint. What the split bought was pre-paint CPU, and it is small beside
+        # what it cost. Measured here (`PreparedReplay.prepare`, per-shape
+        # minimum of 3, fixtures r2, rows in the window at 160x45): projecting
+        # the 80-message window instead of one screenful is 12-66 ms more CPU,
+        # and the wall-clock open over the same shapes with the split disabled
+        # was not slower (3 opens/arm, interleaved). On a 2,000-message session
+        # the split was introduced on the back of 93-147 ms vs 34 ms of render
+        # CPU, i.e. the same shape of number at a larger row count; if a future
+        # measurement shows a real first-paint cost, the mitigation is a
+        # row-count threshold on this projection, NOT a second painted frame —
+        # the split cannot come back without giving up the target.
         #
-        # `_viewport_message_budget` is the budget the sidebar's prepared window
-        # already uses for the same question ("enough messages for one
-        # screen"). The split is skipped when it would not paint less than the
-        # full window — a short conversation, or a terminal tall enough that one
-        # screen IS the window.
-        full_cut = (
-            _resume_tail_start(history, RESUME_RENDER_MESSAGES)
-            if len(history) > RESUME_RENDER_MESSAGES
-            else 0
-        )
-        screenful = _viewport_message_budget(self.size.height)
-        first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
-        if first_cut <= full_cut:
-            # The same first-frame tail placement the split branch below gets
-            # from its hold: without it a short conversation's first frame is
-            # placed at scroll 0 and moved to the tail one frame later.
-            self._hold_tail_for_reveal(self._transcript_view())
-            self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
-            # A message budget is a PROXY for height, and a poor one. Whether the
-            # first frame can be scrolled is a question about ROWS, and only the
-            # laid-out widgets can answer it — so ask them, once the mount has
-            # settled, and top up if the answer is "no".
-            #
-            # Marked active BEFORE the first attempt is scheduled, not inside it:
-            # the frames between this mount and that callback are the earliest
-            # ones a reader sees, and they are exactly as provisional as the ones
-            # between attempts.
-            self._start_resume_fill()
-            return
-        # The rows the backfill will add must not widen the ledger's shared name
-        # column AFTER the first paint (see `TranscriptView.reserve_name_col`).
-        # Every call in the window counts, painted or not: a reserve wider than
-        # the rows need can only come from a name the finished frame shows.
-        view = self._transcript_view()
-        view.reserve_name_col(
-            str(getattr(call, "name", "") or "")
-            for message in history[full_cut:first_cut]
-            for call in (getattr(message, "tool_calls", None) or ())
-        )
-        # Held until the backfill settles, so no layout pass between the first
-        # paint and the finished window puts a following reader off the tail
-        # (`TranscriptView.hold_tail_through_layout`).
-        view.hold_tail_through_layout(True)
-        self._project_settled_rows(history, start=first_cut)
-        self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+        # The height top-up below STAYS, and answers a different question: a
+        # message budget is a PROXY for height, and whether the first frame can
+        # be scrolled at all is about ROWS, which only the laid-out widgets can
+        # answer.
+        self._hold_tail_for_reveal(self._transcript_view())
+        self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
+        # Marked active BEFORE the first attempt is scheduled, not inside it:
+        # the frames between this mount and that callback are the earliest ones
+        # a reader sees, and they are exactly as provisional as the ones between
+        # attempts.
+        self._start_resume_fill()
+        return
 
     @staticmethod
     def _hold_tail_for_reveal(view: TranscriptView | None) -> None:
@@ -13730,98 +13704,6 @@ class OperatorApp(App[None]):
         view.hold_tail_through_layout(True)
         if not view.call_after_refresh(view.hold_tail_through_layout, False):
             view.hold_tail_through_layout(False)
-
-    def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
-        """Mount the newest ``count`` held messages as one page, after the paint.
-
-        The second half of the viewport-first resume (see
-        :meth:`_render_resumed_history`). The page goes through
-        :meth:`_mount_older_resume_page` — the one seam that inserts older rows
-        beneath the head notice with the anchor held — so the reader following
-        the tail stays on the tail across the insert, exactly as they do when
-        the ordinary fill mounts a page.
-
-        THE PAGING LEASE IS TAKEN NOW, before the paint, and handed to that
-        mount. Between this call and the page landing, a wheel notch or a click
-        on the head notice would otherwise page the held head by
-        :data:`RESUME_PAGE_MESSAGES` cuts, and the window would end on different
-        boundaries than the one-shot frame — still correct, but no longer the
-        same frame. With the lease held those gestures stand down against
-        ``_resume_paging`` for the one refresh this waits, and the head notice
-        reads its loading copy rather than an instruction nobody can carry out.
-
-        ``drop_notice`` is the case where the one-shot frame had NO head notice
-        (the whole conversation fit in :data:`RESUME_RENDER_MESSAGES`): the
-        first paint needed one because it held messages back, and once they
-        are mounted there is nothing above them to announce. Removing the row
-        — rather than letting it restate itself as "start of conversation" — is
-        what keeps that frame identical to main's.
-
-        Fenced to this exact source and view: a switch or a re-render between
-        the paint and the callback owns the transcript now, and the lease this
-        took is released rather than stranded.
-        """
-        view = self._transcript_view()
-        source = self._interaction
-        lease = self._acquire_paging_lease(source)
-        if lease is None:
-            # Unreachable today (`_render_resumed_history` pops this source's
-            # lease first); degrade to the ordinary fill rather than mounting
-            # a page against a gate someone else holds.
-            self._start_resume_fill()
-            return
-        self._resume_fill_active = True
-
-        def settled() -> None:
-            view.release_name_col_reserve()
-            if drop_notice and not self._resume_pending_head:
-                notice = self._resume_head_notice
-                if notice is not None:
-                    self._resume_head_notice = None
-                    view.remove_block(notice)
-            # Released only after the layout the removal above causes: that
-            # removal SHRINKS the extent by the notice's rows, and without the
-            # hold its first frame paints two rows off the tail (measured on
-            # the 50-message fixture). The hold is cleared on the refresh after.
-            if not view.call_after_refresh(view.hold_tail_through_layout, False):
-                view.hold_tail_through_layout(False)
-            # Handed back BEFORE the ordinary fill starts, which re-raises it:
-            # the flag is `_start_resume_fill`'s to own from here, and leaving
-            # it set would claim a fill in flight on any path where that start
-            # declines to run one.
-            self._resume_fill_active = False
-            self._start_resume_fill()
-
-        def mount() -> None:
-            if (
-                not self._is_current(source)
-                or self._transcript is not view
-                or self._paging_leases.get(source.token) is not lease
-            ):
-                self._release_paging_lease(lease)
-                view.release_name_col_reserve()
-                view.hold_tail_through_layout(False)
-                return
-            try:
-                self._mount_older_resume_page(
-                    on_settled=settled,
-                    lease=lease,
-                    start=max(0, len(self._resume_pending_head) - count),
-                )
-            except BaseException:
-                # The mount has already restored the head and released the
-                # lease (it re-raises by design); only this caller's two holds
-                # are left to drop, or the tail hold would outlive the resume.
-                view.release_name_col_reserve()
-                view.hold_tail_through_layout(False)
-                raise
-
-        # AFTER the refresh, which is the paint: `call_after_refresh` runs once
-        # the screen has composited the frame this projection produced. A pump
-        # that refuses the post (closing) will not paint either, so the page is
-        # mounted inline and the frame simply arrives whole.
-        if not view.call_after_refresh(mount):
-            mount()
 
     def _prefill_resume_before_reveal(self) -> None:
         """Fill the incoming projection to its goal INSIDE the commit.
@@ -15435,9 +15317,9 @@ class OperatorApp(App[None]):
         # a tool result whose call is still in the remaining head would
         # paint a reply with no question at the top of the newly revealed
         # history.
-        # ``start`` is a cut the CALLER already snapped: the viewport-first
-        # resume's backfill mounts the rest of the initial window at the exact
-        # boundary the one-shot frame would have used (`_backfill_resume_window`).
+        # ``start`` is a cut the CALLER already snapped, so a page mounts at the
+        # boundary the frame that cut it used rather than at a second rule's idea
+        # of where the unread head begins.
         if start is None:
             start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
         page, self._resume_pending_head = head[start:], head[:start]

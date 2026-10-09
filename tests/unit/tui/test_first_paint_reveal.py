@@ -33,7 +33,7 @@ from local_operator.harness.types import Message, TextContent
 from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import RESUME_RENDER_MESSAGES, OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
@@ -235,7 +235,7 @@ async def test_the_reveal_hold_is_taken_and_released_around_one_layout() -> None
 
 
 @asynccontextmanager
-async def _viewer(tmp_path, name: str):
+async def _viewer(tmp_path, name: str, *, rows: int = 6):
     """A real owner runtime plus a real ``AttachedSession`` viewer over it.
 
     The saved-position cell needs the commit seam to run for real: a mocked
@@ -250,13 +250,13 @@ async def _viewer(tmp_path, name: str):
         "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
     )
     directory = config / "sessions" / f"synthetic-{name}"
-    rows = [
+    seed = [
         Message(
             id=f"switch-row-{index:04}", role="assistant", content=[TextContent(text=LONG_PROSE)]
         )
-        for index in range(6)
+        for index in range(rows)
     ]
-    await seed_transcript(directory, rows)
+    await seed_transcript(directory, seed)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
@@ -595,3 +595,54 @@ async def _saved_preview(tmp_path, name: str, *, rows: int = 6):
         yield remote
     finally:
         await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_launch_projects_the_whole_window_in_one_pass(tmp_path) -> None:
+    """(b) as a MECHANISM: one projection for the whole window, no backfill page.
+
+    The user-visible fact — "the launch paints ONE state" — is the bench's, and
+    its A/B (2 states -> 1 on S2/S3/S5/S6) lives in the bench run, because a
+    compositor-race unit test cannot reliably catch a frame that a fast boot
+    coalesces. What a unit test CAN pin exactly is the shape of the render: the
+    projection is called ONCE, for the whole render window, and no older page is
+    mounted during the launch. On a tree that splits again, the call carries the
+    screenful bound and the backfill page runs — this fails on both.
+    """
+    async with _viewer(tmp_path, "launch", rows=40) as viewer:
+
+        async def factory():
+            return viewer
+
+        app = OperatorApp(factory)
+        calls: list[dict[str, object]] = []
+        pages: list[dict[str, object]] = []
+        real_project = OperatorApp._project_settled_rows
+        real_page = OperatorApp._mount_older_resume_page
+
+        def project(_self, history, **kwargs):  # noqa: ANN001
+            calls.append(kwargs)
+            return real_project(_self, history, **kwargs)
+
+        def page(_self, *args, **kwargs):  # noqa: ANN001
+            pages.append(kwargs)
+            return real_page(_self, *args, **kwargs)
+
+        OperatorApp._project_settled_rows = project  # type: ignore[method-assign]
+        OperatorApp._mount_older_resume_page = page  # type: ignore[method-assign]
+        try:
+            async with app.run_test(size=FRAME) as pilot:
+                for _ in range(200):
+                    await pilot.pause()
+                    view = app._transcript_view()
+                    if view is not None and view.blocks():
+                        break
+                for _ in range(6):
+                    await pilot.pause()
+        finally:
+            OperatorApp._project_settled_rows = real_project  # type: ignore[method-assign]
+            OperatorApp._mount_older_resume_page = real_page  # type: ignore[method-assign]
+
+    assert calls, "the resume never projected a window"
+    assert [call.get("bound") for call in calls] == [RESUME_RENDER_MESSAGES], calls
+    assert pages == [], f"a page was mounted during the launch: {pages}"

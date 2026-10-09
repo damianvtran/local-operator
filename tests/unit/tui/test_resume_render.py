@@ -2207,35 +2207,38 @@ class _PaintLog:
     [
         # 600 messages: the window keeps a head notice.
         200,
-        # 60 messages: the whole conversation fits the window, so the backfill
-        # REMOVES the first paint's head notice, which shrinks the extent — the
-        # frame the tail hold exists for.
+        # 60 messages: the whole conversation fits the window, so there is no
+        # held head at all — the case where a second frame used to REMOVE the
+        # first paint's notice and shrink the extent under the reader.
         20,
     ],
 )
-async def test_the_first_painted_frame_is_the_screenful_cut_on_the_tail(
+async def test_the_first_painted_frame_carries_the_whole_render_window(
     monkeypatch, n_turns: int
 ) -> None:
-    """The first frame carries only the screenful, and no painted frame is off the tail."""
+    """The first frame is the finished window, and no painted frame is off the tail.
+
+    This used to be the opposite assertion — the first paint carried one
+    screenful and a backfill mounted the rest of the same window as one page
+    after it (B-F3). That second frame is a state the reader sees as the extent
+    growing under them, it was the launch's remaining visual state in the
+    first-paint audit, and the CPU it saved is 12-66 ms on these fixtures
+    against a target that says the first paint IS the final layout. The
+    projection now carries the whole window (see `_render_resumed_history`); if
+    a split comes back, the equality below fails first.
+    """
     session = FakeSession()
     session._history = _history(n_turns)
-    history = list(session.history())
     app = OperatorApp(lambda: _factory(session))
     log = _PaintLog(monkeypatch, app)
     async with app.run_test(size=(100, 30)) as pilot:
         await _wait_for_resume(pilot, app)
-        screenful = app_module._viewport_message_budget(app.size.height)
-        first_cut = _resume_tail_start(history, screenful)
-        full_cut = _resume_tail_start(history, RESUME_RENDER_MESSAGES)
-        assert first_cut > full_cut, "the fixture must exercise the split"
-        first_blocks = log.frames[0][0]
         settled_blocks = len(app.query_one(TranscriptView).blocks())
-        assert first_blocks < settled_blocks, (
-            "the first paint carried the whole window: the split did not run",
+        assert log.frames[0][0] == settled_blocks, (
+            "the first painted frame did not carry the finished window",
             log.frames[:3],
         )
         assert not log.off_tail(), ("a painted frame left the tail", log.off_tail())
-        # The backfill mounts INTO the painted screenful; it never clears it.
         assert log.blank_after_content == 0, "the fill painted an empty transcript"
 
 
