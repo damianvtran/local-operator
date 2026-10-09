@@ -25,6 +25,7 @@ from local_operator.harness.types import Message, TextContent
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
     ANCHOR_FILENAME,
+    TailAnchor,
     build_anchor,
     read_anchor,
     validate_anchor,
@@ -83,7 +84,7 @@ async def test_the_shortcut_returns_exactly_what_the_full_walk_returned(tmp_path
     )
 
     anchor = build_anchor(tmp_path)
-    assert anchor is not None and anchor.checkpoint_offset is None
+    assert anchor is not None, "a checkpointless journal must get a record"
     assert write_anchor(tmp_path, anchor) is True
 
     after = read_replay_suffix(tmp_path, checkpoint_types=FRONTEND_CHECKPOINT_CUSTOM_TYPE)
@@ -137,13 +138,7 @@ async def test_a_replaced_or_truncated_journal_is_never_described_by_an_old_reco
     replacement = tmp_path / "replacement.jsonl"
     replacement.write_bytes(path.read_bytes())
     os.replace(replacement, path)
-    forged_inode = type(anchor)(
-        inode=anchor.inode + 1,
-        size=anchor.size,
-        checkpoint_offset=anchor.checkpoint_offset,
-        row_id=anchor.row_id,
-    )
-    assert validate_anchor(tmp_path, forged_inode) is None
+    assert validate_anchor(tmp_path, TailAnchor(inode=anchor.inode + 1, size=anchor.size)) is None
 
     # A shrink: the record's size is above the file now.
     fresh = build_anchor(tmp_path)
@@ -153,33 +148,6 @@ async def test_a_replaced_or_truncated_journal_is_never_described_by_an_old_reco
 
 
 @pytest.mark.asyncio
-async def test_a_checkpoint_row_at_the_head_of_a_journal_is_recorded_by_offset(tmp_path):
-    """The recorded-offset half, and the row it names is re-read before use."""
-    transcript = Transcript(tmp_path, defer_materialise=False)
-    await transcript.append_message(Message(role="user", content=[TextContent(text="hi")]))
-    await transcript.append_custom(
-        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"session_id": "sess", "sequence": 7}}
-    )
-    await transcript.append_message(Message(role="user", content=[TextContent(text="and more")]))
-
-    anchor = build_anchor(tmp_path)
-    assert anchor is not None and anchor.checkpoint_offset is not None
-    assert validate_anchor(tmp_path, anchor) is not None
-
-    suffix = read_replay_suffix(tmp_path, checkpoint_types=FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-    assert suffix.checkpoint == {"state": {"session_id": "sess", "sequence": 7}}
-
-    # A record whose offset no longer parses as the row it names is refused: the
-    # journal is otherwise untouched, so only the row read can catch this.
-    forged = type(anchor)(
-        inode=anchor.inode,
-        size=anchor.size,
-        checkpoint_offset=0,
-        row_id=anchor.row_id,
-    )
-    assert validate_anchor(tmp_path, forged) is None
-
-
 def test_a_missing_journal_or_a_malformed_sidecar_reads_as_no_hint(tmp_path):
     """Everything the reader cannot prove it falls back from, quietly."""
     assert read_anchor(tmp_path) is None
@@ -211,7 +179,81 @@ async def test_the_prewarm_writes_the_anchor_once_per_journal_version(tmp_path):
 
     assert write_tail_anchor(root, session_id) is True
     written = read_anchor(directory)
-    assert written is not None and written.checkpoint_offset is None
+    assert written is not None
 
     # Idempotent: the second pass costs a stat, not a scan.
     assert write_tail_anchor(root, session_id) is False
+
+
+@pytest.mark.asyncio
+async def test_a_torn_trailing_row_is_not_recorded_as_absent(tmp_path):
+    """F1: the record must name the END OF THE LAST COMPLETE ROW.
+
+    A journal is appended to while it is scanned. If the record named the file's
+    size, a half-written checkpoint row below that offset would sit inside the
+    "nothing happened here" region — and when the writer finished the row, the
+    validator's suffix scan (everything from the recorded size on) would read only
+    the row's TAIL, miss the marker that was already there, and tell the reader a
+    checkpoint row does not exist. Recording the end of the last complete row
+    instead pushes the torn bytes into the validated suffix.
+    """
+    await journal_without_a_checkpoint(tmp_path, messages=4)
+    path = tmp_path / "transcript.jsonl"
+    complete = path.stat().st_size
+
+    torn = (
+        b'{"id":"t1","ts":1,"type":"custom","payload":{'
+        b'"custom_type":"frontend_state_checkpoint_v1"'
+    )
+    with path.open("ab") as handle:
+        handle.write(torn)
+
+    anchor = build_anchor(tmp_path)
+    assert anchor is not None
+    assert anchor.size == complete, (
+        "the record named bytes that are only part of a row: a row completing below "
+        "it could then hide its marker from the suffix scan"
+    )
+    write_anchor(tmp_path, anchor)
+
+    # The writer finishes the row. Its marker is entirely BELOW the old file size,
+    # so only a record that named the last COMPLETE row catches it.
+    with path.open("ab") as handle:
+        handle.write(b',"details":{"state":{"session_id":"s","sequence":1}}}}\n')
+
+    assert (
+        validate_anchor(tmp_path, read_anchor(tmp_path)) is None
+    ), "a completed checkpoint row was accepted as absent"
+    suffix = read_replay_suffix(tmp_path, checkpoint_types=FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert suffix.checkpoint is not None, "the reader must find the row it was told was absent"
+
+
+@pytest.mark.asyncio
+async def test_a_marker_straddling_a_scan_window_is_found(tmp_path):
+    """F2: the suffix scan's windows overlap by a needle's length.
+
+    The scan is the only thing between a stale record and a reader that skips a
+    real checkpoint row. Fixed, non-overlapping windows cannot see a marker split
+    across a boundary — the fixture below places the needle exactly three bytes
+    across one — so the windows overlap and the scan starts a needle's length below
+    the recorded size.
+    """
+    await journal_without_a_checkpoint(tmp_path, messages=4)
+    path = tmp_path / "transcript.jsonl"
+    anchor = build_anchor(tmp_path)
+    assert anchor is not None
+    write_anchor(tmp_path, anchor)
+
+    needle = b'"custom_type":"frontend_state_checkpoint_v1"'
+    prefix = b'{"id":"straddle","ts":1,"type":"custom","payload":{'
+    # A detail blob sized so the needle's START sits three bytes above a 1 MiB
+    # window boundary — the split that two adjacent windows cannot cover.
+    straddle = 3
+    tail_len = (1 << 20) + straddle - len(needle)
+    row = prefix + needle + b',"details":{"state":{"pad":"' + b"p" * tail_len + b'"}}}\n'
+    with path.open("ab") as handle:
+        handle.write(row)
+
+    assert (
+        validate_anchor(tmp_path, read_anchor(tmp_path)) is None
+    ), "a marker split across the scan's window boundary was reported absent"

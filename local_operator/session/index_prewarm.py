@@ -50,6 +50,7 @@ import asyncio
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,31 @@ PREWARM_MIN_FREE_BYTES = 2 * 1024**3
 PREWARM_MAX_LOAD_PER_CPU = 1.0
 
 #: Strong references to the warm tasks, for the reason
+#: Journals whose anchor question was SETTLED in this process, as
+#: ``{session directory: (inode, size)}``.
+#:
+#: WHY THIS EXISTS (review round 3, F11). ``build_anchor`` returns ``None`` for a
+#: journal that already carries the checkpoint row — there is nothing to prove, so no
+#: sidecar is written — which means a size-only "is the anchor current?" test answers
+#: NO for that journal forever. Under the degraded pass (one journal per pass) the
+#: single slot then goes to the same newest, already-warm journal every time, and the
+#: journal the anchor exists for is never reached: measured on a real store as
+#: ``pass 1/2/3: candidates=['new', 'old'] started=1 anchor(new)=False anchor(old)=False``.
+#: Recording the settlement keeps the queue moving; the ``(inode, size)`` pair
+#: invalidates it the moment the journal changes, so a row that appears later (or a
+#: torn row that completes) is examined again.
+_NO_ANCHOR_NEEDED: dict[str, tuple[int, int]] = {}
+
+#: Single-flight guard for the anchor write, keyed by session directory.
+#:
+#: WHY (review round 3, F15): the write is reachable from the startup queue AND from
+#: a warm request, and its expensive half is a whole-file scan for a checkpointless
+#: journal. Two concurrent callers would both scan and both write — the scan is the
+#: thing the record exists to make unnecessary, so paying it twice is exactly the
+#: waste this module is for.
+_ANCHOR_IN_FLIGHT: set[str] = set()
+_ANCHOR_LOCK = threading.Lock()
+
 #: ``transcript_index.start_refresh`` documents for its own: a bare
 #: ``asyncio.create_task`` holds only a weak referent and can be collected
 #: mid-flight.
@@ -140,8 +166,16 @@ def pace_reason(*, load: float | None = None) -> str | None:
     return None
 
 
-def sessions_needing_index(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> list[str]:
-    """The ``limit`` most recently modified journals whose index is not current.
+def sessions_needing_warm(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> list[str]:
+    """The ``limit`` most recently modified journals that owe this job something.
+
+    TWO REASONS A JOURNAL IS A CANDIDATE, and either one is enough (review round 1,
+    F4): its transcript index is not current, or its TAIL ANCHOR is not current
+    (``session.tail_anchor`` — the record that lets a checkpointless journal be read
+    without scanning to BOF). The index probe used to decide this list alone, so a
+    journal with a warm index was skipped by the refresh and silently skipped by the
+    anchor pass that shares the loop — on a store whose indexes were warmed by an
+    earlier run, that was every journal, and the anchors were never written at all.
 
     SYNCHRONOUS and it stats every journal, so its callers run it in a thread
     (``asyncio.to_thread``): 13,812 stats plus the probes for the newest few is
@@ -173,13 +207,15 @@ def sessions_needing_index(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
     for _mtime, session_id in journals:
         if len(candidates) >= limit:
             break
+        needs = False
         try:
-            if probe_index(root, session_id).state == "ready":
-                continue
-        except Exception:  # noqa: BLE001 — a session we cannot read is not a candidate
+            needs = probe_index(root, session_id).state != "ready"
+        except Exception:  # noqa: BLE001 — fall through to the anchor test
             logger.debug("index prewarm: probe failed for %s", session_id, exc_info=True)
-            continue
-        candidates.append(session_id)
+        if not needs and not _anchor_current(sessions_dir / session_id):
+            needs = True
+        if needs:
+            candidates.append(session_id)
     return candidates
 
 
@@ -214,7 +250,42 @@ def start_session_warm(root: str | Path, session_id: str) -> bool:
     except Exception:  # noqa: BLE001 — a hint must never be the failure of a request
         logger.debug("session warm could not be scheduled", exc_info=True)
         return False
+    # THE ANCHOR WRITE RIDES ALONG, on its own task: it is a whole-file scan for a
+    # checkpointless journal and must not run on the request's time any more than the
+    # index scan does. Held in ``_TASKS`` so the loop cannot collect it mid-flight.
+    anchor_task = asyncio.get_running_loop().create_task(
+        asyncio.to_thread(write_tail_anchor, root, session_id)
+    )
+    _TASKS.add(anchor_task)
+    anchor_task.add_done_callback(_TASKS.discard)
     return True
+
+
+def _anchor_current(directory: Path) -> bool:
+    """Whether this journal's tail anchor already describes its current version.
+
+    A stat and a small read, deliberately — NOT
+    ``tail_anchor.validate_anchor``, which scans everything appended since the
+    record. That scan is the right price for a reader about to skip a whole-file
+    walk and the wrong price for a selector that runs over the newest journals on
+    every core start: a journal the selector wrongly calls current is simply
+    re-checked by ``write_tail_anchor``, which does validate before writing.
+    """
+    from local_operator.session.tail_anchor import read_anchor
+
+    try:
+        stat = (directory / TRANSCRIPT_FILENAME).stat()
+    except OSError:
+        return False
+    settled = _NO_ANCHOR_NEEDED.get(str(directory))
+    if settled == (stat.st_ino, stat.st_size):
+        # Asked and answered in this process: this journal needs no sidecar (see
+        # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
+        return True
+    anchor = read_anchor(directory)
+    if anchor is None:
+        return False
+    return anchor.inode == stat.st_ino and anchor.size == stat.st_size
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
@@ -233,7 +304,7 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
     if reason is not None:
         logger.debug("index prewarm skipped (%s)", reason)
         return 0
-    candidates = await asyncio.to_thread(sessions_needing_index, root, limit=limit)
+    candidates = await asyncio.to_thread(sessions_needing_warm, root, limit=limit)
     # DEGRADED MODE: a host that is already busy gets ONE journal this pass instead
     # of a refused queue, and the pass after it — the next core start, or a request
     # that asks for its own session (:func:`start_session_warm`) — can do one more.
@@ -250,21 +321,17 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
             logger.debug("index prewarm dropped after %d journals (%s)", started, later)
             break
         try:
+            await asyncio.to_thread(write_tail_anchor, root, session_id)
+        except Exception:  # noqa: BLE001 — an unwritable anchor is a slower read, not a failure
+            logger.debug("tail anchor not written for %s", session_id, exc_info=True)
+        try:
             task, was_started = start_refresh(root, session_id)
             await task
         except Exception:  # noqa: BLE001 — one unreadable journal must not end the warm
             logger.debug("index prewarm failed for %s", session_id, exc_info=True)
+            await asyncio.sleep(0)
             continue
         started += 1 if was_started else 0
-        # The same queue writes the tail anchor for this journal (see
-        # ``session.tail_anchor``): the cold reader is not allowed to write, and
-        # these are exactly the journals whose next cold open pays for it. Off
-        # the hot path, behind the guards re-checked above, and best-effort — a
-        # journal the anchor cannot describe simply keeps the walking reader.
-        try:
-            await asyncio.to_thread(write_tail_anchor, root, session_id)
-        except Exception:  # noqa: BLE001 — an unwritable anchor is a slower read, not a failure
-            logger.debug("tail anchor not written for %s", session_id, exc_info=True)
         await asyncio.sleep(0)
     logger.debug("index prewarm started %d refresh(es)", started)
     return started
@@ -288,8 +355,32 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     directory = Path(root) / "sessions" / session_id
     if validate_anchor(directory, read_anchor(directory)) is not None:
         return False
-    anchor = build_anchor(directory)
-    return write_anchor(directory, anchor) if anchor is not None else False
+    # SINGLE-FLIGHT (F15): the expensive half is ``build_anchor``'s whole-file scan
+    # for a checkpointless journal, and this writer is reachable from both the
+    # startup queue and a warm request. The second caller leaves immediately; the
+    # first one's result is the answer either way.
+    key = str(directory)
+    with _ANCHOR_LOCK:
+        if key in _ANCHOR_IN_FLIGHT:
+            return False
+        _ANCHOR_IN_FLIGHT.add(key)
+    try:
+        anchor = build_anchor(directory)
+        if anchor is None:
+            # SETTLE IT (F11): ``build_anchor`` returns None for a journal that
+            # already carries the checkpoint row (nothing to prove) or cannot be
+            # described at all. Either way there is nothing to write, and recording
+            # which keeps the degraded pass from spending every pass on this journal.
+            try:
+                stat = (directory / TRANSCRIPT_FILENAME).stat()
+            except OSError:
+                return False
+            _NO_ANCHOR_NEEDED[key] = (stat.st_ino, stat.st_size)
+            return False
+        return write_anchor(directory, anchor)
+    finally:
+        with _ANCHOR_LOCK:
+            _ANCHOR_IN_FLIGHT.discard(key)
 
 
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:

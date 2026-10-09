@@ -1,38 +1,48 @@
-"""A sidecar recording where a journal's newest frontend checkpoint row is.
+"""A sidecar recording that a journal carries NO frontend checkpoint row.
 
 THE COST THIS REMOVES. A journal with no ``frontend_state_checkpoint_v1`` row
 anywhere puts ``read_replay_suffix`` back at BOF: the reader must reach the newest
 row of every type it was asked for, and when the type is ABSENT that means walking
-the whole file to prove it — measured 570-650 ms of CPU on a 35 MB checkpointless
-journal and 1.0-1.9 s on a 118 MB one, on the cold open of every fresh process.
-The replay cache (#2108) makes the repeats free; nothing makes the FIRST read of
-such a journal cheap, because "there is no such row" is a whole-file fact.
+the whole file to prove it — measured 94 ms of CPU on a 27.2 MB checkpointless
+journal, 570-650 ms on the 35 MB shape the audit used and 1.0-1.9 s on a 118 MB
+one, on the cold open of every fresh process. The replay cache makes the repeats
+free; nothing makes the FIRST read of such a journal cheap, because "there is no
+such row" is a whole-file fact.
 
-So the fact is written down once, by a job that has time: this sidecar records, for
-one journal version, either the byte offset of its newest checkpoint row or the
-PROOF that it has none. A reader that needs that type then stops at the journal's
-own compaction boundary instead of the file's start, which is the same answer the
-full walk produces — the type is not there, and the reader now knows it.
+So the fact is written down once, by a job that has time: this sidecar states that,
+as of a journal version, the checkpoint row is absent. A reader that needs the type
+then stops at the journal's own compaction boundary instead of the file's start,
+which is the same answer the full walk produces.
 
 WHY A SIDECAR AND NOT A CHECKPOINT ROW. Writing a level checkpoint row at teardown
-(as #2108 does for the populations that HAVE a runtime) cannot reach these
-journals: the population is sessions whose runtimes are long gone. The reader is
-not allowed to write (the cold reader's contract), so the writer is a background
-job at core start — ``index_prewarm``'s queue, the K most recently modified
-journals, off the hot path, behind the same disk and load guards.
+cannot reach these journals: the population is sessions whose runtimes are long
+gone. The cold reader is not allowed to write (its contract), so the writer is a
+background job at core start — ``index_prewarm``'s queue, the most recently
+modified journals, off the hot path, behind the same disk and load guards.
+
+WHY THE RECORDED SIZE IS THE END OF THE LAST COMPLETE ROW. A journal is appended
+to while it is read. If the record named the file's size, a half-written checkpoint
+row below that size would be inside the "nothing has happened here" region: the
+scan that justifies the record would have seen a torn line, and the validator's
+suffix scan would never look at the bytes the row completes into (review round 1,
+F1 — the shape that made a torn append able to hide a checkpoint row). Recording
+the end of the last COMPLETE row instead pushes every incomplete byte into the
+validated suffix, where the needle scan sees it.
+
+WHY THE SCAN'S WINDOWS OVERLAP. The point of the suffix scan is that the type
+cannot have appeared in the bytes appended since the record. A needle split across
+two fixed 1 MiB windows is invisible to both of them, so the windows overlap by one
+needle's length, and the scan starts a needle's length below the recorded size
+(review round 1, F2) — a marker written across the boundary is found, never
+assumed absent.
 
 IT IS A HINT, NEVER AN AUTHORITY. Every use is validated against the journal the
-reader has open: same inode, the journal has not SHRUNK below the recorded size,
-the delta appended since has been scanned for the checkpoint's own bytes, and the
-recorded row still parses with the recorded id. Anything unproven falls back to
-the walk. A sidecar that cannot be trusted is a sidecar that costs nothing.
-
-WHY THE BYTES ARE EXACT FOR THIS FORMAT. The scan uses
-``transcript.find_row_for_custom_type``'s needle, which is the spelling every
-writer of this format emits (``to_json`` has used compact separators since the
-format was introduced, 5cf2814a4f) — the same assumption the cursor locator
-already makes for row ids, and the reason a proof of absence from this scan is a
-proof rather than a guess.
+reader has open: same inode, a journal that has not shrunk below the recorded size,
+and a scan of everything from the recorded size on that proves the type's spelling
+absent. Anything unproven falls back to the walking reader. The scan's assumption
+is that the format writes compact JSON separators, which
+``transcript.find_row_for_custom_type`` already assumes for its cursor and which
+every writer of this format has emitted since the format was introduced.
 """
 
 from __future__ import annotations
@@ -42,7 +52,6 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -54,30 +63,38 @@ logger = logging.getLogger(__name__)
 #: Sidecar name, beside the journal it describes.
 ANCHOR_FILENAME = "tail-anchor.v1.json"
 
-#: Sidecar schema version. A file from another version is ignored (the reader's
-#: validation would have to guess at fields a future writer owns).
+#: Sidecar schema version. A file from another version is ignored.
 ANCHOR_VERSION = 1
 
 #: The custom type this sidecar answers for. One type, deliberately: it is the one
-#: the cold open requires and cannot bound without, and a second type would need
-#: its own proof rather than a second field in this record.
+#: the cold open requires and cannot bound without.
 ANCHOR_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: Window size for the suffix scan. 1 MiB matches the reader's own read chunk,
+#: which is what makes this cost the same per byte as the walk it replaces.
+_WINDOW_BYTES = 1 << 20
+
+
+def _needle() -> bytes:
+    """The byte spelling of a checkpoint row's type, as the format writes it.
+
+    Compact separators (no space after the colon) — see the module docstring on
+    why that assumption is the format's own.
+    """
+    return ('"custom_type":"%s"' % ANCHOR_CUSTOM_TYPE).encode("utf-8")
 
 
 @dataclass(frozen=True)
 class TailAnchor:
-    """Where a journal's newest checkpoint row is — or that it has none.
+    """A journal version at which the checkpoint row is known to be absent.
 
-    ``checkpoint_offset`` is ``None`` for the proven-absent case, which is the one
-    that matters most: it is the fact a reader cannot derive cheaply. ``row_id``
-    accompanies an offset so the reader can verify it is looking at the row this
-    record was written for.
+    ``size`` is the END OF THE LAST COMPLETE ROW at the moment of the scan, not the
+    file's size: everything after it (a torn append, and anything written since) is
+    re-examined by :func:`validate_anchor` rather than assumed.
     """
 
     inode: int
     size: int
-    checkpoint_offset: int | None
-    row_id: str | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -85,8 +102,6 @@ class TailAnchor:
             "custom_type": ANCHOR_CUSTOM_TYPE,
             "inode": self.inode,
             "size": self.size,
-            "checkpoint_offset": self.checkpoint_offset,
-            "row_id": self.row_id,
         }
 
 
@@ -105,22 +120,11 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
         return None
     if raw.get("custom_type") != ANCHOR_CUSTOM_TYPE:
         return None
-    offset = raw.get("checkpoint_offset")
-    row_id = raw.get("row_id")
-    if offset is not None and not isinstance(offset, int):
-        return None
-    if offset is None and row_id is not None:
-        return None
     inode = raw.get("inode")
     size = raw.get("size")
     if not isinstance(inode, int) or not isinstance(size, int):
         return None
-    return TailAnchor(
-        inode=inode,
-        size=size,
-        checkpoint_offset=offset,
-        row_id=row_id if isinstance(row_id, str) else None,
-    )
+    return TailAnchor(inode=inode, size=size)
 
 
 def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
@@ -147,56 +151,82 @@ def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
         return False
 
 
-def build_anchor(directory: str | Path) -> TailAnchor | None:
-    """Scan ``directory``'s journal once and return the anchor it proves.
+def _complete_row_end(path: Path, size: int) -> int:
+    """The offset just past the last row that ends in a newline.
 
-    One backward byte scan (``find_row_for_custom_type``: measured 66 ms for a
-    118 MB journal, decoding only the candidate row) answers both halves: the
-    newest checkpoint row's offset and id when there is one, and the proof of
-    absence when there is not. ``None`` means the journal could not be measured at
-    all — an absent file, an unreadable directory — and a caller must not turn that
-    into "there is no checkpoint".
+    ``0`` when no complete row exists in the last window (a journal holding one
+    enormous unterminated line): the conservative answer, because a record at ``0``
+    puts the whole file into the validated suffix, which costs a scan and risks
+    nothing.
+    """
+    window = min(size, _WINDOW_BYTES)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(size - window)
+            tail = handle.read(window)
+    except OSError:
+        return 0
+    cut = tail.rfind(b"\n")
+    return 0 if cut < 0 else size - window + cut + 1
+
+
+def build_anchor(directory: str | Path) -> TailAnchor | None:
+    """The anchor for this journal, or ``None`` when none is needed.
+
+    ``None`` means "no sidecar belongs here": the journal carries the checkpoint row
+    already (the walking reader finds it near the tail, so there is nothing to
+    prove), or it cannot be read at all. The expensive case — the type is absent,
+    and proving that costs a whole-file scan — is the one that gets a record, and it
+    is paid here rather than on a reader's first paint.
     """
     path = Path(directory) / TRANSCRIPT_FILENAME
     try:
         stat = os.stat(path)
     except OSError:
         return None
-    located = find_row_for_custom_type(directory, ANCHOR_CUSTOM_TYPE)
-    if located is None:
-        return TailAnchor(inode=stat.st_ino, size=stat.st_size, checkpoint_offset=None, row_id=None)
-    offset, entry = located
-    return TailAnchor(
-        inode=stat.st_ino, size=stat.st_size, checkpoint_offset=offset, row_id=entry.id
-    )
+    if find_row_for_custom_type(directory, ANCHOR_CUSTOM_TYPE) is not None:
+        return None
+    complete = _complete_row_end(path, stat.st_size)
+    if complete == 0:
+        # Nothing complete to anchor on: a record here would claim a region the
+        # scan cannot describe. The walking reader serves this journal.
+        return None
+    return TailAnchor(inode=stat.st_ino, size=complete)
 
 
-def _needle(handle: "BinaryIO", start: int, end: int) -> bool:
-    """Whether the checkpoint type's bytes appear in ``[start, end)``."""
-    needle = ('"custom_type":"%s"' % ANCHOR_CUSTOM_TYPE).encode("utf-8")
+def _needle_absent(path: Path, start: int, end: int) -> bool:
+    """Whether the checkpoint spelling is absent from ``[start, end)``.
+
+    The windows OVERLAP by one needle length (review round 1, F2): a marker written
+    across a window boundary is otherwise invisible to both windows that contain
+    halves of it, and this scan is the only thing standing between a stale record
+    and a reader that skips a real checkpoint row.
+    """
+    needle = _needle()
+    overlap = len(needle) - 1
     position = end
     while position > start:
-        chunk_start = max(start, position - (1 << 20))
-        handle.seek(chunk_start)
-        window = handle.read(position - chunk_start)
+        window_start = max(start, position - _WINDOW_BYTES)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(window_start)
+                window = handle.read(position - window_start + overlap)
+        except OSError:
+            return False
         if needle in window:
-            return True
-        position = chunk_start
-    return False
+            return False
+        position = window_start
+    return True
 
 
 def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnchor | None:
     """``anchor`` when it still describes the journal on disk, else ``None``.
 
-    THE READER'S GATE, and the whole reason a hint is safe. It refuses when the
-    file was replaced (inode), when it SHRANK below the recorded size (a rollback
-    or a ``compact_file`` that reused the path), when the bytes appended since the
-    record contain the checkpoint type's own spelling (a newer row exists and the
-    record does not know about it), or when a recorded row no longer parses with
-    the recorded id. Only the proven-absent half additionally needs the delta scan:
-    a recorded OFFSET stays valid while the file only grows, because it is still
-    the offset of a row of that type — a newer one above it does not move it, and
-    the caller's own walk covers everything from the file's end down.
+    THE READER'S GATE, and the whole reason a hint is safe. It refuses when the file
+    was replaced (inode changed), when it SHRANK below the recorded size (a rollback
+    or a ``compact_file`` that reused the path), or when the bytes from the recorded
+    size on contain the checkpoint type's own spelling (a row appeared, or a torn
+    row completed into one).
     """
     if anchor is None:
         return None
@@ -207,39 +237,24 @@ def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnc
         return None
     if stat.st_ino != anchor.inode or stat.st_size < anchor.size:
         return None
-    if anchor.checkpoint_offset is None:
-        if stat.st_size == anchor.size:
-            return anchor
-        try:
-            with path.open("rb") as handle:
-                if _needle(handle, anchor.size, stat.st_size):
-                    return None
-        except OSError:
-            return None
+    if stat.st_size == anchor.size:
+        # Nothing was appended since the scan; the record describes the file.
         return anchor
-    # A recorded offset: re-read that row and check it is the row this record
-    # names. Cheap (one small read), and the only way an offset can be wrong.
-    try:
-        with path.open("rb") as handle:
-            handle.seek(anchor.checkpoint_offset)
-            raw = handle.readline()
-    except OSError:
-        return None
-    from local_operator.session.transcript import TranscriptEntry
-
-    entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
-    if entry is None or entry.id != anchor.row_id:
+    needle = _needle()
+    # Start a needle length below the recorded size: a marker written across that
+    # offset has its first bytes in the scanned window and the rest after it.
+    start = max(0, anchor.size - (len(needle) - 1))
+    if not _needle_absent(path, start, stat.st_size):
         return None
     return anchor
 
 
 def proves_absent(directory: str | Path) -> bool:
-    """Whether a valid sidecar PROVES this journal has no checkpoint row.
+    """Whether a valid sidecar proves this journal has no checkpoint row.
 
-    The one question the reader asks, and the only one this module answers for it.
+    The one question the reader asks, and the only one this module answers.
     """
-    anchor = validate_anchor(directory, read_anchor(directory))
-    return anchor is not None and anchor.checkpoint_offset is None
+    return validate_anchor(directory, read_anchor(directory)) is not None
 
 
 __all__ = [

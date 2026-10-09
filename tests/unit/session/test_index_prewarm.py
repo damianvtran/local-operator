@@ -55,8 +55,8 @@ async def build_index(root, session_id: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_newest_journals_without_a_current_index_are_the_candidates(tmp_path):
-    """Newest first, skip the ones already current, stop at the limit."""
+async def test_journals_owing_either_job_are_the_candidates(tmp_path):
+    """Newest first, both reasons, stop at the limit."""
     root = tmp_path
     old = journal(root, "old", mtime=1_000.0)
     new = journal(root, "new", mtime=3_000.0)
@@ -64,8 +64,11 @@ async def test_the_newest_journals_without_a_current_index_are_the_candidates(tm
     # A CURRENT cache for one of them: the warm must not spend a scan on it.
     await build_index(root, fresh)
 
-    assert prewarm.sessions_needing_index(root, limit=2) == [new, old]
-    assert prewarm.sessions_needing_index(root, limit=5) == [new, old]
+    # EITHER REASON QUALIFIES (review round 1, F4): ``fresh`` owes no refresh, but
+    # its tail anchor is not current either, so the queue still visits it. The list
+    # used to be index-only, which silently starved the anchor pass.
+    assert prewarm.sessions_needing_warm(root, limit=2) == [new, fresh]
+    assert prewarm.sessions_needing_warm(root, limit=5) == [new, fresh, old]
 
 
 @pytest.mark.asyncio
