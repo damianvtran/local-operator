@@ -101,6 +101,7 @@ from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
 )
+from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
@@ -4892,6 +4893,14 @@ def build_app(daemon: MobileDaemon):
         refusal left nothing behind and RELEASES the id, so a user who frees the
         session up and presses again is not answered from a refusal forever.
 
+        A STORE THAT CANNOT TAKE THE WRITE IS ITS OWN ANSWER, not a bare 500
+        (QA round 2, Q2083-R2-1): the journal's disk-full condition is
+        classified by the shared ladder (``session/store_failures.py``) and
+        refused 507 ``store_out_of_space`` — the desktop plane's own status and
+        code for it — while a condition the ladder does not claim (a read-only
+        root's ``PermissionError``) is re-raised untouched, exactly as the
+        desktop ladder re-raises it.
+
         A MOVE WHOSE ANSWER NEVER CAME IS A 503, never a 409 that reads as
         "nothing changed" (Addendum 2 C): the request was sent and the outcome
         is unknown, which is a different instruction to the user than "the move
@@ -4971,6 +4980,38 @@ def build_app(daemon: MobileDaemon):
         except ReceiptsUnreadable as unreadable:
             return JSONResponse(
                 {"error": str(unreadable), "code": "receipt_store_unreadable"}, status_code=503
+            )
+        except OSError as error:
+            # THE STORE'S DISK-FULL CONDITION, IN THE HOUSE LADDER'S WORDS (QA
+            # round 2, Q2083-R2-1). The journal's writes raise raw ``OSError``s,
+            # and this route used to let them escape as a bare 500 — a phone
+            # cannot tell "the disk is full" from "the relay crashed", which is
+            # the distinction the desktop's ladder exists to name. The
+            # CLASSIFIER is the shared one (``session/store_failures.py``:
+            # ENOSPC/EDQUOT -> 507 ``store_out_of_space``), so the two planes
+            # keep one vocabulary for the condition; only the body's field
+            # names remain this plane's (``error``/``code``, what
+            # ``web/src/api.ts`` reads).
+            #
+            # Everything the ladder cannot classify is RE-RAISED untouched,
+            # exactly as the desktop ladder re-raises it: a read-only root's
+            # ``PermissionError`` keeps its existing 500 on both planes rather
+            # than being reshaped into an answer, and so does every other
+            # ``OSError`` whose own route has better words for it.
+            failure = store_failure(error, config_dir())
+            if failure is None:
+                raise
+            logger.log(
+                failure.level,
+                "mobile store failure %s at %s %s (session %s)",
+                failure.code,
+                request.method,
+                request.url.path,
+                session_id,
+                exc_info=error if failure.traceback else None,
+            )
+            return JSONResponse(
+                {"error": failure.message, "code": failure.code}, status_code=failure.status
             )
         if result.get("refused"):
             code = str(result.get("code") or "move_refused")

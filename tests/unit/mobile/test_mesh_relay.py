@@ -34,6 +34,7 @@ own, and the fake socket answers only what a cell sets it to answer.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import socket
@@ -666,6 +667,90 @@ def test_a_corrupt_receipt_store_refuses_rather_than_resetting(
     response = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
     assert response.status_code == 503
     assert response.json()["code"] == "receipt_store_unreadable"
+    assert relay.connections == 0
+
+
+def _boundary_client() -> TestClient:
+    """A logged-in client whose unhandled exceptions become the boundary's own 500.
+
+    ``raise_server_exceptions=False`` is what makes an UNTOUCHED escape
+    observable: it is the shape a phone sees when nothing claims the failure,
+    and the shape a store mapping must NOT produce for a condition the shared
+    ladder deliberately leaves alone.
+    """
+    app = build_app(MobileDaemon(port=0, password=PASSWORD, dial_registrants=False))
+    boundary = TestClient(app, follow_redirects=False, raise_server_exceptions=False)
+    assert boundary.post("/login", data={"password": PASSWORD}).status_code in (200, 303)
+    return boundary
+
+
+def test_a_full_volume_refuses_with_the_desktops_store_out_of_space(
+    relay: _FakeRelay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENOSPC on the journal's write is a named 507, not the bare 500 QA saw.
+
+    QA round 2 (Q2083-R2-1) filled the config root's volume for real: the
+    claim's write raised errno 28 and the phone got "Internal Server Error" —
+    the one shape it cannot tell apart from a crashed relay. The desktop
+    ladder answers this condition by name (``session/store_failures.py``:
+    ENOSPC/EDQUOT -> ``StoreFailure(507, STORE_OUT_OF_SPACE, …)``); this cell
+    pins the relay to the same code and status, in this plane's body shape.
+    """
+    from local_operator.mobile.transfer_receipts import TransferReceipts
+
+    relay.detail = lambda op: _move_detail()
+    _publish_relay(relay)
+
+    def full_volume(self: TransferReceipts, data: dict[str, Any]) -> None:
+        # The store's exact write footprint failing, the identity QA induced
+        # with a genuinely filled volume. Simulated here for the same reason
+        # the desktop ladder simulates SQLITE_FULL: a full volume is not
+        # reachable inside a suite that must run on CI.
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(TransferReceipts, "_write", full_volume)
+
+    response = _transfer(_boundary_client(), {"to": DEVICE, "request_id": REQUEST_ID})
+    assert response.status_code == 507, response.text
+    body = response.json()
+    assert set(body) == {"error", "code"}
+    assert body["code"] == "store_out_of_space"
+    # The shared ladder's sentence, naming the volume to free.
+    assert "Free some space on the volume holding" in body["error"]
+    # The claim write precedes the dial: no move was attempted, nothing to
+    # reconcile — the property QA's real-volume run measured as "0 dials".
+    assert relay.connections == 0
+
+
+def test_a_read_only_root_is_left_to_the_boundary_on_both_planes(
+    relay: _FakeRelay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EACCES is NOT reshaped: the ladder answers for space, and re-raises the rest.
+
+    The other half of QA's stress: a read-only config root fails the claim's
+    ``mkstemp`` with ``PermissionError`` [Errno 13]. The desktop ladder
+    deliberately re-raises that condition untouched (``store_failure`` answers
+    ``None`` for it), so this route must not forge a store answer for it
+    either — the phone keeps the boundary's own bare 500, and no dial happens.
+    """
+    from local_operator.mobile.transfer_receipts import TransferReceipts
+
+    relay.detail = lambda op: _move_detail()
+    _publish_relay(relay)
+
+    def read_only(self: TransferReceipts, data: dict[str, Any]) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(TransferReceipts, "_write", read_only)
+
+    response = _transfer(_boundary_client(), {"to": DEVICE, "request_id": REQUEST_ID})
+    assert response.status_code == 500
+    # The boundary's own plain-text refusal, not a store answer: a JSON
+    # content type (or either store code) would mean the condition was
+    # reshaped into something the ladder does not claim.
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "store_out_of_space" not in response.text
+    assert "receipt_store" not in response.text
     assert relay.connections == 0
 
 
