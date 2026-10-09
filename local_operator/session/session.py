@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -14080,20 +14081,32 @@ class Session:
                     self, detections, tool=tool_name, call_id=call_id
                 )
             notes = await asyncio.to_thread(
-                self._code_request_notes, detections, tool_name, args, context
+                self._code_request_notes,
+                detections,
+                tool_name,
+                args,
+                context,
+                asyncio.get_running_loop(),
             )
         except Exception:  # noqa: BLE001 - bookkeeping never breaks a turn
             logger.debug("code-request detection skipped", exc_info=True)
         return notes
 
     def _code_request_notes(
-        self, detections: Any, tool_name: str, args: Mapping[str, Any], context: Any
+        self,
+        detections: Any,
+        tool_name: str,
+        args: Mapping[str, Any],
+        context: Any,
+        loop: Any = None,
     ) -> list[Any]:
         """The tracked one-liners for one tool result, plus its dirty marks (blocking).
 
         Runs on a worker thread: it reads the fetch cache (small JSON files) and
         writes the dirty mark. Both are local I/O, but this sits on the tool-result
         path, so it stays off the event loop like the detection's own file reads.
+        ``loop`` is the caller's event loop (passed because a worker thread has
+        none): the ACTED kick below is handed back to it.
         """
         from local_operator.code_requests import cache as code_requests_cache
         from local_operator.code_requests import service as code_requests_service
@@ -14134,6 +14147,33 @@ class Session:
                     break
         if acted_keys:
             code_requests_cache.mark_dirty(self._config_dir, self._session_id, keys=acted_keys)
+            # THE MARK ALONE IS NOT ENOUGH (QA round 2, Q12). It only lets a
+            # READER revalidate, and with no client-triggered read after an
+            # acted event the feed never moves — the pane was poll-bound
+            # (measured: zero frames over 75 s). Kick a pass for the ACTED
+            # keys here, on the caller's loop: the forge answer then moves
+            # the index revision, and the feed frame follows without a GET.
+            # Scoped to the keys so the rest of the session keeps its TTLs;
+            # best-effort — a kick never breaks the turn.
+            if loop is not None:
+                try:
+                    from local_operator.code_requests import (
+                        ledger as code_requests_ledger,
+                    )
+
+                    entry = code_requests_ledger.read_index(self._config_dir, self._session_id)
+                    rows = (entry or {}).get("rows") or []
+                    loop.call_soon_threadsafe(
+                        functools.partial(
+                            code_requests_service.schedule_session_refresh,
+                            self._config_dir,
+                            self._session_id,
+                            rows,
+                            keys=list(acted_keys),
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - see above
+                    logger.debug("could not schedule a code-request refresh", exc_info=True)
         for ref, text in drafts:
             # A merge note carries the row's round freshness when the cache
             # already knows it (design §F): "agent review r2 clean, fresh on

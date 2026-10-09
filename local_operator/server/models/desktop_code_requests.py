@@ -76,6 +76,17 @@ class CodeRequestRow(BaseModel):
     #: Why a row is only a link, when there is something to say (an unconfirmed host, a
     #: script-created URL, a fork's inheritance). Shown verbatim; never a guess.
     reason: str | None = None
+    #: The one-line remedy a UI shows for a link-only row, per FORGE (cross-round
+    #: finding X3): gh/glab with the ``--hostname`` form off the canonical host, and
+    #: NO CLI at all for detect-and-link-only forges ("Link only — this host isn't
+    #: tracked yet."). A client must render this rather than deriving a CLI from
+    #: ``forge`` — the derivation said "gh" for Codeberg (QA round 2, Q11: the field
+    #: existed on the view but never reached the wire until it was listed here).
+    link_only_hint: str | None = None
+    #: Epoch seconds until a cooling host accepts requests again, when the row's host
+    #: is rate-limited: the row is tracked and WILL be fetched, so a reader must see
+    #: the wait rather than an unqualified "Link only" (QA round 2, Q13).
+    cooling_until: float | None = None
     #: ``{job_id,label,agent_role,child_session_id,path}`` when a subagent opened it.
     via: dict[str, Any] | None = None
     #: The parent session id a forked/inherited row came from.

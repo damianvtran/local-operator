@@ -135,3 +135,39 @@ def test_the_merge_note_omits_freshness_without_a_cache_entry(tmp_path: Path) ->
         EMPTY_CONTEXT,
     )
     assert len(notes) == 1 and "Latest:" not in notes[0].text
+
+
+@pytest.mark.asyncio
+async def test_the_acted_seam_kicks_a_refresh_pass(tmp_path: Path, monkeypatch) -> None:
+    """Q12: the mark lets a READER revalidate; the kick moves the feed without one."""
+    import asyncio
+
+    from local_operator.code_requests import service as cr_service
+
+    scheduled: dict[str, object] = {}
+
+    def fake_schedule(config_dir, session_id, rows, *, keys=None, force=False):
+        scheduled["config_dir"] = str(config_dir)
+        scheduled["session_id"] = session_id
+        scheduled["keys"] = list(keys or [])
+        return True
+
+    monkeypatch.setattr(cr_service, "schedule_session_refresh", fake_schedule)
+    stub = _Stub(tmp_path)
+    _seed_index(tmp_path)
+    notes = await asyncio.to_thread(
+        Session._code_request_notes,
+        cast(Any, stub),
+        [SimpleNamespace(kind="acted", ref=REF, act="comment")],
+        "bash",
+        {},
+        EMPTY_CONTEXT,
+        asyncio.get_running_loop(),
+    )
+    assert notes, "the note still lands"
+    for _ in range(100):
+        if scheduled:
+            break
+        await asyncio.sleep(0.01)
+    assert scheduled.get("keys") == [REF.key], scheduled
+    assert scheduled.get("session_id") == SESSION

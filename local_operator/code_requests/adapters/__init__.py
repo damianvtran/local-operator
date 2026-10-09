@@ -56,6 +56,19 @@ def adapter_for(ref: "Ref") -> Forge | None:
     return _FULL_ADAPTERS.get(ref.forge)
 
 
+def forge_adapter(forge: str) -> Forge | None:
+    """The adapter for a FORGE, independent of a ref's confirmation state.
+
+    The qualified-ref probe (``probe_shorthand``, QA round 2, Q10) needs the
+    GitHub adapter for an ``owner/repo#N`` ref that is deliberately
+    ``full=False`` until the probe confirms it — :func:`adapter_for` refuses
+    everything unconfirmed, which made the advertised resolve unreachable.
+    The probe still resolves credentials first, so this never widens what a
+    token may travel to (the F1 gate is in the caller, not here).
+    """
+    return _FULL_ADAPTERS.get(forge)
+
+
 def state_of(adapter: Forge, pieces: Mapping[str, object]) -> str:
     """``adapter.state`` behind the "only when there is data" guard.
 
@@ -75,6 +88,7 @@ __all__ = [
     "Forge",
     "ForgeHTTPError",
     "adapter_for",
+    "forge_adapter",
     "merge_comments",
     "state_of",
 ]
