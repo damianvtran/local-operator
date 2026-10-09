@@ -2999,11 +2999,12 @@ class ToolCard(ExpandableActionBlock):
         that gap is known.
 
         The imagegen variant's QUEUED state is the one live exception that is
-        not ``running``: its body (the state line, and the call's arguments) is
-        strictly more than the row can hold, and it is exactly the stretch a
-        user watching a slow batch wants to open onto. Gated on the detection
-        set, so every other tool's queued row keeps the inert-row answer
-        (``⟨waiting…⟩``) unchanged.
+        not ``running``: its body (the call's arguments, and whatever facts
+        the producer sent) is strictly more than the row can hold, and it is
+        exactly the stretch a user watching a slow batch wants to open onto
+        (the state word itself is NOT repeated — the status cell says it; see
+        the live body). Gated on the detection set, so every other tool's
+        queued row keeps the inert-row answer (``⟨waiting…⟩``) unchanged.
         """
         return (
             bool(self._output)
@@ -3398,11 +3399,12 @@ class ToolCard(ExpandableActionBlock):
         Replaces the generic live body for the detection set, rendering only
         what the producer actually sent: the state line carries the frozen
         vocabulary's word (with the card's own elapsed reading where the card
-        has one), the graphic is determinate when the adapter has a fraction
-        and the shimmering canvas otherwise, and the queue position, provider
-        error and log tail appear only when a producer carried them. Absence
-        renders the reduced state — no fraction means no bar, never a
-        filled-in guess.
+        has one) — except where it would only repeat the row's status cell,
+        which the queued card already states (design round 1, D4); the graphic
+        is determinate when the adapter has a fraction and the shimmering
+        canvas otherwise, and the queue depth, provider error and log tail
+        appear only when a producer carried them. Absence renders the reduced
+        state — no fraction means no bar, never a filled-in guess.
 
         The log tail is ONE source: the adapter's structured rows when the
         producer sent them, else the streamed text the generic body reads.
@@ -3417,7 +3419,13 @@ class ToolCard(ExpandableActionBlock):
         indent = " " * OUTPUT_INDENT
         view = self._imagegen_live or imagegen_mod.ImagegenLive()
         word = imagegen_mod.imagegen_state_word(self._state, view.state)
-        if word is not None:
+        # The queued row already says `queued` in its status cell (`QUEUED_LABEL`),
+        # and repainting it here is the double-print class this repo polices
+        # (design round 1, D4). The line is skipped exactly when it would only
+        # repeat that cell — a provider interim, a running elapsed or the
+        # cancelling word all add something and keep it.
+        repeats_status = self._state == "queued" and word == QUEUED_LABEL
+        if word is not None and not repeats_status:
             header = f"⋯ {word}"
             # Elapsed only for a RUNNING card: a queued call has not started,
             # and a duration counted from the announcement would date a wait
@@ -3439,10 +3447,13 @@ class ToolCard(ExpandableActionBlock):
             row.append("\n" + indent, style=dim)
             row.append_text(imagegen_mod.progress_graphic(view.fraction, self._frame_ms))
         if view.queue_position is not None:
+            # The field counts requests AHEAD of ours (FAL's own semantics,
+            # see the adapter), so "queue position 3" read off by one — the
+            # copy states what the number counts (design round 1, D3).
+            requests = view.queue_position
+            ahead = f"{requests} request{'s' if requests != 1 else ''} ahead"
             row.append("\n" + indent, style=dim)
-            row.append(
-                truncate_cells(f"queue position {view.queue_position}", line_width), style=dim
-            )
+            row.append(truncate_cells(ahead, line_width), style=dim)
         if view.error or view.error_type:
             # The provider's note for this snapshot: the platform sentence
             # verbatim, or the already-finished cancel conflict's own words —
@@ -4366,10 +4377,22 @@ class ToolCard(ExpandableActionBlock):
         # It takes the slot ahead of the expand offer while the call can still
         # be stopped — "how do I stop this" is the load-bearing question on a
         # live row, and the row still expands on click; only its LABEL yields.
+        # A call already saying `cancelling` has BEEN stopped: the hint would
+        # promise a stop already in flight, and the key's next activation is
+        # not "stop the call" (a double-press quits; a later press re-requests
+        # — design round 1, D2). The gate reads the PAINTED word through the
+        # same function the state line paints with, so the two cannot drift.
         # When the hint cannot fit, the generic arms below run unchanged, so a
         # narrow row keeps whatever affordance it already had.
         interrupt_hint = ""
-        if self._state in ("queued", "running") and self._is_imagegen():
+        live_word = imagegen_mod.imagegen_state_word(
+            self._state, self._imagegen_live.state if self._imagegen_live else None
+        )
+        if (
+            self._state in ("queued", "running")
+            and self._is_imagegen()
+            and live_word != imagegen_mod.STATE_CANCELLING
+        ):
             if remaining - (cell_len(IMAGE_INTERRUPT_HINT) + 1) >= _SUMMARY_FLOOR:
                 interrupt_hint = IMAGE_INTERRUPT_HINT
         if interrupt_hint:

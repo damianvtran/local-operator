@@ -259,12 +259,12 @@ def test_provider_error_note_shows_a_new_payload_and_skips_a_carried_one() -> No
 
 
 def test_the_determinate_bar_is_proportional_and_labelled() -> None:
-    assert imagegen.progress_graphic(0.42).plain == "▰▰▰▰▱▱▱▱▱▱ 42%"
-    assert imagegen.progress_graphic(0.0).plain == "▱" * 10 + " 0%"
-    assert imagegen.progress_graphic(1.0).plain == "▰" * 10 + " 100%"
+    assert imagegen.progress_graphic(0.42).plain == "████░░░░░░ 42%"
+    assert imagegen.progress_graphic(0.0).plain == "░" * 10 + " 0%"
+    assert imagegen.progress_graphic(1.0).plain == "█" * 10 + " 100%"
     # The fill floors to the label's own percent, so at 99% the last cell
     # stays hollow — the bar can never read ahead of its number (reviewer F3).
-    assert imagegen.progress_graphic(0.99).plain == "▰" * 9 + "▱" + " 99%"
+    assert imagegen.progress_graphic(0.99).plain == "█" * 9 + "░" + " 99%"
 
 
 def test_the_canvas_is_the_same_footprint_as_the_bar(
@@ -276,8 +276,8 @@ def test_the_canvas_is_the_same_footprint_as_the_bar(
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
     canvas = imagegen.progress_graphic(None, 123.0)
     bar = imagegen.progress_graphic(0.42)
-    assert canvas.plain == "▱" * imagegen.PROGRESS_CELLS
-    assert bar.plain[: imagegen.PROGRESS_CELLS] == "▰▰▰▰" + "▱" * 6
+    assert canvas.plain == "░" * imagegen.PROGRESS_CELLS
+    assert bar.plain[: imagegen.PROGRESS_CELLS] == "████" + "░" * 6
 
 
 def test_the_canvas_shimmers_under_the_kill_switch_off(
@@ -297,7 +297,7 @@ def test_the_canvas_shimmers_under_the_kill_switch_off(
 
     lit = imagegen.progress_graphic(None, 400.0)
     dark = imagegen.progress_graphic(None, 0.0)
-    assert lit.plain == dark.plain == "▱" * imagegen.PROGRESS_CELLS
+    assert lit.plain == dark.plain == "░" * imagegen.PROGRESS_CELLS
     assert bands(dark) == [theme_mod.semantic_color("dim")] * imagegen.PROGRESS_CELLS
     assert theme_mod.semantic_color("accent") in bands(lit)
 

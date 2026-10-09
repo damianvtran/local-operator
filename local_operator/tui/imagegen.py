@@ -52,6 +52,9 @@ __all__ = [
     "ImagegenLive",
     "LIVE_STATE_WORDS",
     "PROGRESS_CELLS",
+    "PROGRESS_EMPTY",
+    "PROGRESS_FILLED",
+    "STATE_CANCELLING",
     "imagegen_state_word",
     "is_image_gen_tool",
     "live_from_details",
@@ -389,11 +392,21 @@ def provider_error_note(
 #: gradient crossing it (measured on the band maths, not assumed).
 PROGRESS_CELLS = 10
 
+#: The bar's fill/track pair — the HOUSE pair (`█`/`░`; `usage_panel.py`'s
+#: ``BAR_FILLED``/``BAR_EMPTY`` and every other proportion graphic in the
+#: product). The parallelogram pair ``▰``/``▱`` this started on was the only
+#: occurrence in the tree and sits outside WGL4's Block-Elements subset, so it
+#: taught a second fill language for the same read; one vocabulary, in the
+#: repertoire the product already trusts for fills (design review round 1,
+#: D1). A future pair change is a one-line edit here.
+PROGRESS_FILLED = "█"
+PROGRESS_EMPTY = "░"
+
 
 def progress_graphic(fraction: float | None, time_ms: float | None = None) -> Text:
     """The generating-image graphic: determinate bar, else shimmering canvas.
 
-    With ``fraction`` known the graphic is frozen and precise — ``▰▰▰▰▱▱▱▱▱▱
+    With ``fraction`` known the graphic is frozen and precise — ``████░░░░░░
     42%`` — because a real number exists and motion would only smear it.
     Without one it is a canvas of empty cells that the shimmer band crosses,
     which is the honest indeterminate read: work is happening, nobody has said
@@ -415,14 +428,17 @@ def progress_graphic(fraction: float | None, time_ms: float | None = None) -> Te
         percent = round(fraction * 100)
         filled = max(0, min(PROGRESS_CELLS, percent * PROGRESS_CELLS // 100))
         bar = Text()
-        bar.append("▰" * filled, style=Style(color=theme_mod.semantic_color("accent"), bold=True))
-        bar.append("▱" * (PROGRESS_CELLS - filled), style=_dim_style())
+        bar.append(
+            PROGRESS_FILLED * filled,
+            style=Style(color=theme_mod.semantic_color("accent"), bold=True),
+        )
+        bar.append(PROGRESS_EMPTY * (PROGRESS_CELLS - filled), style=_dim_style())
         bar.append(
             f" {percent}%",
             style=Style(color=theme_mod.semantic_color("muted")),
         )
         return bar
-    canvas = "▱" * PROGRESS_CELLS
+    canvas = PROGRESS_EMPTY * PROGRESS_CELLS
     return shimmer_text(canvas, time_ms)
 
 
