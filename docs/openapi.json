@@ -21124,6 +21124,18 @@
                 "type": "null"
               }
             ]
+          },
+          "delegated_cleanup_notice": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delegated Cleanup Notice"
           }
         },
         "type": "object",

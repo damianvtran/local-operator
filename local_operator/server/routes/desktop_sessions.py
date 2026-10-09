@@ -2298,6 +2298,31 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     return CatalogueScope(kind, name)
 
 
+async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
+    """The one-time "delegated sessions were cleaned up" notice, consumed on read.
+
+    Read on a worker thread (a few-hundred-byte file, but this route is polled).
+    ``defer_to_writer=False``: the desktop server has no runtime of its own to
+    defer to, and the notice is once per STORE, so whichever viewer asks first
+    announces. Never raises into the listing it rides on.
+    """
+    try:
+        from local_operator.session.delegated_retention import (
+            notice_wire,
+            take_unannounced_delegated_notice,
+        )
+        from local_operator.session.retention import SESSIONS_DIRNAME
+
+        root = pathlib.Path(request.app.state.config_manager.config_dir)
+        payload = await asyncio.to_thread(
+            take_unannounced_delegated_notice, root / SESSIONS_DIRNAME, defer_to_writer=False
+        )
+        return None if payload is None else notice_wire(payload)
+    except Exception:  # noqa: BLE001 — a notice never fails the sidebar
+        logger.debug("delegated cleanup notice unavailable", exc_info=True)
+        return None
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
@@ -2407,6 +2432,7 @@ async def list_sessions(
                 "cursor_missing": page.cursor_missing,
                 "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
                 "counts": page.counts,
+                "delegated_cleanup_notice": await _delegated_cleanup_notice(request),
             }
         )
 

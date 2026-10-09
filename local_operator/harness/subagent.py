@@ -2797,7 +2797,20 @@ async def _construct_child_session(
     # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
-    mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
+    # ``parent`` is the spawning session's id: a forward-looking edge for the
+    # delegated-retention pass (``session/delegated_retention.py``), which today
+    # derives "is a parent still using this child" from the PARENT's roster
+    # because legacy markers carry no link. Optional and additive: absent when the
+    # parent has no id, and nothing reads it yet but diagnostics. Re-stamped on
+    # resume, so a resumed child records the session that resumed it.
+    parent_id = getattr(parent_session, "session_id", None)
+    mark_session_origin(
+        session_dir,
+        ORIGIN_SUBAGENT,
+        label=label,
+        agent=agent,
+        **({"parent": parent_id} if isinstance(parent_id, str) and parent_id else {}),
+    )
     # Birth metadata must be durable before publication, without its fsync
     # blocking the parent or other children sharing this event loop.
     transcript = await asyncio.to_thread(Transcript, session_dir)
