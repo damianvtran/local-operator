@@ -425,8 +425,8 @@ async def test_an_append_across_a_gutter_power_of_ten_is_still_delivered(harness
     """QA round 1: at 9->10 lines ``read`` re-pads every gutter (full replace)."""
     harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
     harness.scheduler.load([spec(name="log")])
-    nine = "\n".join(f"{i}| line {i}" for i in range(1, 10))
-    ten = "\n".join(f"{i}| line {i}" for i in range(1, 11))
+    nine = "\n".join(f"{i:>1}| line {i}" for i in range(1, 10))
+    ten = "\n".join(f"{i:>2}| line {i}" for i in range(1, 11))
     harness.results.extend([{"text": nine}, {"text": ten}])
     await harness.ripe()
     await harness.ripe()

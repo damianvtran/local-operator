@@ -103,8 +103,10 @@ def test_is_pure_addition_survives_a_line_count_crossing_a_power_of_ten() -> Non
     """QA round 1, Q1: ``read`` re-pads every gutter at 9->10 lines."""
     from local_operator.monitors.diff import is_pure_addition
 
-    old = "\n".join(f"{i}| line {i}" for i in range(1, 10))
-    new = "\n".join(f"{i}| line {i}" for i in range(1, 11))
+    # Faithful to ``_number_lines``: the column is right-aligned to the widest
+    # line number, so 9 lines use ``N| `` and 10 lines `` N| `` on EVERY line.
+    old = "\n".join(f"{i:>1}| line {i}" for i in range(1, 10))
+    new = "\n".join(f"{i:>2}| line {i}" for i in range(1, 11))
     assert is_pure_addition(old, new)
 
 
