@@ -79,6 +79,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -471,7 +472,11 @@ def remove_session_dir(
     WARNING so an attempt against an unmarked or foreign store is visible.
     Logs every real removal at WARNING (naming the record file) and appends
     it to the store's :data:`CLEANUP_LOG_NAME` BEFORE the ``rmtree``, so a
-    crash mid-removal still leaves the record. A dry run refuses and decides
+    crash mid-removal still leaves the record. Read-only leftovers inside the
+    session (rig-created 0555/0444 trees — the measured husk cause; see
+    ``_widen_and_retry`` below) are cleared by a bounded chmod-and-retry;
+    anything it cannot clear still raises to the caller, exactly as the plain
+    removal did. A dry run refuses and decides
     exactly as a real run would but writes nothing and logs at DEBUG — the
     CLI prints the decisions itself, and a WARNING per rehearsal doubled
     every line in a terminal (UX round 1, U3). Returns whether the directory
@@ -514,7 +519,66 @@ def remove_session_dir(
         actor,
         target.parent / CLEANUP_LOG_NAME,
     )
-    shutil.rmtree(target)
+    try:
+        resolved_root = target.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
+        # The shapes ``resolve()`` refuses here fail the removal below anyway;
+        # this fallback only keeps the containment test meaningful while that
+        # failure surfaces.
+        resolved_root = target
+
+    def _widen_and_retry(function: Callable[..., Any], path: str, error: BaseException) -> None:
+        """``onexc`` hook for the removal below: widen, then retry ONCE.
+
+        WHY IT EXISTS. Session scratchpads can contain read-only trees left by
+        test rigs — measured on the live store, 2026-10-09: a 0555 directory
+        holding a 0444 file (husks ``ebf4ed0639c6`` and ``30776a2dc9b8``). A
+        plain removal deletes most of the session, then dies on the entry; the
+        record was already written, so the remainder (origin.json gone) can
+        never be classified again — a partial husk no later pass can see.
+
+        WHAT IT MAY TOUCH. Only paths inside ``resolved_root`` — the directory
+        this call already selected for deletion, with the guards passed — get
+        their owner bits widened: ``unlink`` inside an unwritable directory
+        needs the PARENT's write+execute bit, ``rmdir`` needs the parent's too,
+        so both the failing path and its parent are candidates. A symlink
+        candidate is skipped, never followed: ``chmod`` would reach its target,
+        a path this call was never asked to touch (``update.py``'s sibling
+        handler measured that).
+
+        FAIL CLOSED, BOUNDED. Only ``os.unlink``/``os.rmdir`` are re-issued;
+        the other shapes ``rmtree`` reports (``os.open``, ``os.scandir``,
+        ``os.lstat``, ``os.path.islink``, ``os.close``) cannot be re-issued
+        with just a path, and letting them return would silently skip a
+        subtree. A failed retry propagates exactly as the plain removal's
+        failure did: the caller counts an error and the directory stays on
+        disk — nothing is suppressed.
+        """
+        for candidate in (Path(path).parent, Path(path)):
+            try:
+                if candidate.is_symlink() or not candidate.resolve().is_relative_to(resolved_root):
+                    continue
+            except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
+                continue
+            try:
+                os.chmod(candidate, os.stat(candidate).st_mode | stat.S_IRWXU)
+            except OSError:
+                logger.debug(
+                    "session cleanup: could not widen %s for removal",
+                    candidate,
+                    exc_info=True,
+                )
+        if function is os.unlink or function is os.rmdir:
+            # The one retry: a second failure propagates, by design.
+            function(path)
+        else:
+            # Not re-issuable with just a path (see above): fail closed.
+            raise error
+
+    # ``onexc``, not ``onerror``: the non-deprecated spelling since 3.12 (the
+    # type stubs flag ``onerror``), and what ``update.py``'s chmod-and-retry
+    # handler already uses.
+    shutil.rmtree(target, onexc=_widen_and_retry)
     if config_dir is not None:
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of

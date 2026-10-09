@@ -762,6 +762,75 @@ def test_remover_removes_a_marked_store_entry(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_remover_clears_a_read_only_leftover_inside_a_scratchpad(tmp_path: Path) -> None:
+    """The bounded chmod-and-retry exists for this shape: a rig left a 0555
+    directory (holding a 0444 file) inside a session's scratchpad, and a plain
+    ``rmtree`` deleted the rest of the session and then died on the entry —
+    the measured husks (2026-10-09, live store sessions ``ebf4ed0639c6`` and
+    ``30776a2dc9b8``) kept a remainder no later pass could classify, because
+    the record files were already gone. The retry must take the whole
+    directory."""
+    mark_store(tmp_path / "sessions")
+    target = tmp_path / "sessions" / "abc"
+    ro = target / "scratchpad" / "walprobe-j715hwh8" / "ro"
+    ro.mkdir(parents=True)
+    db = ro / "wal.db"
+    db.write_text("probe\n", encoding="utf-8")
+    os.chmod(db, 0o444)
+    os.chmod(ro, 0o555)
+    try:
+        removed = remove_session_dir(
+            target, config_dir=tmp_path, policy="p", reason="r", actor="test"
+        )
+    finally:
+        # Without the retry the removal raises and leaves the read-only tree
+        # behind; restore the write bits so tmp_path teardown can reap it.
+        # (After a successful removal there is nothing left to restore.)
+        for leftover in (ro, db):
+            try:
+                os.chmod(leftover, 0o755)
+            except OSError:
+                pass
+    assert removed is True
+    assert not target.exists()
+
+
+def test_remover_fails_closed_when_the_widening_cannot_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: when even the widening cannot run (here ``chmod`` itself
+    raises), the retry fails too and an OSError still reaches the caller — the
+    error is counted, the directory is kept, and the record written before the
+    attempt is the durable evidence. Nothing is suppressed."""
+    mark_store(tmp_path / "sessions")
+    target = tmp_path / "sessions" / "abc"
+    ro = target / "scratchpad" / "ro"
+    ro.mkdir(parents=True)
+    db = ro / "wal.db"
+    db.write_text("probe\n", encoding="utf-8")
+    os.chmod(db, 0o444)
+    os.chmod(ro, 0o555)
+
+    def _refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "chmod", _refuse)
+    try:
+        with pytest.raises(OSError):
+            remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
+    finally:
+        monkeypatch.undo()
+    for leftover in (ro, db):
+        try:
+            os.chmod(leftover, 0o755)
+        except OSError:
+            pass
+    assert target.exists()
+    assert db.exists()
+    log = (tmp_path / "sessions" / CLEANUP_LOG_NAME).read_text(encoding="utf-8")
+    assert '"session": "abc"' in log
+
+
 def test_mark_store_is_idempotent(tmp_path: Path) -> None:
     mark_store(tmp_path / "sessions")
     first = (tmp_path / "sessions" / STORE_MARKER_NAME).read_text()
