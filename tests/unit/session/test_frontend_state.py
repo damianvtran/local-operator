@@ -1041,7 +1041,10 @@ def test_the_checkpoint_makes_no_access_claim() -> None:
     transcript = _Transcript()
     asyncio.run(store.checkpoint(transcript))
     ((_, payload),) = transcript.appended
-    assert payload["state"]["model_access"] is None
+    # ABSENT, not null: the serializer drops an idle claim from the wire so the
+    # attach frame does not spend its null (QA round 1, Q3), and absence is the
+    # same "no claim" the durable fold means.
+    assert "model_access" not in payload["state"]
     assert store.state.model_access is not None
 
 

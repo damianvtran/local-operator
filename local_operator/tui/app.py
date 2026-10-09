@@ -12622,6 +12622,11 @@ class OperatorApp(App[None]):
             streaming=False,
         )
         self._wire_mcp_status(session)
+        # Both adoption paths publish (the claim `_adopt_session`'s own comment
+        # makes, QA round 1 Q2): a takeover replaces the owner whose credentials
+        # the catalogue and the access claim describe, so the new owner's rows
+        # are republished here too. Previously only the boot path did.
+        self._publish_model_catalogue(session)
         # The durable ledger carries the conversation's true cost/context
         # across the rotation. Seeding the band directly from the canonical
         # snapshot (not only from restored turn usage, which is one turn's
@@ -42272,27 +42277,36 @@ class OperatorApp(App[None]):
         store = getattr(session, "_frontend_state_store", None) if session is not None else None
         if store is None:
             return
-        from local_operator.session.frontend_state import FrontendModelAccess
+        # NEVER RAISES, on any edge (agent review round 1, R1-2/R1-1 fallout):
+        # the same call runs on the boot path, on logins, on local switches and
+        # now on routed switches, and an additive state field is never worth
+        # failing the keystroke it rode in on. One guard here rather than a
+        # try/except around every call site, which is how the routed lane came
+        # to be missed in the first place.
+        try:
+            from local_operator.session.frontend_state import FrontendModelAccess
 
-        selector = self._current_selector()
-        if not selector:
-            store.refresh_model_access(None)
-            return
-        provider = selector.partition("/")[0]
-        usable = self._usable_providers()
-        if usable is None:
-            store.refresh_model_access(None)
-            return
-        from local_operator.providers.registry import get_provider_definition
+            selector = self._current_selector()
+            if not selector:
+                store.refresh_model_access(None)
+                return
+            provider = selector.partition("/")[0]
+            usable = self._usable_providers()
+            if usable is None:
+                store.refresh_model_access(None)
+                return
+            from local_operator.providers.registry import get_provider_definition
 
-        definition = get_provider_definition(provider)
-        store.refresh_model_access(
-            FrontendModelAccess(
-                state="ok" if provider in usable else "signed_out",
-                provider=provider,
-                label=definition.name if definition is not None else provider,
+            definition = get_provider_definition(provider)
+            store.refresh_model_access(
+                FrontendModelAccess(
+                    state="ok" if provider in usable else "signed_out",
+                    provider=provider,
+                    label=definition.name if definition is not None else provider,
+                )
             )
-        )
+        except Exception:
+            logger.debug("model access publication failed", exc_info=True)
 
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).
@@ -42318,12 +42332,9 @@ class OperatorApp(App[None]):
             logger.debug("model catalogue publication failed", exc_info=True)
         # The access claim rides the SAME edges as the catalogue — a login or a
         # re-adoption is exactly when either fact changes, and both are reads
-        # this app already pays for on those edges. Failures degrade the same
-        # way: an additive state field is never worth a boot-path exception.
-        try:
-            self._publish_model_access(session)
-        except Exception:
-            logger.debug("model access publication failed", exc_info=True)
+        # this app already pays for on those edges. `_publish_model_access`
+        # carries its own never-raises guard.
+        self._publish_model_access(session)
 
     def _catalogue_rows(
         self, entries: list["CatalogueEntry"], *, show_all: bool | None = None
@@ -42480,10 +42491,19 @@ class OperatorApp(App[None]):
             from local_operator.providers.catalogue import split_by_access
 
             _, withheld = split_by_access(entries, usable=usable, current=current)
+            # Agreement is not nit-fodder here: the count is 1 in exactly the
+            # state the clause was added to teach (one unusable provider), so
+            # `1 need sign-in` was the commonest reading of the line.
+            needs = "needs" if withheld == 1 else "need"
             return rows, (
-                f"showing all — {withheld} need sign-in — /model --all hides" if withheld else ""
+                f"showing all — {withheld} {needs} sign-in — /model --all hides" if withheld else ""
             )
-        return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
+        # The `--all` clause is a TRAILING clause on purpose (design review
+        # round 1, D1): `_fit_clauses` drops trailing clauses before it
+        # truncates the leading one, so a narrow picker loses the teaching
+        # hint and keeps the actionable `/login` path. 49 cells at N=1 fits
+        # the 53-cell body of the 56-cell minimum card and every wider one.
+        return rows, (f"{hidden} hidden — /login <provider> · /model --all shows" if hidden else "")
 
     def _with_current_row(self, rows: list[ModelRow], current: str | None) -> list[ModelRow]:
         """``rows`` guaranteed to contain the session's own model.
@@ -51371,6 +51391,14 @@ class OperatorApp(App[None]):
         self._probe_quota_after_switch(session)
         self._effort_refusal_shown = None
         self._warm_usage_background()
+        # The routed lane is a REAL switch on the owner session — it is where a
+        # phone or any remote follower's `/model <selector>` lands
+        # (`may_run_slash_in_the_owners_terminal` routes them here) — so the
+        # canonical access claim has to move with it. Without this the claim
+        # kept describing the PREVIOUS model, which is the stale claim
+        # ``FrontendModelAccess``'s own docstring calls worse than none (agent
+        # review round 1, R1-2).
+        self._publish_model_access(session)
         suffix, warning = self._model_access_note(provider)
         # The switch lands on the SHARED session, so every terminal's band
         # repaints from the canonical update — the receipt below only has to

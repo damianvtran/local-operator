@@ -3144,6 +3144,18 @@ class FrontendSessionState(BaseModel):
             payload.pop("asks_open", None)
         if mutable.asks_truncated is None:
             payload.pop("asks_truncated", None)
+        # An IDLE claim costs the frame its null (``, "model_access": null`` —
+        # 22 bytes), and the attach frame has no slack: the class guard in
+        # tests/unit/session/test_attach_frame_size.py sat 2,177 bytes under
+        # the 1 MiB line without the field and 22 bytes over with it (QA round
+        # 1, Q3). Absence already means "no claim" for every consumer — the
+        # field defaults to None and the durable fold writes None for the same
+        # reason — so the null is spent only when a claim EXISTS. A live claim
+        # serializes normally; the delta that CLEARS one still carries an
+        # explicit null (this seam shapes snapshots, not change sets), which
+        # is what lets a follower tell "cleared" from "never said".
+        if mutable.model_access is None:
+            payload.pop("model_access", None)
         return payload
 
     @field_validator("selected_model", "effective_model", mode="before")
