@@ -222,6 +222,22 @@ Screens, following branding.md §7's agent-output hierarchy:
   diff counts, tap to expand/collapse args+output+diff; todos panel;
   subagents panel with tap-to-drill into a subagent's transcript and a
   back-to-parent crumb; approval/ask cards pinned above the composer.
+
+  The view's FIRST FRAME IS THE FINAL LAYOUT: with no projection yet the screen
+  paints the header row, the transcript's box and the composer's box (an inert
+  `ComposerFrame` drawn from the composer's own class strings), so the
+  projection's arrival is a content fill and not a full-layout swap. The
+  composer is deliberately not live there — there is no session to send to and
+  a control that silently drops a typed sentence is worse than a reserved box.
+
+  Older history is paged in as the reader scrolls: the transcript asks for the
+  rows below the oldest row it HOLDS, and the daemon serves them from the
+  journal itself — the rows a compaction dropped included, which the fold's
+  replay no longer reaches. That last part is the difference between "the phone
+  shows a bounded tail window" and "the phone shows a bounded tail window of a
+  conversation whose beginning it can never reach": with four compactions in
+  one fixture journal, 639 of its 3,348 lines were reachable before and all of
+  them are now.
 - **Composer** — the TUI composer, mobilized: multiline auto-growing field,
   model label + effort as tappable chips (opens the model sheet / effort
   rungs), typing `/` opens the slash-command sheet with fuzzy filtering and

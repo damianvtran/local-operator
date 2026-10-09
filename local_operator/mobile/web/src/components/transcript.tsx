@@ -384,13 +384,26 @@ export function Transcript({
 	/* Long projections pin the opening user row ahead of a disjoint tail. It is
 	   already retained, but it is not the tail's chronological history cursor;
 	   anchor at the next row so the API can return the missing middle. The
-	   merge's id de-dup keeps the opener exactly once when that page reaches it. */
+	   merge's id de-dup keeps the opener exactly once when that page reaches it.
+
+	   ONCE A PAGE HAS BEEN FETCHED THE CURSOR IS THE OLDEST ROW HELD, not the
+	   oldest row RENDERED. `visible[0]` is the oldest row inside the mounted
+	   window, and that window only grows when the reader taps `show N more
+	   loaded` — so while fetches outpace taps the cursor did not move and every
+	   request returned the SAME page. Measured on the S6 fixture after deep
+	   history became reachable: 40 taps produced 139 requests and 4,680 mounted
+	   rows holding 240 distinct ones, twenty copies of one page, which the
+	   reader then scrolls through as a conversation that repeats itself.
+	   `older[0]` is the oldest row this view actually holds, so the next page is
+	   the one immediately before it and paging is linear in the reader's taps. */
 	const oldestId =
-		older.length === 0 && entries.length === PAGE && entries[0]?.kind === "user"
-			? entries[1]?.id ?? entries[0]?.id ?? null
-			: visible.length > 0
-				? visible[0].id
-				: null;
+		older.length > 0
+			? older[0].id
+			: entries.length === PAGE && entries[0]?.kind === "user"
+				? entries[1]?.id ?? entries[0]?.id ?? null
+				: visible.length > 0
+					? visible[0].id
+					: null;
 
 	/* Follow the tail on new content, but only when already at the bottom. */
 	useEffect(() => {
