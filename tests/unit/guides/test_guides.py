@@ -35,6 +35,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "credentials",
         "extensions",
         "failover",
+        "image-generation",
         "mcp",
         "mobile",
         "monitor",
@@ -87,6 +88,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
+        ("generate an image of a cat", "image-generation"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
         (

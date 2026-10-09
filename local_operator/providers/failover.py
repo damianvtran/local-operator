@@ -2438,9 +2438,10 @@ def expand_fallback_targets(
     know the selected effort pass it so quota preflight and the stream agree:
     an explicitly identical effort is not another route to spend or pin.
 
-    A DECISION-ONLY OR SPEECH-ONLY PROVIDER IS DROPPED HERE
+    A DECISION-ONLY, SPEECH-ONLY OR MEDIA-ONLY PROVIDER IS DROPPED HERE
     (``registry.is_decision_only`` — TypeSafe's Jev; ``registry.is_speech_only``
-    — ElevenLabs), before the wildcard expansion below, so the selector is
+    — ElevenLabs; ``registry.is_media_only`` — FAL), before the wildcard
+    expansion below, so the selector is
     read for the provider it names rather than for the id a ``provider/*``
     entry would inherit. This is the one place a chain ENTRY becomes a ROUTE:
     the waterfall in ``model.configure``, the quota preflight and the TUI's
@@ -2452,7 +2453,11 @@ def expand_fallback_targets(
     """
     # Imported at call time, like the sibling helpers in this module: `registry`
     # is a heavier module and this one sits on the request path.
-    from local_operator.providers.registry import is_decision_only, is_speech_only
+    from local_operator.providers.registry import (
+        is_decision_only,
+        is_media_only,
+        is_speech_only,
+    )
 
     _, _, bare_id = selector.partition("/")
     targets: list[FallbackTarget] = []
@@ -2461,7 +2466,11 @@ def expand_fallback_targets(
         if target is None:
             continue
         entry_provider = parse_selector(target.selector)[0]
-        if is_decision_only(entry_provider) or is_speech_only(entry_provider):
+        if (
+            is_decision_only(entry_provider)
+            or is_speech_only(entry_provider)
+            or is_media_only(entry_provider)
+        ):
             continue
         if target.selector.endswith("/*"):
             target = dataclasses.replace(target, selector=f"{target.selector[:-1]}{bare_id}")

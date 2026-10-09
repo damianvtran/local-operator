@@ -128,9 +128,19 @@ def _force_browser_available(monkeypatch):
     discovery record), so it is forced here too: a test whose answer depends on
     whether the developer happens to be running the app is not a test of the
     registry.
+
+    ``generate_image`` joined them in the image-generation workstream: its gate
+    reads the machine's image credentials (``imagegen.availability``), so an
+    unforced answer would depend on the developer's stored keys. Patched on the
+    module object the builder resolves through.
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    from local_operator.tools import image_tool
+
+    monkeypatch.setattr(
+        image_tool.image_availability, "image_provider_reachable", lambda *a, **k: True
+    )
 
 
 def test_default_set_builds_all_builtin_tools() -> None:

@@ -147,6 +147,7 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_media_only,
         is_speech_only,
     )
 
@@ -155,9 +156,11 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # A provider that can serve no chat completion is not a selection this reader
     # may hand out, for the same reason the provider registry refuses one as a
     # hosting: TypeSafe's Jev rejects ``chat/completions`` on every host we reach
-    # it through (``ProviderDefinition.decision_only``) and ElevenLabs serves
-    # speech-to-text with no chat route at all (``ProviderDefinition.speech_only``),
-    # so honouring either row would resume a conversation onto a model that 400s
+    # it through (``ProviderDefinition.decision_only``), ElevenLabs serves
+    # speech-to-text with no chat route at all (``ProviderDefinition.speech_only``)
+    # and FAL serves generative media with no chat route at all
+    # (``ProviderDefinition.media_only``),
+    # so honouring any such row would resume a conversation onto a model that 400s
     # every turn. Refused HERE, in the
     # one validator both owner-side readers go through —
     # ``session_factory.resolve_hosting_model_with_source`` and
@@ -170,7 +173,7 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # resolver name the provider and the remedy instead of falling back quietly —
     # and it answers for BOTH flag classes this reader refuses, so a speech-only
     # row gets the same named refusal (agent review round 1, R1-3).
-    if is_decision_only(provider) or is_speech_only(provider):
+    if is_decision_only(provider) or is_speech_only(provider) or is_media_only(provider):
         return None
     return StoredModelSelection(
         provider,
@@ -476,7 +479,11 @@ def refused_decision_only_selection(directory: Path) -> str | None:
 
 def _read_refusal(directory: Path) -> str | None:
     """The uncached read behind :func:`refused_decision_only_selection`."""
-    from local_operator.providers.registry import is_decision_only, is_speech_only
+    from local_operator.providers.registry import (
+        is_decision_only,
+        is_media_only,
+        is_speech_only,
+    )
 
     path = directory / "transcript.jsonl"
     try:
@@ -509,7 +516,11 @@ def _read_refusal(directory: Path) -> str | None:
                     # have kept looking below it and any name here would be a guess.
                     return None
                 provider = selector.split("/", 1)[0]
-                refused = is_decision_only(provider) or is_speech_only(provider)
+                refused = (
+                    is_decision_only(provider)
+                    or is_speech_only(provider)
+                    or is_media_only(provider)
+                )
                 return provider if provider and refused else None
     return None
 
