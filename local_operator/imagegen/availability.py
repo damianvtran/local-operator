@@ -62,6 +62,7 @@ OPENAI_IMAGES_KINDS = frozenset({"api_key"})
 FAL_ENV_KEY = "FAL_API_KEY"
 OPENAI_ENV_KEY = "OPENAI_API_KEY"
 GOOGLE_ENV_KEY = "GOOGLE_AI_STUDIO_API_KEY"
+XAI_ENV_KEY = "XAI_API_KEY"
 
 
 def _open_store(config_dir: Path | None) -> AuthStore:
@@ -182,6 +183,7 @@ def image_provider_reachable(config_dir: Path | None = None) -> bool:
         or openai_images_key(config_dir)
         or openai_subscription_grant(config_dir)
         or google_key(config_dir)
+        or xai_available(config_dir)
     )
 
 
@@ -257,6 +259,34 @@ def google_key(config_dir: Path | None = None) -> str | None:
     return exported or None
 
 
+def xai_available(config_dir: Path | None = None) -> bool:
+    """Whether an xAI credential exists: a stored row of EITHER class, or env.
+
+    xAI serves both an API key and the Grok OAuth token at the same images
+    route (the ``xai-oauth`` login stores under the ``xai`` namespace), so
+    this probe accepts both row classes — the one-class rule holds because
+    BOTH genuinely run the call, and there is no second credential class this
+    rung could silently spend instead. The registry's store row and an
+    exported ``XAI_API_KEY`` are honoured like FAL's. Never raises.
+    """
+    try:
+        store = _open_store(config_dir)
+        try:
+            rows = store.list_credentials("xai")
+            if any(getattr(row, "credential_type", None) in ("api_key", "oauth") for row in rows):
+                return True
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.debug("xai row probe failed; falling back to store/env", exc_info=True)
+
+    from local_operator.providers.registry import provider_secret_value
+
+    if provider_secret_value(XAI_ENV_KEY, base=config_dir):
+        return True
+    return bool(os.environ.get(XAI_ENV_KEY))
+
+
 async def openai_sub_access(store: AuthStore, session_id: str | None = None) -> OAuthAccess | None:
     """The identity-carrying grant the subscription rung would send.
 
@@ -287,4 +317,25 @@ async def google_call_key(store: AuthStore, session_id: str | None = None) -> st
     if key:
         return key
     exported = os.environ.get(GOOGLE_ENV_KEY)
+    return exported or None
+
+
+async def xai_call_bearer(store: AuthStore, session_id: str | None = None) -> str | None:
+    """The bearer the xAI rung would send: the store's own pick, then env.
+
+    Deliberately ``get_oauth_access``: it resolves EITHER row class (the
+    ``xai`` and ``xai-oauth`` logins share one namespace) with refresh,
+    rotation and backoff exactly as a chat turn's credential would — one
+    place for those rules. ``None`` means "no credential"; a stored row that
+    cannot mint a bearer surfaces as a rung failure and fails forward. Never
+    raises.
+    """
+    try:
+        access = await store.get_oauth_access("xai", session_id)
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.warning("xai credential read failed; reporting none")
+        access = None
+    if access is not None and access.access_token:
+        return access.access_token
+    exported = os.environ.get(XAI_ENV_KEY)
     return exported or None

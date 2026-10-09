@@ -76,6 +76,9 @@ class ImageRoute(StrEnum):
     OPENAI_SUB = "openai-sub"
     #: Google's Gemini API (Nano Banana family; media wave-2, append-only).
     GOOGLE = "google"
+    #: xAI's Grok Imagine images API (media wave-2, append-only); key or the
+    #: Grok OAuth token both ride this route.
+    XAI = "xai"
     #: No usable route. Appears in availability/refusal payloads only.
     NONE = "none"
 

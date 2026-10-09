@@ -166,6 +166,10 @@ def test_reachable_is_the_any_of_matrix(
     assert availability.image_provider_reachable(config_root) is True
     monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY")
 
+    monkeypatch.setenv("XAI_API_KEY", "xk")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("XAI_API_KEY")
+
     store.upsert_credential(
         "radient", {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000}
     )
@@ -185,6 +189,7 @@ def test_probes_never_raise(config_root: Path, monkeypatch: pytest.MonkeyPatch) 
     assert availability.openai_images_key(config_root) is None
     assert availability.openai_subscription_grant(config_root) is False
     assert availability.google_key(config_root) is None
+    assert availability.xai_available(config_root) is False
     assert availability.image_provider_reachable(config_root) is False
 
 
@@ -312,3 +317,40 @@ async def test_the_google_async_twin_agrees_with_the_sync_probe(
     store.upsert_credential("google", {"type": "api_key", "source": "login", "key": "gkey"})
     assert availability.google_key(config_root) == "gkey"
     assert await availability.google_call_key(store) == "gkey"
+
+
+# ---------------------------------------------------------------------------
+# xAI: key rows OR the Grok OAuth grant (both store under "xai"), or env
+# ---------------------------------------------------------------------------
+
+
+def test_xai_lights_from_an_api_key_row(store: AuthStore, config_root: Path) -> None:
+    assert availability.xai_available(config_root) is False
+    store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
+    assert availability.xai_available(config_root) is True
+
+
+def test_xai_lights_from_an_oauth_grant(store: AuthStore, config_root: Path) -> None:
+    store.upsert_credential(
+        "xai",
+        {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000},
+    )
+    assert availability.xai_available(config_root) is True
+
+
+def test_xai_lights_from_the_export(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "exported")
+    assert availability.xai_available(config_root) is True
+    monkeypatch.delenv("XAI_API_KEY")
+    assert availability.xai_available(config_root) is False
+
+
+@pytest.mark.asyncio
+async def test_the_xai_bearer_twin_prefers_the_store_then_env(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "exported")
+    assert await availability.xai_call_bearer(store) == "exported"
+
+    store.upsert_credential("xai", {"type": "api_key", "source": "login", "key": "xk"})
+    assert await availability.xai_call_bearer(store) == "xk"

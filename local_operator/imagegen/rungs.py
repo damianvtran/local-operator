@@ -69,6 +69,7 @@ __all__ = [
     "progress_details",
     "run_google",
     "run_openai_sub",
+    "run_xai",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1165,3 +1166,4 @@ async def best_effort_cancel(handle: CancelHandle | None) -> str:
 # the provider module first, or the provider module imported first.
 from local_operator.imagegen.rungs_google import run_google  # noqa: E402
 from local_operator.imagegen.rungs_openai_sub import run_openai_sub  # noqa: E402
+from local_operator.imagegen.rungs_xai import run_xai  # noqa: E402

@@ -81,6 +81,7 @@ RUNG_LABELS: dict[str, str] = {
     ImageRoute.OPENAI: "OpenAI",
     ImageRoute.OPENAI_SUB: "ChatGPT plan",
     ImageRoute.GOOGLE: "Google",
+    ImageRoute.XAI: "xAI",
 }
 
 #: The resolver's fixed order, first match wins. APPEND-ONLY: the three routes
@@ -95,6 +96,7 @@ IMAGE_RUNG_ORDER: tuple[ImageRoute, ...] = (
     ImageRoute.OPENAI,
     ImageRoute.OPENAI_SUB,
     ImageRoute.GOOGLE,
+    ImageRoute.XAI,
 )
 
 #: Every rung's declaration — identity, capability, cancel support and cost
@@ -152,6 +154,19 @@ RUNG_SPECS: dict[str, RungSpec] = {
         # Synchronous single request, no per-call figure; vendor rate table
         # (documentation only — see the guide + image-providers matrix).
         cost="rate_table",
+    ),
+    ImageRoute.XAI: RungSpec(
+        route=ImageRoute.XAI,
+        label="xAI",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i"}),
+        cancel_support=CancelSupport.NONE,
+        # REPORTED, not a rate table: the official OpenAPI schema requires
+        # ``usage.cost_in_usd_ticks`` on the response, so a figure a provider
+        # reported may ride ``cost_usd`` (design D8). This supersedes the
+        # wave's initial ``rate_table`` pencil, taken before the schema was
+        # read at implement time (2026-10-09).
+        cost="reported",
     ),
 }
 
@@ -236,6 +251,8 @@ async def _probe_route(
         return image_availability.openai_subscription_grant(config_dir)
     if route == ImageRoute.GOOGLE:
         return bool(image_availability.google_key(config_dir))
+    if route == ImageRoute.XAI:
+        return image_availability.xai_available(config_dir)
     logger.warning("no availability probe for image route %s; reporting unavailable", route)
     return False
 
@@ -256,6 +273,7 @@ _ROUTE_REASONS: dict[ImageRoute, tuple[str, str]] = {
         "A Google AI Studio key is stored.",
         "No Google AI Studio key is stored.",
     ),
+    ImageRoute.XAI: ("An xAI key or sign-in is stored.", "No xAI key or sign-in is stored."),
 }
 
 
@@ -293,8 +311,10 @@ async def resolve_image_route(
         "No image provider is available: sign in to Radient (`/login radient`), "
         "store a FAL key (`lop login fal`) or export FAL_API_KEY, store an "
         "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY, "
-        "sign in to a ChatGPT plan (`lop login openai`), or store a Google AI "
-        "Studio key (`lop login google`) or export GOOGLE_AI_STUDIO_API_KEY."
+        "sign in to a ChatGPT plan (`lop login openai`), store a Google AI "
+        "Studio key (`lop login google`) or export GOOGLE_AI_STUDIO_API_KEY, "
+        "or store an xAI key (`lop login xai`) or sign in to Grok "
+        "(`lop login xai-oauth`)."
     )
     return ImageRouteResolution(route=ImageRoute.NONE, reason=reason, rungs=tuple(rungs))
 
@@ -343,6 +363,13 @@ async def _call_time_key(
         if not key:
             raise APIError(
                 "No Google AI Studio key is available.", status_code=None, code="unauthorized"
+            )
+        return key
+    if route == ImageRoute.XAI:
+        key = await image_availability.xai_call_bearer(store)
+        if not key:
+            raise APIError(
+                "No xAI key or sign-in is available.", status_code=None, code="unauthorized"
             )
         return key
     key = await image_availability.openai_call_key(store)
@@ -431,6 +458,19 @@ async def _run_route(
         )
     if route == ImageRoute.GOOGLE:
         return await image_rungs.run_google(
+            prompt=prompt,
+            key=key,
+            num_images=num_images,
+            image_size=image_size,
+            source_url=source_url,
+            seed=seed,
+            model=model,
+            emit=emit,
+            pause=pause,
+            client=client,
+        )
+    if route == ImageRoute.XAI:
+        return await image_rungs.run_xai(
             prompt=prompt,
             key=key,
             num_images=num_images,

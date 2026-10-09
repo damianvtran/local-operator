@@ -30,6 +30,7 @@ def _pin_probes(
     openai: bool = False,
     openai_sub: bool = False,
     google: bool = False,
+    xai: bool = False,
 ) -> None:
     async def fake_radient(config_dir, base_url, *, store):
         return radient
@@ -49,6 +50,7 @@ def _pin_probes(
     monkeypatch.setattr(
         image_availability, "google_key", lambda config_dir=None: "gk" if google else None
     )
+    monkeypatch.setattr(image_availability, "xai_available", lambda config_dir=None: xai)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,20 @@ async def test_the_google_rung_appends_after_the_subscription(
     resolution = await cascade.resolve_image_route(tmp_path)
     assert resolution.route == ImageRoute.GOOGLE
     assert resolution.reason == "A Google AI Studio key is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_xai_rung_appends_after_google(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, google=True, xai=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.GOOGLE
+
+    _pin_probes(monkeypatch, xai=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.XAI
+    assert resolution.reason == "An xAI key or sign-in is stored."
 
 
 @pytest.mark.asyncio
@@ -305,6 +321,20 @@ async def test_the_walk_dispatches_the_subscription_rung(
     assert calls == [ImageRoute.OPENAI_SUB]
     assert outcome.route == ImageRoute.OPENAI_SUB
     assert outcome.model == "gpt-image-2"
+
+
+@pytest.mark.asyncio
+async def test_the_walk_dispatches_the_xai_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, xai=True)
+    fake, calls = _make_route_script({ImageRoute.XAI: _result("grok-imagine-image-2.0")})
+    monkeypatch.setattr(cascade, "_run_route", fake)
+
+    outcome = await cascade.run_image_cascade(prompt="a cat", config_dir=tmp_path)
+
+    assert calls == [ImageRoute.XAI]
+    assert outcome.route == ImageRoute.XAI
 
 
 @pytest.mark.asyncio
