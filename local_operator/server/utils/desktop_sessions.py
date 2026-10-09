@@ -5709,16 +5709,17 @@ class DesktopSessions:
 
     async def rehome_stranded_sessions(
         self, accessible: set[str] | None, provider: str, model_id: str
-    ) -> list[tuple[str, str]]:
-        """Move every IDLE bound session off a model this user can no longer reach.
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Repair the bound sessions this sign-in stranded, or ask nothing and move none.
 
         The pool half of the sign-in re-home (see ``server/utils/desktop_rehome``):
         a user signed in to ``provider``, and the sessions still pinned to a
         provider with no credential left are repaired onto it — but only the ones
-        this process is bound to, and only under every guard below. Returns the
-        ``(old_label, new_label)`` pairs actually moved, so the caller can count
-        them and quote them in its receipt; refusals are logged by the owner's
-        own receipt and deliberately not counted.
+        this process is bound to, and only under every guard below. Returns TWO
+        lists: the ``(old_label, new_label)`` pairs actually moved, and the
+        old labels of the busy sessions that were ASKED and refused — the
+        deferrals, which the caller folds into its receipt so a sign-in where
+        every session was busy is not silent (UX review U1).
 
         The guards, and who owns each:
 
@@ -5729,13 +5730,14 @@ class DesktopSessions:
           on that device's credentials, which this machine cannot see and must not
           second-guess (the design's "never on a follower or a borrowing device");
         * a cold facade, or one whose mirror is not vouched current, is skipped:
-          "idle" read off a stale mirror is not evidence, and the owner's own
-          re-check would be the only thing standing between a guess and a switch;
+          a snapshot read off a stale mirror is not evidence to act on at all,
+          and the owner's re-check is the only thing that could rescue it;
         * the SELECTED provider must be stranded by ``model_access.is_stranded``;
-        * the owner must look idle (``_work_is_running``'s terms: no turn, gate,
-          subagent or goal loop). Background ``bash`` jobs are deliberately not a
-          term, exactly as they are not one for the interrupt rung — they exist to
-          outlive the turn that started them.
+        * BUSY is NOT filtered here (round 1: it used to skip the ask, which is
+          how a mid-turn session ended up repaired by nothing and told nothing).
+          The owner answers ``REHOME_BUSY_REPLY``, speaks the deferral sentence
+          into its own conversation, and the pair is counted as deferred — the
+          pool only records what the owner decided.
 
         Every check above is a SNAPSHOT, and that is why the owner's
         ``rehome_if_current`` re-checks all of it under its own state before it
@@ -5743,17 +5745,16 @@ class DesktopSessions:
         model, send a prompt, or sign in again. This method only decides whom to
         ASK; the compare-and-set decides whether the ask lands.
         """
-        from local_operator.providers.model_access import is_accessible, is_stranded
+        from local_operator.providers.model_access import (
+            REHOME_BUSY_REPLY,
+            is_accessible,
+            is_stranded,
+        )
 
         moved: list[tuple[str, str]] = []
+        deferred: list[str] = []
         if accessible is None or not is_accessible(provider, accessible):
-            return moved
-        # Imported lazily: routes/desktop_sessions imports THIS module, so a
-        # module-level import would be a cycle. The predicate itself is the
-        # route's own idle term — sharing it rather than re-deriving "is there
-        # work" here is what keeps the interrupt rung and the re-home from
-        # disagreeing about a busy session.
-        from local_operator.server.routes.desktop_sessions import _work_is_running
+            return moved, deferred
 
         for bridge in list(self.bridges.values()):
             if bridge.remote_row is not None:
@@ -5768,8 +5769,6 @@ class DesktopSessions:
             if not selected_provider or not selected_model:
                 continue
             if not is_stranded(selected_provider, accessible):
-                continue
-            if _work_is_running(remote):
                 continue
             client = bridge._owner_connection()
             ask: Any = getattr(client, "rehome_if_current", None)
@@ -5790,9 +5789,13 @@ class DesktopSessions:
                 continue
             if detail.startswith("rehomed: "):
                 moved.append((expected, f"{provider}/{model_id}"))
+            elif detail == REHOME_BUSY_REPLY:
+                # The owner has already told the conversation itself; this is
+                # the count the sign-in's receipt names.
+                deferred.append(expected)
             else:
                 logger.debug("re-home refused for session %s: %s", bridge.session_id, detail)
-        return moved
+        return moved, deferred
 
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
         """A read receipt never admits work, binds a viewer, or starts a runtime.

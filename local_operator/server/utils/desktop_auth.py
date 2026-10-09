@@ -263,15 +263,22 @@ class DesktopAuth:
         #: rather than inventing a second manager on a possibly different root.
         self.config_manager = config_manager
         #: Repairs LIVE sessions the just-stored credential stranded: an async
-        #: callable returning the ``(old, new)`` pairs it moved. Installed by the
-        #: routes host (``get_desktop_auth``), which is the only place that can
-        #: reach the app's session pool; ``None`` — every direct construction,
-        #: tests included — means "this host has no sessions to repair", and the
+        #: callable taking the login provider's id and returning
+        #: ``(moved, deferred)`` — the ``(old, new)`` label pairs that switched,
+        #: and the old labels of the busy conversations the owner refused, which
+        #: the receipt counts (see ``server/utils/desktop_rehome``). The provider
+        #: id is what the first-login rule is evaluated against, so it is passed
+        #: per call rather than frozen in. Installed by the routes host
+        #: (``get_desktop_auth``), which is the only place that can reach the
+        #: app's session pool; ``None`` — every direct construction, tests
+        #: included — means "this host has no sessions to repair", and the
         #: sign-in still applies the config defaults exactly as before. Set as an
         #: attribute rather than a constructor argument so the pool's lazy
         #: construction (it is built by the first request that needs it) cannot
         #: be frozen into a stale ``None`` here.
-        self.rehome: "Callable[[], Awaitable[list[tuple[str, str]]]] | None" = None
+        self.rehome: (
+            "Callable[[str], Awaitable[tuple[list[tuple[str, str]], list[str]]]] | None"
+        ) = None
         self.operations: dict[str, LoginOperation] = {}
         # Serialises ``start``'s cancel-then-create. Superseding AWAITS the old
         # flow's teardown (so its loopback port is free before the new flow
@@ -489,9 +496,14 @@ class DesktopAuth:
                 # that succeeded must not be reported as failed by a repair that
                 # could not reach an owner.
                 moved: list[tuple[str, str]] = []
+                deferred: list[str] = []
                 if self.rehome is not None:
                     try:
-                        moved = await self.rehome()
+                        # The LOGIN PROVIDER rides along: the re-home is
+                        # first-login-only, and which call this is cannot be
+                        # derived from config or the store (operator
+                        # refinement, round 1).
+                        moved, deferred = await self.rehome(definition.id)
                     except Exception:  # noqa: BLE001 — the sign-in already succeeded
                         logger.warning(
                             "could not re-home sessions after the sign-in to %s",
@@ -500,7 +512,7 @@ class DesktopAuth:
                         )
                 from local_operator.server.utils.desktop_rehome import with_rehome_count
 
-                op.defaults_applied = with_rehome_count(applied, moved)
+                op.defaults_applied = with_rehome_count(applied, moved, deferred)
             settle("succeeded", "Sign-in complete.")
         except asyncio.CancelledError:
             settle("cancelled", "Sign-in cancelled.")

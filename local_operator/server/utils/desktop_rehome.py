@@ -27,6 +27,8 @@ from typing import Any
 
 from local_operator.providers.model_access import (
     credentialed_chat_providers_here,
+    is_first_provider_login,
+    rehome_deferred_notice,
     rehome_notice,
 )
 
@@ -37,13 +39,35 @@ logger = logging.getLogger(__name__)
 #: name both providers (see :func:`with_rehome_count`).
 REHOMED_KEY = "rehomed_sessions"
 
+#: Additive sibling of ``REHOMED_KEY``: how many conversations were BUSY at the
+#: sign-in and therefore did not move. They are not silent failures — each was
+#: told by its own owner — but a sign-in whose every session was busy must say so
+#: in its receipt too, or the login reads as "fixed" over a conversation that
+#: still cannot run a turn (UX review U1).
+DEFERRED_KEY = "deferred_sessions"
 
-async def rehome_after_login(app: Any) -> list[tuple[str, str]]:
+
+async def rehome_after_login(
+    app: Any, login_provider: str
+) -> tuple[list[tuple[str, str]], list[str]]:
     """Move the sessions this sign-in stranded, or explain nothing and move none.
 
     Takes the STARLETTE APP rather than the request: the hook it is installed as
     (``DesktopAuth.rehome``) outlives any single request, and reading ``app.state``
     keeps the per-request object out of the closure.
+
+    THE FIRST-LOGIN RULE (operator refinement, round 1) is the second thing this
+    checks, after the target: sessions move ONLY on the user's first provider
+    login — that is, when the credentialed chat providers other than
+    ``login_provider`` are empty (``is_first_provider_login``; Radient counts, so
+    a prior Radient/web sign-in makes later logins non-first). The rule exists
+    for the state a session can be in BEFORE any provider login: started by some
+    earlier build, pinned to ``radient/auto``, nothing behind it — the reported
+    bug. That first OpenAI or Anthropic login should move it, and NO later
+    provider login should ever re-home a conversation: adding a second provider
+    to switch models with must not silently re-point open chats. The config half
+    (``plan_login_defaults``) is not scoped by this rule — it repairs an
+    unrunnable default on any login.
 
     Three reads, all after the credential write so the new provider is visible:
     this app's config manager (the default the user just ended up with), the
@@ -53,6 +77,11 @@ async def rehome_after_login(app: Any) -> list[tuple[str, str]]:
     with no pool — and the answer is "nothing moved", never an error: the sign-in
     itself has already succeeded and must not be reported as failed.
 
+    Returns ``(moved, deferred)``: the sessions that switched, and the old labels
+    of the busy ones the owner refused — the deferrals the receipt must count so
+    a sign-in where every conversation was busy is not silent (UX review U1).
+    Each deferred conversation is told by the owner itself, when it refuses.
+
     The store read runs OFF the loop (SQLite, and the pool's own reads treat a
     controller as thread-affine), and the config values ride along so the local
     providers' ``base_url`` check reads the file once.
@@ -61,7 +90,7 @@ async def rehome_after_login(app: Any) -> list[tuple[str, str]]:
     manager = getattr(state, "config_manager", None)
     pool = getattr(state, "desktop_sessions", None)
     if manager is None or pool is None:
-        return []
+        return [], []
     values = manager.get_config().values
     provider = str(values.get("hosting", "") or "").strip().lower()
     model_id = str(values.get("model_name", "") or "").strip()
@@ -70,44 +99,60 @@ async def rehome_after_login(app: Any) -> list[tuple[str, str]]:
         # (its case 1), so it is not a failure: a default with no model is its
         # own setup state, and re-homing onto a half-configured pair would trade
         # one stranded session for another.
-        return []
+        return [], []
     accessible = await asyncio.to_thread(
         credentialed_chat_providers_here,
         config_dir=Path(pool.root),
         config_values=values,
     )
+    if not is_first_provider_login(accessible, login_provider):
+        return [], []
     return await pool.rehome_stranded_sessions(accessible, provider, model_id)
 
 
 def with_rehome_count(
-    applied: dict[str, Any] | None, moved: list[tuple[str, str]]
+    applied: dict[str, Any] | None,
+    moved: list[tuple[str, str]],
+    deferred: list[str],
 ) -> dict[str, Any] | None:
-    """Fold ``moved`` into the ``defaults_applied`` receipt the routes return.
+    """Fold ``moved`` and ``deferred`` into the ``defaults_applied`` receipt.
 
     ``None`` from ``apply_desktop_login_defaults`` means "the config default was
     left alone and there is nothing to say" — but a login that moved live sessions
-    DID do something the user must be told about, so in that case a receipt is
-    composed here (the planner has no sentence for it; it never touched a session).
+    (or left busy ones where they were) DID do something the user must be told
+    about, so in that case a receipt is composed here: the planner has no
+    sentence for it, because it never touched a session.
 
     When the config default WAS replaced, the planner's receipt stands untouched
     — it already names both providers, and the design's frozen sentences are
-    asserted verbatim in tests — and the count joins it as the additive field.
+    asserted verbatim in tests — and the counts join it as additive fields. The
+    mixed case (some moved, some busy) says the move in the receipt and carries
+    both counts; each busy conversation has already been told by its own owner.
     """
-    if not moved:
+    if not moved and not deferred:
         return applied
-    count = len(moved)
     if applied is None:
-        old, new = moved[0]
-        if count == 1:
-            receipt = rehome_notice(old, new)
+        if moved:
+            count = len(moved)
+            if count == 1:
+                receipt = rehome_notice(moved[0][0], moved[0][1])
+            else:
+                # The old provider is NOT named: the moved sessions can come off
+                # two different stranded providers, and quoting the first one's
+                # let a two-provider move read as if one provider had been
+                # involved (review NIT-1).
+                receipt = f"Moved {count} open sessions to {moved[0][1]}."
         else:
-            old_provider = old.partition("/")[0] or old
-            receipt = f"Moved {count} open sessions to {new} — not signed in to {old_provider}."
-        return {
+            receipt = rehome_deferred_notice(deferred[0], count=len(deferred))
+        applied = {
             "hosting": None,
             "model": None,
             "model_name": None,
             "receipt": receipt,
-            REHOMED_KEY: count,
         }
-    return {**applied, REHOMED_KEY: count}
+    result = dict(applied)
+    if moved:
+        result[REHOMED_KEY] = len(moved)
+    if deferred:
+        result[DEFERRED_KEY] = len(deferred)
+    return result

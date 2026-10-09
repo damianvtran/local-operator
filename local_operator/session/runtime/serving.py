@@ -1053,6 +1053,13 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
+        # a single frame, so a desktop session is never read with no claim at
+        # all (the band's sentence is unrenderable then) — the same fact the
+        # TUI host publishes on its own adopt edge, from this process's own
+        # store. `publish_model_access` carries its own never-raises guard, so
+        # it cannot fail the boot it rides in on.
+        self.publish_model_access()
         # Last, so a handle that could not be fully built never leaves a live
         # registration behind (see :meth:`_register_secret_session`). The call
         # is synchronous and can stall the loop for up to ``STARTUP_TIMEOUT_S``
@@ -4749,7 +4756,46 @@ class ServingSessionHandle(SessionHandle):
         # the fallback displaced — see ``Session.set_model``.
         self._session.set_model(spec, explicit=True)
         self._refresh_state()
+        # The claim follows the model it is about: a switch can land on a
+        # provider this host has no credential for, and a reader must not keep
+        # reading the previous model's answer. ALL switch routes land here —
+        # the phone's sheet, a peer's ``peer_set_model``, the desktop's
+        # ``rehome_if_current`` — so this is the one place the claim can go
+        # stale from a model change.
+        self.publish_model_access()
         return f"model: {self._projection.model_label}"
+
+    def publish_model_access(self) -> None:
+        """Publish "can the session's model actually run here" (the composer band).
+
+        The serve-side half of the claim the TUI host publishes from its own
+        controller (``session/frontend_state.FrontendModelAccess``): a
+        desktop-only session — served by THIS process, with no TUI host
+        anywhere — otherwise carries no claim at all, and the band's "not
+        signed in to <provider>" sentence can never render.
+
+        Called at the edges that CHANGE the fact: this host taking the session
+        up (``__init__``, before it serves any frame) and every model switch
+        (see :meth:`set_model_effort`). Deliberately NOT from ``_refresh_state``:
+        that runs after every folded event, and the credential read behind this
+        is a SQLite one.
+
+        NEVER RAISES: the claim is additive state, and a boot edge that cannot
+        read a store must not fail the boot it rode in on. An unreadable store
+        publishes ``None`` — "no claim" — rather than leaving a stale ``ok`` in
+        place, which is the one degradation a reader could act on wrongly.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            from local_operator.providers.model_access import usable_providers_here
+            from local_operator.session.frontend_state import model_access_claim
+
+            usable = usable_providers_here(config_dir=self._config_dir)
+            store.refresh_model_access(model_access_claim(_selector(self._session), usable))
+        except Exception:  # noqa: BLE001 — additive state never fails its edge
+            logger.debug("model access publication failed", exc_info=True)
 
     @_on_session_loop
     async def rehome_if_current(self, expected_selector: str, provider: str, model_id: str) -> str:
@@ -4788,9 +4834,11 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         from local_operator.mobile import peer_model
         from local_operator.providers.model_access import (
+            REHOME_BUSY_REPLY,
             credentialed_chat_providers_here,
             is_accessible,
             is_stranded,
+            rehome_deferred_notice,
             rehome_notice,
         )
 
@@ -4803,10 +4851,16 @@ class ServingSessionHandle(SessionHandle):
             return f"kept: the model moved to {current or 'nothing'} since the sign-in"
         old_provider = current.partition("/")[0]
         if self.is_conversationally_active():
-            return "kept: the session is working right now"
+            # The refusal is SPOKEN, not just returned: the caller counts it, but
+            # only the conversation itself can tell the user their session did
+            # not move and why (U1). The sentence names the manual route because
+            # no surface retries this by itself.
+            self._emit_notice(rehome_deferred_notice(current), "info")
+            return REHOME_BUSY_REPLY
         try:
             if session.running_subagents() > 0:
-                return "kept: subagents are running"
+                self._emit_notice(rehome_deferred_notice(current), "info")
+                return REHOME_BUSY_REPLY
         except Exception:  # noqa: BLE001 — an unreadable work state is assumed busy
             return "kept: this session's work state is unreadable"
         accessible = await asyncio.to_thread(credentialed_chat_providers_here)
@@ -4816,6 +4870,18 @@ class ServingSessionHandle(SessionHandle):
             return f"kept: {old_provider} is signed in again"
         if not is_accessible(provider, accessible):
             return f"kept: {provider} is not signed in on this device"
+        # THE COMPARE RE-RUNS IMMEDIATELY BEFORE THE SET (review MAJOR/MINOR-1):
+        # the checks above ran before the credential read yielded the loop, and a
+        # pick or a turn landing inside that await would otherwise be clobbered —
+        # the exact race the entry CAS exists to lose. Same-connection frames are
+        # serialized by the dispatch chain, so this window needs another
+        # connection (a phone or peer picking) or a turn starting; both are
+        # reachable, and both must keep their choice.
+        current = peer_model.selected_label(session)
+        if current != expected_selector:
+            return f"kept: the model moved to {current or 'nothing'} since the sign-in"
+        if self.is_conversationally_active():
+            return REHOME_BUSY_REPLY
         await self.set_model_effort(provider, model_id, None)
         # The answer comes from the read-back, never from the switch's own
         # receipt: ``set_model`` assigns the spec before its journal writes and

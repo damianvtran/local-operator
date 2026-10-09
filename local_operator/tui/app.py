@@ -4732,6 +4732,15 @@ class OperatorApp(App[None]):
         self._setup_state_flag = False
         self._model_activation_generation = 0
         self._model_activation_pending: int | None = None
+        #: A FIRST-LOGIN re-home whose session was not bound when the login
+        #: completed: the provider id to re-home for. Drained on the session-bind
+        #: edge and, as a backstop, at the next turn end (QA round 1, Q1 — the
+        #: repair used to evaporate silently in exactly this window).
+        self._rehome_await_bind: str | None = None
+        #: ``(old_label, login_provider, model_id)`` for a stranded conversation
+        #: that was BUSY when its first-login re-home ran. Retried at the next
+        #: turn end; the deferral sentence told the user so (UX review U1).
+        self._rehome_pending: tuple[str, str, str] | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -13344,6 +13353,18 @@ class OperatorApp(App[None]):
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
+        # A first-login re-home that had no session to inspect (the login landed
+        # mid-swap) runs HERE, on the edge its decision was waiting for — the one
+        # writer of ``self._session``, so there is no second place the queue could
+        # be drained from a stale binding (QA round 1, Q1). Nothing runs on an
+        # UNBIND (``session is None``): the queue keeps its provider for the next
+        # bind or the turn-end backstop rather than firing against no session.
+        queued = self._rehome_await_bind
+        if queued is not None and session is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
 
     def _restore_search_spend(self, session: Any) -> None:
         """Seed a RESUMED conversation's search spend into the search ledger.
@@ -38320,12 +38341,18 @@ class OperatorApp(App[None]):
         attachments: Mapping[int, Marked] | None = None,
         *,
         _inline_remote: bool = False,
+        _rehome: bool = False,
     ) -> Awaitable[None] | None:
         """Dispatch a typed slash command (with arguments) to its handler.
 
         Ordinary callers schedule remote work and return None. The cold-bind
         worker requests the SAME operation inline so queued commands reach the
         owner before a later prompt can overtake an extra scheduling hop.
+
+        ``_rehome`` is the sign-in repair's private spelling of ``/model
+        <p>/<id>``: it suppresses the dispatch's own receipt, because the repair
+        paints ONE sentence of its own and two receipts for one switch read as
+        two events (design round 1, D1). See ``_activate_resolved_model``.
 
         ``attachments`` is the composer's index→image map at submit time, passed
         through so the two prompt-sending commands (``/team``/``/agent``) can
@@ -38700,7 +38727,7 @@ class OperatorApp(App[None]):
         elif command == "/delete":
             self._cmd_delete(arg, notice)
         elif command == "/model":
-            self._cmd_model(arg, notice)
+            self._cmd_model(arg, notice, _rehome=_rehome)
         elif command == "/effort":
             self._cmd_effort(arg, notice)
         elif command == "/fast":
@@ -39776,7 +39803,7 @@ class OperatorApp(App[None]):
         )
 
     # -- model --------------------------------------------------------------
-    def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
+    def _cmd_model(self, arg: str, notice: NoticeFn, *, _rehome: bool = False) -> None:
         """``/model`` — open the picker; ``/model provider/id`` — switch directly.
 
         A bare ``/model`` OPENS THE LIST rather than printing the current label.
@@ -39982,10 +40009,15 @@ class OperatorApp(App[None]):
             # This is a user-command receipt, not background infrastructure.
             # Retire the splash before the wait so completion cannot move the
             # composer underneath a draft typed while capacity is being checked.
-            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            if not _rehome:
+                # A machine-initiated repair is not a user command waiting on a
+                # capacity answer, so the wait line goes with the receipt it
+                # belongs to (design round 1, D1): the re-home has its own single
+                # sentence.
+                notice(f"Checking active capacity for {provider}/{model_id}…", "info")
             self.run_worker(
                 self._resolve_local_model_activation(
-                    session, provider, model_id, persist_default, notice, generation
+                    session, provider, model_id, persist_default, notice, generation, _rehome
                 ),
                 group="local-model-resolution",
                 exclusive=True,
@@ -39996,7 +40028,9 @@ class OperatorApp(App[None]):
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
-        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+        self._activate_resolved_model(
+            session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
+        )
 
     async def _resolve_local_model_activation(
         self,
@@ -40006,6 +40040,7 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
         generation: int,
+        _rehome: bool = False,
     ) -> None:
         providers = self._providers
         if providers is None:
@@ -40017,7 +40052,7 @@ class OperatorApp(App[None]):
             # selection settles, so a fast next prompt cannot reach the old model.
             if self._session is session and generation == self._model_activation_generation:
                 self._activate_resolved_model(
-                    session, provider, model_id, spec, persist_default, notice
+                    session, provider, model_id, spec, persist_default, notice, _rehome=_rehome
                 )
         except Exception as error:
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
@@ -40054,6 +40089,8 @@ class OperatorApp(App[None]):
         spec: Any,
         persist_default: bool,
         notice: NoticeFn,
+        *,
+        _rehome: bool = False,
     ) -> None:
         # Consume the ONE-SHOT effort override FIRST, before any early return.
         # `_cmd_model_saved` and the persist path leave it here so the NEXT
@@ -40369,6 +40406,16 @@ class OperatorApp(App[None]):
         # the login warning would be about a provider already serving the
         # session.
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
+        if _rehome:
+            # ONE STATEMENT OF THE MOVE (design round 1, D1). Everything below is
+            # the dispatch's RECEIPT — the `model: X → Y (this session) · … —
+            # /model default saves this for new sessions` row (and the mid-turn
+            # and access rows that qualify it) — and the sign-in repair paints a
+            # sentence of its own, written for a move the user did not ask for.
+            # Two receipts for one switch read as two events, and the persist
+            # hint advised an action the config row above had already taken
+            # (D2). The switch itself, and the band, have already happened.
+            return
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
@@ -49251,11 +49298,13 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
 
-    def _rehome_stranded_session(self) -> str | None:
+    def _rehome_stranded_session(
+        self, login_provider: str, *, from_pending: bool = False
+    ) -> str | None:
         """Move THIS session off a model the sign-in just proved unreachable.
 
         The TUI's half of the re-home (the desktop's is ``server/utils/
-        desktop_rehome``; the policy, the predicate and the sentence all live in
+        desktop_rehome``; the policy, the predicate and the sentences all live in
         ``providers/model_access``). A conversation's ``selected_model`` outranks
         config — the owner is the only writer that may move it — so correcting
         the default alone would leave the user staring at a chat pinned to a
@@ -49267,19 +49316,44 @@ class OperatorApp(App[None]):
         sign-in path repairs it (the design's cross-process rule — lazy by
         design, never pushed).
 
+        THE FIRST-LOGIN RULE (operator refinement, round 1) gates the move:
+        ``login_provider`` is the provider this login just added, and the repair
+        runs only when the credentialed chat providers other than it are empty
+        (``is_first_provider_login``; Radient counts). It exists for the state a
+        session can be in BEFORE any provider login — started by some earlier
+        build, pinned to ``radient/auto``, nothing behind it — and the first
+        OpenAI or Anthropic login is the one that moves it. Adding a second
+        provider later must never re-point open conversations.
+        ``from_pending`` is the deferred completion of an ALREADY-authorised
+        first login (see ``_settle_deferred_rehome``), so it skips the gate and
+        keeps every other check.
+
         The switch goes through the ``/model`` dispatch rather than the raw
         setter, for the reason ``_on_model_row_chosen`` gives: a picked or typed
         selector and this repair must not be able to diverge, and the dispatch
-        carries ``_model_activation_generation`` and the receipt with it. The
-        check-then-dispatch below is atomic by construction (both halves run in
-        one event-loop slot with no await between them), which is this front
-        end's equivalent of the owner-side compare-and-set the runtime uses.
+        carries ``_model_activation_generation`` with it. ``_rehome=True``
+        suppresses that dispatch's own receipt — the sentence returned here is
+        the ONE statement of the move (design round 1, D1). The check-then-
+        dispatch below is atomic by construction (both halves run in one
+        event-loop slot with no await between them), which is this front end's
+        equivalent of the owner-side compare-and-set the runtime uses.
 
-        Returns the receipt sentence to paint, or ``None`` when nothing moved.
-        Never raises: the login it rides on has already succeeded.
+        Returns the sentence to paint — the move's notice, or the deferral when
+        the conversation is busy (and re-arms ``_rehome_pending`` for the turn
+        end) — or ``None`` when there is nothing to say. Never raises: the login
+        it rides on has already succeeded.
         """
         session = self._session
-        if session is None or self._providers is None:
+        if self._providers is None:
+            return None
+        if session is None:
+            # NO SESSION YET — the app is mid-swap, and there is no conversation
+            # to inspect (QA round 1, Q1: this window used to swallow the repair
+            # silently). The login authorised it, so it waits for the bind edge
+            # rather than evaporating. Not in the setup state, where no
+            # conversation exists to strand and the config write IS the repair.
+            if not from_pending and not self._setup_state:
+                self._rehome_await_bind = login_provider
             return None
         if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
             return None
@@ -49289,7 +49363,9 @@ class OperatorApp(App[None]):
             from local_operator.providers.model_access import (
                 credentialed_chat_providers,
                 is_accessible,
+                is_first_provider_login,
                 is_stranded,
+                rehome_deferred_notice,
                 rehome_notice,
             )
 
@@ -49301,6 +49377,8 @@ class OperatorApp(App[None]):
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
         except Exception:  # noqa: BLE001 — a repair must never fail a completed login
             return None
+        if not from_pending and not is_first_provider_login(accessible, login_provider):
+            return None
         if not provider or not model_id or not is_accessible(provider, accessible):
             return None
         old_label = str(getattr(session, "model_label", "") or "")
@@ -49308,9 +49386,61 @@ class OperatorApp(App[None]):
         if not old_label or not is_stranded(old_provider, accessible):
             return None
         if not self._idle_for_rehome(session):
-            return None
-        self._run_slash_command(f"/model {provider}/{model_id}")
+            # BUSY, and said so (UX review U1). The refusal is recorded here, so
+            # this is where the deferral sentence goes — and the repair is armed
+            # for the turn end instead of evaporating. A pending re-check keeps
+            # the arm rather than re-saying the sentence on every turn end.
+            self._rehome_pending = (old_label, login_provider, model_id)
+            if from_pending:
+                return None
+            return rehome_deferred_notice(old_label)
+        self._rehome_pending = None
+        self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
         return rehome_notice(old_label, f"{provider}/{model_id}")
+
+    def _settle_deferred_rehome(self) -> None:
+        """Complete — or close out — a re-home the login had to defer.
+
+        Runs at the ONE turn exit (see ``_finalize_turn``), where a busy
+        conversation becomes idle. Two queued repairs are honoured here, and
+        both were authorised at login time: the first-login move that had no
+        session yet (``_rehome_await_bind``, retried at this backstop if the bind
+        edge could not run it), and the deferred move itself
+        (``_rehome_pending``). Once the attempt can no longer land — the user
+        picked another model, the target went away — the promise is CLOSED with
+        one sentence, because a pending repair that silently evaporates is the
+        silence this whole path exists to end (U1).
+        """
+        queued = self._rehome_await_bind
+        if queued is not None:
+            self._rehome_await_bind = None
+            sentence = self._rehome_stranded_session(queued)
+            if sentence:
+                self._notice(sentence, "note")
+            return
+        pending = self._rehome_pending
+        if pending is None:
+            return
+        old_label, login_provider, _model_id = pending
+        session = self._session
+        if session is None or self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            self._rehome_pending = None
+            return
+        if str(getattr(session, "model_label", "") or "") != old_label:
+            # The user (or a reload) moved it themselves; whatever they chose
+            # wins, and there is nothing to explain.
+            self._rehome_pending = None
+            return
+        sentence = self._rehome_stranded_session(login_provider, from_pending=True)
+        if sentence:
+            self._notice(sentence, "note")
+        elif self._rehome_pending is None:
+            from local_operator.providers.model_access import (
+                rehome_still_stranded_notice,
+            )
+
+            still = str(getattr(session, "model_label", "") or "") or old_label
+            self._notice(rehome_still_stranded_notice(still), "note")
 
     @staticmethod
     def _idle_for_rehome(session: Any) -> bool:
@@ -49413,7 +49543,7 @@ class OperatorApp(App[None]):
             # user now has — and OUTSIDE the ``set_msg`` guard, because a login
             # that wrote no config can still have stranded a session (its owner
             # was pinned earlier, by a different sign-in or by /model).
-            rehome_msg = self._rehome_stranded_session()
+            rehome_msg = self._rehome_stranded_session(provider)
             if rehome_msg:
                 await notice(rehome_msg, "note")
             # The credential set just changed, so the owner's offerable-model
@@ -53031,6 +53161,13 @@ class OperatorApp(App[None]):
         # path regardless, because "held when the turn ended" is a fact this
         # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
+        # A re-home the sign-in deferred (the conversation was busy) becomes
+        # possible exactly here, and a repair that never revisited it was the
+        # silent half of the bug (UX review U1). Books kept with the queued
+        # steer rows above, and for the same reason: it reconciles state this
+        # turn end is the first to see, and it is not part of the outcome
+        # announcement the latch below owns.
+        self._settle_deferred_rehome()
         # THE LATCH lands here — the notification ladder is the tail this turn
         # owes AT MOST ONCE, whichever route retired it. Everything above ran
         # unconditionally because a turn already closed can still have live

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,9 +21,11 @@ import pytest
 from local_operator.harness.types import (
     AskOption,
     AskQuestion,
+    ModelSpec,
     NoticeEvent,
     SteeringDeliveredEvent,
 )
+from local_operator.providers.model_access import REHOME_BUSY_REPLY
 from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -3319,23 +3322,190 @@ async def test_rehome_loses_to_a_pick_that_landed_first(monkeypatch: pytest.Monk
     assert applied == []
 
 
+class _AccessSession(FakeSession):
+    """A session with a canonical store and a real model spec — the claim's inputs.
+
+    ``FakeSession`` is deliberately storeless, so the serve-side publication
+    early-outs on it and every other test in this file keeps its shape; this
+    subclass is the one double that stands in for a real runtime session, whose
+    ``_frontend_state_store`` is what carries the claim.
+    """
+
+    def __init__(self, label: str = "radient/auto") -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        self._frontend_state_store = FrontendStateStore(
+            FrontendSessionState(session_id="sess-1", epoch="e1")
+        )
+        provider, _, model_id = label.partition("/")
+        self.model = ModelSpec(provider=provider, model_id=model_id)
+        self.model_label = label
+        self.effective_model_label = label
+
+    def set_model(self, spec: Any, *, explicit: bool = False) -> None:
+        self.model = spec
+        self.model_label = f"{spec.provider}/{spec.model_id}"
+        self.effective_model_label = self.model_label
+
+
+def _store_with_credential(root: Path, provider: str = "deepseek") -> None:
+    """A real credential store under ``root`` holding one api_key row."""
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(root / "auth.db", config_dir=root)
+    store.upsert_credential(provider, {"type": "api_key", "source": "login", "key": "probe"})
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_serve_side_publishes_the_access_claim_at_open_and_on_switch(
+    tmp_path: Path,
+) -> None:
+    """A desktop-only session carries the band's claim: at open, and after a switch.
+
+    The TUI host publishes ``model_access`` from its own controller, so a
+    session served by a runtime — no TUI anywhere — had no claim at all and the
+    band's "not signed in to <provider>" sentence could never render. The
+    serve-side host publishes the same claim from its own store on the two
+    edges that change it: taking the session up, and every model switch (the
+    re-home lands through ``set_model_effort`` too).
+    """
+    root = tmp_path / "cfg"
+    root.mkdir()
+    _store_with_credential(root)
+
+    session = _AccessSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp", config_dir=root)
+
+    opened = session._frontend_state_store.state.model_access
+    assert opened is not None
+    assert (opened.state, opened.provider, opened.label) == ("signed_out", "radient", "Radient")
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    switched = session._frontend_state_store.state.model_access
+    assert switched is not None
+    assert (switched.state, switched.provider, switched.label) == (
+        "ok",
+        "deepseek",
+        "DeepSeek",
+    )
+
+    # THE TUI PARITY, for the same store: the serve-side predicate is the
+    # controller call the TUI publishes from, and the claim is the SHARED
+    # builder's answer over it — one computation, two hosts.
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+    from local_operator.providers.model_access import usable_providers_here
+    from local_operator.session.frontend_state import model_access_claim
+
+    store = AuthStore(root / "auth.db", config_dir=root)
+    try:
+        tui_usable = ProviderController(store, root).usable_providers()
+    finally:
+        store.close()
+    assert usable_providers_here(config_dir=root) == tui_usable
+    tui_ok = model_access_claim("deepseek/deepseek-flash", tui_usable)
+    tui_out = model_access_claim("radient/auto", tui_usable)
+    assert tui_ok is not None and tui_ok.state == switched.state
+    assert tui_out is not None and tui_out.state == opened.state
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_store_clears_the_claim_rather_than_leaving_a_stale_ok(
+    tmp_path: Path,
+) -> None:
+    """A stale ``ok`` is the one wrong answer a reader cannot detect.
+
+    When the store cannot be read the host says nothing (``None``, the absent
+    field) rather than keeping the previous claim: "could not check" must not
+    re-present as "you are signed in".
+    """
+    root = tmp_path / "cfg"
+    root.mkdir()
+    _store_with_credential(root)
+
+    session = _AccessSession("deepseek/deepseek-flash")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp", config_dir=root)
+    claim = session._frontend_state_store.state.model_access
+    assert claim is not None and claim.state == "ok"
+
+    # The store becomes unreadable: the db file is replaced by a directory, the
+    # shape both the picker and the re-home degrade on (D18's sibling case).
+    (root / "auth.db").unlink()
+    (root / "auth.db").mkdir()
+
+    handle.publish_model_access()
+
+    assert session._frontend_state_store.state.model_access is None
+
+
+@pytest.mark.asyncio
+async def test_a_pick_during_the_credential_read_still_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compare re-runs immediately before the switch (review MINOR-1).
+
+    The entry checks run, then the credential read awaits the loop — and the
+    dispatch chain serializes same-connection frames, so a pick landing inside
+    that window comes from ANOTHER connection (a phone or peer) or from a turn
+    starting. Either way the user's decision is live and the CAS exists to lose
+    to it, so the pre-switch re-read must catch it.
+    """
+    from local_operator.providers import model_access
+
+    handle, session, applied, _recorder = _rehome_handle(monkeypatch)
+
+    def _pick_then_read(**kwargs: Any) -> set[str]:
+        # Exactly the window the reviewer reproduced: the set arrives, but a
+        # selection landed while it was being read.
+        session.model_label = "openai/gpt-6-astra"
+        return {"deepseek"}
+
+    monkeypatch.setattr(model_access, "credentialed_chat_providers_here", _pick_then_read)
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the model moved to openai/gpt-6-astra since the sign-in"
+    assert applied == []
+    assert session.model_label == "openai/gpt-6-astra"
+
+
 @pytest.mark.asyncio
 async def test_rehome_never_cuts_across_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sleeping on a stranded model is not a defect: switching mid-turn is."""
+    """Sleeping on a stranded model is not a defect: switching mid-turn is.
+
+    And the refusal is SPOKEN (UX review U1): the caller only counts the word,
+    so the conversation itself gets the one sentence naming what happens next —
+    said once per attempt, for either flavour of busy (a turn, or subagents
+    still running).
+    """
     handle, session, applied, recorder = _rehome_handle(monkeypatch)
     _patch_access(monkeypatch, {"deepseek"})
 
     session.is_streaming = True
     assert (
         await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
-        == "kept: the session is working right now"
+        == REHOME_BUSY_REPLY
     )
 
     session.is_streaming = False
     session.running_children = 2
     assert (
         await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
-        == "kept: subagents are running"
+        == REHOME_BUSY_REPLY
+    )
+    await _settle_notices(handle)
+    assert (
+        recorder.notices()
+        == [
+            "This conversation stays on radient/auto until the current turn ends — "
+            "/model switches it now.",
+        ]
+        * 2
     )
     assert applied == []
 

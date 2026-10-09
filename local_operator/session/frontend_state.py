@@ -20,6 +20,7 @@ import weakref
 from collections import deque
 from collections.abc import (
     Callable,
+    Collection,
     Iterable,
     Iterator,
     Mapping,
@@ -2761,6 +2762,64 @@ class FrontendModelSpec(ModelSpec):
     model_config = ConfigDict(extra="allow")
 
 
+class FrontendModelAccess(BaseModel):
+    """Whether the session's SELECTED model can run on the publishing host.
+
+    The composer band's claim, carried on the session state so every reader of
+    a desktop or phone session answers "is this conversation on a model its
+    host is signed in for" without a second credential read of its own — the
+    host KNOWS (``ProviderController.usable_providers`` is the one predicate
+    every picker already filters by) and publishes it here.
+
+    ``None`` (the field ABSENT, see the serializer) is "this host makes no
+    statement" — a host that does not publish it, or one whose store could not
+    be read. ``signed_out`` is a positive finding and must never stand in for
+    "could not check".
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    #: ``ok`` — the selected provider is usable here; ``signed_out`` — it is
+    #: not (no stored row, no env key). One word, so a renderer branches on a
+    #: value rather than parsing a sentence.
+    state: Literal["ok", "signed_out"]
+    #: The selected model's provider id (``anthropic``), not a display name.
+    provider: str
+    #: The provider's human name for the band's sentence ("Not signed in to
+    #: Anthropic"). Carried rather than looked up client-side because the wire
+    #: has no provider registry, and a client inventing one is how the two
+    #: surfaces start describing one situation with two vocabularies.
+    label: str
+
+
+def model_access_claim(
+    selector: str | None, usable: Collection[str] | None
+) -> FrontendModelAccess | None:
+    """The claim a host publishes for ``selector``, or ``None`` for "no claim".
+
+    ONE spelling of the mapping, shared by every publishing host, so the TUI and
+    a serve-side runtime cannot describe the same store with two answers: the
+    inputs are the session's selector (``provider/model_id``) and the WIDE
+    usable-providers set (``ProviderController.usable_providers`` — keyless
+    locals included, because that is the set the pickers filter by).
+
+    ``None`` in either input is "cannot tell": a selectorless session has no
+    model to speak about, and an unreadable store must not present as
+    ``signed_out`` (an accusation nobody established).
+    """
+    if not selector or usable is None:
+        return None
+    from local_operator.providers.registry import get_provider_definition
+
+    provider = selector.partition("/")[0]
+    definition = get_provider_definition(provider)
+    return FrontendModelAccess(
+        state="ok" if provider in usable else "signed_out",
+        provider=provider,
+        label=definition.name if definition is not None else provider,
+    )
+
+
 class FrontendUsage(Usage):
     """Lossless wire usage, including future cost component metadata."""
 
@@ -2930,6 +2989,11 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: "Can the model this session is on actually run on the publishing host" —
+    #: see :class:`FrontendModelAccess`. ``None`` = no claim (a host that does
+    #: not publish it, or one whose store could not be read); old clients ignore
+    #: the key, and a client that knows it renders nothing for ``None``.
+    model_access: "FrontendModelAccess | None" = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
     context_tokens: int | None = None
@@ -3110,6 +3174,14 @@ class FrontendSessionState(BaseModel):
             payload.pop("asks_open", None)
         if mutable.asks_truncated is None:
             payload.pop("asks_truncated", None)
+        # An idle claim costs the frame its null (``, "model_access": null`` —
+        # 22 bytes), and the attach frame has no slack (the same reason the ask
+        # fields pop above). Absence already means "no claim" for every consumer
+        # (the field defaults to None), so the null is spent only when a claim
+        # EXISTS; the delta that CLEARS one still carries an explicit null,
+        # which is what lets a follower tell "cleared" from "never said".
+        if mutable.model_access is None:
+            payload.pop("model_access", None)
         return payload
 
     @field_validator("selected_model", "effective_model", mode="before")
@@ -6916,6 +6988,25 @@ class FrontendStateStore:
         self._released_rows.adopt_from(self._state.jobs)
         return update
 
+    def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
+        """Publish whether the session's selected model can run on this host.
+
+        Called by the edges that CHANGE that fact — session open, a login, a
+        model switch or re-home — and NOT by ``refresh_from_session``: that
+        method runs on every streaming edge of the session loop, and reading a
+        credential store there would put a SQLite read on that path for a field
+        that changes on credential timescales. The caller owns the credential
+        knowledge (``ProviderController.usable_providers``, or
+        ``providers.model_access.usable_providers_here`` for a serve-side host
+        with no controller of its own); this is only the wire.
+        """
+        # Dumped to the wire shape rather than stored as the model, matching
+        # ``refresh_model_catalogue``'s rows: this store is JSON in and JSON
+        # out, and a store holding a live pydantic instance would share a
+        # mutable object through ``read_field``.
+        value = access.model_dump(mode="json") if access is not None else None
+        return self.mutate(model_access=value)
+
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
         """Publish the runtime's offerable model rows as canonical state.
 
@@ -7394,6 +7485,13 @@ class FrontendStateStore:
                 "asks": None,
                 "asks_open": None,
                 "asks_truncated": None,
+                # A claim about THIS host's credential store, not about the
+                # conversation: a checkpoint reopened on a machine without the
+                # sign-in would otherwise serve a stale ``ok``, and one that
+                # gained credentials would keep a stale ``signed_out``. The
+                # publishing host recomputes it (``refresh_model_access``), so
+                # the durable copy deliberately carries no claim.
+                "model_access": None,
                 "jobs": [
                     job.model_copy(
                         update={

@@ -14504,13 +14504,11 @@ async def test_a_login_rehomes_the_session_it_stranded(
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         receipt = app._apply_login_defaults("deepseek")
-        rehome = app._rehome_stranded_session()
+        rehome = app._rehome_stranded_session("deepseek")
         for _ in range(6):
             await pilot.pause()
 
-    assert receipt == (
-        "Replaced unreachable hosting 'radient' with 'deepseek', model to 'deepseek-flash'."
-    )
+    assert receipt == ("Default moved to deepseek/deepseek-flash — not signed in to radient.")
     assert ConfigManager(tmp_path).get_config_value("hosting") == "deepseek"
     assert rehome == "Switched to deepseek/deepseek-flash — not signed in to radient."
     assert [(spec.provider, spec.model_id) for spec in session.switched] == [
@@ -14545,7 +14543,7 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
     )
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        assert app._rehome_stranded_session() is None
+        assert app._rehome_stranded_session("deepseek") is None
     assert signed_in.switched == []
 
     busy = _RehomableSession()
@@ -14555,5 +14553,150 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
     )
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        assert app._rehome_stranded_session() is None
-    assert busy.switched == [], "a busy session keeps its model until the turn ends"
+        # The refusal is SPOKEN (U1) and the repair is armed for the turn end
+        # rather than evaporating: the session keeps its model for now.
+        assert app._rehome_stranded_session("deepseek") == (
+            "This conversation stays on radient/auto until the current turn ends — "
+            "/model switches it now."
+        )
+        assert app._rehome_pending is not None
+        busy.streaming = False
+        # The ONE turn exit drains the deferral: _finalize_turn calls this, and
+        # the test drives the seam directly because a pilot cannot end a real
+        # turn without a runtime.
+        app._settle_deferred_rehome()
+        for _ in range(6):
+            await pilot.pause()
+    assert busy.switched, "the deferred repair completes at the turn end"
+    assert busy.model_label == "deepseek/deepseek-flash"
+    assert app._rehome_pending is None
+
+
+@pytest.mark.asyncio
+async def test_only_the_first_provider_login_rehomes_a_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The operator refinement: a later login must never re-point a conversation.
+
+    A stranded default and an idle, stranded session are present — everything
+    the repair used to act on — but this user can already run turns on another
+    provider, so this login is "add a second provider to switch models with",
+    and no conversation may be moved for it. Radient counts the same way: a
+    prior Radient/web sign-in makes a later OpenAI login non-first.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "deepseek")
+    seed.set_config_value("model_name", "deepseek-flash")
+
+    session = _RehomableSession()  # pinned to radient/auto, idle, stranded
+    app = OperatorApp(
+        lambda: _factory(session),
+        provider_controller=_credentialed_controller("deepseek", "openrouter"),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session("deepseek") is None
+    assert session.switched == [], "an Nth provider login moves nothing"
+
+    # A prior RADIENT/web sign-in, spelled through the fake registry the same way
+    # the real one carries it: it counts as a credentialed chat provider, so the
+    # OpenAI login that follows it is not this user's first.
+    radient_user = _RehomableSession()
+    controller = _credentialed_controller("radient")
+    base_logins = controller.login_providers
+    controller.login_providers = lambda: [
+        *base_logins(),
+        _FakeDef("radient", "Radient", None, ("auto",)),
+    ]
+    app = OperatorApp(lambda: _factory(radient_user), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session("openai") is None
+    assert radient_user.switched == []
+
+
+@pytest.mark.asyncio
+async def test_the_login_paints_one_statement_of_the_move(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D1: the sign-in's transcript carries ONE sentence for the switch.
+
+    The composition, not the parts: the dispatch's own receipt
+    (``model: X → Y (this session) · … — /model default saves this for new
+    sessions``) announced the same transition a row after the re-home's notice,
+    and a reader could take the pair as two events. The frame-level check is the
+    point — the design round's finding was that no test ever saw the two rows
+    together.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await app._login_flow("deepseek")
+        for _ in range(8):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert text.count("Switched to deepseek/deepseek-flash — not signed in to radient.") == 1
+    assert "model: radient/auto → deepseek/deepseek-flash (this session)" not in text
+    assert "/model default saves this for new sessions" not in text
+    assert session.model_label == "deepseek/deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_a_rehome_queued_before_the_session_binds_runs_on_the_bind_edge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Q1: a login completing mid-swap must not swallow the repair.
+
+    With no session bound there is no conversation to inspect, and the repair
+    used to return None silently — the flake QA and the design round measured.
+    It now queues and runs on the bind edge (the ONE writer of ``self._session``),
+    which is exactly the state a real login starts from when the app is
+    rebuilding.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # The config half ran (as it does at every login), so the target is the
+        # new default; the session half is what has to wait for a conversation.
+        app._apply_login_defaults("deepseek")
+        app._bind_viewer(None)  # the mid-swap window: no conversation bound
+        assert app._rehome_stranded_session("deepseek") is None
+        assert app._rehome_await_bind == "deepseek"
+        app._bind_viewer(session)
+        for _ in range(6):
+            await pilot.pause()
+        text = _transcript_text(app)
+
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert app._rehome_await_bind is None
+    assert "Switched to deepseek/deepseek-flash — not signed in to radient." in text

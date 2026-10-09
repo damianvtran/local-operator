@@ -1182,7 +1182,7 @@ async def test_key_save_replaces_a_stranded_default(desktop):
     applied = response.json()["result"]["defaults_applied"]
     assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
     assert applied["receipt"] == (
-        "Replaced unreachable hosting 'anthropic' with 'deepseek', model to 'deepseek-flash'."
+        "Default moved to deepseek/deepseek-flash — not signed in to anthropic."
     )
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "deepseek"
