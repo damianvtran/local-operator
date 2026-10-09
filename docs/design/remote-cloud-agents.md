@@ -492,7 +492,7 @@ margin (the tunnel doc states an 80% gross margin). For a cloud task:
 
 ---
 
-## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6's service proxy reconciled to −1.7% with the tag half still BLOCKED (the tag the criterion names does not attribute), teardown still needs approval)
+## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6's service proxy reconciled to −1.7% over the whole two billed days (−4.0% on the 40 tasks' own slice) with the tag half still BLOCKED (the tag the criterion names does not attribute), teardown still needs approval)
 
 ### 9.1 Account, first
 
@@ -611,10 +611,11 @@ by `verify` (22 checks, 0 FAIL, 0 BLOCKED). Items 2 and 3 and the real-model hal
 were the ones waiting on a key and are no longer PENDING/BLOCKED. Item 6 is now **measured with
 its service proxy reconciled** — the Cost Explorer lag has cleared for both billed days
 (2026-10-07 and 2026-10-08) and the settled figures are in the results doc's Test 6; the two-day
-Fargate usage prices at $0.0697292747 gross against the model's own 40-task $0.0709 (−1.7%,
-inside the criterion's 20% band). But the POC's `lop-poc` key is not an activated cost-allocation
-tag in this linked account, so the tag-filtered query the criterion names returns $0 and that half
-stays BLOCKED: the verdict is PARTIAL, not PASS. Item 7
+Fargate usage prices at $0.0697292747 gross against the model's own 40-task $0.0709 (−1.7% over
+the whole two billed days, a window that includes the real-key run's 10-08 usage; −4.0% on the 40
+tasks' own 10-07 slice — both inside the criterion's 20% band). But the POC's `lop-poc` key is
+not an activated cost-allocation tag in this linked account, so the tag-filtered query the
+criterion names returns $0 and that half stays BLOCKED: the verdict is PARTIAL, not PASS. Item 7
 (teardown) still awaits the operator's approval, and the stack is still up. Per-run evidence, the probe
 readings with the real key, the cold start and the cost: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md)
 § Real-key acceptance run. **Nothing in §7 is relaxed by that run**: the pod still holds no
