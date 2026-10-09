@@ -22,9 +22,11 @@ import os
 import re
 import select
 import signal
+import socket
 import struct
 import sys
 import termios
+import threading
 import time
 from pathlib import Path
 
@@ -113,6 +115,40 @@ _REAP_GRACE = 1.0
 _PAINT_DEADLINE = 120.0
 
 
+class _EgressRefuser:
+    """A loopback listener that accepts and closes: every outbound call fails at once.
+
+    The child is pointed at it through the proxy environment, so a paste-leg or
+    a greeting turn that would have called a provider resolves to an immediate
+    refusal here instead of a real request. Nothing behind it answers, and
+    nothing outside the machine is contacted.
+    """
+
+    def __init__(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(64)
+        self.url = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        self._closed = False
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._closed:
+            try:
+                connection, _ = self._sock.accept()
+            except OSError:
+                return
+            connection.close()
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            self._sock.close()
+        except OSError:  # pragma: no cover - already gone
+            pass
+
+
 class _TuiChild:
     """The real CLI on its own pty: drain, read, send, reap by pid."""
 
@@ -151,6 +187,21 @@ class _TuiChild:
         # the suite uses, and NOT inherited: the scrub stays, so nothing else
         # about the parent leaks in.
         env["LOP_RUNTIME_STANDBY_DISABLED"] = "1"
+        # NO LIVE ENDPOINT (CI `tui-e2e`, ubuntu, 2026-10-09): the paste-provider
+        # legs used to reach api.deepseek.com for real — a balance fetch and the
+        # greeting's own model call — and on a runner that took 62 s to answer
+        # 401, i.e. the leg's budget went to a third party's network and a
+        # refusal on this host would be a different test. Egress is now refused
+        # by a listener on loopback (started below): the requests leave the
+        # product exactly as before, fail immediately, and nothing this test
+        # exercises depends on an answer from the internet. Loopback stays
+        # exempt so the app's own local traffic (the desktop token, the secret
+        # broker's socket) is untouched.
+        self._egress_refuser = _EgressRefuser()
+        for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            env[name] = self._egress_refuser.url
+        for name in ("NO_PROXY", "no_proxy"):
+            env[name] = "127.0.0.1,localhost,::1"
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         pid = os.fork()
@@ -289,6 +340,10 @@ class _TuiChild:
         onboarding ledger) is asserted BEFORE the teardown runs, and the pid is
         still the exact one this instance forked.
         """
+        # The refuser dies with the child. It exists only to refuse THAT child's
+        # egress, and a listener left behind keeps a port open (and a thread
+        # alive) for the rest of the session — one per test.
+        self._egress_refuser.close()
         try:
             os.kill(self.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -357,12 +412,17 @@ def test_a_fresh_cli_boot_enters_setup_and_she_answers_at_the_cue(tmp_path: Path
 def test_the_first_login_routes_to_her_and_arms_the_greeting(tmp_path: Path) -> None:
     """R26 on the shipped binary: the setup exit arms ``aida-greeting``.
 
-    The login is the real paste-provider flow (a deepseek key is stored, not
-    validated), so this also pins that the rebuild after `/login` runs on the
-    shipped path — the seam the U1 defect skipped. The greeting is asserted on
-    the wake index and the ledger, which are the two durable facts the fire
-    and the once-only guard hang off; the delivery itself is covered by the
-    engine tests and QA's live walk.
+    The login is the real paste-provider flow — the prompt, the key landing in
+    the credential store, the rebuild, the routing — so this also pins that
+    the rebuild after ``/login`` runs on the shipped path, the seam the U1
+    defect skipped. Nothing here reaches the internet: the child's egress is
+    refused on loopback (see ``_EgressRefuser``), which is what keeps the leg
+    off a third party's network and its timing off that network's mood. The
+    key is a stub, so the provider refuses it; what the leg asserts is the pair
+    of durable facts the fire and the once-only guard hang off — the
+    ``aida-greeting`` row in her wake index and the ledger stamp — and those
+    land before any provider answer matters. The delivery itself is covered by
+    the engine tests and QA's live walk.
     """
     child = _TuiChild(tmp_path)
     root = tmp_path / ".local-operator"
