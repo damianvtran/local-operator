@@ -47,6 +47,24 @@ previous ``true``, or that raced the switch, must be told its op did not run
 rather than receive a session id that will never exist. The code is part of the
 contract because a renderer can only tell "disabled" from "your request was
 malformed" by the code, not the sentence.
+
+WHY A HELD STORE LOCK IS A 409 WITH A CODE, NOT A 500 — AND NOT A 200 EITHER.
+``pause``/``resume`` take the aida store lock as their first act
+(``aida.state.locked``), so a peer that holds it for the whole wait REFUSES the
+op with ``WakeLockBusy`` — the lock module's own documented answer for that case,
+retryable, and normal on a seam with several attended writers. The refusal used
+to escape this module as a 500 (QA-O1), and a 200 receipt does not work either:
+the desktop client reads only ``envelope.result`` on a 2xx
+(``local-operator-ui``'s ``desktop-api.ts::desktopResult``), so a 200 would paint
+the ACTION's success copy while nothing ran and no ``held`` owner was coming.
+It answers the shape this module already refuses with: **409 plus a declared
+``code``** (``aida_store_busy``) and the SAME pinned ``message`` the TUI's
+``/aida`` handler renders for the identical refusal — the client classifies a
+409 by that code rather than by status (``desktopRefusalCodeForStatus`` refuses
+to read a 409 as a plane refusal), and renders the backend's authored sentence
+as an error toast. The two surfaces and the sentence are pinned together by
+``tests/unit/server/test_desktop_aida.py``. A genuine failure from the op still
+surfaces as it did: this converts the lock refusal only, never a defect.
 """
 
 from __future__ import annotations
@@ -228,6 +246,44 @@ def _op_reply(state: AidaState, message: str, *, held: bool = False) -> CRUDResp
     )
 
 
+def _refuse_lock(verb: str, name: str, exc: BaseException) -> HTTPException:
+    """A store-lock refusal as the desktop's DECLARED refusal: 409 plus a code.
+
+    The op did not run: a peer held the aida store lock for the whole wait, so
+    ``locked`` raised before anything was unpaused or cancelled. That refusal is
+    retryable and normal on this seam, and it is answered the way this module's
+    other refusals are (``_refuse_disabled``): a 409 whose ``code`` is the
+    category and whose ``message`` is the authority's own sentence. NOT a 200
+    receipt — the desktop client reads only ``envelope.result`` on a 2xx
+    (``local-operator-ui``'s ``desktop-api.ts::desktopResult``) and would paint
+    the ACTION's success copy while nothing ran; NOT a 500 either, which is the
+    QA-O1 defect. The sentence is
+    :func:`local_operator.aida.state.op_refusal_sentence` — the same one the
+    TUI's ``/aida`` handler renders for the identical refusal, so the terminal
+    and the desktop cannot drift into two accounts of it (the two are pinned
+    together by ``tests/unit/server/test_desktop_aida.py``).
+
+    Why not a ``retry_after_ms``: no consumer on this path (the client reads it
+    into ``DesktopControlError.retryAfterMs`` for the completion ladder), and the
+    only number available would be the wait this request has already spent, not a
+    cooldown the caller owes. The code is the fact; the sentence says the rest.
+
+    NOT the ``busy`` word's receipt below: that word is ``resume``'s arm attempt
+    AFTER the unpause landed (round 3d, N2), so she really is active again —
+    while this refusal is the op never running at all.
+    """
+    from local_operator.aida import state as aida_state
+
+    aida_state.note_lock_refusal(f"the {verb} command", exc)
+    return HTTPException(
+        409,
+        {
+            "code": "aida_store_busy",
+            "message": aida_state.op_refusal_sentence(verb, name, exc),
+        },
+    )
+
+
 @router.get("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
 async def get_aida(request: Request) -> CRUDResponse[AidaState]:
     """Her state. Never creates: a caller that wants her to exist POSTs ``open``."""
@@ -250,6 +306,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
     from local_operator import aida
     from local_operator.aida import naming, onboarding, proactive
     from local_operator.aida import state as aida_state
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     root = _config_dir(request)
     name = naming.display_name(root)
@@ -335,7 +392,12 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
 
     session_id = aida_state.session_id_of(root) or ""
     if body.op == "pause":
-        outcome = await proactive.pause(root, session_id)
+        try:
+            outcome = await proactive.pause(root, session_id)
+        except (WakeLockBusy, WakeLockUnavailable) as exc:
+            # A PEER HELD THE STORE LOCK FOR THE WHOLE WAIT, so nothing was
+            # paused: the refusal is the answer (see `_refuse_lock`).
+            raise _refuse_lock(body.op, name, exc) from None
         state = _state(root)
         message = f"{name} is paused; she will not check in proactively."
         if outcome.owner_blocked:
@@ -343,7 +405,13 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         return _op_reply(state, message, held=bool(outcome.owner_blocked))
 
     # resume
-    arm = await proactive.resume(root, session_id)
+    try:
+        arm = await proactive.resume(root, session_id)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # ``resume`` takes the store lock before it unpauses anything, so a
+        # refusal here means the op did not run — NOT the ``busy`` word below,
+        # which describes a resume whose unpause landed (see `_refuse_lock`).
+        raise _refuse_lock(body.op, name, exc) from None
     state = _state(root)
     if arm == "owner":
         # Correct and expected, not a failure: a live session owns its rows and

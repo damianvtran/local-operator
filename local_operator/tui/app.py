@@ -47269,12 +47269,15 @@ class OperatorApp(App[None]):
             # the launch hook, the tray drain) refuses this command: the lock
             # module's sentence already states what happened and that re-running
             # is the fix, so it goes to the notice unchanged and the log gets the
-            # quiet line instead of a `Traceback` block.
+            # quiet line instead of a `Traceback` block. The sentence's SHAPE is
+            # `state.op_refusal_sentence` rather than a literal here, because the
+            # desktop route answers the same refusal with it (`desktop_aida.py`'s
+            # `_refuse_lock`, QA-O1) — one account of the refusal, two surfaces.
             state.note_lock_refusal(f"the {word} command", error)
-            self._system_notice(f"could not {word} {name}: {error}", "warning")
+            self._system_notice(state.op_refusal_sentence(word, name, error), "warning")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
-            self._system_notice(f"could not {word} {name}: {error}", "warning")
+            self._system_notice(state.op_refusal_sentence(word, name, error), "warning")
 
     async def _aida_rename(self, name: str, notice: NoticeFn) -> None:
         """``rename`` — set her display name (config + conversation); bare, report.
