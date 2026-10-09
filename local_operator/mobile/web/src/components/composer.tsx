@@ -433,6 +433,19 @@ const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center font-mono text-mono-s
     `COMPOSER_FIELD_BOX`: the settled field sits inside a bordered container
     (`px-3 py-2`), which is 24 px of width and 16 px of height the reserve
     would otherwise be missing. */
+/* The attach disc's paperclip, drawn so it needs no icon font — ONE definition,
+   shared by the settled composer and by its reserved frame, because design
+   review round 1 (D1) measured the swap moving three glyphs and a placeholder
+   into place when all four are static and knowable before any data arrives. The
+   reserve is the settled empty composer or it is a different composer. */
+function PaperclipGlyph() {
+	return (
+		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+			<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+		</svg>
+	);
+}
+
 export function ComposerFrame() {
 	return (
 		<div className={COMPOSER_SHELL} aria-hidden>
@@ -440,17 +453,40 @@ export function ComposerFrame() {
 				<div className="min-h-11" />
 			</div>
 			<div className={COMPOSER_INPUT_ROW}>
-				<span className={cn(COMPOSER_ROUND, "border border-control")} />
+				{/* The settled empty composer's own three glyphs and placeholder, in
+				   their DISABLED styling: the attach disc at `opacity-50`, the field
+				   empty with `Message…`, the send disc `bg-sunken`
+				   /`text-ink-disabled`. Design review round 1 (D1) measured the gap
+				   this closes: the reserve read as "ring + outline" with the
+				   right-hand control invisible (the sunken disc sits at 1.05:1
+				   against the canvas) and then three glyphs and a placeholder
+				   popped in at the reveal. */}
+				<span
+					className={cn(
+						COMPOSER_ROUND,
+						"border border-control text-ink-muted opacity-50",
+					)}
+				>
+					<PaperclipGlyph />
+				</span>
 				<div className={cn(COMPOSER_FIELD_BOX, "border-control")}>
 					<textarea
 						disabled
 						rows={1}
 						aria-hidden
 						tabIndex={-1}
+						placeholder={COMPOSER_PLACEHOLDER}
 						className={COMPOSER_FIELD}
 					/>
 				</div>
-				<span className={cn(COMPOSER_ROUND, "bg-sunken")} />
+				<span
+					className={cn(
+						COMPOSER_ROUND,
+						"bg-sunken text-ink-disabled",
+					)}
+				>
+					<span aria-hidden>↑</span>
+				</span>
 			</div>
 			<div className={COMPOSER_CHIP_ROW}>
 				<span className={cn(COMPOSER_CHIP, "flex-1")} />
@@ -1365,10 +1401,7 @@ export function Composer({
 						"border border-control text-ink-muted active:bg-elevated disabled:opacity-50",
 					)}
 				>
-					{/* paperclip, drawn so it needs no icon font */}
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-					</svg>
+					<PaperclipGlyph />
 				</button>
 				{/* The voice mic: same 44px round control as attach/send/stop, left
 				    cluster beside attach. Visible iff the daemon advertised an available

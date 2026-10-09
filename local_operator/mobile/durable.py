@@ -49,7 +49,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Container
@@ -136,6 +136,24 @@ class DurableFoldState:
     #: Kept here rather than re-derived by scanning the file: the fold has already
     #: located this row, and a second scan would be a second answer to one question.
     keep_start_id: str | None = None
+    #: Whether the entries this fold read were the journal FROM ITS FIRST ROW.
+    #: Two answers ride on this one fact, and both are wrong in the same way when
+    #: it is assumed rather than known:
+    #:
+    #: - :func:`_replay` decides ``keep_start_id`` from it. The boundary's index
+    #:   being 0 means "the journal starts here" only if the read started at the
+    #:   journal's start; on a SUFFIX fold (lane T3's bounded read) an index of 0
+    #:   just means the retained window happens to open the chunk, and answering
+    #:   ``None`` there disables the archive for a conversation that still has
+    #:   everything below it on disk.
+    #: - :func:`journal_rows_older_than` reads the prune map from it. A
+    #:   whole-file fold's map covers every row; a suffix fold's covers only the
+    #:   window, and a page served with the wrong map shows tool output the live
+    #:   fold had blanked.
+    #:
+    #: Set by :meth:`DurableFoldCache.load`'s caller, which is the only place that
+    #: knows it; every reader of this field degrades to the honest answer.
+    scan_from_bof: bool = True
     prunes: dict[str, str] = field(default_factory=dict)
     #: Transcript entries consumed so far. Not read by the fold itself — it is
     #: the cheap invariant that says the incremental cursor and the file agree,
@@ -201,14 +219,20 @@ class DurableFoldCache:
         with self._lock:
             self._states.clear()
 
-    def load(self, directory: Path) -> DurableFoldState:
+    def load(self, directory: Path, *, at_bof: bool = True) -> DurableFoldState:
         """Fold state brought current with the file on disk.
 
         The common path reads only the bytes appended since the last load;
         rotation (``compact_file``) or a failed incremental repair falls back
         to a full rebuild, which is still exactly what every request used to
         do before this cache existed.
-        """
+
+        ``at_bof`` is the READER's fact, not a caller preference: does the
+        rebuild it may run start at the journal's first row? This reader always
+        reads the whole file, so it is True, and the parameter exists so the
+        bounded suffix read (lane T3) can say False instead of the state
+        inferring it from a list index (see
+        :attr:`DurableFoldState.scan_from_bof`)."""
         state = self.get(directory)
         with state.lock:
             path = directory / TRANSCRIPT_FILENAME
@@ -236,7 +260,7 @@ class DurableFoldCache:
                             "durable fold: incremental read failed for %s; rebuilding", directory
                         )
             # New file, shrunk file, or failed increment: full rebuild.
-            self._rebuild(state, path, fingerprint)
+            self._rebuild(state, path, fingerprint, at_bof=at_bof)
             return state
 
     # -- internals -----------------------------------------------------------
@@ -326,9 +350,23 @@ class DurableFoldCache:
         state.fingerprint = fingerprint
         return True
 
-    def _rebuild(self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint) -> None:
+    def _rebuild(
+        self,
+        state: DurableFoldState,
+        path: Path,
+        fingerprint: _FileFingerprint,
+        *,
+        at_bof: bool = True,
+    ) -> None:
         """Full fold from the file: the pre-cache behaviour, run once per
-        session per daemon lifetime (then maintained incrementally)."""
+        session per daemon lifetime (then maintained incrementally).
+
+        ``at_bof`` says whether the entries read here began at the journal's own
+        first row, and it is written to the state because two later answers need
+        it (see :attr:`DurableFoldState.scan_from_bof`). This reader always
+        reads the whole file, so it is True unless the caller says otherwise —
+        the seam lane T3's bounded suffix read will drive.
+        """
         entries: list[TranscriptEntry] = []
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -346,7 +384,8 @@ class DurableFoldCache:
             if custom_type in _TRACKED_CUSTOM_TYPES and custom_type not in latest_customs:
                 latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
         state.injection_ids = _journal_injection_ids(entries)
-        state.history, state.keep_start_id = _replay(entries)
+        state.history, state.keep_start_id = _replay(entries, at_bof=at_bof)
+        state.scan_from_bof = at_bof
         state.render = _fold(state.history)
         state.prunes = {
             str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
@@ -359,7 +398,9 @@ class DurableFoldCache:
         state.fingerprint = fingerprint
 
 
-def _replay(entries: list[TranscriptEntry]) -> tuple[list[AgentMessage], str | None]:
+def _replay(
+    entries: list[TranscriptEntry], *, at_bof: bool = True
+) -> tuple[list[AgentMessage], str | None]:
     """``Transcript.build_llm_history`` semantics over parsed entries.
 
     Kept beside the cache rather than reused THROUGH a ``Transcript`` instance
@@ -406,7 +447,7 @@ def _replay(entries: list[TranscriptEntry]) -> tuple[list[AgentMessage], str | N
         # rows left below it opens at the compaction row itself, so the archive
         # still knows which line everything older than the window sits behind.
         boundary = start if start < len(entries) else compaction_index
-        if boundary > 0:
+        if boundary > 0 or not at_bof:
             keep_start_id = entries[boundary].id
 
     prunes = {
@@ -506,8 +547,11 @@ def _rebuild_history_after_compaction(state: DurableFoldState, entry: Transcript
         # old boundary would page rows the render already holds. ``index > 0``
         # is the same condition ``_replay`` uses — a window that opens at the
         # history's own first row dropped nothing, so the boundary it had is
-        # still the right one.
-        if index > 0:
+        # still the right one — and it needs the same qualification that reading
+        # carries: "the history's own first row" means the JOURNAL's first row
+        # only while the fold began there (``state.scan_from_bof``), which a
+        # bounded suffix read does not.
+        if index > 0 or not state.scan_from_bof:
             state.keep_start_id = str(first_kept_id)
     # Prunes journalled before this marker already shaped the kept window;
     # re-apply the map so a kept message blanked by an older prune stays
@@ -539,19 +583,207 @@ def _fold(history: list[AgentMessage]) -> list[Any]:
 #: asks the file for more than the route could have served.
 _ARCHIVE_READ_LIMIT = 200
 
+#: Rows read NEWER than each page's anchor, used only to pair the page's newest
+#: calls with the results that answer them (:func:`_pairing_messages`). A tool
+#: result is written immediately after its call, so one message's fan-out covers
+#: every realistic split; the cost is a bounded forward walk the reader already
+#: performs for an anchored page.
+_ARCHIVE_PAIRING_MARGIN = 64
+
 
 def _journal_entry_id(row_id: str) -> str:
-    """The journal entry id a rendered row id names.
+    """The journal entry id a rendered row id names, when the suffix is the fold's.
 
     ``fold_messages_to_entries`` composes a tool row's id from its message plus
     the call (``<message id>:<call id>``, and ``<message id>:stop`` for the
     budget stop), while the transcript reader's cursor is an ENTRY id. Callers
     legitimately hold either — the web client's page cursor is the row id it was
-    served — so the narrowing happens HERE, once, rather than at each call site
-    that has to remember it. Message ids are uuids and carry no colon, which is
-    what makes the first segment the entry.
+    served — so the narrowing happens here, once, for the call sites that need
+    it.
+
+    IT STRIPS ONE TRAILING SEGMENT, NOT EVERYTHING AFTER THE FIRST COLON, and
+    the difference is not cosmetic. ``harness/subagent.py`` mints
+    ``subagent-launch:<job id>`` user rows, so an entry id CAN contain a colon —
+    on this host 13 of the 60 largest journals name one as their newest
+    ``first_kept_entry_id`` — and splitting on the first colon turned such an id
+    into ``subagent-launch``, which resolves nowhere: the page reconciled, the
+    walk ended, and everything below it became unreachable. That is the same
+    defect this module exists to fix, reintroduced by an assumption about id
+    shape.
+
+    BECAUSE OF THAT IT IS A FALLBACK, never the first try: callers attempt the
+    id exactly as given and narrow only when the reader could not locate it.
     """
-    return row_id.partition(":")[0]
+    base, _, _ = row_id.rpartition(":")
+    return base or row_id
+
+
+def _row_group(row_id: str, known: Container[str]) -> str:
+    """The message a rendered row belongs to, resolved against the rows at hand.
+
+    A message paints its own row first and then one row per tool call, so the
+    rows of one message are ``<message id>`` plus ``<message id>:<call id>`` —
+    which makes the group a PREFIX relationship, not a stripped key: two sibling
+    calls (``m:call-2`` and ``m:call-3``) share a base but neither is a prefix of
+    the other, and an entry id may itself contain a colon
+    (``subagent-launch:<job>``), so neither "strip everything after the first
+    colon" nor "strip the last segment" is right on its own.
+
+    ``known`` is the set of row ids in the page being cut — the fold's own rows,
+    so the search answers with an id the conversation actually has. A row whose
+    message is NOT in the window keeps its OWN id as its group, and that is the
+    safe direction: the cut can only fall a row lower (the page gets longer), and
+    the cursor such a row hands over resolves to the message one page down rather
+    than to a stripped id that names nothing. Answering with the stripped base
+    there was wrong in exactly the way this module keeps re-learning: for
+    ``subagent-launch:<job>``, stripping answers ``subagent-launch`` for the bare
+    row and ``subagent-launch:<job>`` for its own call rows, so the two ends of
+    one group got different keys and the cut could land between them.
+    """
+    head = row_id
+    while ":" in head:
+        head = head.rsplit(":", 1)[0]
+        if head in known:
+            return head
+    return row_id
+
+
+#: The needle a prune entry's line carries, exactly as the journal writes it:
+#: the writer emits compact JSON (``{"id":…,"type":"prune",…}``), so a byte scan
+#: finds the candidate lines without parsing a single other row.
+_PRUNE_LINE_NEEDLE = b'"type":"prune"'
+#: Prune scans kept, keyed by the file's identity (path, inode, size — the same
+#: reasoning as ``_CustomSnapshotEntry``: an append-only file cannot change
+#: without changing its size, and ``compact_file`` replaces the inode).
+_PRUNE_CACHE_MAX = 8
+_PRUNE_CACHE: OrderedDict[tuple[str, int, int], dict[str, str]] = OrderedDict()
+_PRUNE_CACHE_LOCK = threading.Lock()
+
+
+def _journal_prunes(directory: Path, *, fallback: Mapping[str, str]) -> dict[str, str]:
+    """Every prune the journal carries, for a reader that folded only a window.
+
+    A prune marker is written ABOVE the row it blanks, so a reader that folds a
+    suffix — or pages backward — cannot see the prunes that apply to the rows it
+    serves. Serving them unblended is a redaction failure: the phone paints the
+    tool output the live fold had already hidden (measured on the merged tree, a
+    pruned result over 1 MiB above the replay window came back verbatim). The
+    TUI's audit window sidesteps this by reading the resident entries
+    (``collect_prunes``); this reader is disk-based and stateless, so it makes
+    one byte pass looking for the prune needle and parses only the lines that
+    carry it, cached against the file's identity so the pass happens once per
+    file state rather than once per page.
+
+    ``fallback`` is the map the caller already holds — the fold's own, which is
+    complete whenever the fold read the whole journal. It is what an unreadable
+    file answers with: the walk's own read is about to fail on the same file, so
+    refusing to page would trade a real answer for no answer.
+    """
+    path = directory / TRANSCRIPT_FILENAME
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return dict(fallback)
+    key = (str(path), stat.st_ino, stat.st_size)
+    with _PRUNE_CACHE_LOCK:
+        cached = _PRUNE_CACHE.get(key)
+        if cached is not None:
+            _PRUNE_CACHE.move_to_end(key)
+            return dict(cached)
+    prunes: dict[str, str] = {}
+    try:
+        with path.open("rb") as handle:
+            for raw in handle:
+                if _PRUNE_LINE_NEEDLE not in raw:
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None or entry.type != ENTRY_PRUNE:
+                    continue
+                target = entry.payload.get("target")
+                if target:
+                    prunes[str(target)] = str(entry.payload.get("notice", ""))
+    except OSError:
+        return dict(fallback)
+    with _PRUNE_CACHE_LOCK:
+        _PRUNE_CACHE[key] = prunes
+        _PRUNE_CACHE.move_to_end(key)
+        while len(_PRUNE_CACHE) > _PRUNE_CACHE_MAX:
+            _PRUNE_CACHE.popitem(last=False)
+    return dict(prunes)
+
+
+def _page_messages(
+    entries: Sequence[TranscriptEntry], prunes: Mapping[str, str]
+) -> list[AgentMessage]:
+    """Rehydrate one journal range into the messages the fold walks.
+
+    The archive's own reader, shared by the page and by the pairing rows
+    (:func:`_pairing_messages`): one conversion, so a page and its pairing
+    cannot disagree about what a journal row is.
+    """
+    messages: list[AgentMessage] = []
+    for entry in entries:
+        if entry.type == ENTRY_COMPACTION:
+            # A compaction row a reader scrolls past: the desktop paints it
+            # where it sits in the journal, and dropping it here would make the
+            # archived stretch look like a conversation that simply continued
+            # across a summary that never happened. Same helper the live prefix
+            # uses, so both markers are one object shape.
+            messages.append(_compaction_marker(entry))
+            continue
+        if entry.type != ENTRY_MESSAGE:
+            continue
+        message = _entry_to_message(entry, _attachments())
+        if message is None:
+            continue
+        notice = prunes.get(entry.id)
+        if notice is not None and isinstance(message, Message):
+            _apply_prune_to(message, notice)
+        messages.append(message)
+    return messages
+
+
+def _pairing_messages(
+    newer: Sequence[TranscriptEntry],
+    page: Sequence[AgentMessage],
+    prunes: Mapping[str, str],
+) -> list[AgentMessage]:
+    """The newer rows that answer the page's calls, for folding but not serving.
+
+    WHY THIS EXISTS. ``fold_messages_to_entries`` pairs a call with its result by
+    looking the call up in what it has ALREADY walked, so a range folded on its
+    own leaves the calls at its newest edge unpaired — and an unpaired call
+    paints ``interrupted``, which is a lie about a call that returned. Measured
+    by diffing paged rows against a whole-journal fold on the fixtures: 2 tool
+    rows per walk came out ``done -> interrupted``.
+
+    The answers are appended to the page's fold INPUT and are never rows of their
+    own: a result's row is the call's row, so settling one adds nothing to the
+    page's row set, and the rule (tool results only, matching a call in the page)
+    is what keeps a newer assistant row from importing its own calls as new rows.
+    """
+    answered = {
+        str(message.tool_call_id or "")
+        for message in page
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    wanted: set[str] = set()
+    for message in page:
+        if not isinstance(message, Message):
+            continue
+        for call in message.tool_calls or []:
+            call_id = str(call.id or "")
+            if call_id and call_id not in answered:
+                wanted.add(call_id)
+    if not wanted:
+        return []
+    return [
+        message
+        for message in _page_messages(newer, prunes)
+        if isinstance(message, Message)
+        and message.role == "tool"
+        and str(message.tool_call_id or "") in wanted
+    ]
 
 
 def journal_rows_older_than(
@@ -560,6 +792,7 @@ def journal_rows_older_than(
     *,
     before_id: str,
     limit: int,
+    prunes_complete: bool = True,
 ) -> tuple[list[Any], bool] | None:
     """Phone rows for the journal entries OLDER than ``before_id``.
 
@@ -584,15 +817,24 @@ def journal_rows_older_than(
     renderer here is how the two would drift.
 
     ``prunes`` is the fold state's own map (the ``[pruned]`` blanks the replay
-    applies). It arrives from the caller rather than being re-derived per page:
-    a prune marker is written ABOVE the row it blanks, so a backward page walk
-    reaches it after the row and a local scan would serve un-blanked content the
-    live fold had already hidden.
+    applies), and ``prunes_complete`` says whether that map covered the WHOLE
+    journal. When it did not — a suffix fold (lane T3's bounded read) sees only
+    its window — the map is rebuilt from the journal itself before anything is
+    served, because a prune marker sits ABOVE the row it blanks: a page served
+    without it hands the phone output the live fold had hidden, which is a
+    redaction failure rather than a cosmetic one.
+
+    EACH PAGE IS FOLDED WITH THE NEWER ROWS THAT ANSWER ITS CALLS
+    (:func:`_pairing_messages`), because the fold pairs a call with its result by
+    looking the call up in what it has already walked: folded alone, the calls at
+    a page's newest edge render ``interrupted`` however long ago they returned.
 
     ``before_id`` is a rendered ROW id, not necessarily a bare journal entry id:
     the web client pages with the id it was served, and a tool row's id carries
-    its call. :func:`_journal_entry_id` narrows it back to the entry the reader
-    walks from.
+    its call. The id is tried AS GIVEN first and narrowed by
+    :func:`_journal_entry_id` only when the reader cannot locate it — an entry id
+    can itself contain a colon (``subagent-launch:<job>``), and narrowing first
+    would ask for a row that does not exist.
 
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
@@ -603,39 +845,46 @@ def journal_rows_older_than(
     """
     rows: list[Any] = []
     has_more = False
-    cursor = _journal_entry_id(before_id)
+    if not prunes_complete:
+        prunes = _journal_prunes(directory, fallback=prunes)
+    candidate = before_id
+    narrowed_tried = False
     while len(rows) < limit:
-        page = read_transcript_page(directory, before_id=cursor, limit=_ARCHIVE_READ_LIMIT)
-        if page.reconciled:
+        try:
+            # AN ANCHORED read rather than a plain ``before_id`` one: the page
+            # needs the newer rows that answer its newest calls, and the anchor
+            # is where both halves meet. ``before`` is the reader's own ceiling
+            # for a page, ``after`` the pairing margin — one message's fan-out,
+            # so a call and its result are inside it on any real journal.
+            page = read_transcript_page(
+                directory,
+                around_id=candidate,
+                before=_ARCHIVE_READ_LIMIT,
+                after=_ARCHIVE_PAIRING_MARGIN,
+                limit=_ARCHIVE_READ_LIMIT + _ARCHIVE_PAIRING_MARGIN + 1,
+            )
+        except FileNotFoundError:
             return None
-        entries = page.entries
-        if not entries:
-            has_more = False
-            break
-        messages: list[AgentMessage] = []
-        for entry in entries:
-            if entry.type == ENTRY_COMPACTION:
-                # A compaction row a reader scrolls past: the desktop paints it
-                # where it sits in the journal, and dropping it here would make
-                # the archived stretch look like a conversation that simply
-                # continued across a summary that never happened. Same helper the
-                # live prefix uses, so both markers are one object shape.
-                messages.append(_compaction_marker(entry))
+        if page.reconciled:
+            narrowed = _journal_entry_id(before_id)
+            if not narrowed_tried and narrowed != before_id:
+                narrowed_tried = True
+                candidate = narrowed
                 continue
-            if entry.type != ENTRY_MESSAGE:
-                continue
-            message = _entry_to_message(entry, _attachments())
-            if message is None:
-                continue
-            if entry.id in prunes and isinstance(message, Message):
-                _apply_prune_to(message, prunes[entry.id])
-            messages.append(message)
+            return None
+        anchor = next((i for i, entry in enumerate(page.entries) if entry.id == candidate), None)
+        if anchor is None:
+            return None
+        older = list(page.entries[:anchor])
+        newer = list(page.entries[anchor:])
+        messages = _page_messages(older, prunes)
         if messages:
+            messages += _pairing_messages(newer, messages, prunes)
             rows = _fold(messages) + rows
-        cursor = entries[0].id
         has_more = page.has_more
-        if not page.has_more:
+        if not older or not has_more:
             break
+        candidate = older[0].id
     if not rows:
         return [], False
     if len(rows) > limit:
@@ -654,8 +903,9 @@ def journal_rows_older_than(
         # its first call. So the cut MOVES BACK to the group's first row and the
         # page is that much longer — bounded by one message's fan-out, and the
         # reader pays rows it was going to be served in the next page anyway.
-        base = _journal_entry_id(str(rows[cut].id))
-        while cut > 0 and _journal_entry_id(str(rows[cut - 1].id)) == base:
+        known = {str(row.id) for row in rows}
+        key = _row_group(str(rows[cut].id), known)
+        while cut > 0 and _row_group(str(rows[cut - 1].id), known) == key:
             cut -= 1
         rows = rows[cut:]
         has_more = True

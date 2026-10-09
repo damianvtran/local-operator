@@ -2484,25 +2484,36 @@ async def _engage_and_publish(
     return detail
 
 
-def _archive_page(
+def _journal_page(
     directory: Path,
     state: Any,
     *,
     before: str,
     limit: int,
 ) -> tuple[list[Any], bool]:
-    """The rows behind the newest compaction, or an honest end-of-history.
+    """The journal's rows immediately older than ``before``, or an honest end.
 
-    The fold starts its replay at the newest compaction's first-kept entry, so
-    rows a compaction dropped are absent from ``state.render``; the journal
-    itself still holds them and the desktop pages them. ``None`` from the reader
-    means the cursor names no journal row at all (an anchor pruned between
-    scrolls, or a marker row's minted id), and the client then treats the answer
-    as end-of-history rather than looping on the same rows.
+    The reader behind every cursor page (see :func:`_history_page` for why the
+    cursor pages the journal rather than the render). ``None`` from the reader
+    means the cursor names no journal row at all — a row from a transcript that
+    was replaced under the client, or an id narrowed wrongly — and the client
+    then treats the answer as end-of-history rather than looping on the same
+    rows.
+
+    ``prunes_complete`` is the fold state's own fact (see
+    ``DurableFoldState.scan_from_bof``): with a whole-journal fold its prune map
+    is the file's own, and with a bounded suffix fold it is not, in which case
+    the reader rebuilds the map before serving anything.
     """
     from local_operator.mobile.durable import journal_rows_older_than
 
-    rows = journal_rows_older_than(directory, state.prunes, before_id=before, limit=limit)
+    rows = journal_rows_older_than(
+        directory,
+        state.prunes,
+        before_id=before,
+        limit=limit,
+        prunes_complete=bool(getattr(state, "scan_from_bof", True)),
+    )
     return rows if rows is not None else ([], False)
 
 
@@ -2518,13 +2529,29 @@ def _history_page(
     the event loop (``asyncio.to_thread`` at the call site): even the cached
     path touches disk and the fold is not loop-safe work.
 
-    REACH, not just speed: the render begins at the newest compaction's window,
-    so paging it alone stopped a phone reader at the last compaction — measured
-    on the S6 fixture, 640 of 3,348 journal rows were reachable and the rest
-    were only evidence of a conversation the phone could not show. Once the
-    render is exhausted the page continues into the journal itself
-    (:func:`_archive_page`), which is the same reader and the same rows the
-    desktop's history route serves.
+    TWO SOURCES, CHOSEN BY THE QUESTION. Without a cursor this is the newest
+    page a surface shows on open, so it comes from the render. With one it comes
+    from the JOURNAL (:func:`_journal_page`) — and that split is what makes the
+    phone's history complete and loop-free.
+
+    WHY NOT THE RENDER, for a cursor page. Paging it alone stopped a phone
+    reader at the last compaction — measured on the S6 fixture, 640 of 3,348
+    journal rows were reachable and the rest were evidence of a conversation the
+    phone could not show — and it also served rows twice. The render's order is
+    not the journal's: it opens with the compaction marker and re-injects the
+    latest compaction's ``preserved_user_turns`` UNDER THEIR ORIGINAL ROW IDS,
+    and those same rows sit in the journal below the cut. A cursor that lands on
+    one of them therefore answers a page around the render's head plus a refill
+    from the compaction boundary — rows the client already holds — so
+    ``has_more`` stays true and the walk cycles (measured: 117,020 mounted rows
+    holding 408 distinct ids). 60 of the 60 largest journals on this host carry
+    preserved turns, so that is the ordinary shape, not a corner.
+
+    The desktop has always answered this question from the journal, and the rows
+    agree because both surfaces fold them with the same fold
+    (``fold_messages_to_entries``); the marker id fix in :mod:`.durable` is what
+    makes the row identities match. One row is served once, at its journal
+    position, in journal order.
     """
     if durable_only:
         directory = _durable_user_session_dir(session_id)
@@ -2543,7 +2570,6 @@ def _history_page(
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
-        entries = state.render
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -2551,41 +2577,13 @@ def _history_page(
         return [], False
 
     if before:
-        anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
-        if anchor is None:
-            # Two different misses, one answer. Either the cursor is a row this
-            # route served from BEHIND the newest compaction — the journal holds
-            # it and the page continues there — or the client's anchor was
-            # pruned (a compaction between scrolls), and serving the newest page
-            # would duplicate the client's live window. Return empty in the
-            # second case and let the client treat it as end-of-history rather
-            # than loop on the same rows.
-            return _archive_page(directory, state, before=before, limit=limit)
-        cut = anchor
-    else:
-        cut = len(entries)
-    older = entries[:cut]
-    page = older[-limit:] if len(older) > limit else older
-    has_more = len(older) > len(page)
-    if before and not has_more and state.keep_start_id is not None:
-        # The page reaches the render's head, which is where the newest
-        # compaction CLOSED the replay: everything above it is on disk. Fill the
-        # rest of the page from the journal so a scroll-up crosses the boundary
-        # in one request instead of needing a probing round trip first.
-        filled = max(0, limit - len(page))
-        if filled:
-            archive, has_more = _archive_page(
-                directory, state, before=state.keep_start_id, limit=filled
-            )
-            page = archive + page
-        else:
-            # Exactly a full page of rendered rows and the head is reached, so
-            # whether more exists is the archive's answer and it is not known
-            # yet. Claiming yes costs one request that a genuinely empty archive
-            # answers with the empty page above; claiming no would stop a reader
-            # one page short of their own conversation.
-            has_more = True
-    return page, has_more
+        # Every cursor page comes from the journal: the render's order is not the
+        # journal's, and its head re-serves rows whose originals sit below the
+        # cut. See this function's docstring for the measurement.
+        return _journal_page(directory, state, before=before, limit=limit)
+    entries = state.render
+    page = entries[-limit:] if len(entries) > limit else list(entries)
+    return page, len(entries) > len(page)
 
 
 def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:

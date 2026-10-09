@@ -107,6 +107,27 @@ describe("the relay's first frame reserves the settled layout", () => {
 		expect(after).toBe(before);
 	});
 
+	it("carries the settled empty composer's glyphs and placeholder in the reserve", () => {
+		/* Design review round 1 (D1). The reserve was a ring, a bordered empty box
+		   and a sunken disc: no paperclip, no `Message…`, no arrow — so the reveal
+		   popped three glyphs and a placeholder into place, all four of which are
+		   static and knowable before any data arrives. In dark the disc sits at
+		   1.05:1 against the canvas, so the row read as "ring + outline" with the
+		   right-hand control missing. */
+		const { container } = render(<SessionScreen sessionId="s1" />);
+		const frame = container.querySelector("[aria-hidden='true'] textarea") as HTMLTextAreaElement;
+		expect(frame).not.toBeNull();
+		expect(frame.placeholder).toBe("Message…");
+		// One paperclip definition, drawn in the attach disc's disabled styling.
+		expect(container.querySelectorAll("[aria-hidden='true'] svg").length).toBe(1);
+		const discs = Array.from(
+			container.querySelectorAll("[aria-hidden='true'] span"),
+		).filter((el) => el.className.includes("size-11"));
+		const send = discs.find((el) => el.className.includes("bg-sunken"));
+		expect(send).toBeTruthy();
+		expect(send?.textContent).toBe("↑");
+	});
+
 	it("reports a dropped link in its own sentence, with no ladder rung stacked on it", () => {
 		// The reserved frame's sentence IS the link report, and with no data on
 		// screen a "last synced view" strip would be noise about noise — the rule

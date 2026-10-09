@@ -23,9 +23,15 @@ import type { TranscriptEntry } from "./types";
 
 const calls: string[] = [];
 
+/** A gate a test can lower AFTER the request has started, so the in-flight
+    indicator is observable without racing the fetch (the mock resolves on the
+    next microtask otherwise). */
+let inFlight: Promise<void> | null = null;
+
 vi.mock("./api", () => ({
 	getHistory: vi.fn(async (_pid: string, before: string | null) => {
 		calls.push(String(before));
+		if (inFlight) await inFlight;
 		if (before === "p0") {
 			return { entries: [row("older-1"), row("older-2")], has_more: true };
 		}
@@ -76,13 +82,77 @@ describe("the older-history cursor", () => {
 		await waitFor(() => expect(calls.length).toBe(1));
 		expect(calls[0]).toBe("p0");
 
-		// The prepend does NOT move the mounted window, so a reader who scrolls
-		// again before tapping `show N more loaded` must still get the page
-		// below the rows already held.
+		// The prepend does NOT move the mounted window, so the rows just fetched
+		// sit hidden above it. The reader's next scroll upward REVEALS them
+		// (grows the window) instead of fetching another page nobody can see —
+		// one mechanism at a time, which is what stopped the cascade that pulled
+		// 13 pages (2.24 MB) into a window the reader could not reach.
+		fireEvent.scroll(scroller as Element);
+		await waitFor(() =>
+			expect(container.querySelectorAll("[data-completion-anchor]").length).toBe(122),
+		);
+		expect(calls.length).toBe(1);
+
+		// Once nothing is held above the reader, the next scroll fetches the page
+		// below the rows already held — and the cursor is the oldest row HELD
+		// (``older-1``), not the oldest row rendered (``p0``, which the mount
+		// already dropped from the window).
 		fireEvent.scroll(scroller as Element);
 		await waitFor(() => expect(calls.length).toBeGreaterThan(1));
-		expect(calls[1]).not.toBe(calls[0]);
 		expect(calls[1]).toBe("older-1");
 		expect(getHistory).toHaveBeenCalled();
+	});
+
+	it("anchors past a pinned opener when the projection is at its cap", async () => {
+		/* The daemon pins the conversation's first user row at the head of a
+		   capped projection (``_cap_tail``), and that row is NOT the tail's
+		   chronological neighbour: paging from it asks for rows older than an
+		   opening turn, so everything between the opener and the tail is never
+		   requested. The guard against that compared the transcript's length to
+		   ``PAGE`` (120) — a number the daemon never sends — so it never fired on
+		   a real projection (measured on S6: 22 user turns and 272 rows missing;
+		   S3: 28 and 839). The cap the daemon actually sends is 80. */
+		const capped = [row("opener"), ...Array.from({ length: 79 }, (_, i) => row(`tail-${i}`))];
+		capped[0] = { ...capped[0], kind: "user" };
+		const { container } = render(<Transcript pid="s1" entries={capped} />);
+		const scroller = container.querySelector(".lo-scroll");
+		Object.defineProperty(scroller, "scrollTop", { value: 0, writable: true });
+		fireEvent.scroll(scroller as Element);
+		await waitFor(() => expect(calls.length).toBe(1));
+		expect(calls[0]).toBe("tail-0");
+	});
+
+	it("keeps the idle hairline and the in-flight bar the same height", async () => {
+		/* The two top-indicator states differ by their HEIGHT (2px bar, 1px
+		   hairline), and that pixel is not cosmetic: every swap moved the rows
+		   below it, the anchor-hold wrote `scrollTop` to compensate, and the
+		   write re-entered `onScroll` and fetched again. On the S6 deep cell 23
+		   of 27 transitions in one open were that oscillation against a rig
+		   scrolling once every 300 ms. */
+		let release!: () => void;
+		inFlight = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { container } = render(<Transcript pid="s1" entries={window()} />);
+		const scroller = container.querySelector(".lo-scroll") as HTMLElement;
+		Object.defineProperty(scroller, "scrollTop", { value: 0, writable: true });
+		fireEvent.scroll(scroller);
+
+		const box = () =>
+			Array.from(container.querySelectorAll('[aria-hidden="true"]')).find((el) =>
+				el.className.includes("h-0.5"),
+			) ?? null;
+		await waitFor(() => expect(box()).not.toBeNull());
+		const loadingBox = box() as Element;
+
+		release();
+		inFlight = null;
+		await waitFor(() => expect(calls.length).toBe(1));
+		await waitFor(() => expect(box()).not.toBeNull());
+		const idleBox = box() as Element;
+
+		// Same box, same height — the hairline is 1px INSIDE a 2px row.
+		expect(loadingBox.className).toContain("h-0.5");
+		expect(idleBox.className).toContain("h-0.5");
 	});
 });

@@ -24,6 +24,21 @@ import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
 
+/* The daemon's ``PROJECTION_TRANSCRIPT_LIMIT`` (``local_operator/mobile/types.py``):
+   the projection is the pinned opener plus the newest 79 rows, so a transcript
+   this long is a CAPPED window whose head row is not the tail's chronological
+   neighbour. Mirrored rather than fetched because the rule is about the SHAPE of
+   what arrived, and ``agent-view.tsx`` mirrors the same number for the child
+   sheet. It was compared against ``PAGE`` (120) before — a number the daemon
+   never sends — so the pinned-opener branch never ran on a real projection and
+   the first cursor was the opener itself: the page came back as the opener's own
+   neighbour plus the journal BELOW the cut, and the turns in between were never
+   requested (measured with the S6 first-paint fixture: 22 user turns, 272 rows;
+   on S3, 28 turns and 839 rows). ``>=`` rather than ``===`` is safe because the
+   head row is already held either way — paging from the row after it cannot lose
+   it, only re-offer it to the merge's id de-dup. */
+const PROJECTION_ROWS = 80;
+
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
    `danger` and `ink-dim` sit at 1.30:1, and across all 31 themes those two are
@@ -399,7 +414,7 @@ export function Transcript({
 	const oldestId =
 		older.length > 0
 			? older[0].id
-			: entries.length === PAGE && entries[0]?.kind === "user"
+			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
 				? entries[1]?.id ?? entries[0]?.id ?? null
 				: visible.length > 0
 					? visible[0].id
@@ -474,10 +489,20 @@ export function Transcript({
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
 		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
-		/* Near the top with more history to fetch: auto-load so scrolling up
-		   just keeps going, no button needed. */
-		if (el.scrollTop < 120 && hasMore && !loadingRef.current) {
-			void loadOlder();
+		/* Near the top: reveal what is already held, then fetch what is not.
+		   ONE mechanism at a time, in that order, and no button.
+
+		   The order is the fix for two rounds of the same complaint. A page
+		   arriving while rows sat hidden behind `show N more loaded` fetched
+		   further pages nobody could see (13 pages, 2.24 MB), and the button's
+		   own label described a count it did not deliver (`show 1,425 more
+		   loaded` revealed 120, with the next tap about 18 screens above the
+		   reader). Growing first means the reader's upward gesture always moves
+		   the transcript, and a fetch only ever happens once there is nothing
+		   left held above them. */
+		if (el.scrollTop < 120 && !loadingRef.current) {
+			if (hiddenCount > 0) setWindowSize((n) => n + PAGE);
+			else if (hasMore) void loadOlder();
 		}
 	};
 
@@ -485,9 +510,9 @@ export function Transcript({
 	   reserve's own edges; round 4 extends the same hand to every other row
 	   change, because the opt-out means no other hand exists). The live window
 	   drops its oldest row on each append at the cap (U28 — native anchoring
-	   used to cover that removal silently), `show N more loaded` expands the
-	   window upward, a page of older rows can prepend, and the reserve grows or
-	   clears. So rather than compensating one cause, this measures its EFFECT:
+	   used to cover that removal silently), scrolling up expands the window
+	   upward (the tap target that used to do it is gone — review round 1, D2/D3),
+	   a page of older rows can prepend, and the reserve grows or clears. So rather than compensating one cause, this measures its EFFECT:
 	   EVERY rendered row is remembered with its viewport offset, and the next
 	   commit re-measures the row the reader was closest to — the first row at
 	   the viewport's top edge — and follows how far it moved.
@@ -612,27 +637,28 @@ export function Transcript({
 			{/* History loads automatically as the user scrolls up — no button. A
 			   subtle top indicator is the only chrome: a thin accent bar that
 			   fills while a page is in flight, plus a hairline when more history
-			   exists. Nothing tappable, nothing blocky. */}
+			   exists. Nothing tappable, nothing blocky.
+
+			   THE TWO STATES ARE THE SAME HEIGHT (2px), and that is load-bearing
+			   rather than tidy. The bar used to be 2px and the hairline 1px, so
+			   each swap moved the rows below it by a pixel — and the anchor-hold
+			   wrote `scrollTop` to compensate, which fired `scroll`, which saw
+			   `scrollTop < 120` and fetched again: measured on the S6 deep cell,
+			   23 of 27 transitions in one open were that 1px oscillation against
+			   a rig scrolling once every 300 ms, and the cascade pulled 13 pages
+			   (2.24 MB) into a window the reader could not see. */}
 			{loadingOlder ? (
-				<div className="flex justify-center py-1" aria-hidden>
-					<span className="lo-loadbar h-0.5 w-16 overflow-hidden rounded-full bg-sunken">
+				<div className="flex h-0.5 justify-center" aria-hidden>
+					<span className="lo-loadbar h-full w-16 overflow-hidden rounded-full bg-sunken">
 						<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
 					</span>
 				</div>
 			) : hasMore ? (
-				<div className="flex justify-center py-1" aria-hidden>
+				<div className="flex h-0.5 items-center justify-center" aria-hidden>
 					<span className="h-px w-10 bg-hairline" />
 				</div>
 			) : null}
-			{hiddenCount > 0 ? (
-				<button
-					type="button"
-					onClick={() => setWindowSize((n) => n + PAGE)}
-					className="mx-auto text-meta text-ink-dim underline-offset-2 active:underline"
-				>
-					show {hiddenCount} more loaded
-				</button>
-			) : null}
+
 			{visible.map((e) => (
 				/* A boundary per row: one malformed entry must not unmount the
 				   whole app (the "tap → blank screen" failure). */
