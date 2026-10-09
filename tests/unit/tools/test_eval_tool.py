@@ -29,7 +29,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.scratchpad import SCRATCHPAD_ELSEWHERE, SCRATCHPAD_PATH_ENV
+from local_operator.scratchpad import SCRATCHPAD_ELSEWHERE_SHORT, SCRATCHPAD_PATH_ENV
 from local_operator.tools import builtin
 from local_operator.tools import eval as eval_tool
 
@@ -886,17 +886,18 @@ def _render_offline(context: ToolContext, code: str) -> ToolResult:
 
 def test_a_pad_naming_cell_carries_the_size_line_near_the_top(tmp_path, monkeypatch) -> None:
     """A cell that names the pad while the pad is over budget gets ONE line —
-    first line of the body, ahead of its own output, the same sentence and the
-    same numbers the write path refuses with."""
+    first line of the body, ahead of its own output — the same walk and the
+    same thresholds the write path refuses with, in the unit a reader parses
+    (design review round 1, D2) and claiming exactly what the write path
+    refuses, writes that add (F3)."""
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
     code = "import os\nprint(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])\n"
 
     result = _render_offline(context, code)
 
     expected = (
-        f"[scratch] The pad now holds at least {held:,} bytes — over the "
-        f"{held - 1:,}-byte budget its tools enforce, which now refuse further writes. "
-        f"{SCRATCHPAD_ELSEWHERE}"
+        f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
+        f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
     )
     assert result.text.splitlines()[0] == expected, result.text
 
@@ -946,7 +947,7 @@ async def test_the_pad_line_reaches_the_real_eval_result(tmp_path, monkeypatch) 
     result = await _call(context, code)
 
     assert result.is_error is False
-    assert "[scratch] The pad now holds at least" in result.text, result.text
+    assert "[scratch] The pad now holds ≥" in result.text, result.text
 
 
 # ---------------------------------------------------------------------------

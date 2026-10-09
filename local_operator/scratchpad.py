@@ -634,6 +634,21 @@ SCRATCHPAD_ELSEWHERE = (
     "than /tmp."
 )
 
+#: The SAME alternative said shorter, for the sentence whose audience is a
+#: cropped card rather than prose: where :data:`SCRATCHPAD_ELSEWHERE` costs 268
+#: cells, this costs 60.
+#:
+#: It exists because the two tails are drawn at different widths. Every
+#: :data:`SCRATCHPAD_ELSEWHERE` consumer is a ``write``/``edit`` REFUSAL — read
+#: as prose and whole — while :func:`scratchpad_refusal`'s line is painted as a
+#: captured row in a TUI card that crops per line at the frame's measure (design
+#: review round 1, D1: the long tail started past cell 140 on those lines, past
+#: every standard width). So the audit sentence composes the same refused-name
+#: CLAUSE — the finding and the rule, which must never drift — with this tail,
+#: and the refusals keep the long one: the two differ only in how much of the
+#: alternative is spelled out, never in what was refused or why.
+SCRATCHPAD_ELSEWHERE_SHORT = "build/dependency trees belong in a git worktree, not the pad"
+
 
 def _relative_parts(path: Path, root: Path) -> tuple[str, ...] | None:
     """The segments of ``path`` BELOW ``root``, or ``None`` when they cannot be related.
@@ -753,14 +768,17 @@ def scratchpad_footprint(root: Path) -> tuple[int, bool, bool]:
     return held, held > SCRATCHPAD_TOTAL_BUDGET_BYTES, truncated
 
 
-def _content_refusal(below: tuple[str, ...]) -> str | None:
-    """The sentence refusing a path ``below`` the pad root, or ``None`` when it may stay.
+def _refused_name_clause(below: tuple[str, ...]) -> str | None:
+    """The CLAUSE every refusal sentence is built from, or ``None``.
 
-    ONE spelling of the two name arms, because two channels sentence from it:
-    :func:`check_scratchpad_write` (which RAISES it, ``{url}:``-prefixed) and
-    :func:`scratchpad_refusal` (which hands the clause to the shell audit) — a
-    second hand-written copy is how the two would drift apart about what a
-    refused name is.
+    Names WHAT is refused and the rule its name breaks — ``"'build' is a build
+    or dependency directory"`` — with no verdict and no tail, because two
+    sentences compose around it and must agree about the finding: the write
+    refusal (:func:`check_scratchpad_write`, via :func:`_content_refusal`) and
+    the shell audit (:func:`scratchpad_refusal`, with
+    :data:`SCRATCHPAD_ELSEWHERE_SHORT`). A second hand-written copy is how the
+    two would drift apart about what a refused name is; only the tail and the
+    audience they are drawn for may differ.
 
     Parent parts are judged by :func:`_is_refused_segment` and the LEAF by
     :func:`_refused_suffix`, and never the other way round: the dot after a
@@ -771,27 +789,39 @@ def _content_refusal(below: tuple[str, ...]) -> str | None:
     """
     for segment in below[:-1]:
         if _is_refused_segment(segment):
-            return (
-                f"'{segment}' is a build or dependency directory, not scratch. "
-                f"{SCRATCHPAD_ELSEWHERE}"
-            )
+            return f"'{segment}' is a build or dependency directory"
     suffix = _refused_suffix(below[-1]) if below else None
     if suffix is not None:
-        return (
-            f"'{suffix}' is a compiled, archived or model artefact, not scratch. "
-            f"{SCRATCHPAD_ELSEWHERE}"
-        )
+        return f"'{suffix}' is a compiled, archived or model artefact"
     return None
 
 
-def scratchpad_refusal(path: Path, root: Path) -> str | None:
-    """The refusal sentence for ``path`` under ``root``, or ``None`` when nothing
-    about its name is refused.
+def _content_refusal(below: tuple[str, ...]) -> str | None:
+    """The write path's full refusal sentence for a path ``below`` the pad,
+    or ``None``: the shared clause, the verdict, and the long tail.
 
-    The shell channel's reuse point (``tools.builtin._bash_pad_write_check``): a
-    command that already ran cannot be refused, but whether it put a refused
-    NAME in the pad is judged by the write path's own rule and sentence, so the
-    advisory and the next ``write``'s refusal cannot disagree.
+    Byte-frozen where it is read: ``write``/``edit`` refusals carry this
+    sentence, and only the tail composition is allowed to differ between the
+    channels (see :func:`_refused_name_clause`).
+    """
+    clause = _refused_name_clause(below)
+    if clause is None:
+        return None
+    return f"{clause}, not scratch. {SCRATCHPAD_ELSEWHERE}"
+
+
+def scratchpad_refusal(path: Path, root: Path) -> str | None:
+    """The shell audit's sentence for ``path`` under ``root``, or ``None``.
+
+    The clause the write path refuses with, COMPOSED FOR THE CARD the audit's
+    line lands in (``tools.builtin._bash_pad_write_check``): the finding leads —
+    the refused segment or suffix, not the address — then the short tail
+    (:data:`SCRATCHPAD_ELSEWHERE_SHORT`), with the pad-RELATIVE path in the
+    closing parenthesis. Two measured reasons, design review round 1 (D1/D2):
+    a leading absolute path pushed the actionable half past the card's crop at
+    every standard width, and the long tail cost cells the crop never gave
+    back. The clause itself is shared, so the advisory and the next ``write``'s
+    refusal cannot disagree about what was refused.
 
     ``None`` also when ``path`` cannot be placed inside ``root`` — unlike the
     write path, which refuses an unplaceable path, the audit can only report,
@@ -800,7 +830,10 @@ def scratchpad_refusal(path: Path, root: Path) -> str | None:
     below = _relative_parts(path, root)
     if below is None:
         return None
-    return _content_refusal(below)
+    clause = _refused_name_clause(below)
+    if clause is None:
+        return None
+    return f"{clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({'/'.join(below)})."
 
 
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
@@ -833,9 +866,10 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"{url}: this write could not be placed inside the pad, so it is refused "
             f"rather than judged. {SCRATCHPAD_ELSEWHERE}"
         )
-    # The name arms sentence from ONE place (``_content_refusal``) so the write
-    # refusal and the shell audit's line cannot drift apart; its docstring owns
-    # why parent parts and the leaf are judged by different rules.
+    # The name arms sentence from ONE clause (``_refused_name_clause``, wrapped
+    # here in ``_content_refusal``) so the write refusal and the shell audit's
+    # line cannot drift apart; the clause's docstring owns why parent parts and
+    # the leaf are judged by different rules.
     refusal = _content_refusal(below)
     if refusal is not None:
         raise ScratchpadContentError(f"{url}: {refusal}")

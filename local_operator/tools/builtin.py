@@ -170,7 +170,7 @@ from local_operator.redaction_shapes import (
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_BUDGET_SCAN_ENTRIES,
-    SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
@@ -7420,12 +7420,16 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
     Contract, all of it load-bearing:
 
     * THE MENTION GATE is the no-latency guarantee. This runs on every bash
-      result, so a command that spells neither ``$LOCAL_OPERATOR_SCRATCHPAD`` /
-      ``${LOCAL_OPERATOR_SCRATCHPAD}`` nor the pad's literal path returns ``""``
-      after pure string work — ZERO filesystem calls. A command that reaches the
-      pad through an alias spelling of the store (``/tmp`` against
-      ``/private/tmp``) is a MISS, deliberately: resolving the alias here would
-      cost a syscall on every command to serve a spelling nothing writes.
+      result, so a command that does not NAME the pad returns ``""`` after
+      pure string work — ZERO filesystem calls. ``_command_names_pad`` owns the
+      spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
+      path, and the home spellings (``~/…``/``$HOME/…``/``${HOME}/…``) the
+      scan has always resolved but the gate could not reach — review round 1,
+      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. A
+      command that reaches the pad through an alias spelling of the store
+      (``/tmp`` against ``/private/tmp``) is a MISS, deliberately: resolving
+      the alias here would cost a syscall on every command to serve a spelling
+      nothing writes.
     * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
       parts are a refused segment or whose leaf carries a refused suffix gets
       the sentence the write tools raise, ``[scratch]``-tagged (see
@@ -7436,10 +7440,26 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
       means a bare ``mkdir $LOCAL_OPERATOR_SCRATCHPAD/node_modules`` draws no
       line, because nothing distinguishes that target from a file of the same
       name, and the file is allowed.
+    * A COPY/MOVE whose destination is a DIRECTORY creates ``dst/basename(src)``
+      — a name no operand spells — so each source's derived child is judged by
+      the same parent-segment + leaf-suffix rule before the budget arm is
+      reached: ``cp x.tar.gz "$PAD/"`` is the ordinary way to copy into the pad
+      and was the whole silent class before (review round 1, F2). The
+      derivation runs when the destination resolves to the pad root or an
+      existing directory — a trailing-slash destination that does NOT exist is
+      skipped because the copy failed there and created nothing — and a
+      derived child that is itself a refused SEGMENT-shaped leaf stays silent
+      exactly like the bare ``mkdir`` above: a copied tree and a file of the
+      same name are indistinguishable, and the file is allowed.
     * BUDGET arm: ONE bounded walk (``scratchpad.scratchpad_footprint``) — over
-      budget or past the entry cap, one line. At most ONE line per result: a
-      shape hit returns without walking, because it attributes the change to
-      THIS command while the budget line reports pad state.
+      budget or past the entry cap, one line. At most ONE line from THIS AUDIT
+      per result: a shape hit returns without walking, because it attributes
+      the change to THIS command while the budget line reports pad state. A
+      result can still carry a SECOND ``[scratch]`` line — the temp/scratch-dir
+      nudge above is a different advisory with its own single-line rule and
+      its own remedy, and a command that creates under a temp root AND
+      overfills the pad earns both (measured; kept, because collapsing them
+      would have to pick one of two traps to name).
     * NOT a ``background: true`` call — the deliberate gap ``_bash_scratch_hint``
       documents one level up: a detached command settles through
       ``_detach_to_job``, whose job result is assembled on its own path and
@@ -7450,15 +7470,24 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
     pad = _scratchpad_root(context)
     if pad is None:
         return ""
-    if str(pad) not in _expand_scratchpad_spellings(command, pad):
+    if not _command_names_pad(command, pad):
         return ""
-    for candidate in _bash_created_paths(command):
+    for candidate, sources in _bash_created_entries(command):
         target = _pad_target(candidate, pad)
         if target is None:
             continue
         clause = scratchpad_refusal(target, pad)
         if clause is not None:
-            return f"[scratch] {target}: {clause}"
+            return f"[scratch] {clause}"
+        if not sources or not (target == pad or target.is_dir()):
+            continue
+        for source in sources:
+            name = Path(source).name
+            if name in ("", ".", ".."):
+                continue
+            clause = scratchpad_refusal((target / name).resolve(), pad)
+            if clause is not None:
+                return f"[scratch] {clause}"
     return _pad_budget_line(pad)
 
 
@@ -7482,7 +7511,16 @@ def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
     The background path is the same deliberate gap the shell channel has:
     ``_run_in_background`` settles through ``_background_summary``, which
     assembles its own result text and never reaches ``_build_render_result``,
-    so a detached cell gets no line.
+    so a detached cell gets no line. The CRASH/ABORT/TIMEOUT returns share the
+    shape for the same reason (review round 1, F5): those three return
+    ``_lost_state_error``/``_error`` for a kernel killed mid-run, a fatal
+    signal or a timeout BEFORE ``_render`` runs, so a cell that over-filled the
+    pad and then crashed, timed out or was aborted carries no line either.
+    Kept as a miss rather than routed through three more return paths: those
+    results already LEAD the body with the state loss or the crash, a pad line
+    beside them would rank below both, and one next-to-nothing line for the one
+    cell shape that least needs pad advice is not worth three more call sites
+    to keep honest.
     """
     if not code:
         return ""
@@ -7494,26 +7532,56 @@ def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
     return _pad_budget_line(pad)
 
 
-def _pad_budget_line(pad: Path) -> str:
-    """The ``[scratch]`` line when ``pad`` is over its byte budget or its entry
-    cap, else ``""`` — the BUDGET arm every pad-audit channel shares.
+#: One MiB in bytes, for the budget line's DISPLAY only. The policy thresholds
+#: stay exact bytes at the walk's own comparisons; only the rendered sentence is
+#: scaled, because ``268,435,456`` costs 13 cells of a card row where ``256 MiB``
+#: costs 7 — cells the remedy needs inside the crop (design review round 1, D1/D2).
+_PAD_MIB = 1024 * 1024
 
-    One bounded walk, and the line carries the same numbers and the same
-    :data:`SCRATCHPAD_ELSEWHERE` tail as the write path's refusals, so where the
-    material belongs cannot drift between the channels that refuse and the
-    channels that report.
+
+def _pad_size_text(value: int, *, attributive: bool = False) -> str:
+    """``value`` in the unit its reader parses without dividing.
+
+    MiB once the value is at least one — FLOORED, so a ``≥`` claim never
+    overstates the walk's lower bound — and bytes below that, which is where a
+    test-scale pad lives and where ``0 MiB`` would be a worse sentence than the
+    number itself. ``attributive`` spells the bytes arm as the noun modifier
+    (``8,191-byte``) that "over its ___ budget" needs; the MiB arm needs no
+    separator (``256 MiB budget``).
+    """
+    if value >= _PAD_MIB:
+        return f"{value // _PAD_MIB:,} MiB"
+    return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+
+
+def _pad_budget_line(pad: Path) -> str:
+    """The ``[scratch]`` line when ``pad`` is over its byte budget or its
+    entry cap, else ``""`` — the BUDGET arm every pad-audit channel shares.
+
+    One bounded walk, and the line carries the write path's own thresholds (the
+    walk reads the same constants and the same comparisons, so the sentence and
+    the refusal cannot disagree about when the policy bites) — but NOT the
+    refusal's long tail. This line's audience is a TUI card that crops per line
+    at the frame's measure, so the remedy is :data:`SCRATCHPAD_ELSEWHERE_SHORT`,
+    and it starts inside the first standard width rather than past it (design
+    review round 1, D1; the measured prologue is 65 cells, not 143). The claim
+    about writes is the write path's ACTUAL rule: a write is refused when it
+    would leave the pad over the budget, so a shrinking overwrite that brings
+    it back under is still accepted — "writes that add are refused" is the
+    precise half, where the earlier "refuse further writes" overstated it
+    (review round 1, F3).
     """
     held, over_budget, too_wide = scratchpad_footprint(pad)
     if over_budget:
         return (
-            f"[scratch] The pad now holds at least {held:,} bytes — over the "
-            f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte budget its tools enforce, which now "
-            f"refuse further writes. {SCRATCHPAD_ELSEWHERE}"
+            f"[scratch] The pad now holds ≥{_pad_size_text(held)}, over its "
+            f"{_pad_size_text(SCRATCHPAD_TOTAL_BUDGET_BYTES, attributive=True)} budget — "
+            f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
         )
     if too_wide:
         return (
-            f"[scratch] The pad holds more than {SCRATCHPAD_BUDGET_SCAN_ENTRIES:,} entries, "
-            f"a tree rather than a pad. {SCRATCHPAD_ELSEWHERE}"
+            f"[scratch] The pad holds {SCRATCHPAD_BUDGET_SCAN_ENTRIES:,}+ entries — "
+            f"a tree rather than a pad; {SCRATCHPAD_ELSEWHERE_SHORT}."
         )
     return ""
 
@@ -7531,6 +7599,45 @@ def _expand_scratchpad_spellings(text: str, pad: Path) -> str:
     for spelling in (f"${{{SCRATCHPAD_PATH_ENV}}}", f"${SCRATCHPAD_PATH_ENV}"):
         text = text.replace(spelling, str(pad))
     return text
+
+
+def _command_names_pad(command: str, pad: Path) -> bool:
+    """Whether ``command`` NAMES the pad, in any spelling the scan accepts.
+
+    Pure string work, because this is the gate half of
+    ``_bash_pad_write_check``'s no-latency guarantee: the check runs on every
+    bash result, so a command that does not name the pad must return after
+    string compares and ZERO filesystem calls. Four spelling families, each of
+    which the scan downstream resolves to the same target: the two
+    ``$LOCAL_OPERATOR_SCRATCHPAD`` forms and the literal path
+    (:func:`_expand_scratchpad_spellings`), plus the shell's HOME spellings —
+    ``~/…``, ``$HOME/…``, ``${HOME}/…`` — which :func:`_pad_target` has always
+    expanded but the gate could not see, so the same target fired spelled
+    absolutely and went silent spelled through the home directory (review
+    round 1, F1: the same asymmetry the temp nudge's v0.62.3 fix closed for its
+    arm).
+
+    The home spelling is matched as a SUBSTRING of the raw command, the way
+    ``_expand_tmpdir_spellings`` matches ``$TMPDIR``: quoting is not visible
+    here (``'~/x'`` is a literal name to the shell and counts anyway — the same
+    eager edge the nudge documents), and a ``~`` in a non-leading position can
+    at worst trigger one scan for a command that likely spelled its way toward
+    the pad. It can never make a pad-naming command quieter, which is the
+    direction that would hide a write.
+    """
+    text = _expand_scratchpad_spellings(command, pad)
+    if str(pad) in text:
+        return True
+    try:
+        relative = pad.relative_to(Path.home())
+    except (RuntimeError, ValueError):
+        # No home to name, or a store outside it: the spellings that need one
+        # cannot reach THIS pad, and the families above have already answered.
+        return False
+    if not relative.parts:
+        return False
+    tail = relative.as_posix()
+    return any(f"{spelling}{tail}" in text for spelling in ("~/", "$HOME/", "${HOME}/"))
 
 
 def _pad_target(candidate: str, pad: Path) -> Path | None:
@@ -7558,14 +7665,24 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
         return None
 
 
-def _bash_created_paths(command: str) -> Iterator[str]:
-    """The candidate paths ``command`` creates, in the order the shell meets them.
+def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """The candidate paths ``command`` creates, in the order the shell meets
+    them, each with the SOURCE operands a copy or move reads from.
 
     A structural walk over the token stream rather than a pattern match, because
     "is this token CREATED" is a fact about its position — an operand of a
     creating command, or a redirect target — and not about how the path is
     spelled. Quoted and backslash-escaped text has already been dequoted by the
     scanner, so ``> "/tmp/x.log"`` yields the same token as ``> /tmp/x.log``.
+
+    The second element is empty for every creation that is not a copy: ``cp``
+    and ``mv`` create ONLY their destination operand, but the name they create
+    can be the SOURCE's basename UNDER a directory destination (``cp x "$PAD/"``
+    creates ``$PAD/x``), so the pad audit needs the sources beside the
+    destination (review round 1, F2). ``_bash_created_paths`` hands the nudge
+    the same candidate stream it always had — the temp arm's targets cannot be
+    derived from a source this way — so the richer shape exists for the pad
+    audit alone.
     """
     tokens = _bash_tokens(_strip_heredoc_bodies(command))
     index = 0
@@ -7575,7 +7692,7 @@ def _bash_created_paths(command: str) -> Iterator[str]:
         index += 1
         if kind == "redir":
             if index < len(tokens) and tokens[index][0] == "word":
-                yield tokens[index][1]
+                yield tokens[index][1], ()
                 index += 1
             continue
         if kind == "op":
@@ -7603,11 +7720,28 @@ def _bash_created_paths(command: str) -> Iterator[str]:
                 operands.append(tokens[index][1])
             index += 1
         if mode == "last":
-            operands = operands[-1:]
+            if operands:
+                yield operands[-1], tuple(operands[:-1])
         elif mode == "template":
-            operands = [operand for operand in operands if "X" in operand]
-        yield from operands
+            for operand in operands:
+                if "X" in operand:
+                    yield operand, ()
+        else:
+            for operand in operands:
+                yield operand, ()
         at_command = False
+
+
+def _bash_created_paths(command: str) -> Iterator[str]:
+    """The candidate paths alone — the nudge's view of
+    :func:`_bash_created_entries`.
+
+    Kept as its own name because the temp arm's contract has always been "the
+    paths to scan", and neither of its predicates reads a destination/source
+    split; the walk and its ordering rules live with the entries.
+    """
+    for candidate, _sources in _bash_created_entries(command):
+        yield candidate
 
 
 def _skip_prefix_operands(
