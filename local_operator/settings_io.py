@@ -1133,6 +1133,24 @@ def _theme_choices() -> tuple[Choice, ...]:
     return tuple(choices)
 
 
+def _language_choices() -> tuple[Choice, ...]:
+    """The ``language`` row's value space: ``auto`` plus the SHIPPED locales.
+
+    Deliberately NOT a static list: shipment is a property of the translation
+    ledger (§6), and the resolver's ``shipped_locales()`` derives it from the
+    generated set — so a wave that passes audit widens this picker by
+    regenerating data, with no code change here, while an unaudited locale can
+    never be selected (RFC §3.1: "unaudited locales are not listed").
+
+    Imported function-locally like ``_theme_choices``'s registry, and read at
+    CALL time through ``choices_source``: the value space must reflect the
+    shipped set of the process answering, not of import.
+    """
+    from local_operator.i18n.resolve import language_options
+
+    return tuple(Choice(value, label) for value, label in language_options())
+
+
 #: One-line meaning for each rung of :data:`EFFORT_ORDER`, for the
 #: ``model_effort`` row's expanded list. Every member is a 3-argument
 #: :class:`Choice` here (value, label, description), so the descriptions live
@@ -2110,6 +2128,25 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("12h", "12-hour", "7:52 PM PDT"),
             Choice("24h", "24-hour", "19:52 PDT"),
         ),
+    ),
+    Setting(
+        key="language",
+        path=("language",),
+        section="appearance",
+        # i18n: ignore wire.settings slice owns this row's copy (label + help).
+        label="Language",
+        kind=Kind.ENUM,
+        # Literal, not imported: the registry stays off the resolver's import
+        # path (the same arrangement as `tui.theme` above), and
+        # `test_every_default_matches_its_consumer` compares this against
+        # `i18n.resolve.DEFAULT_LANGUAGE`, which is what stops the two
+        # drifting into a page that lies.
+        default="auto",
+        help="Interface language. auto follows your operating system, falling back to English.",
+        # Dynamic: auto plus the locales the translation ledger has passed
+        # (RFC §3.1 — unaudited locales are not offered). Widens by
+        # regeneration, never by a code change here.
+        choices_source=_language_choices,
     ),
     Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`

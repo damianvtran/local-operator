@@ -60,6 +60,7 @@ from local_operator.server.routes import (
     desktop_tunnel,
     desktop_wakes,
     health,
+    i18n,
     jobs,
     models,
     schedules,
@@ -741,6 +742,10 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
 
 
 app.include_router(capabilities.router)
+# The i18n catalogue surface, beside the capability that advertises it. Public
+# like the capability route it is negotiated through; nothing calls it until a
+# client sees `features.i18n`, so it ships dark without a switch.
+app.include_router(i18n.router)
 # Aida's two routes, beside the capabilities that advertise them. Registered
 # unconditionally (the handlers answer `enabled: false` themselves): hiding
 # the routes on the env switch would make the desktop's discovery loop read a

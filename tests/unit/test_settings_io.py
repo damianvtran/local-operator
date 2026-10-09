@@ -65,6 +65,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_AUTO_UPDATE_TEAMS,
         DEFAULT_CHECK_INTERVAL_MIN,
     )
+    from local_operator.i18n.resolve import DEFAULT_LANGUAGE
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -161,6 +162,12 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The language resolver's own default, from the module that READS the
+        # key (`i18n.resolve.resolve_language`). The registry restates "auto"
+        # rather than importing it (settings_io stays off the resolver's import
+        # path); THIS entry is what turns a drift between the two into a red
+        # test rather than a page advertising a default nothing honours.
+        "language": DEFAULT_LANGUAGE,
         # The opt-in hider's own constant, beside the predicate that reads it
         # (`local_operator.cross_session`), so a registry default that drifts
         # from the code's is a red test rather than a page that lies.
