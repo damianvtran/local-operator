@@ -4752,6 +4752,83 @@ class ServingSessionHandle(SessionHandle):
         return f"model: {self._projection.model_label}"
 
     @_on_session_loop
+    async def rehome_if_current(self, expected_selector: str, provider: str, model_id: str) -> str:
+        """Move this session off an unreachable model — a COMPARE-AND-SET switch.
+
+        WHY THIS IS NOT ``set_model``. A sign-in re-homes a session the user did
+        not ask to move: they signed in to provider B while the conversation sat
+        on provider A, whose credential is gone. The desktop decides which
+        sessions are candidates from its own mirror (idle, stranded, bound here),
+        but that read is a snapshot taken BEFORE this request: by the time it
+        arrives the user may have already picked a model with ``/model``, and a
+        blind switch would clobber a deliberate choice with a stale one. So the
+        OWNER — the only party that can see its own live state — re-checks every
+        term here, and applies nothing unless all of them still hold:
+
+        * the selected model is STILL exactly ``expected_selector``;
+        * the conversation is idle (no turn, gate, compaction, queued prompt or
+          goal loop, and no running subagents) — a re-home must never cut across
+          live work, since the model in force decides the NEXT request only and
+          there is nothing to gain by racing a turn;
+        * the outbound provider is STILL stranded (it was signed out again, or
+          this device borrowed no credential for it);
+        * the inbound provider is accessible HERE, on this process's own store.
+
+        ``accessible`` is re-read from the store rather than trusted from the
+        caller for the same reason the target is re-validated by
+        ``receive_peer_model``: the sender may run under a different config root,
+        and this process is the one that will run the turns.
+
+        The receipt is a word — ``rehomed: <old> → <new>`` or ``kept: <why>`` —
+        because the caller counts successes, and every refusal has to be legible
+        in a log without the sentence that explains it. A successful switch also
+        emits the transcript notice (``rehome_notice``), which is the only place
+        the USER is told their session moved and why.
+        """
+        self._check_loop_thread()
+        from local_operator.mobile import peer_model
+        from local_operator.providers.model_access import (
+            credentialed_chat_providers_here,
+            is_accessible,
+            is_stranded,
+            rehome_notice,
+        )
+
+        session = self._session
+        current = peer_model.selected_label(session)
+        if current != expected_selector:
+            # The user (or a peer) picked something between the sign-in and this
+            # request. Whatever they chose wins; a re-home never overwrites a
+            # live decision.
+            return f"kept: the model moved to {current or 'nothing'} since the sign-in"
+        old_provider = current.partition("/")[0]
+        if self.is_conversationally_active():
+            return "kept: the session is working right now"
+        try:
+            if session.running_subagents() > 0:
+                return "kept: subagents are running"
+        except Exception:  # noqa: BLE001 — an unreadable work state is assumed busy
+            return "kept: this session's work state is unreadable"
+        accessible = await asyncio.to_thread(credentialed_chat_providers_here)
+        if accessible is None:
+            return "kept: the credential store could not be read"
+        if not is_stranded(old_provider, accessible):
+            return f"kept: {old_provider} is signed in again"
+        if not is_accessible(provider, accessible):
+            return f"kept: {provider} is not signed in on this device"
+        await self.set_model_effort(provider, model_id, None)
+        # The answer comes from the read-back, never from the switch's own
+        # receipt: ``set_model`` assigns the spec before its journal writes and
+        # its stream notify, so a raise from a later step still leaves a switch
+        # in force (see ``receive_peer_model``, which reads back for the same
+        # reason).
+        new_label = peer_model.selected_label(session)
+        if new_label != f"{provider}/{model_id}":
+            return f"kept: the switch did not take (still {new_label or 'nothing'})"
+        self._emit_notice(rehome_notice(current, new_label), "info")
+        return f"rehomed: {current} → {new_label}"
+
+    @_on_session_loop
     async def receive_peer_model(
         self,
         provider: str,

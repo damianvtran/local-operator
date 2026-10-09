@@ -3221,3 +3221,168 @@ async def test_audio_is_probed_away_for_a_session_that_predates_the_keyword() ->
         assert asyncio.get_running_loop().time() < deadline
         await asyncio.sleep(0.01)
     assert session.prompt_calls == ["with a recording"]
+
+
+# ---------------------------------------------------------------------------
+# ``rehome_if_current`` — the compare-and-set behind a sign-in's repair
+# ---------------------------------------------------------------------------
+
+
+class _EventRecorder:
+    """Collects what the handle emits; notices ride a fire-and-forget task."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def __call__(self, event: object) -> None:
+        self.events.append(event)
+
+    def notices(self) -> list[str]:
+        return [e.text for e in self.events if isinstance(e, NoticeEvent)]
+
+
+def _rehome_handle(
+    monkeypatch: pytest.MonkeyPatch, current: str = "radient/auto"
+) -> tuple[Any, FakeSession, list[Any], _EventRecorder]:
+    """A handle whose session is pinned to ``current`` and records switches.
+
+    Returns ``(handle, session, applied_specs, recorder)`` — the records live in
+    the test's own variables rather than on the fake, so pyright checks every
+    read (the fake declares no such attributes, and a typo here would otherwise
+    be a passing test that asserts nothing).
+    """
+    handle, session = make_handle()
+    session.model_label = current
+    applied: list[Any] = []
+
+    def _set_model(spec: Any, *, explicit: bool = False) -> None:
+        applied.append(spec)
+        session.model_label = f"{spec.provider}/{spec.model_id}"
+
+    monkeypatch.setattr(session, "set_model", _set_model, raising=False)
+    recorder = _EventRecorder()
+    session._emit = recorder
+    return handle, session, applied, recorder
+
+
+def _patch_access(monkeypatch: pytest.MonkeyPatch, accessible: set[str] | None) -> None:
+    """Point the owner-side credential read at a fixed set (None = unreadable)."""
+    from local_operator.providers import model_access
+
+    monkeypatch.setattr(
+        model_access, "credentialed_chat_providers_here", lambda **kwargs: accessible
+    )
+
+
+async def _settle_notices(handle: Any) -> None:
+    """A notice is emitted on the handle's own task holder — await it, do not sleep."""
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rehome_switches_a_stranded_idle_session_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported bug's second half: the pin outranks config, so the OWNER moves it.
+
+    Asserted on three things at once, because any one alone can lie: the receipt
+    word the caller counts, the SPEC the session received (the switch really
+    happened), and the emitted notice (the user is told why).
+    """
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "rehomed: radient/auto → deepseek/deepseek-flash"
+    assert [(spec.provider, spec.model_id) for spec in applied] == [("deepseek", "deepseek-flash")]
+    await _settle_notices(handle)
+    assert recorder.notices() == ["Switched to deepseek/deepseek-flash — not signed in to radient."]
+
+
+@pytest.mark.asyncio
+async def test_rehome_loses_to_a_pick_that_landed_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compare-and-set's whole reason: a /model that landed in between WINS.
+
+    The desktop's candidate list is a snapshot; this re-check is what keeps a
+    stale one from clobbering a deliberate choice with a model the user did not pick.
+    """
+    handle, session, applied, _recorder = _rehome_handle(
+        monkeypatch, current="anthropic/claude-opus-5-5"
+    )
+    _patch_access(monkeypatch, {"deepseek", "anthropic"})
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the model moved to anthropic/claude-opus-5-5 since the sign-in"
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_rehome_never_cuts_across_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sleeping on a stranded model is not a defect: switching mid-turn is."""
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    session.is_streaming = True
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: the session is working right now"
+    )
+
+    session.is_streaming = False
+    session.running_children = 2
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: subagents are running"
+    )
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_rehome_refuses_when_either_side_of_the_pair_is_wrong(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both re-checks on the owner: the old provider signed back in, or the new one
+    is not signed in HERE (the desktop runs under its own config root)."""
+    handle, session, applied, _recorder = _rehome_handle(monkeypatch)
+
+    _patch_access(monkeypatch, {"deepseek", "radient"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: radient is signed in again"
+    )
+
+    _patch_access(monkeypatch, {"openai"})
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: deepseek is not signed in on this device"
+    )
+
+    _patch_access(monkeypatch, None)
+    assert (
+        await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+        == "kept: the credential store could not be read"
+    )
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_rehome_reports_a_switch_that_did_not_take(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read-back decides, never the setter's own return (the ``set_model``
+    contract: it assigns the spec before its journal writes, so a later raise can
+    still leave a switch in force — and a silent no-op must not read as one)."""
+    handle, session, applied, recorder = _rehome_handle(monkeypatch)
+    _patch_access(monkeypatch, {"deepseek"})
+
+    def _set_model(spec: Any, *, explicit: bool = False) -> None:
+        # A host that swallowed the switch: the selection does not move.
+        return None
+
+    monkeypatch.setattr(session, "set_model", _set_model, raising=False)
+
+    detail = await handle.rehome_if_current("radient/auto", "deepseek", "deepseek-flash")
+
+    assert detail == "kept: the switch did not take (still radient/auto)"
+    assert session.model_label == "radient/auto"

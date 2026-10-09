@@ -14437,3 +14437,123 @@ async def test_the_connected_receipt_survives_the_post_setup_rebuild(
     # Her conversation's transcript does NOT carry it: a notice row here would
     # be the first thing above her greeting.
     assert "Connected" not in transcript_text, transcript_text
+
+
+class _RehomableSession(FakeSession):
+    """A session whose model this test can move and read back."""
+
+    def __init__(self, label: str = "radient/auto") -> None:
+        super().__init__()
+        self._label = label
+        self.switched: list[Any] = []
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    @property
+    def model(self) -> Any:
+        from local_operator.harness.types import ModelSpec
+
+        provider, _, model_id = self._label.partition("/")
+        return ModelSpec(provider=provider, model_id=model_id)
+
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+        self.switched.append(model)
+        self._label = f"{model.provider}/{model.model_id}"
+
+
+def _credentialed_controller(*providers: str) -> FakeProviderController:
+    """The app's provider controller with exactly ``providers`` signed in."""
+    controller = FakeProviderController()
+    known = set(providers)
+
+    def _has(provider: str) -> bool:
+        return provider in known
+
+    controller.has_any_credential = _has  # type: ignore[method-assign]
+    return controller
+
+
+@pytest.mark.asyncio
+async def test_a_login_rehomes_the_session_it_stranded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reported bug, both halves, through the TUI's own methods.
+
+    Signing in to a working provider must repair BOTH the config default (which
+    the shared planner now does) and the conversation itself — a session's
+    ``selected_model`` outranks config, so without the second half the user
+    would keep staring at a chat pinned to a provider whose credential is gone.
+    The switch goes through the real ``/model`` dispatch, exactly as a typed
+    selector does.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "radient")
+    seed.set_config_value("model_name", "auto")
+
+    session = _RehomableSession()
+    app = OperatorApp(
+        lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        receipt = app._apply_login_defaults("deepseek")
+        rehome = app._rehome_stranded_session()
+        for _ in range(6):
+            await pilot.pause()
+
+    assert receipt == (
+        "Replaced unreachable hosting 'radient' with 'deepseek', model to 'deepseek-flash'."
+    )
+    assert ConfigManager(tmp_path).get_config_value("hosting") == "deepseek"
+    assert rehome == "Switched to deepseek/deepseek-flash — not signed in to radient."
+    assert [(spec.provider, spec.model_id) for spec in session.switched] == [
+        ("deepseek", "deepseek-flash")
+    ]
+    assert session.model_label == "deepseek/deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two of the four guards, at the TUI's own seam.
+
+    A session on an accessible model is never touched (the user chose it, and it
+    runs), and a BUSY one is left until the turn finishes — the model in force
+    decides the NEXT request, so switching mid-turn buys nothing and interrupts
+    something.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seed = ConfigManager(tmp_path)
+    seed.set_config_value("hosting", "deepseek")
+    seed.set_config_value("model_name", "deepseek-flash")
+
+    signed_in = _RehomableSession(label="deepseek/deepseek-flash")
+    app = OperatorApp(
+        lambda: _factory(signed_in), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session() is None
+    assert signed_in.switched == []
+
+    busy = _RehomableSession()
+    busy.streaming = True
+    app = OperatorApp(
+        lambda: _factory(busy), provider_controller=_credentialed_controller("deepseek")
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._rehome_stranded_session() is None
+    assert busy.switched == [], "a busy session keeps its model until the turn ends"

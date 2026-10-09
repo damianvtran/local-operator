@@ -1842,6 +1842,12 @@ class SessionHandle(Protocol):
     #   switch, reads back the model in force, and records a peer audit card.
     #   Raises ValueError("refused: …; still on …") on refusal. Optional and
     #   getattr-probed like receive_peer_message.
+    # rehome_if_current(expected, provider, model_id) -> str: a sign-in moving
+    #   this session off a model whose provider has no credential left, applied
+    #   only if the selection has not moved and the session is idle. Answers
+    #   "rehomed: <old> → <new>" or "kept: <why>". Optional and getattr-probed
+    #   like receive_peer_model — an older handle cannot be re-homed, which the
+    #   caller reports as zero moved sessions, never as an error.
     # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
     #   instead of cutting the running tool (Session.request_graceful_cancel).
     #   Serves the ``cancel`` op's default mode. Deliberately distinct from
@@ -7156,6 +7162,27 @@ class RuntimeServer:
             return await h.set_model(provider, model_id)
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
+        if op == "rehome_if_current":
+            # A sign-in re-homing a session whose model provider has no credential
+            # left (design: the stranded default). Optional capability,
+            # getattr-probed like every other addition to this dispatch: an older
+            # or reduced handle answers the unknown-op sentence, which the caller
+            # reads as "this session cannot be re-homed" and counts as zero moved
+            # sessions — never as a failure of the sign-in that prompted it.
+            #
+            # Unlike the ``set_model`` arm above, there is no two-argument legacy
+            # shape to preserve: the op is new in this build, so every
+            # implementation takes all three fields, and the shape was validated
+            # at the wire (``validate_control_frame``).
+            rehome = getattr(h, "rehome_if_current", None)
+            if not callable(rehome):
+                raise ValueError("this session cannot be re-homed")
+            typed_rehome = cast(Callable[[str, str, str], Awaitable[str]], rehome)
+            return await typed_rehome(
+                str(frame.get("expected", "")),
+                str(frame.get("provider", "")),
+                str(frame.get("model_id", "")),
+            )
         if op == "complete_aside":
             complete_aside = getattr(h, "complete_aside", None)
             if not callable(complete_aside):
