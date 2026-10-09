@@ -3794,9 +3794,12 @@ class RuntimeServer:
                 INPUT_MODE_CAPABILITY in self._record.capabilities
             )
             # The supplements twin: both halves of the gate, never the viewer's
-            # word alone.
+            # word alone. ``is True``, not truthiness, on purpose: a declaration is
+            # the JSON boolean, and a stray "false"/"0" string from a buggy client
+            # must fail CLOSED (it would otherwise opt that viewer into an event
+            # kind it may paint as unknown).
             conn.supplements = negotiated(
-                self._record.capabilities, bool(frame.get(SUPPLEMENTS_AUTH_FIELD))
+                self._record.capabilities, frame.get(SUPPLEMENTS_AUTH_FIELD) is True
             )
 
             # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason

@@ -33,7 +33,7 @@ from local_operator.supplements.contract import (
 from tests.unit.supplements.conftest import FIXTURES, load, raw
 
 ROW_NAMES = [
-    "decided", "queued_stale", "done_populated", "done_files_only", "done_empty",
+    "decided", "queued_stale", "queued_no_files", "done_populated", "done_files_only", "done_empty",
     "failed", "cancelled", "superseded", "dismissed",
 ]  # fmt: skip
 EVENT_NAMES = sorted(p.stem for p in (FIXTURES / "events").glob("*.json"))
@@ -125,6 +125,19 @@ def test_newest_version_per_anchor_wins_and_older_rows_remain_an_audit_trail() -
     assert only["version"] == 2 and only["state"] == "done"
 
 
+@pytest.mark.parametrize("bad", ["x", None, 1.5, True, "2"])
+def test_a_row_with_a_malformed_version_is_skipped_not_raised(bad: object) -> None:
+    """Agent review R8: readers tolerate rows from other builds; one bad line must not
+    stop a history page rendering every other anchor."""
+    good = {"anchor": "a", "version": 1, "state": "done"}
+    rows = [
+        good,
+        {"anchor": "a", "version": bad, "state": "failed"},
+        {"anchor": "b", "version": bad},
+    ]
+    assert newest_per_anchor(rows) == {"a": good}
+
+
 def test_the_disposition_fixture_is_the_reader_rule_and_covers_the_stale_row() -> None:
     expected = load("rows/dispositions.json")
     assert set(expected) == set(ROW_NAMES)
@@ -135,11 +148,31 @@ def test_the_disposition_fixture_is_the_reader_rule_and_covers_the_stale_row() -
 
 
 def test_the_stale_row_rule_queued_with_no_live_job_reads_cancelled_retry() -> None:
-    """THE fixture every lane asserts against (memo §2.4, round-1 R4)."""
+    """THE fixture every lane asserts against (memo §2.4, round-1 R4). It carries files,
+    so the line comes WITH the files the decision already showed (agent review R2)."""
     stale = load("rows/queued_stale.json")["payload"]["details"]
-    assert stale["state"] == "queued"
-    assert reader_disposition(stale, job_live=False) == "cancelled_retry"
-    assert reader_disposition(stale, job_live=True) == "preparing"
+    assert stale["state"] == "queued" and stale["files"]
+    assert reader_disposition(stale, job_live=False) == "files_cancelled_retry"
+    assert reader_disposition(stale, job_live=True) == "files_preparing"
+    bare = load("rows/queued_no_files.json")["payload"]["details"]
+    assert bare["state"] == "queued" and not bare["files"]
+    assert reader_disposition(bare, job_live=False) == "cancelled_retry"
+    assert reader_disposition(bare, job_live=True) == "preparing"
+
+
+def test_files_decided_before_the_generator_are_shown_while_it_prepares() -> None:
+    """Memo §2.4: ``decided`` carries ``files`` so "file callouts appear without waiting for
+    the generator". A disposition with no files in it (round 1's single value) made every
+    surface hide them until ``done`` -- agent review R2."""
+    decided = load("rows/decided.json")["payload"]["details"]
+    assert decided["state"] == "decided" and len(decided["files"]) == 2
+    assert reader_disposition(decided, job_live=True) == "files_preparing"
+    # and a job that then fails or is cancelled keeps the files the user already saw
+    for state, line in (("failed", "files_failed_retry"), ("cancelled", "files_cancelled_retry")):
+        assert reader_disposition({**decided, "state": state}, job_live=False) == line
+    # supersede / dismiss still hide the whole row, files included
+    assert reader_disposition({**decided, "error": "superseded"}, job_live=True) == "nothing"
+    assert reader_disposition({**decided, "dismissed": True}, job_live=True) == "nothing"
 
 
 def test_a_superseded_row_renders_nothing_whatever_its_state() -> None:
@@ -224,6 +257,50 @@ def test_the_accepted_list_is_closed() -> None:
 @pytest.mark.parametrize("name", sorted(MESSAGES["frame_rejected"]))
 def test_every_rejected_frame_shape_is_dropped(name: str) -> None:
     assert accept_frame_message(MESSAGES["frame_rejected"][name], NONCE) is None
+
+
+def test_a_message_without_the_bound_nonce_or_with_another_one_is_rejected() -> None:
+    """What the nonce DOES bind (agent review R1 / QA Q-1): a state-moving post must carry
+    the exact nonce this host minted for this frame. It does not -- and is not claimed to --
+    keep that value from scripts inside the frame (see ``ThemeMessage``)."""
+    accepted = MESSAGES["frame_accepted"]
+    for kind in contract.NONCE_REQUIRED_TYPES:
+        message = accepted[kind]
+        assert accept_frame_message(message, NONCE) == message
+        without = {k: v for k, v in message.items() if k != "n"}
+        assert accept_frame_message(without, NONCE) is None, kind
+        assert accept_frame_message({**message, "n": NONCE + "-other"}, NONCE) is None, kind
+        assert accept_frame_message(message, "another-frame") is None, kind
+
+
+def test_the_nonce_limit_is_frozen_and_both_sides_agree_at_the_boundary() -> None:
+    """Agent review R4: ``NONCE_MAX_CHARS`` is the contract; the prelude refuses a longer
+    nonce (asserted under node in ``test_prelude``) and the reference acceptor matches."""
+    boundary = MESSAGES["nonce_boundary"]
+    assert boundary["max_chars"] == contract.NONCE_MAX_CHARS == 64
+    ok, too_long = boundary["accepted"], boundary["rejected"]
+    assert len(ok["nonce"]) == contract.NONCE_MAX_CHARS
+    assert accept_frame_message(ok["message"], ok["nonce"]) == ok["message"]
+    assert len(too_long["nonce"]) == contract.NONCE_MAX_CHARS + 1
+    assert accept_frame_message(too_long["message"], too_long["nonce"]) is None
+
+
+def test_an_error_message_must_be_a_bounded_string() -> None:
+    """Agent review R10: the reference checks ``msg`` as its docstring promises."""
+    error = MESSAGES["frame_accepted"]["error"]
+    limit = contract.ERROR_MSG_MAX_CHARS
+    assert accept_frame_message({**error, "msg": "x" * limit}, NONCE) is not None
+    for bad in ("x" * (limit + 1), 3, None, ["x"]):
+        assert accept_frame_message({**error, "msg": bad}, NONCE) is None, bad
+    assert accept_frame_message({k: v for k, v in error.items() if k != "msg"}, NONCE) is None
+
+
+def test_the_desktop_query_param_is_frozen() -> None:
+    """Agent review R7: lanes C1 (route) and U-b (client) read one spelling."""
+    assert (contract.SUPPLEMENTS_QUERY_PARAM, contract.SUPPLEMENTS_QUERY_VALUE) == (
+        "supplements",
+        "1",
+    )
 
 
 def test_a_non_mapping_is_dropped() -> None:

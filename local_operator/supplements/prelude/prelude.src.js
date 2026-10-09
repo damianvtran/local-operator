@@ -1,9 +1,24 @@
-(()=>{"use strict";
-let N;const D=document,R=D.documentElement,S="http://www.w3.org/2000/svg",H=[],V=[],B=[],// §4.1 S-R4: every frame->host message that can move host state (resize/error/pong) echoes the
+"use strict";(()=>{
+let N,Q;const D=document,R=D.documentElement,S="http://www.w3.org/2000/svg",H=[],V=[],B=[],// §4.1 S-R4: every frame->host message that can move host state (resize/error/pong) echoes the
 // per-frame nonce the host minted and sent in its FIRST theme push; `ready` precedes that push, so
-// it carries none. N is closure-private (never on LO), so a component script cannot read it.
-// N is fixed by the FIRST theme push whatever it carries (a later push cannot rebind it); until then, or if that push carried none, posts go out unmarked and the host drops them by rule.
-P=m=>{try{parent.postMessage({lo:"supplement",v:1,...m,...(N&&{n:N})},"*")}catch(e){}};
+// it carries none. WHAT THE NONCE PROVES: that a post comes from the browsing context the host
+// mounted (a navigated successor never received the push). It is NOT a secret from code running
+// in this document: a component script can add its own `message` listener and read the push, so
+// the host still clamps and validates every value. It also stays on `LO.theme` (the push as the
+// host sent it): stripping it measured 4,611 B gzip against the 4,608 B cap, and would hide
+// nothing from a script that adds its own listener. Navigation after mount is the HOST's to
+// stop (one-shot guard / parent frame-src / second-load teardown, memo §4.1).
+// N is fixed by the FIRST theme push (a later push cannot rebind it); a nonce that is missing or
+// longer than the contract's NONCE_MAX_CHARS (64) binds "" -- refused, never truncated into a
+// value the host did not mint -- so posts go out unmarked and the host drops them by rule.
+// Q (Q-2): a component that throws during parse does so BEFORE the host's theme push at frame
+// `load`, so its `error` would go out unmarked and be dropped. Errors raised before the nonce is
+// bound are held -- the FIRST only: it is the cause, later ones are its fallout and a host shows one
+// line either way -- and flushed with the nonce the moment the first theme push binds it.
+P=m=>{try{parent.postMessage({lo:"supplement",v:1,...m,...(N&&{n:N})},"*")}catch(e){}},
+// One spelling of the frame-level error post: three call sites, and the bytes it saves are what
+// pays for the pre-nonce queue above inside the memo's gzip cap.
+E=x=>{const m={t:"error",msg:String(x).slice(0,300)};N==null?Q??=m:P(m)};
 const _ttl=(o,d)=>o.title||d.title,_us=o=>o.unit?(o.unit==="%"?"%":" "+o.unit):"";
 // D2-1: the unit rides the top-most tick label, which is end-anchored inside the left margin;
 // a margin that does not fit the composed string paints the leading characters outside the
@@ -54,10 +69,10 @@ ys.forEach((c,j)=>{const yv=LO.col(id,c),pts=x.map((v,i)=>yv[i]==null?null:[xs(v
 LO._put(t,sv,ys.length>1?[]:ys,o,_ttl(o,LO.ds(id)));return sv},
 _put(t,sv,keys,o,ttl){const fig=LO.el("figure",{});if(ttl)fig.append(LO.el("div",{class:"ttl",text:ttl}));if(keys.length>1)fig.append(LO.el("div",{},keys.map((k,j)=>LO.el("span",{class:"k"},LO.el("i",{style:`background:${LO.color(j)}`}),k))));fig.append(sv);if(o.caption)fig.append(LO.el("figcaption",{text:o.caption}));t.append(fig);LO.size()},
 size(){cancelAnimationFrame(LO._r);LO._r=requestAnimationFrame(()=>P({t:"resize",h:Math.ceil(R.getBoundingClientRect().height)}))},
-_rd(){cancelAnimationFrame(LO._x);LO._x=requestAnimationFrame(()=>{const c=V.slice();V.length=0;for(const v of c)if(v.t.isConnected){v.t.replaceChildren();try{LO[v.k](v.t,v.id,{...v.o,_k:1})}catch(e){P({t:"error",msg:String(e).slice(0,300)})}V.push(v)}for(const f of B)try{f()}catch(e){}LO.size()})}};
-addEventListener("message",e=>{if(e.source!==parent||!e.data||e.data.lo!=="supplement-host")return;if(e.data.t==="ping"){P({t:"pong"});return}if(e.data.t!=="theme")return;const th=e.data;if(N==null)N=typeof th.nonce=="string"?th.nonce.slice(0,64):"";R.dataset.mode=th.mode==="dark"?"dark":"light";for(const k in th.vars||{}){const v=String(th.vars[k]).slice(0,120);if(/^--(lo|font)-[a-z0-9-]+$/.test(k)&&CSS.supports(k,v))R.style.setProperty(k,v)}LO.theme=th;R.setAttribute("data-ready","");H.forEach(f=>{try{f(th)}catch(x){P({t:"error",msg:String(x).slice(0,300)})}});LO.size()});
-addEventListener("error",e=>P({t:"error",msg:String(e.message).slice(0,300)}));
+_rd(){cancelAnimationFrame(LO._x);LO._x=requestAnimationFrame(()=>{const c=V.slice();V.length=0;for(const v of c)if(v.t.isConnected){v.t.replaceChildren();try{LO[v.k](v.t,v.id,{...v.o,_k:1})}catch(e){E(e)}V.push(v)}for(const f of B)try{f()}catch(e){}LO.size()})}};
+addEventListener("message",({source:o,data:d})=>{if(o!==parent||!d||d.lo!=="supplement-host")return;if(d.t==="ping"){P({t:"pong"});return}if(d.t!=="theme")return;const th=d,k=d.nonce;if(N==null){N=typeof k=="string"&&k.length<65?k:"";Q&&P(Q)}R.dataset.mode=th.mode==="dark"?"dark":"light";for(const k in th.vars||{}){const v=String(th.vars[k]).slice(0,120);if(/^--(lo|font)-[a-z0-9-]+$/.test(k)&&CSS.supports(k,v))R.style.setProperty(k,v)}LO.theme=th;R.setAttribute("data-ready","");H.forEach(f=>{try{f(th)}catch(x){E(x)}});LO.size()});
+addEventListener("error",e=>E(e.message));
 let LW=0;new ResizeObserver(()=>{const w=R.clientWidth;if(LW&&w!==LW)LO._rd();LW=w;LO.size()}).observe(R);
-setTimeout(()=>{if(!LO.theme){R.dataset.mode=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";R.setAttribute("data-ready","")}},400);
+setTimeout(()=>{if(!LO.theme){R.dataset.mode=matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light";R.setAttribute("data-ready","")}},400);
 P({t:"ready"});
 })();

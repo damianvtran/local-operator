@@ -11,7 +11,11 @@
 //
 // usage: node prelude_harness.mjs <prelude.js> <scenario.json>
 //   scenario = {width, data, steps:[{host:{...}} | {other:{...}} | {flush:true} | {size:true}
-//                                    | {error:"msg"} | {draw:"LO.bar(...)"}]}
+//                                    | {error:"msg"} | {draw:"LO.bar(...)"}
+//                                    | {script:"..."}]}
+//   `script` runs a component's inline script as the browser would: a throw is NOT fatal to
+//   the page, it becomes the window `error` event ("Uncaught <error>"). That is how a
+//   component that fails during parse -- before the host's theme push -- is reproduced.
 // output   = {posts:[...], texts:[{text,x,y,anchor,left,right,top,bottom}...], svgW}
 import fs from "node:fs";
 import vm from "node:vm";
@@ -82,6 +86,9 @@ for (const step of scenario.steps ?? []) {
   else if (step.size) { vm.runInContext("LO.size()", ctx); flush(); }
   else if (step.error) fire("error", { message: step.error });
   else if (step.draw) { vm.runInContext(step.draw, ctx); flush(); }
+  else if (step.script) {
+    try { vm.runInContext(step.script, ctx); } catch (e) { fire("error", { message: "Uncaught " + String(e) }); }
+  }
 }
 
 const texts = [];
