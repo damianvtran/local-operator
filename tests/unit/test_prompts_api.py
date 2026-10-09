@@ -42,17 +42,31 @@ def _force_browser_available(monkeypatch):
     (``test_inventory_block_matches_default_tool_order``, against
     ``DEFAULT_TOOL_NAMES``) CONTAINS ``console`` — the tool is absent rather than
     hidden where the app cannot serve it, so what the gate decides is whether that
-    assertion sees the full 27-tool default surface or a 26-tool subset that
+    assertion sees the full default surface or a subset one tool lighter that
     depends on whether the developer happens to be running the desktop app.
     Nothing console-specific is asserted in THIS file: the note's three states
     (host has the app, host has no app, role not given the tool) belong to
     ``test_prompts_console_flags.py``, which sets the gate itself in both
     directions. A reader who "fixed" this line to ``False`` would break the
     ordering assertion, which is why the comment now says which way it is forced.
+
+    ``generate_image`` is ``console``'s story again (image-generation restore,
+    2026-10-08): its builder is createIf-gated on the machine having SOME image
+    provider credential (``imagegen.availability.image_provider_reachable``) and
+    the ordering assertion spans ``DEFAULT_TOOL_NAMES``, which now contains it.
+    A CI runner has no stored image credential, so an unforced predicate would
+    decide the expected list by machine — the exact dependence this fixture
+    exists to remove (``scripts/real_tool_surface`` binds the same predicate for
+    the context-budget guard).
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_browser_advertisable", lambda: False)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    from local_operator.tools import image_tool
+
+    monkeypatch.setattr(
+        image_tool.image_availability, "image_provider_reachable", lambda *args, **kwargs: True
+    )
 
 
 if TYPE_CHECKING:
