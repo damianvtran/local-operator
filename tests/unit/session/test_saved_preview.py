@@ -1,4 +1,14 @@
-"""Saved display must be bounded without inventing a canonical replay cut."""
+"""Saved display must be bounded by the rows it needs, without inventing a cut.
+
+The reader used to take a fixed 256 KiB tail window and refuse the whole preview
+when that window cut a row, missed a compaction boundary, or ended on a live
+append. On this store those are the COMMON shapes (checkpoint rows reach
+0.9 MB, compaction summaries average 568 KB), so the reader painted a blank
+pane on exactly the large sessions it exists for. The tests below pin the
+replacement contract: the walk is bounded by ROWS, an oversized bookkeeping row
+is stepped over, a torn append is one dropped row, and anything the reader
+cannot prove is reported through ``partial`` rather than by returning nothing.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator.harness.types import Message
-from local_operator.session.saved_preview import PREVIEW_BYTES, read_saved_preview
-from local_operator.session.transcript import TranscriptEntry, encode_message_payload
+from local_operator.session.history_window import DISPLAY_HISTORY_MESSAGES
+from local_operator.session.saved_preview import PREVIEW_SCAN_BYTES, read_saved_preview
+from local_operator.session.transcript import (
+    Transcript,
+    TranscriptEntry,
+    encode_message_payload,
+)
 
 
 def message(identifier: str, text: str) -> TranscriptEntry:
@@ -93,8 +108,19 @@ def test_preview_replays_correct_session_and_prunes(tmp_path):
     assert "original tool output" not in result.messages[0].text
 
 
-def test_preview_reads_only_bounded_suffix(tmp_path, monkeypatch):
-    journal(tmp_path, [message("huge", "x" * (PREVIEW_BYTES * 16)), message("tail", "Useful tail")])
+def test_preview_walks_by_rows_not_a_byte_window(tmp_path, monkeypatch):
+    """The tail row is reached across an oversized row, in bounded reads.
+
+    A row far larger than any window this reader could pick is the shape that
+    used to fail: the window landed inside it, found no newline, and returned
+    nothing. The assertion on the read sizes is the other half — every read is
+    a chunk of the shared backward walker, never an unbounded ``read()`` of a
+    file a writer can grow while this call runs.
+    """
+    journal(
+        tmp_path,
+        [message("huge", "x" * (PREVIEW_SCAN_BYTES // 8)), message("tail", "Useful tail")],
+    )
     original = Path.open
     reads = []
 
@@ -116,26 +142,87 @@ def test_preview_reads_only_bounded_suffix(tmp_path, monkeypatch):
 
         def read(self, count=-1):
             reads.append(count)
-            assert 0 <= count <= PREVIEW_BYTES
+            assert 0 <= count <= PREVIEW_SCAN_BYTES
             return self.handle.read(count)
 
     monkeypatch.setattr(Path, "open", lambda path, *a, **kw: BoundedRead(original(path, *a, **kw)))
     result = read_saved_preview(tmp_path)
-    assert result.partial
-    assert [row.text for row in result.messages] == ["Useful tail"]
-    assert reads == [PREVIEW_BYTES]
+    assert [row.text for row in result.messages] == ["x" * (PREVIEW_SCAN_BYTES // 8), "Useful tail"]
+    assert reads, "precondition: the reader must read the file through this handle"
+    assert max(reads) < PREVIEW_SCAN_BYTES
 
 
 @pytest.mark.parametrize("suffix", [b'{"type":"prune"', b"not json\n"])
-def test_incomplete_or_corrupt_tail_cannot_resurrect_content(tmp_path, suffix):
+def test_a_torn_or_malformed_tail_row_is_dropped_not_the_preview(tmp_path, suffix):
+    """An append in progress costs a row, never the pane.
+
+    Both suffixes are rows no reader can use: the first is a live append caught
+    mid-write, the second a complete but unparseable line. Neither is durable
+    evidence about the row above it — the writer fsyncs whole lines and
+    truncates on failure, and every other reader (``read_replay_suffix``, the
+    resident ``Transcript``) drops exactly these — so the preview shows the
+    conversation and reports the incompleteness through ``partial``.
+
+    The previous revision returned an EMPTY preview here, which is the
+    blank-pane failure one append wide: a running session is mid-append often
+    enough that this was reachable by hovering a sidebar.
+    """
     journal(tmp_path, [message("saved", "May have been retracted")])
     with (tmp_path / "transcript.jsonl").open("ab") as handle:
         handle.write(suffix)
     result = read_saved_preview(tmp_path)
-    assert result.partial and result.messages == []
+    assert [row.text for row in result.messages] == ["May have been retracted"]
+    # A torn row means the file's newest row is unreadable, so the preview is an
+    # excerpt; a complete-but-malformed row is fully accounted for and is not.
+    assert result.partial is suffix.startswith(b'{"type"')
 
 
-def test_unresolved_compaction_cut_does_not_use_full_history_fallback(tmp_path):
+def test_oversized_bookkeeping_rows_do_not_blank_the_pane(tmp_path):
+    """AUDIT F9, reproduced: the real-shape blank pane.
+
+    The journal here is S7's shape — the row sizes the audit measured on the
+    operator's store: a ~0.9 MB checkpoint row and ~600 KB compaction summaries
+    as the newest rows, with the conversation underneath them. A 256 KiB tail
+    lands inside the newest checkpoint (no newline at all in the window) and the
+    old reader returned ``[]``, so the sidebar painted nothing on exactly the
+    sessions most worth previewing. Row-wise walking steps over them.
+    """
+    big = "p" * 600_000
+    journal(
+        tmp_path,
+        [
+            message("m0", "earlier answer"),
+            TranscriptEntry("c0", 0, "compaction", {"summary": big, "first_kept_entry_id": "m0"}),
+            message("m1", "the newest thing the user said"),
+            TranscriptEntry(
+                "k0",
+                0,
+                "custom",
+                {"custom_type": "frontend_state_checkpoint_v1", "details": {"state": big}},
+            ),
+        ],
+    )
+    result = read_saved_preview(tmp_path)
+    # ``CustomMessage`` (the compaction marker) has no ``text``; the rows this
+    # preview is about do.
+    texts = [row.text for row in result.messages if isinstance(row, Message)]
+    assert "the newest thing the user said" in texts
+    # The compaction marker is in the window and the kept window is resolved, so
+    # the preview is the journal's own replay of it, not an excerpt.
+    assert not result.partial
+
+
+def test_an_unresolved_compaction_cut_matches_the_canonical_replay(tmp_path):
+    """A compaction naming a row that is gone is NOT this reader's to invent around.
+
+    The row it names may have been dropped as malformed, or the journal may have
+    been written by a converter that minted ids elsewhere. What this reader owes
+    is the SAME answer every other reader gives for that journal rather than a
+    private fallback: the canonical replay logs and replays everything it has
+    (``context_cut_index`` returning 0), and so does this preview, on the one
+    shared implementation. It is pinned against a real ``Transcript`` rather
+    than against a restatement of the rule, so a future divergence fails here.
+    """
     journal(
         tmp_path,
         [
@@ -144,13 +231,80 @@ def test_unresolved_compaction_cut_does_not_use_full_history_fallback(tmp_path):
         ],
     )
     result = read_saved_preview(tmp_path)
-    assert result.partial and result.messages == []
+    canonical = Transcript(tmp_path).build_llm_history()
+    assert [getattr(row, "text", "") for row in result.messages] == [
+        getattr(row, "text", "") for row in canonical
+    ]
 
 
-def test_oversized_last_row_reports_unavailable_instead_of_fake_content(tmp_path):
-    journal(tmp_path, [message("huge", "x" * (PREVIEW_BYTES * 2))])
+def test_an_oversized_final_message_row_is_shown_whole(tmp_path):
+    """A big MESSAGE row is content, not a reason to withdraw the preview.
+
+    Distinct from the bookkeeping case above: this row is a turn the reader can
+    display, at 512 KB of text. A row ceiling that refused it would be a size
+    policy hiding a real conversation, and the widget renders one message row
+    whatever its length; the walk's own ``PREVIEW_SCAN_BYTES`` ceiling is where
+    cost is bounded instead.
+    """
+    big = "x" * (512 * 1024)
+    journal(tmp_path, [message("huge", big)])
     result = read_saved_preview(tmp_path)
-    assert result.partial and result.messages == []
+    assert [row.text for row in result.messages] == [big]
+    assert not result.partial
+
+
+def test_the_walk_stops_at_the_display_budget_not_the_file_start(tmp_path):
+    """The budget counts MESSAGES the reader can show, and reports the excerpt.
+
+    Row counting is the point of the change: 300 display rows on disk must not
+    become 300 journal rows read when 120 of them are what a pane can use, and
+    the ``partial`` flag is what tells the sidebar it is showing an excerpt.
+    """
+    journal(tmp_path, [message(f"m{index}", f"turn {index}") for index in range(300)])
+    result = read_saved_preview(tmp_path)
+    assert len(result.messages) == DISPLAY_HISTORY_MESSAGES
+    assert result.partial
+    # The newest rows are the ones kept — a preview is for the tail.
+    assert result.messages[-1].text == "turn 299"
+    assert result.messages[0].text == f"turn {300 - DISPLAY_HISTORY_MESSAGES}"
+
+
+def test_a_scan_ceiling_hit_is_an_honest_excerpt_not_a_silent_blank(tmp_path, monkeypatch):
+    """The ceiling's answer is ``partial``, which is what the TUI paints.
+
+    ``PREVIEW_SCAN_BYTES`` is a bound this reader imposes on itself, so the one
+    case it can still refuse is a journal whose display rows all sit deeper than
+    the ceiling. Returning nothing there is honest ONLY because it is flagged:
+    the sidebar's lease turns ``partial`` with no blocks into the explicit
+    "Saved preview unavailable. Connect to load the conversation." notice rather
+    than an empty pane, which is the difference this whole change turns on.
+    """
+    monkeypatch.setattr("local_operator.session.saved_preview.PREVIEW_SCAN_BYTES", 1024)
+    # Two 600 KB bookkeeping rows newest, so the first chunk the walker can
+    # yield holds NOTHING displayable — the one shape where the ceiling binds
+    # before any display row is in hand.
+    pad = "z" * 600_000
+    journal(
+        tmp_path,
+        [
+            message("m0", "the turn behind them"),
+            TranscriptEntry(
+                "k0",
+                0,
+                "custom",
+                {"custom_type": "frontend_state_checkpoint_v1", "details": {"state": pad}},
+            ),
+            TranscriptEntry(
+                "k1",
+                0,
+                "custom",
+                {"custom_type": "frontend_state_checkpoint_v1", "details": {"state": pad}},
+            ),
+        ],
+    )
+    result = read_saved_preview(tmp_path)
+    assert result.messages == []
+    assert result.partial, "an empty preview must say it is an excerpt, or the pane is silent"
 
 
 async def _seeded_image_journal(tmp_path: Path, monkeypatch) -> tuple[Path, str]:

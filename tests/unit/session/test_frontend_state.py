@@ -971,7 +971,17 @@ def test_checkpoint_strips_trajectories_and_live_events() -> None:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # The real writer's signature: ``checkpoint`` forwards the
+            # bookkeeping-mtime request, so a double that omits the keyword
+            # would fail on the parameter rather than on the behaviour under
+            # test (the closing checkpoint passes it; a turn-end one does not).
             self.appended.append((custom_type, payload))
 
     transcript = _Transcript()
@@ -1917,7 +1927,17 @@ def test_the_phase_pair_rides_the_wire_and_is_not_durable() -> None:
         def __init__(self) -> None:
             self.appended: list[tuple[str, dict[str, Any]]] = []
 
-        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self,
+            custom_type: str,
+            payload: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+        ) -> None:
+            # The real writer's signature: ``checkpoint`` forwards the
+            # bookkeeping-mtime request, so a double that omits the keyword
+            # would fail on the parameter rather than on the behaviour under
+            # test (the closing checkpoint passes it; a turn-end one does not).
             self.appended.append((custom_type, payload))
 
     transcript = _Transcript()

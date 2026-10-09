@@ -248,8 +248,12 @@ async def test_headless_turn_preserves_a_rich_frontend_checkpoint(tmp_path: Path
     await transcript.append_message(
         Message(role="assistant", content=[TextContent(text="prior")], stop_reason="stop")
     )
+    # ``session_id`` MATCHES the transcript's directory: the row is this
+    # session's own, which is what a resume leaves behind. A row naming another
+    # session is read as a FORK's (``_inherited_identity_fixups`` clears its
+    # ``checkpoint_id`` and jobs), and this test is about the ordinary case.
     rich = FrontendSessionState(
-        session_id="conv",
+        session_id="sess",
         epoch="tui-epoch",
         conversation_title="Real title",
         conversation_title_user_set=True,

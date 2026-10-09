@@ -159,6 +159,25 @@ ENTRY_PRUNE = "prune"
 #: ``preserve_mtime=True``, and announcing an account change is never work a
 #: turn carried. Its own note in ``harness/message_types.py`` states the
 #: operator-facing surface.
+#:
+#: ``frontend_state_checkpoint_v1`` is here for the CLOSING checkpoint a runtime
+#: leaves at teardown (``Session._write_closing_checkpoint``). That row is the
+#: tail anchor the next cold open reads its compaction boundary and its status
+#: from, and writing it must not restamp a conversation the user finished hours
+#: ago as freshly worked — the same rule the spend ledger follows one line up.
+#: The type is RESTATED as a literal here rather than imported, because the
+#: constant lives in ``frontend_state``, whose import graph reaches the TUI, and
+#: ``_COLLAPSIBLE_CUSTOM_TYPES`` above already restates it for the same reason;
+#: ``tests/unit/session/test_transcript.py`` pins the two spellings together.
+#:
+#: ONE CONSEQUENCE, named because it is a behaviour change rather than a
+#: tidy-up: ``is_bookkeeping_entry`` is also what decides whether a session
+#: holds "a conversation" (``is_pristine``, ``transcript_is_bookkeeping_only``),
+#: so a journal whose only rows are checkpoints now reads as pristine. That is
+#: the honest answer — a checkpoint is a record ABOUT the session; it carries no
+#: turn the user would recognise — and it is reachable only for a runtime that
+#: ended a turn without persisting a message, since every ordinary turn writes
+#: its own message rows in the same pass.
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -167,6 +186,7 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
     }
 )
 

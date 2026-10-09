@@ -45,6 +45,7 @@ fold, not two).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -70,16 +71,58 @@ from local_operator.session.transcript import (
     TranscriptEntry,
     _entry_to_message,
     _journal_injection_ids,
+    read_latest_custom_entry,
+    read_replay_suffix,
 )
 
 logger = logging.getLogger(__name__)
+
+#: The subagent roster's custom-entry type, restated from
+#: ``session.session.SUBAGENT_ROSTER_CUSTOM_TYPE`` (the same restatement
+#: discipline the tracked-type set documents below: importing the session
+#: module here would drag its whole import graph into every daemon boot).
+ROSTER_CUSTOM_TYPE = "subagent_roster"
 
 #: Custom-entry types the durable projection reads newest-wins (the store's
 #: ``latest_custom`` contract). Tracked in the fold cache so a cached session
 #: never re-parses its transcript to answer them. Importing the roster
 #: constant pulls in the session module, so the literals are restated here and
 #: asserted against the source of truth in the unit tests.
-_TRACKED_CUSTOM_TYPES = frozenset({"subagent_roster", "todo_snapshot"})
+_TRACKED_CUSTOM_TYPES = frozenset({ROSTER_CUSTOM_TYPE, "todo_snapshot"})
+
+#: The roster's own store, restated for the same reason as the type above:
+#: ``session.session.SUBAGENT_ROSTER_SIDECAR`` is the name writers use, and a
+#: unit test pins the two spellings together. Read (never written) here so the
+#: fold can seed a roster whose transcript row sits far above its replay window
+#: — 0 of the 40 largest real journals carry that row inside the window, while
+#: 30 of them have this file.
+ROSTER_SIDECAR_FILENAME = "subagent-roster.v1.json"
+
+#: The sidecar's own schema version, mirrored from
+#: ``session.session._SUBAGENT_ROSTER_VERSION``. A sidecar written by another
+#: version is not read: the fold would have to guess at a payload shape the
+#: writer owns, and the transcript fallback below is a correct answer for it.
+_ROSTER_SIDECAR_VERSION = 1
+
+#: Ceiling above which the fold will NOT go back into the journal for the roster
+#: when the window and the sidecar both came up empty.
+#:
+#: WHY A CEILING AT ALL. That lookup is ``read_latest_custom_entry``, bounded by
+#: the answer's DISTANCE FROM EOF and by nothing the caller can choose — correct
+#: for its own contract (a caller today always gets an answer) and expensive for
+#: a cold fold that asks it for a type which is usually ABSENT: measured 457 ms
+#: on a 118 MB journal with neither a sidecar nor a roster row, against a 20 ms
+#: window read and a 310 ms fold. Paying that per cold phone open would be the
+#: exact regression this module's window read exists to remove.
+#:
+#: WHY 32 MiB. Below it the lookup is bounded by a file that small, so the scan
+#: costs what the whole-file parse it replaces costs (~5 ms/MB) and a legacy
+#: journal keeps its roster rows. Above it the roster comes from the sidecar,
+#: which is the roster's own store and the fresher of the two — the same
+#: precedence ``AttachedSession._restore_cold_subagents`` applies. The real store
+#: sits below the line: of the 40 largest real journals, every one WITHOUT a
+#: sidecar was at most 27.2 MB.
+_TRANSCRIPT_LOOKUP_MAX_BYTES = 32 * 1024 * 1024
 
 #: Bound on cached durable folds, in sessions. One entry holds the replayed
 #: history plus the UNCAPPED render rows (the history endpoint serves the full
@@ -134,8 +177,15 @@ class DurableFoldState:
     prunes: dict[str, str] = field(default_factory=dict)
     #: Transcript entries consumed so far. Not read by the fold itself — it is
     #: the cheap invariant that says the incremental cursor and the file agree,
-    #: which the cache tests assert against a full re-parse.
+    #: which the cache tests assert against a full re-parse. After the windowed
+    #: cold fold it counts the rows the fold CONSUMED (the replayed window, then
+    #: whatever the tail read appended), never the journal's total.
     entry_count: int = 0
+    #: Bytes of journal the cold fold last READ, for the caller's own evidence
+    #: and for the tests that have to prove the read was bounded (the walk's
+    #: granularity is a chunk, so a row count cannot show it). Not a contract:
+    #: nothing in the fold consults it. Mirrors ``ReplaySuffix.bytes_read``.
+    window_bytes: int = 0
     #: Ids of message entries journalled from a harness aside, accumulated as
     #: entries stream in. The INCREMENTAL fold has no journal in hand, so
     #: without this it could not resolve preserved-turn provenance and would
@@ -322,24 +372,84 @@ class DurableFoldCache:
         return True
 
     def _rebuild(self, state: DurableFoldState, path: Path, fingerprint: _FileFingerprint) -> None:
-        """Full fold from the file: the pre-cache behaviour, run once per
-        session per daemon lifetime (then maintained incrementally)."""
-        entries: list[TranscriptEntry] = []
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                entry = TranscriptEntry.from_json(line)
-                if entry is not None:
-                    entries.append(entry)
-        # Newest-wins custom snapshots, backward scan like ``latest_custom``.
-        latest_customs: dict[str, dict[str, Any]] = {}
-        for entry in reversed(entries):
-            if entry.type != ENTRY_CUSTOM:
-                continue
-            custom_type = entry.payload.get("custom_type")
-            if custom_type in _TRACKED_CUSTOM_TYPES and custom_type not in latest_customs:
-                latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
+        """Fold from the journal's REPLAYED WINDOW, not from the whole file.
+
+        This used to be the pre-cache behaviour run verbatim: read every row of
+        the journal, parse it, and replay it. On the operator's store that is
+        1229 ms for a 121 MB conversation and grows with the file, for a replay
+        that only ever reads the rows after the latest compaction — the same
+        argument (and the same reader) the desktop's cold attach already uses
+        (:func:`read_replay_suffix`, 11-130 ms on those files).
+
+        WHY THE SHARED READER RATHER THAN A SECOND SUFFIX WALK: the stop rule
+        here has to be the desktop's, byte for byte — the newest compaction's
+        ``first_kept_entry_id`` must be in hand before the replay may cut, and a
+        journal with no compaction has no boundary to stop at, so the honest
+        answer there is the whole file (which is what this reader returns). Two
+        implementations of that rule is exactly how the phone's notion of "what
+        the model still sees" drifts from the desktop's.
+
+        THE ROWS THE WINDOW DOES NOT CONTAIN are the other half of the change,
+        and they are why this is not merely "parse less": it is the derived
+        state (the subagent roster, the todo snapshot) whose rows are written
+        once and then live far above the cut — the roster's legacy row is inside
+        the window on 0 of the 40 largest real journals, its newest occurrence
+        sat 32-670 ms of backward scan away. The rule for seeding it is the one
+        the cold facet already applies in
+        ``AttachedSession._restore_cold_subagents``: the SIDECAR is the roster's
+        own store and the fresher of the two, so it wins when it is there; only
+        a session that has none pays a backward lookup for the transcript row.
+        Anything the window already carried costs nothing at all.
+        """
+        # Sorted, so the tuple a reader sees is deterministic rather than
+        # whatever order a frozenset happened to iterate in.
+        suffix = read_replay_suffix(
+            state.directory, opportunistic_types=tuple(sorted(_TRACKED_CUSTOM_TYPES))
+        )
+        entries = list(suffix.entries)
+        state.window_bytes = suffix.bytes_read
+        # ``opportunistic_types`` never gates the scan (a type that may
+        # legitimately be absent must not, see ``read_replay_suffix``), so this
+        # is the free half: snapshots the window already passed.
+        latest_customs: dict[str, dict[str, Any]] = {
+            name: dict(details)
+            for name, details in suffix.checkpoints.items()
+            if name in _TRACKED_CUSTOM_TYPES
+        }
+        roster = _read_roster_sidecar(state.directory)
+        if roster is not None:
+            latest_customs[ROSTER_CUSTOM_TYPE] = roster
+        elif fingerprint.size <= _TRANSCRIPT_LOOKUP_MAX_BYTES:
+            # Only the ROSTER goes back into the journal, and only for a session
+            # small enough that the scan is bounded by the file it scans. It is
+            # the one tracked type with a consumer (``daemon._durable_projection``
+            # reads it to rebuild the child rows), and a session with no sidecar
+            # is a legacy one whose roster row sits near the head of the journal
+            # — written once, before the sidecar existed — so nothing nearer than
+            # a backward scan can answer it.
+            #
+            # THE TODO SNAPSHOT DELIBERATELY DOES NOT, and that is a trade rather
+            # than an oversight. It IS harvested from the window whenever the
+            # window passes it (17 of the 40 largest real journals); beyond that
+            # nothing reads the entry: the daemon's durable projection reads the
+            # roster only, and a child's todos come from ``CustomSnapshotCache``.
+            # The scan costs O(distance) in the common case — measured 340 ms on
+            # a 5.9 MB fixture where the row does not exist at all, i.e. work paid
+            # on every cold open to fill a field no caller reads. A future
+            # consumer of it needs a bounded reader of its own; this comment is
+            # the hand-off.
+            entry = read_latest_custom_entry(state.directory, ROSTER_CUSTOM_TYPE)
+            if entry is not None:
+                # Newest-wins, exactly as ``Transcript.latest_custom`` answers it
+                # (same predicate, same projection) — one backward scan, not a
+                # second full parse.
+                latest_customs[ROSTER_CUSTOM_TYPE] = dict(entry.payload.get("details", {}))
+        else:
+            logger.debug(
+                "durable fold: %s is too large to scan for a roster row",
+                state.directory,
+            )
+
         state.injection_ids = _journal_injection_ids(entries)
         state.history = _replay(entries)
         state.render = _fold(state.history)
@@ -349,6 +459,10 @@ class DurableFoldCache:
             if entry.type == ENTRY_PRUNE and entry.payload.get("target")
         }
         state.latest_customs = latest_customs
+        # The rows this fold actually consumed. It is still the cursor/file
+        # agreement invariant (the incremental path adds to it), but it now
+        # counts the WINDOW rather than the file — asserting equality with the
+        # file's line count would be asserting the whole-file read back.
         state.entry_count = len(entries)
         state.offset = fingerprint.size
         state.fingerprint = fingerprint
@@ -585,6 +699,38 @@ class CustomSnapshotCache:
         except OSError:
             pass
         return customs
+
+
+def _read_roster_sidecar(directory: Path) -> dict[str, Any] | None:
+    """The roster sidecar's payload for ``directory``, or ``None``.
+
+    The fold's seeding path for the one tracked type whose rows are written once
+    and then sit above the replay window forever (see ``_rebuild``). Frozen
+    only as an answer for THIS fold: the file is rewritten on every roster move,
+    so a later ``load`` of a cached session does not re-read it — the same
+    staleness the transcript-row source has (its legacy row is written once
+    too), and the live path, not this cache, is what keeps a running
+    conversation's roster current.
+
+    Best-effort by construction: the durable projection must degrade to "no
+    roster" rather than fail because a sidecar is half-written, absent, or from
+    a version this build does not know. A payload that is not the shape the
+    writer promises is refused rather than passed on, because the daemon reads
+    ``jobs``/``records`` off it directly.
+    """
+    try:
+        with (directory / ROSTER_SIDECAR_FILENAME).open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != _ROSTER_SIDECAR_VERSION:
+        return None
+    if not isinstance(payload.get("jobs"), list) or not isinstance(payload.get("records"), list):
+        return None
+    # The projection's own reader (``daemon._durable_projection``) takes what it
+    # needs by key; the whole mapping is kept so the seeded value is the store's
+    # record rather than a projection of it that could drop something.
+    return dict(payload)
 
 
 #: One shared store: it is content-addressed under config_dir() and read-only

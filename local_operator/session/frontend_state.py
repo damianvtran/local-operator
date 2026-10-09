@@ -7353,7 +7353,18 @@ class FrontendStateStore:
         # needs installing against a reader.
         self._install(self._state.model_copy(update={"live_events": live}))
 
-    async def checkpoint(self, transcript: Any) -> None:
+    async def checkpoint(self, transcript: Any, *, preserve_mtime: bool = False) -> None:
+        """Append the durable turn-end (or closing) status row.
+
+        ``preserve_mtime`` is for the CLOSING checkpoint a runtime leaves at
+        teardown (see ``Session._write_closing_checkpoint``): that row is a
+        record ABOUT the session written after the user's last turn, so it must
+        not re-rank the session as freshly worked in ``retention.session_activity``
+        (the one clock the picker and ``session.cleanup`` share). It is a
+        REQUEST the transcript layer validates — honoured only for a whole batch
+        of :data:`~local_operator.session.transcript.BOOKKEEPING_CUSTOM_TYPES`,
+        which this type is a member of — so a caller cannot use it to hide work.
+        """
         state = self.state
         checkpoint_id = uuid.uuid4().hex
         state.checkpoint_id = checkpoint_id
@@ -7420,6 +7431,7 @@ class FrontendStateStore:
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE,
             {"checkpoint_id": checkpoint_id, "state": durable.model_dump(mode="json")},
+            preserve_mtime=preserve_mtime,
         )
 
     def _retained_windows(self) -> _TrajectoryWindows:

@@ -3253,6 +3253,14 @@ class Session:
         #: spec) — session state, like the tool declaration, never persisted.
         self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
+        #: Whether a TURN has ended on this runtime. Set at the turn-end
+        #: bookkeeping boundary, read by :meth:`dispose` to decide whether the
+        #: runtime owes the journal a closing checkpoint (see
+        #: :meth:`_write_closing_checkpoint`). Deliberately not "the store holds
+        #: state": a store restored from a previous runtime holds plenty and has
+        #: observed nothing, and a session a user only looked at must not gain a
+        #: row for it.
+        self._turn_ended_since_engage = False
         self._cwd = cwd or "."
         # ``tool://`` is chained AHEAD of the factory's knowledge resolver in
         # the ONE place every session must pass through — root or subagent,
@@ -13567,6 +13575,9 @@ class Session:
             # ``from_checkpoint`` — clobber the richer checkpoint a TUI wrote.
             if self._has_ui or self._frontend_state_store.has_subscribers:
                 await self._frontend_state_store.checkpoint(self._transcript)
+            # A turn ENDED here, which is what the closing checkpoint's gate
+            # reads (dispose is reached by runtimes that never ran one too).
+            self._turn_ended_since_engage = True
 
             # Child events reach the shared comms watcher before either durable
             # append. Notify only after messages AND todos are stable, including
@@ -20591,6 +20602,76 @@ class Session:
                 self._subagent_roster_writer = writer
             await asyncio.shield(writer)
 
+    async def _write_closing_checkpoint(self) -> None:
+        """Leave the tail anchor that bounds the NEXT cold open of this session.
+
+        WHY IT EXISTS. Without a checkpoint row, ``read_replay_suffix`` has no
+        compaction boundary to stop at and scans the journal to BOF on every
+        request: 200 ms per snapshot/``/history``/``/events`` on a 35.5 MB
+        journal, paid three times per open and again on every reconnect. 15 of
+        the 40 largest real journals carry no checkpoint, and the reason is this
+        method's absence rather than a bug: the only writer runs at turn end and
+        only "for any session with a UI or an attach subscriber"
+        (``FrontendStateStore.checkpoint``), so a session driven headlessly —
+        ``lop exec``, a scheduled job, a scripted run — was never anchored at
+        all. One row per RUNTIME LIFE is the whole cost, against a per-turn row
+        for a session a user is watching.
+
+        WHY THE CLOCK IS HELD STILL. The row is appended with
+        ``preserve_mtime=True``, so it does not move
+        ``retention.session_activity`` — the one ranking clock the picker and
+        ``session.cleanup`` share. A runtime closing hours after the user's last
+        turn must not rank the conversation as freshly worked; the transcript
+        layer validates the request against ``BOOKKEEPING_CUSTOM_TYPES`` (which
+        this type is now a member of) rather than taking the caller's word for
+        it.
+
+        FOUR GATES, each of which is a case that must not write:
+
+        * **A child session is skipped.** Subagent transcripts are read through
+          page reads (the child panel, ``subagent_view``), never through the
+          cold replay this row would bound, and a wide roster would pay one
+          checkpoint per child per run for nothing.
+        * **A runtime that ended no turn is skipped.** ``dispose`` is reached by
+          runtimes that only looked at a conversation, and a session a user
+          merely opened must not gain a row for it (the same principle the cold
+          viewer states: opening a terminal is not work).
+        * **A journal that already carries a checkpoint is left alone**, and this
+          gate is the one CI found rather than the one I designed
+          (``test_headless_turn_preserves_a_rich_frontend_checkpoint``): the
+          durable row is REPLACEMENT state, so a runtime that writes its own view
+          over a richer one can LOWER it — that test's TUI-era title and its
+          300.0 s of accrued duration went to "" and to a re-derived zero for a
+          headless turn whose store had already been handed the rich values.
+          Readers take the NEWEST row, so "anchor anyway" is not a trade, it is
+          the N1 defect (a scheduler turn must never lower the TUI's durable
+          state). A session that has one is bounded by it already, and the replay
+          cache makes its repeat cost free; a session that has none — the 15 of
+          the 40 largest real journals this method exists for — gets its anchor.
+          ``checkpoint_id`` is the cheap proof a row exists: it is set when a
+          checkpoint is RESTORED (``from_checkpoint``) and when one is written,
+          and by nothing else.
+        * **The write is bounded and best-effort**, like every other teardown
+          transcript write: a wedged mount must not hang disposal, and a lost
+          closing row costs one open the cost this method exists to remove —
+          never the conversation, which is already on disk.
+        """
+        if self._job_id is not None or not self._turn_ended_since_engage:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        transcript = getattr(self, "_transcript", None)
+        if store is None or transcript is None:
+            return
+        if store.state.checkpoint_id is not None:
+            return
+        try:
+            await asyncio.wait_for(
+                store.checkpoint(transcript, preserve_mtime=True),
+                timeout=_NAME_FLUSH_TIMEOUT_S,
+            )
+        except (Exception, asyncio.TimeoutError):  # noqa: BLE001 — teardown must proceed
+            logger.warning("closing checkpoint did not land", exc_info=True)
+
     async def _final_persist_snapshots(self) -> None:
         """Write the last roster and todo snapshots at teardown, in order.
 
@@ -23025,6 +23106,10 @@ class Session:
             # through a host path without a turn task.
             if self._pending_shell_records:
                 await self._flush_shell_records()
+            # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
+            # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
+            # this is what keeps the next cold open bounded rather than O(file).
+            await self._write_closing_checkpoint()
             self._transcript.flush()
         finally:
             # Drop the retention claim FIRST in the finally: everything in the
