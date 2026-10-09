@@ -355,4 +355,15 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         )
     if arm == "no-session":
         return _op_reply(state, f"{name} is active again; her next conversation arms the check-in.")
+    if arm == "busy":
+        # The store lock was held for the whole wait, so NOTHING was armed on this
+        # call (round 3d, N2): the cadence word is new, and the generic sentence
+        # below would tell the operator a check-in exists when it does not. The
+        # sentence stays calm because the refusal is retryable — the next boot or
+        # tick arms it — which is what the TUI's fallback copy says too.
+        return _op_reply(
+            state,
+            f"{name} is active again, but her files were busy just now; "
+            "the next check-in arms on her next boot.",
+        )
     return _op_reply(state, f"{name} is active again; the next check-in is armed.")

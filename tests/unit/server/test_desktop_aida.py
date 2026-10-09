@@ -118,6 +118,34 @@ async def test_pause_and_resume_move_the_flag(client, isolated_root: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_resume_refused_by_a_held_store_lock_says_so(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``busy`` word gets its own receipt (round 3d, N2).
+
+    ``proactive.resume`` answers ``"busy"`` when a peer held the store lock for
+    the whole wait — nothing was armed on that call — so the generic
+    "the next check-in is armed." would tell the desktop's operator a check-in
+    exists when it does not. The sentence also has to stay calm: the refusal is
+    retryable, and the next boot or tick arms it.
+    """
+    from local_operator.aida import proactive
+
+    async def busy(*_args: object, **_kwargs: object) -> str:
+        return "busy"
+
+    monkeypatch.setattr(proactive, "resume", busy)
+    async with client as http:
+        await http.post("/v1/desktop/aida", json={"op": "open"})
+        resumed = await http.post("/v1/desktop/aida", json={"op": "resume"})
+
+    assert resumed.status_code == 200
+    message = resumed.json()["message"]
+    assert "busy" in message and "arms" in message, message
+    assert "the next check-in is armed" not in message, message
+
+
+@pytest.mark.asyncio
 async def test_greet_refuses_without_a_provider_and_stamps_nothing(
     client, isolated_root: Path
 ) -> None:
