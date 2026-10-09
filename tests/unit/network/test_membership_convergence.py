@@ -635,8 +635,37 @@ def test_a_silently_refused_handshake_is_named_locally(
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    # THE DEVICE IS AWAY WHEN THE REMOVAL HAPPENS, and that is part of the scenario,
+    # not setup colour. ``member rm`` broadcasts the rotation over every live link
+    # (``_broadcast_epoch``: "Send net_epoch to every live link"), and the admitting
+    # device owes the rest of the network a post-pairing contact (``contact_peers`` at
+    # the tail of ``_run_pair_listener``) whose dial runs on the listener thread and
+    # races the very next statement here. When that dial lands first the joiner is
+    # reachable at broadcast time, the epoch frame reaches it, ``apply_epoch`` takes
+    # its ``removing_us`` branch (a path this file pins in its own right), and
+    # ``membership_state`` answers 'removed' by design — removed outranks refused —
+    # so the assertion below would be about a device that was TOLD. Measured: CI shard
+    # (3.12, 4), run 37851665431 first attempt, ``'removed' == 'refused'``; reproduced
+    # on this fleet with a probe trace — contact_peers dial → broadcast send → b's
+    # APPLY ``removed_by_this_rotation``. Q-R3-2's story is the device that was away
+    # when the removal happened and came back to a silent refusal, so the device goes
+    # away first: with the relay stopped no link can exist to receive the rotation
+    # (``stop``'s post-condition closes every link and refuses a late dialer), which
+    # makes the refusal the ONLY account of the removal b can hold.
+    b.server.stop()
     a.server._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
         {"network": record.network_id, "device_id": b.device_id}
+    )
+    # ...AND IT COMES BACK: a fresh relay on the existing root — the durable state is
+    # on disk, the process is not (the process that paired is not the process that
+    # later dials). Dial-only, per the rule the fresh-relay helper in
+    # ``test_relay_e2e`` states: nothing below needs a listener, and a test that
+    # starts one more listener than it stops is a leak.
+    b.server = relay.RelayServer(
+        root=b.root,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        identity=b.identity,
+        audit=audit_mod.AuditLog(b.root),
     )
 
     refused = store.load(record.network_id, b.root)
