@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
     is_decision_only,
+    is_media_only,
     is_speech_only,
     list_login_providers,
     resolve_env_key,
@@ -276,9 +277,11 @@ class ControllerAuthStore(Protocol):
 def _chat_providers() -> list[ProviderDefinition]:
     """The registry rows that may contribute CHAT models to a catalogue.
 
-    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) and
+    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev),
     speech-only ones (``registry.is_speech_only`` — ElevenLabs and ``openai-key``,
-    whose wires serve speech and no chat route at all) are dropped HERE, at the one place
+    whose wires serve speech and no chat route at all) and media-only ones
+    (``registry.is_media_only`` — FAL, whose queue serves generative media and no
+    chat route at all) are dropped HERE, at the one place
     every catalogue is assembled, rather than inside the three builders below or
     in each consumer of them. A provider whose wire rejects ``chat/completions``
     on every host must not appear as a model the user can pick: selecting one
@@ -360,7 +363,9 @@ def _chat_providers() -> list[ProviderDefinition]:
     chat = [
         definition
         for definition in PROVIDER_REGISTRY
-        if not is_decision_only(definition.id) and not is_speech_only(definition.id)
+        if not is_decision_only(definition.id)
+        and not is_speech_only(definition.id)
+        and not is_media_only(definition.id)
     ]
     ids = {definition.id for definition in chat}
     return [

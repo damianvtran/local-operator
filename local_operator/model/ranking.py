@@ -273,12 +273,18 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     # Imported at CALL time, like the sibling helpers in ``providers.failover``:
     # ``providers.registry`` is a heavier module and this one is stdlib-only by
     # design (it is imported by the mobile daemon, which renders no terminal).
-    from local_operator.providers.registry import is_decision_only, is_speech_only
+    from local_operator.providers.registry import (
+        is_decision_only,
+        is_media_only,
+        is_speech_only,
+    )
 
     rows = [
         row
         for row in rows
-        if not is_decision_only(row.provider) and not is_speech_only(row.provider)
+        if not is_decision_only(row.provider)
+        and not is_speech_only(row.provider)
+        and not is_media_only(row.provider)
     ]
     # TWO EMPTY-ISH CASES, and they are not the same. `query.strip() == ""` is the
     # user having typed nothing, which lists the catalogue in its natural order.
