@@ -472,12 +472,14 @@ def remove_session_dir(
     WARNING so an attempt against an unmarked or foreign store is visible.
     Logs every real removal at WARNING (naming the record file) and appends
     it to the store's :data:`CLEANUP_LOG_NAME` BEFORE the ``rmtree``, so a
-    crash mid-removal still leaves the record. Read-only leftovers inside the
-    session (rig-created 0555/0444 trees — the measured husk cause; see
-    ``_widen_and_retry`` below) are cleared by a bounded chmod-and-retry;
-    anything it cannot clear still raises to the caller, exactly as the plain
-    removal did. A dry run refuses and decides
-    exactly as a real run would but writes nothing and logs at DEBUG — the
+    crash mid-removal still leaves the record. Read-only or no-permission
+    leftovers inside the session (rig-created 0555/0444 trees and 0000 dirs —
+    the measured husk causes) are handled by two bounded phases: the ``onexc``
+    hook below widens and retries each single removal once, and a still-failing
+    removal gets one pre-widen walk (``_widen_for_removal``) plus one further
+    attempt; anything neither phase can clear still raises to the caller,
+    exactly as the plain removal did. A dry run refuses and decides exactly as
+    a real run would but writes nothing and logs at DEBUG — the
     CLI prints the decisions itself, and a WARNING per rehearsal doubled
     every line in a terminal (UX round 1, U3). Returns whether the directory
     was (or, in a dry run, would have been) removed.
@@ -550,9 +552,11 @@ def remove_session_dir(
         the other shapes ``rmtree`` reports (``os.open``, ``os.scandir``,
         ``os.lstat``, ``os.path.islink``, ``os.close``) cannot be re-issued
         with just a path, and letting them return would silently skip a
-        subtree. A failed retry propagates exactly as the plain removal's
-        failure did: the caller counts an error and the directory stays on
-        disk — nothing is suppressed.
+        subtree — a removal still failing after this hook takes the second
+        phase (``_widen_for_removal``, then one further attempt), and only a
+        failure of that reaches the caller exactly as the plain removal's
+        did: an error is counted and the directory stays on disk — nothing is
+        suppressed.
         """
         for candidate in (Path(path).parent, Path(path)):
             try:
@@ -577,8 +581,27 @@ def remove_session_dir(
 
     # ``onexc``, not ``onerror``: the non-deprecated spelling since 3.12 (the
     # type stubs flag ``onerror``), and what ``update.py``'s chmod-and-retry
-    # handler already uses.
-    shutil.rmtree(target, onexc=_widen_and_retry)
+    # handler already uses. The same guarded call is attempted at most twice —
+    # still the module's single removal call site — with the bounded widen
+    # walk in between for the shapes the hook cannot re-issue (``os.open``).
+    for attempt in (1, 2):
+        try:
+            shutil.rmtree(target, onexc=_widen_and_retry)
+            break
+        except OSError:
+            if attempt == 2:
+                raise
+            # One bounded second phase: a directory without its owner read bit
+            # cannot be opened or listed at all, so per-entry retries can never
+            # reach it — widen the modes in place first, then attempt the walk
+            # once more. Past the caps nothing further is widened, and the
+            # second failure propagates as the first would have.
+            widened = _widen_for_removal(resolved_root)
+            logger.warning(
+                "session cleanup: widened %d path(s) inside %s; retrying the removal once",
+                widened,
+                target.name,
+            )
     if config_dir is not None:
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of
@@ -594,6 +617,99 @@ def remove_session_dir(
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
     return True
+
+
+#: Caps for :func:`_widen_for_removal`, mirroring the scratchpad search's style
+#: (``delegated_retention.SCRATCH_MAX_DEPTH``/``_ENTRIES``). The measured shape
+#: reaches depth 8-9 (a pytest tmpdir chain whose 0000 ``guard`` holds a file),
+#: so the depth clears real nesting with margin; past either cap nothing more is
+#: widened and the retry simply fails closed, exactly as before the walk.
+WIDEN_MAX_DEPTH = 16
+WIDEN_MAX_ENTRIES = 20_000
+
+
+def _widen_owner_mode(path: str, owner_bits: int) -> bool:
+    """Add ``S_IRWXU`` to ``path`` when ``owner_bits`` are missing; True if so.
+
+    Never raises: a failed stat or chmod leaves the path as it was, and the
+    retry that follows is the decider.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:  # pragma: no cover — gone under the walk
+        return False
+    if mode & owner_bits == owner_bits:
+        return False
+    try:
+        os.chmod(path, mode | stat.S_IRWXU)
+    except OSError:
+        logger.debug("session cleanup: could not widen %s for removal", path, exc_info=True)
+        return False
+    return True
+
+
+def _widen_for_removal(root: Path) -> int:
+    """Add missing owner bits under ``root`` so a mode-blocked removal can retry.
+
+    WHY IT EXISTS. Some leftovers block the ``rmtree`` WALK itself, not any one
+    removal: a directory without its owner read bit cannot be opened or listed,
+    so the walk dies before it can even see the children — the measured second
+    husk (live store ``30776a2dc9b8``) is exactly this, a pytest tmpdir chain
+    whose deepest directory is mode 0000. A per-entry ``onexc`` retry cannot
+    fix that shape (the walk never re-issues its open), so the modes are
+    widened in place first and the walk is attempted once more.
+
+    WHAT IT TOUCHES. Only paths under ``root`` — the directory this call has
+    already committed to deleting, with the guards passed. Directories get
+    ``S_IRWXU`` when any owner bit is missing (they need read to be listed and
+    write+execute to be emptied); non-directories get it when the owner write
+    bit is missing (the bit that blocks unlink on some platforms). The
+    directory is widened BEFORE it is scanned: an unreadable directory cannot
+    be listed, and its children can only be found after its own bits are back.
+    Symlinks are skipped, never followed or chmod-ed through.
+
+    BOUNDED, BEST EFFORT. At most :data:`WIDEN_MAX_DEPTH` levels deep and
+    :data:`WIDEN_MAX_ENTRIES` entries examined; past either cap nothing further
+    is widened. Every failure to stat, scan or chmod is swallowed (the
+    caller's retry is the decider; a failure of THAT still propagates).
+    Returns the number of paths actually widened, which the caller logs as one
+    WARNING line.
+    """
+    widened = 0
+    visited = 0
+    stack: list[tuple[str, int]] = [(os.fspath(root), 0)]
+    while stack:
+        current, depth = stack.pop()
+        if _widen_owner_mode(current, stat.S_IRWXU):
+            widened += 1
+        if depth >= WIDEN_MAX_DEPTH:
+            continue
+        try:
+            with os.scandir(current) as entries:
+                children = list(entries)
+        except OSError:  # pragma: no cover — gone under the walk
+            logger.debug(
+                "session cleanup: could not scan %s while widening", current, exc_info=True
+            )
+            continue
+        visited += len(children)
+        if visited > WIDEN_MAX_ENTRIES:
+            break
+        for entry in children:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry.path, depth + 1))
+                elif _widen_owner_mode(entry.path, stat.S_IWUSR):
+                    widened += 1
+            except OSError:  # pragma: no cover — a stat race under the scan
+                logger.debug(
+                    "session cleanup: could not inspect %s while widening",
+                    entry.path,
+                    exc_info=True,
+                )
+    return widened
 
 
 #: The record ``policy`` string for a delete the USER asked for, as opposed to
