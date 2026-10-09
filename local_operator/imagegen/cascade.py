@@ -42,6 +42,7 @@ import httpx
 
 from local_operator.artifacts import ArtifactKind, JobCancelled, JobSpec, JobUnavailable
 from local_operator.artifacts import walk as artifacts_walk
+from local_operator.artifacts.rung import CancelSupport, RungSpec
 from local_operator.clients._http import APIError
 from local_operator.env import resolve_radient_api_base_url
 from local_operator.imagegen import (
@@ -78,6 +79,56 @@ RUNG_LABELS: dict[str, str] = {
     ImageRoute.RADIENT: "Radient",
     ImageRoute.FAL: "FAL",
     ImageRoute.OPENAI: "OpenAI",
+}
+
+#: The resolver's fixed order, first match wins. APPEND-ONLY: the three routes
+#: that shipped keep their exact positions (the v1 principle — an existing
+#: user's path must not change), and each wave-2 breadth rung appends after
+#: them in the order the manager signed off (openai-sub, google, xai,
+#: openrouter). ``resolve_image_route`` iterates THIS constant; a new rung
+#: goes through the add-a-rung checklist (design §5.3).
+IMAGE_RUNG_ORDER: tuple[ImageRoute, ...] = (
+    ImageRoute.RADIENT,
+    ImageRoute.FAL,
+    ImageRoute.OPENAI,
+)
+
+#: Every rung's declaration — identity, capability, cancel support and cost
+#: posture in ONE table (design D10), so an addition updates a spec entry
+#: instead of rediscovering seven code sites. Values follow the design's §4
+#: row and the manager's sign-off #2/#3:
+#: - ``cancel_support`` is DECLARED, test-pinned, and read by no branch in v1;
+#:   FAL's ``signal`` is per best available evidence (its cancel URL answers
+#:   CANCELLATION_REQUESTED) with mid-run honour UNVERIFIED — declaration-only
+#:   in v1, so nothing depends on it yet.
+#: - ``cost`` labels where a future figure would come from: only ``reported``
+#:   rungs can ever put a number in ``cost_usd`` (design D8); ``rate_table``
+#:   entries are documentation with vendor provenance in the guide.
+RUNG_SPECS: dict[str, RungSpec] = {
+    ImageRoute.RADIENT: RungSpec(
+        route=ImageRoute.RADIENT,
+        label="Radient",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i", "i2i"}),
+        cancel_support=CancelSupport.SIGNAL,
+        cost="reported",
+    ),
+    ImageRoute.FAL: RungSpec(
+        route=ImageRoute.FAL,
+        label="FAL",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i", "i2i"}),
+        cancel_support=CancelSupport.SIGNAL,
+        cost="rate_table",
+    ),
+    ImageRoute.OPENAI: RungSpec(
+        route=ImageRoute.OPENAI,
+        label="OpenAI",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i"}),
+        cancel_support=CancelSupport.NONE,
+        cost="rate_table",
+    ),
 }
 
 
@@ -128,6 +179,55 @@ def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[Aut
     return AuthStore(db_path, config_dir=config_dir), True
 
 
+async def _probe_route(
+    route: ImageRoute,
+    *,
+    config_dir: Path | None,
+    radient_base: str,
+    store: AuthStore,
+) -> bool:
+    """Whether ``route``'s credential exists — the resolver's per-rung probe.
+
+    Radient's is the async persisted-credential check (shared with the
+    executor's resolver, so the two cannot disagree about what "signed in"
+    means); every other rung reads one of ``availability``'s sync, socket-free
+    functions. A wave-2 rung's probe reads the credential class it SPENDS with
+    — that rule is the reason the subscription rung probes the OAuth grant
+    class, the deliberate inverse of the ``openai-key`` rule. A probe that
+    cannot answer reads as "not available"; it must never take its caller
+    down. An unhandled route is a programming error (order and probes are
+    edited together) and degrades closed, not open.
+    """
+    if route == ImageRoute.RADIENT:
+        try:
+            return await has_persisted_radient_credential(config_dir, radient_base, store=store)
+        except Exception:  # noqa: BLE001 - a probe must not take its caller down
+            logger.warning("image probe for radient failed; reporting the rung unavailable")
+            return False
+    if route == ImageRoute.FAL:
+        return bool(image_availability.fal_key(config_dir))
+    if route == ImageRoute.OPENAI:
+        return bool(image_availability.openai_images_key(config_dir))
+    logger.warning("no availability probe for image route %s; reporting unavailable", route)
+    return False
+
+
+#: Per-route availability reasons — the pair a user is shown (available /
+#: not). The three v1 routes' strings are FROZEN (surfaces and tests quote
+#: them); a new rung adds its pair here and appends its route to
+#: IMAGE_RUNG_ORDER.
+_ROUTE_REASONS: dict[ImageRoute, tuple[str, str]] = {
+    ImageRoute.RADIENT: ("Signed in to Radient.", "Not signed in to Radient."),
+    ImageRoute.FAL: ("A FAL key is stored.", "No FAL key is stored."),
+    ImageRoute.OPENAI: ("An OpenAI API key is stored.", "No OpenAI API key is stored."),
+}
+
+
+def _route_reason(route: ImageRoute, available: bool) -> str:
+    yes, no = _ROUTE_REASONS.get(route, ("Available.", "Not available."))
+    return yes if available else no
+
+
 async def resolve_image_route(
     config_dir: Path | None = None,
     *,
@@ -138,47 +238,27 @@ async def resolve_image_route(
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
-        try:
-            radient_ok = await has_persisted_radient_credential(
-                config_dir, radient_base, store=store
+        rungs: list[RungAvailability] = []
+        for route in IMAGE_RUNG_ORDER:
+            ok = await _probe_route(
+                route, config_dir=config_dir, radient_base=radient_base, store=store
             )
-        except Exception:  # noqa: BLE001 - a probe must not take its caller down
-            logger.warning("image probe for radient failed; reporting the rung unavailable")
-            radient_ok = False
-        fal_ok = bool(image_availability.fal_key(config_dir))
-        openai_ok = bool(image_availability.openai_images_key(config_dir))
+            rungs.append(RungAvailability(route, ok, _route_reason(route, ok)))
     finally:
         if owned:
             store.close()
 
-    rungs = (
-        RungAvailability(
-            ImageRoute.RADIENT,
-            radient_ok,
-            "Signed in to Radient." if radient_ok else "Not signed in to Radient.",
-        ),
-        RungAvailability(
-            ImageRoute.FAL,
-            fal_ok,
-            "A FAL key is stored." if fal_ok else "No FAL key is stored.",
-        ),
-        RungAvailability(
-            ImageRoute.OPENAI,
-            openai_ok,
-            "An OpenAI API key is stored." if openai_ok else "No OpenAI API key is stored.",
-        ),
-    )
     available = next((rung for rung in rungs if rung.available), None)
     if available is not None:
         return ImageRouteResolution(
-            route=ImageRoute(available.route), reason=available.reason, rungs=rungs
+            route=ImageRoute(available.route), reason=available.reason, rungs=tuple(rungs)
         )
     reason = (
         "No image provider is available: sign in to Radient (`/login radient`), "
         "store a FAL key (`lop login fal`) or export FAL_API_KEY, or store an "
         "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY."
     )
-    return ImageRouteResolution(route=ImageRoute.NONE, reason=reason, rungs=rungs)
+    return ImageRouteResolution(route=ImageRoute.NONE, reason=reason, rungs=tuple(rungs))
 
 
 def _make_pause(signal: "AbortSignal | None") -> image_rungs.PauseFn | None:
