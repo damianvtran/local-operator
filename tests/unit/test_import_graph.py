@@ -802,3 +802,38 @@ def test_the_session_package_init_is_import_light() -> None:
         "so a re-export here lands the session engine on that path. Keep the "
         "package init empty and import the module you need directly."
     )
+
+
+# --- The delegated-session retention pass -----------------------------------
+
+
+@pytest.fixture(scope="module")
+def delegated_retention_modules() -> set[str]:
+    """Modules loaded by importing the delegated-retention pass."""
+    return _imported_modules("local_operator.session.delegated_retention")
+
+
+def test_delegated_retention_import_is_light(delegated_retention_modules: set[str]) -> None:
+    # It runs on the store-maintenance daemon thread of EVERY runtime process
+    # (``session_factory._run_delegated_sweeps``), so it must not carry the loop,
+    # the harness, a front end or the heavy ``resume`` module: those load lazily
+    # inside the functions that need them (``is_delegated_dir`` and the titles).
+    for top, why in (
+        ("asyncio", "plain synchronous I/O"),
+        ("pydantic", "rows are plain dicts here"),
+        ("textual", "no front end"),
+        ("local_operator.resume", "lazy, for the class predicate only"),
+        ("local_operator.harness", "no harness"),
+        ("local_operator.mobile", "no daemon"),
+        ("local_operator.tui", "no front end"),
+    ):
+        _assert_absent(delegated_retention_modules, top, why)
+    ours = sorted(m for m in delegated_retention_modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.procstate",
+        "local_operator.session",
+        "local_operator.session.cleanup",
+        "local_operator.session.delegated_retention",
+        "local_operator.session.retention",
+    ], ours

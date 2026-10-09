@@ -193,7 +193,9 @@ def test_a_manager_without_the_nested_reader_yields_the_disabled_default() -> No
         def get_config_value(self, key: str, default: object = None) -> object:
             return True  # would have enabled everything under the old accessor
 
-    assert policy_from_config(Old()) == CleanupPolicy()
+    # Disabled on BOTH classes: the delegated switch defaults to ON, so a stub
+    # that cannot be read must not inherit the bare default.
+    assert policy_from_config(Old()) == CleanupPolicy(delegated_enabled=False)
 
 
 # ---------------------------------------------------------------------------
@@ -385,18 +387,27 @@ def test_max_sessions_counts_in_the_pickers_unit(tmp_path: Path) -> None:
     assert [name for name, _ in recent_sessions(tmp_path)] == list(reversed(users[11:]))
 
 
-def test_age_and_byte_limits_still_consider_subagent_runs(tmp_path: Path) -> None:
-    """U15 narrows ``max_sessions`` only: staleness and disk are about the
-    directory, not about whose it is, so ``max_inactive_days`` takes an old
-    subagent run and labels its origin on the row."""
+def test_age_and_byte_limits_no_longer_see_subagent_runs(tmp_path: Path) -> None:
+    """The PARENT class is what the sidebar lists. Delegated sessions used to be
+    ranked under ``max_inactive_days`` / ``max_total_bytes`` too, which let a user
+    limit evict conversations to make room for machine transcripts (and walked 64 GB
+    of them); they have their own class and policy now
+    (``session/delegated_retention.py``), so these limits neither take nor count
+    them — and the parent class's ``scanned`` is its own population."""
     from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
     mark_store(tmp_path / "sessions")
     _session(tmp_path, "conv", age_days=2)
     old = _session(tmp_path, "oldsub", age_days=90)
     mark_session_origin(old, ORIGIN_SUBAGENT)
-    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_inactive_days=30), now=NOW)
-    assert [(c.session, c.origin) for c in result.removed] == [("oldsub", "subagent")]
+    for policy in (
+        CleanupPolicy(enabled=True, max_inactive_days=30),
+        CleanupPolicy(enabled=True, max_total_bytes=1),
+        CleanupPolicy(enabled=True, remove_empty=True),
+    ):
+        result = run_cleanup(tmp_path, policy, now=NOW)
+        assert result.removed == [] and result.scanned == 1, policy
+    assert old.exists()
 
 
 def test_equal_stamps_are_stable_across_consecutive_runs(tmp_path: Path) -> None:

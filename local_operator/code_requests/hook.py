@@ -48,7 +48,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from local_operator.code_requests.detect import (
@@ -315,62 +314,6 @@ def attach_parent(child: Any, parent: Any) -> None:
         logger.debug("could not attach the code-request parent handle", exc_info=True)
 
 
-def stamp_origin_parent(session_dir: Path, parent_id: str) -> None:
-    """Add ``parent=<session_id>`` to a child's ``origin.json``. Best-effort.
-
-    The durable half of the same idea: a later BACKFILL (a scan that predates this
-    feature, or a child whose live propagation failed) can attribute a child's rows to
-    the parent it came from. ``resume.mark_session_origin`` writes the file, so the
-    read-modify-write below keeps whatever the caller already recorded (the subagent
-    stamp writes ``label``/``agent``, and losing those would break the ``/resume``
-    picker).
-    """
-    if not parent_id:
-        return
-    try:
-        import json
-        import os
-
-        # The file name comes from the module that owns it, so there is one spelling of
-        # it in the tree; the import is inside the function because this runs once per
-        # delegated child and must not put ``resume`` on the session boot path.
-        from local_operator.resume import ORIGIN_NAME
-
-        path = Path(session_dir) / ORIGIN_NAME
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if payload.get("parent") == parent_id:
-            return
-        # WRITTEN THE WAY ``resume.mark_session_origin`` WRITES IT, and for the same
-        # documented reason: the marker is bookkeeping ABOUT a session, so the session
-        # directory's mtime — which readers use for recency — must not move. That
-        # function itself cannot be called here because it REPLACES the payload, and this
-        # must MERGE one key into a marker it did not create (the subagent stamp already
-        # holds ``label``/``agent``, and losing those breaks the ``/resume`` picker).
-        #
-        # It is deliberately NOT a tmp+``os.replace``: the guard in
-        # ``tests/unit/session/test_no_session_deletion.py`` exists because a rename or
-        # replace of a session directory is a deletion by another name, and a marker
-        # write has no need to introduce that call shape into a module that never deletes
-        # anything (review round 1, Q2). A torn write is survivable by contract — the
-        # reader tolerates a truncated marker and reports the session as the user's own.
-        try:
-            previous = Path(session_dir).stat().st_mtime
-        except OSError:
-            previous = None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload["parent"] = parent_id
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        if previous is not None:
-            os.utime(session_dir, (previous, previous))
-    except Exception:  # noqa: BLE001 - provenance is never a gate
-        logger.debug("could not stamp the origin parent for %s", session_dir, exc_info=True)
-
-
 __all__ = [
     "attach_parent",
     "classify",
@@ -379,5 +322,4 @@ __all__ = [
     "load_context_async",
     "load_mcp_servers",
     "record_detections",
-    "stamp_origin_parent",
 ]

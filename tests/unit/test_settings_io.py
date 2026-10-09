@@ -109,6 +109,8 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.session.cleanup import (
+        DEFAULT_DELEGATED_ENABLED,
+        DEFAULT_DELEGATED_MAX_AGE_HOURS,
         DEFAULT_ENABLED,
         DEFAULT_MAX_INACTIVE_DAYS,
         DEFAULT_MAX_SESSIONS,
@@ -224,6 +226,8 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_inactive_days": DEFAULT_MAX_INACTIVE_DAYS,
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
+        "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
+        "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry
@@ -2902,3 +2906,66 @@ def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> N
     assert settings_io.validate(setting, "ctrl+g") is None
     assert settings_io.validate(setting, "banana") is not None
     assert settings_io.validate(setting, "primary+alt+shift+space") is not None
+
+
+# -- delegated-work retention keys ------------------------------------------
+
+
+@pytest.mark.parametrize("hours", [2, 48, 720])
+def test_delegated_max_age_accepts_the_whole_range(manager: ConfigManager, hours: int) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert settings_io.validate(setting, hours) is None
+    settings_io.write_setting(manager, setting, hours)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["session"]["cleanup"]["delegated"]["max_age_hours"] == hours
+
+
+@pytest.mark.parametrize("hours", [1, 0, -5, 721, 100000])
+def test_delegated_max_age_refuses_out_of_range_with_the_range_sentence(
+    manager: ConfigManager, hours: int
+) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    message = settings_io.validate(setting, hours)
+    assert message == f"max_age_hours must be between 2 and 720 (30 days); got {hours}"
+    with pytest.raises(ValueError, match="between 2 and 720"):
+        settings_io.write_setting(manager, setting, hours)
+
+
+@pytest.mark.parametrize("raw", ["abc", "2.5", ""])
+def test_delegated_max_age_text_that_is_not_a_whole_number_is_refused(raw: str) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    with pytest.raises(ValueError, match="whole number"):
+        settings_io.coerce(setting, raw)
+
+
+def test_delegated_max_age_refuses_a_bool_and_a_float() -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert settings_io.validate(setting, True) == "expected a number"
+    assert settings_io.validate(setting, 2.5) == "expected a whole number"
+
+
+def test_delegated_rows_carry_the_contract_a_bounded_control_needs() -> None:
+    """minimum/maximum/unit are the whole contract the desktop control renders."""
+    hours = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert (hours.minimum, hours.maximum, hours.unit, hours.default) == (2, 720, "hours", 48)
+    assert hours.gated_by == "session.cleanup.delegated.enabled"
+    switch = settings_io.BY_KEY["session.cleanup.delegated.enabled"]
+    assert switch.default is True and switch.kind is Kind.BOOL
+    # The two classes are separate sections; the parent keys stayed parent keys.
+    assert switch.section == hours.section == "session_delegated"
+    assert settings_io.BY_KEY["session.cleanup.enabled"].section == "session_cleanup"
+
+
+def test_delegated_rows_round_trip_through_the_policy_reader(manager: ConfigManager) -> None:
+    from local_operator.session.cleanup import DELEGATED_PATH, policy_from_config
+
+    for key in ("session.cleanup.delegated.enabled", "session.cleanup.delegated.max_age_hours"):
+        assert settings_io.BY_KEY[key].path[:3] == DELEGATED_PATH, key
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"], 96
+    )
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["session.cleanup.delegated.enabled"], False
+    )
+    policy = policy_from_config(ConfigManager(manager.config_dir))
+    assert (policy.delegated_enabled, policy.delegated_max_age_hours) == (False, 96)

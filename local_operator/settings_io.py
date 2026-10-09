@@ -198,6 +198,14 @@ class Setting:
     #: Inclusive bounds for INT/FLOAT. ``None`` on either side means unbounded.
     minimum: float | None = None
     maximum: float | None = None
+    #: What an INT/FLOAT value COUNTS, as a plain lowercase noun the UI can put
+    #: after the number ("hours", "days", "bytes"); empty for a bare count or a
+    #: non-numeric row. Together with ``minimum``/``maximum`` it is the whole
+    #: contract a bounded-duration control needs, and it is authored here
+    #: because a renderer cannot infer "this INT is hours" from its key. The
+    #: stored value is ALWAYS in this unit — a UI that shows "2 days" must still
+    #: write 48 — so the unit never changes what a writer sends.
+    unit: str = ""
     #: Members a LIST setting may contain, in the order they are offered.
     #: A CLOSED allow-list: :func:`validate`/:func:`coerce` reject anything
     #: else, which is right only where this repo owns the vocabulary
@@ -435,7 +443,40 @@ SECTIONS: tuple[Section, ...] = (
         # The scope tag one column away already says "takes effect: new
         # launch", so restating "read once at launch" here said "launch" twice
         # within one row (design round 1, D7).
-        "Autosave and the cleanup policy.",
+        "Autosave. The cleanup policies have their own sections below.",
+    ),
+    # The two cleanup CLASSES, each its own section so each gets its own header
+    # on every surface (the TUI paints the title; the desktop paints the title
+    # and the description) and its own plain-language copy. They are split out
+    # of ``session`` rather than left under "Session storage" because they are
+    # different promises: the first is the user's own conversations and is OFF
+    # until they ask; the second is machine-made bookkeeping and is ON with a
+    # long, bounded window. Scope is NEW_LAUNCH for both, honestly: the policy
+    # is read by the store-maintenance pass at launch and by its hourly sweep
+    # in a long-lived runtime (``session_factory._store_maintenance_thread_main``),
+    # and never by a ``/new``.
+    Section(
+        "session_cleanup",
+        "Your conversations",
+        Scope.NEW_LAUNCH,
+        "Session cleanup for the conversations you started and the workstreams "
+        "in your sidebar. Off by default; nothing here runs until you switch it on.",
+    ),
+    Section(
+        "session_delegated",
+        # NOT "Delegated work: subagents and background sessions": at 49 cells
+        # the title overran the page's 34-cell value column and the header
+        # silently lost its "takes effect: new launch" tag (found in the
+        # rendered frame). The longer phrase lives in the description (desktop)
+        # and in the rows' help (TUI paints no section description).
+        "Delegated work",
+        Scope.NEW_LAUNCH,
+        "Delegated work: subagent and background-session transcripts and their "
+        "scratch folders. "
+        "On by default: they are removed after the age below. Your conversations, "
+        "sidebar workstreams, anything running, waiting on a wake or monitor, "
+        "linked to an open project, still in use by an active parent, or holding "
+        "unpushed or uncommitted git work are kept.",
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
@@ -1245,6 +1286,22 @@ def _validate_advertise_hosts(value: object) -> object:
 #: syncs its title into this key, so a title the session layer accepted must
 #: never be refused by the config layer mid-sync.
 _AIDA_NAME_MAX_CHARS = 80
+
+
+def _validate_delegated_max_age_hours(value: Any) -> None:
+    """The range sentence for ``session.cleanup.delegated.max_age_hours``.
+
+    The generic INT bounds would say "must be at most 720", which tells a user
+    typing ``1`` nothing about WHY 2 is the floor. This names the range and what
+    it means in days, once, for every writer (the page, ``lop config edit`` and
+    the HTTP route share :func:`validate`). Only a whole number reaches the range
+    test: a bool, a float or text keeps the generic type sentence from the INT
+    arm, which is the more useful thing to say about them.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return
+    if not 2 <= value <= 720:
+        raise ValueError(f"max_age_hours must be between 2 and 720 (30 days); got {value}")
 
 
 def _validate_aida_name(value: Any) -> None:
@@ -2415,7 +2472,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="session.cleanup.enabled",
         path=("session", "cleanup", "enabled"),
-        section="session",
+        section="session_cleanup",
         label="Session cleanup",
         kind=Kind.BOOL,
         default=False,
@@ -2431,7 +2488,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="session.cleanup.max_sessions",
         path=("session", "cleanup", "max_sessions"),
-        section="session",
+        section="session_cleanup",
         label="↳ max sessions",
         kind=Kind.INT,
         default=0,
@@ -2442,7 +2499,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="session.cleanup.max_inactive_days",
         path=("session", "cleanup", "max_inactive_days"),
-        section="session",
+        section="session_cleanup",
         label="↳ max inactive days",
         kind=Kind.INT,
         default=0,
@@ -2453,7 +2510,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="session.cleanup.max_total_bytes",
         path=("session", "cleanup", "max_total_bytes"),
-        section="session",
+        section="session_cleanup",
         label="↳ max total bytes",
         kind=Kind.INT,
         default=0,
@@ -2464,13 +2521,51 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="session.cleanup.remove_empty",
         path=("session", "cleanup", "remove_empty"),
-        section="session",
+        section="session_cleanup",
         label="↳ remove empty",
         kind=Kind.BOOL,
         default=False,
         help="Needs cleanup on. Remove dirs that never got a transcript.",
         choices=_bool_choices("remove transcript-less directories", "keep them"),
         gated_by="session.cleanup.enabled",
+    ),
+    # -- delegated-work retention --------------------------------------------
+    # Nested one level deeper (``session.cleanup.delegated.*``) so the parent
+    # keys above can never be mistaken for these and so the two classes read as
+    # two blocks in config.yml. The consumer is the same module, through the
+    # same ``DELEGATED_PATH`` tuple. ``enabled`` is the one cleanup switch that
+    # defaults to TRUE; see ``cleanup.DEFAULT_DELEGATED_ENABLED`` for why.
+    Setting(
+        key="session.cleanup.delegated.enabled",
+        path=("session", "cleanup", "delegated", "enabled"),
+        section="session_delegated",
+        label="Delegated cleanup",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Remove subagent and background-session transcripts after the age "
+            "below; never your conversations or anything in use."
+        ),
+        choices=_bool_choices(
+            "remove delegated work after the age below",
+            "keep all delegated work",
+        ),
+    ),
+    Setting(
+        key="session.cleanup.delegated.max_age_hours",
+        path=("session", "cleanup", "delegated", "max_age_hours"),
+        section="session_delegated",
+        label="↳ remove after (hours)",
+        kind=Kind.INT,
+        default=48,
+        # The help carries both limits because the page paints help but not
+        # min/max, and "2 to 720" is what a user needs to type a valid value.
+        help="Hours idle before removal: 2 to 720 (30 days). Default 48.",
+        minimum=2,
+        maximum=720,
+        unit="hours",
+        validate_value=_validate_delegated_max_age_hours,
+        gated_by="session.cleanup.delegated.enabled",
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -2991,7 +3086,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Classifier state (chars)",
         kind=Kind.INT,
         default=1200,
-        help="Bound on the state the materiality check receives.",
+        help=(
+            "Bound on the changed lines the materiality check receives "
+            "(the monitor's name and purpose ride along, clipped separately)."
+        ),
         minimum=0,
     ),
     Setting(
