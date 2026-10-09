@@ -126,19 +126,38 @@ def test_approval_text_names_provider_quantity_and_size(
 ) -> None:
     monkeypatch.setattr(image_tool, "_preferred_route_label", lambda: "Radient")
     text = image_tool._describe_generate_image_approval(
-        {"prompt": "a cat", "num_images": 2, "image_size": "square_hd"}, "."
+        {"prompt": "a cat", "num_images": 2, "image_size": "portrait_16_9"}, "."
     )
     assert text == (
-        "Generate 2 images at square_hd via Radient — a paid provider call on your account."
+        "Generate 2 images at portrait 16:9 via Radient — a paid provider call on your account."
     )
 
     single = image_tool._describe_generate_image_approval({"prompt": "a cat"}, ".")
-    assert "Generate 1 image at square_hd" in single
+    assert "Generate 1 image at square HD" in single
 
+    # D1: the edit path carries the quantity too, and D2's map applies here.
     edited = image_tool._describe_generate_image_approval(
+        {"prompt": "make it night", "source_image_path": "/tmp/in.png", "num_images": 2},
+        ".",
+    )
+    assert edited == (
+        "Edit 2 images (/tmp/in.png) at square HD via Radient — "
+        "a paid provider call on your account."
+    )
+
+    edited_one = image_tool._describe_generate_image_approval(
         {"prompt": "make it night", "source_image_path": "/tmp/in.png"}, "."
     )
-    assert edited.startswith("Edit an image (/tmp/in.png)")
+    assert edited_one.startswith("Edit 1 image (/tmp/in.png) at square HD")
+
+
+def test_the_size_display_map_covers_every_accepted_token_and_falls_back_raw() -> None:
+    """D2's map: every wire enum value has a prompt-facing spelling, and an
+    unmapped token passes through raw rather than failing or blanking."""
+    assert {token for token in image_tool.IMAGE_SIZE_VALUES} <= set(image_tool._SIZE_DISPLAY)
+    assert image_tool._display_size("square_hd") == "square HD"
+    assert image_tool._display_size("landscape_16_9") == "landscape 16:9"
+    assert image_tool._display_size("weird_future_token") == "weird_future_token"
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +174,7 @@ async def test_success_registers_the_attachment_and_caption_first(
 
     _patch_cascade(monkeypatch, fake_cascade)
     result = await image_tool.execute_generate_image(
-        "call-1", {"prompt": "a cat", "seed": 7, "image_size": "square_hd"}
+        "call-1", {"prompt": "a cat", "seed": 7, "image_size": "square_hd"}, None, None, None
     )
 
     assert result.is_error is False
@@ -197,7 +216,9 @@ async def test_partial_registration_failure_is_a_caption_note(
         return _outcome(assets)
 
     _patch_cascade(monkeypatch, fake_cascade)
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
 
     # An empty payload is one of cache_media's documented refusals (None on
     # empty bytes) — the tool must note it, not raise and not claim it.
@@ -219,7 +240,9 @@ async def test_every_registration_failing_is_an_error_naming_sources(
         )
 
     _patch_cascade(monkeypatch, fake_cascade)
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
 
     assert result.is_error is True
     text = result.content[0].text  # type: ignore[union-attr]
@@ -247,7 +270,9 @@ async def test_unavailable_carries_the_attempt_list(monkeypatch: pytest.MonkeyPa
         )
 
     _patch_cascade(monkeypatch, fake_cascade)
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
 
     assert result.is_error is True
     assert "Radient: boom" in result.content[0].text  # type: ignore[union-attr]
@@ -273,7 +298,9 @@ async def test_the_no_cancellation_race_returns_a_clean_receipt(
     _patch_cascade(monkeypatch, fake_cascade)
     monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
 
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
 
     assert result.is_error is True
     assert calls, "the provider job must be best-effort cancelled"
@@ -306,7 +333,7 @@ async def test_task_cancellation_cancels_provider_side_and_reraises(
     monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
 
     with pytest.raises(asyncio.CancelledError):
-        await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+        await image_tool.execute_generate_image("call-1", {"prompt": "a cat"}, None, None, None)
     assert calls, "an abort must attempt the provider-side cancel"
 
 
@@ -317,7 +344,9 @@ async def test_task_cancellation_cancels_provider_side_and_reraises(
 
 @pytest.mark.asyncio
 async def test_strength_without_a_source_image_is_rejected() -> None:
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat", "strength": 0.5})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat", "strength": 0.5}, None, None, None
+    )
     assert result.is_error is True
     text = result.content[0].text  # type: ignore[union-attr]
     assert "strength requires source_image_path" in text
@@ -326,7 +355,7 @@ async def test_strength_without_a_source_image_is_rejected() -> None:
 @pytest.mark.asyncio
 async def test_a_missing_source_image_is_an_argument_fault() -> None:
     result = await image_tool.execute_generate_image(
-        "call-1", {"prompt": "edit this", "source_image_path": "/nope/never.png"}
+        "call-1", {"prompt": "edit this", "source_image_path": "/nope/never.png"}, None, None, None
     )
     assert result.is_error is True
     assert "not a readable image file" in result.content[0].text  # type: ignore[union-attr]
@@ -348,7 +377,9 @@ async def test_a_real_source_image_travels_as_a_data_uri(
     result = await image_tool.execute_generate_image(
         "call-1",
         {"prompt": "make it night", "source_image_path": str(source), "strength": 0.4},
-        context=ToolContext(cwd=str(tmp_path)),
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
     )
 
     assert result.is_error is False
@@ -382,7 +413,9 @@ async def test_progress_updates_map_onto_agent_tool_updates(
         return _outcome()
 
     _patch_cascade(monkeypatch, fake_cascade)
-    await image_tool.execute_generate_image("call-1", {"prompt": "a cat"}, on_update=updates.append)
+    await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, updates.append, None
+    )
 
     assert len(updates) == 1
     update = updates[0]
@@ -406,6 +439,8 @@ async def test_the_cancel_receipt_states_not_cancelled_reasons(
     _patch_cascade(monkeypatch, fake_cascade)
     monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
 
-    result = await image_tool.execute_generate_image("call-1", {"prompt": "a cat"})
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, None, None
+    )
     text = result.content[0].text  # type: ignore[union-attr]
     assert "not cancelled — it had already completed" in text

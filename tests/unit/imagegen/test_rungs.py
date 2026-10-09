@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from local_operator.clients._http import APIError
 from local_operator.imagegen import ImageRoute
 from local_operator.imagegen import rungs as image_rungs
+from local_operator.imagegen.errors import REASON_CLASSES
 
 #: A 73-byte 1x1 PNG (real bytes, so nothing has to decode anything).
 PNG_1X1 = bytes.fromhex(
@@ -160,8 +161,26 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     for request in recorder.requests:
         if request.url.path.endswith(("/tools/media/status", "/tools/media/result")):
             assert list(request.url.params.keys()) == ["request_id"]
-        if request.url.path.endswith("/tools/media/generate"):
-            assert request.headers["authorization"] == "Bearer cred"
+
+    # The bearer rides EVERY hub call — models, capacity, generate, status and
+    # result. The 2026-10-08 defect was exactly a call missing it, so this is
+    # pinned per-path rather than on the generate call alone.
+    hub_requests = [r for r in recorder.requests if r.url.host == "hub.test"]
+    assert {r.url.path for r in hub_requests} == {
+        "/tools/media/models",
+        "/me/billing-sources/capacity",
+        "/tools/media/generate",
+        "/tools/media/status",
+        "/tools/media/result",
+    }
+    for request in hub_requests:
+        assert request.headers["authorization"] == "Bearer cred", request.url.path
+    # ...and NOTHING else does: asset downloads go to the provider's own origin
+    # and must never receive the account bearer.
+    downloads = [r for r in recorder.requests if r.url.host == "img.test"]
+    assert downloads, "sanity: the asset download happened through the same client"
+    for request in downloads:
+        assert "authorization" not in request.headers
 
     generate_body = next(
         body
@@ -261,6 +280,48 @@ async def test_radient_affordability_reads_the_result_envelope() -> None:
             )
     assert caught.value.reason_class == "insufficient_balance"
     assert not any(path.endswith("/tools/media/generate") for path in recorder.paths())
+
+
+def test_the_no_signal_backoff_is_bounded() -> None:
+    """pause=None callers get 2 s -> 4 s -> 8 s(cap) — never an unbounded wait."""
+    assert image_rungs._no_signal_poll_interval(0.0) == image_rungs.IMAGE_POLL_INTERVAL_S
+    assert image_rungs._no_signal_poll_interval(30.0) == 4.0
+    assert image_rungs._no_signal_poll_interval(60.0) == image_rungs.IMAGE_POLL_NO_SIGNAL_CAP_S
+    assert image_rungs._no_signal_poll_interval(9_999.0) == image_rungs.IMAGE_POLL_NO_SIGNAL_CAP_S
+
+
+@pytest.mark.asyncio
+async def test_a_pauseless_poller_still_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The round-1 pace pin: with ``pause=None`` (the no-signal caller) the poll
+    loop consults the bounded pacer instead of racing back-to-back reads."""
+    waited: list[float] = []
+
+    def pacer(elapsed_s: float) -> float:
+        waited.append(elapsed_s)
+        return 0.0  # keep the test instant; the interval values are pinned just above
+
+    monkeypatch.setattr(image_rungs, "_no_signal_poll_interval", pacer)
+    recorder = _Recorder()
+    async with _client(
+        _radient_handler(recorder, statuses=[{"status": "IN_QUEUE"}, {"status": "COMPLETED"}])
+    ) as client:
+        result = await image_rungs.run_radient(
+            prompt="a cat",
+            base_url="https://hub.test",
+            credential="cred",
+            num_images=1,
+            image_size="square_hd",
+            seed=None,
+            strength=None,
+            source_url=None,
+            model=None,
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=None,
+            client=client,
+        )
+    assert result.generation_id == "r1"
+    assert waited, "the loop paced the poll instead of hot-polling"
 
 
 @pytest.mark.asyncio
@@ -518,6 +579,9 @@ async def test_openai_img2img_is_skipped_with_a_reason() -> None:
                 client=client,
             )
     assert caught.value.reason_class == "unsupported"
+    # And the token is INSIDE the closed vocabulary — a consumer switching on
+    # ``REASON_CLASSES`` must never meet an out-of-set class (round-1 finding).
+    assert caught.value.reason_class in REASON_CLASSES
     assert recorder.requests == [], "nothing is spent on a skipped rung"
 
 
@@ -554,6 +618,7 @@ async def test_radient_cancel_sends_request_id_only(
     request = recorder.requests[0]
     assert request.method == "POST"
     assert request.url.path == "/tools/media/cancel"
+    assert request.headers["authorization"] == "Bearer cred", "the cancel carries the bearer"
     assert recorder.bodies[0] == {"request_id": "r1"}, "request_id ONLY, never model"
 
 
