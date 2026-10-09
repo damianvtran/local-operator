@@ -532,6 +532,20 @@ def _tool_row_details(
         for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
             if key in result_details:
                 details[key] = result_details[key]
+        # THE SETTLE PATH CARRIES THE CANONICAL BAG TOO (review round 1, F1).
+        # This function REPLACES the row's details at settle, so the live
+        # update pass-through (``LIVE_IMAGE_DETAIL_KEYS``) is discarded here
+        # — and without this read the card's settle arms (a landed cancel's
+        # ``stage``, the ``media_already_completed`` conflict) are unreachable
+        # on a real stream: the capture fixtures seed THIS function's output,
+        # so they cannot see the drop. Same tolerance as the update arm —
+        # present-key verbatim (`None` included), absent key not written —
+        # which also keeps live and replayed rows identical: updates are
+        # live-only, so a replayed row could never reproduce a retained live
+        # value.
+        for key in LIVE_IMAGE_DETAIL_KEYS:
+            if key in result_details:
+                details[key] = result_details[key]
     return details
 
 

@@ -353,4 +353,65 @@ describe("the canonical stage word", () => {
 		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
 		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
 	});
+
+	it("the latch holds the interim over the terminal-update window (design D1)", () => {
+		/* The producer brackets a cancel with two UPDATES — `cancelling` then
+		   `cancelled`, one emit before the result — and then the settle.
+		   Without the latch the second update un-says the acknowledged stop:
+		   the hold word vanishes and the abort control re-arms mid-cancel, so
+		   a second tap would send a second `{op:abort}`. */
+		const { rerender } = render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({
+						tool_state: "running",
+						details: liveDetails({ stage: "cancelling" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+
+		rerender(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({
+						tool_state: "running",
+						details: liveDetails({ stage: "cancelled" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.getByText("cancelling…")).toBeTruthy();
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+
+		/* The settle's own account is the word, and it retires the latch. */
+		rerender(
+			<Transcript pid="9" entries={[entry({ tool_state: "interrupted" })]} />,
+		);
+		expect(screen.getByText("cancelled")).toBeTruthy();
+		expect(screen.queryByTestId("image-gen-hold")).toBeNull();
+	});
+
+	it("a terminal stage word with no interim latches nothing", () => {
+		/* Non-preemption (design D1's scope: the interim only): a live row
+		   that never mapped to `cancelling` and then carries a settled-end
+		   word keeps its control — the word alone may not shed it. */
+		render(
+			<Transcript
+				pid="9"
+				entries={[
+					entry({
+						tool_state: "running",
+						details: liveDetails({ stage: "cancelled" }),
+					}),
+				]}
+			/>,
+		);
+		expect(screen.queryByTestId("image-gen-hold")).toBeNull();
+		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
+	});
 });

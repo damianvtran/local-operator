@@ -345,6 +345,99 @@ def test_canonical_image_update_details_reach_the_row_verbatim() -> None:
     assert "unrelated" not in row.details
 
 
+def test_the_canonical_settle_bag_reaches_the_settled_row() -> None:
+    """The settle REPLACES `row.details`, so the update arm's pass-through is
+    discarded there (review round 1, F1). Without the same allowlist on this
+    path the card's settle arms — a landed cancel's `stage`, the
+    `media_already_completed` conflict — are unreachable on a real stream,
+    and the fixtures seed the fold's OUTPUT (this very function), so they
+    cannot see the drop. Driven start -> update -> end through the REAL fold,
+    with the producer's own settle shapes (#2089: a landed cancel is
+    error-shaped with `stage: "cancelled"` and NO `error_type`; the conflict
+    adds the code beside the platform sentence).
+    """
+    # The landed cancel: the adapter's `cancelled` arm reads stage + the
+    # ABSENCE of `error_type` — both must survive the settle.
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img2", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img2",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): queued")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "queued",
+                    "queue_position": 2,
+                    "progress_fraction": None,
+                    "log_lines": None,
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="img2",
+            tool_name="generate_image",
+            result=ToolResult(
+                tool_call_id="img2",
+                tool_name="generate_image",
+                is_error=True,
+                content=[TextContent(text="Cancelled.")],
+                details={
+                    "cancel_handle": {"provider": "radient", "request_id": "r1"},
+                    "stage": "cancelled",
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "failed"
+    assert row.details["stage"] == "cancelled"
+    assert "error_type" not in row.details
+    assert row.details["output"] == "Cancelled."
+    # An absent canonical key is not retained from the live phase: updates
+    # are live-only, so a replayed row could never reproduce a kept value —
+    # the drop is what keeps live and replayed rows identical.
+    assert "queue_position" not in row.details
+
+    # The conflict: the same settle plus the code and the platform sentence.
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img3", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="img3",
+            tool_name="generate_image",
+            result=ToolResult(
+                tool_call_id="img3",
+                tool_name="generate_image",
+                is_error=True,
+                content=[TextContent(text="not cancelled — it had already completed")],
+                details={
+                    "stage": "cancelled",
+                    "error": "The generation had already completed when the cancel arrived.",
+                    "error_type": "media_already_completed",
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.details["stage"] == "cancelled"
+    assert row.details["error_type"] == "media_already_completed"
+    assert row.details["error"] == "The generation had already completed when the cancel arrived."
+
+
 def test_a_marked_abort_settles_interrupted_and_an_unmarked_failure_stays_failed() -> None:
     """The phone's live end-event ladder reads the marker before `is_error`.
 
