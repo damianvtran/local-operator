@@ -252,9 +252,15 @@ def test_live_and_durable_shapes_parse_to_one_model():
         assert isinstance(block, AttachmentContent)
         assert block.kind == "video"
     # The durable row's own metadata lands on the block; the live frame,
-    # which never carried a duration, does not invent one.
-    assert durable.content[0].duration_s == 3.5
-    assert live.content[0].duration_s is None
+    # which never carried a duration, does not invent one. (Narrowed per the
+    # union rule — `content[0]` is `Content` until isinstance says otherwise,
+    # and pyright's whole-tree pass reads this file too.)
+    durable_block = durable.content[0]
+    live_block = live.content[0]
+    assert isinstance(durable_block, AttachmentContent)
+    assert isinstance(live_block, AttachmentContent)
+    assert durable_block.duration_s == 3.5
+    assert live_block.duration_s is None
 
     # A legacy image reference is NOT an artifact: the coercion must leave
     # the old shapes alone.

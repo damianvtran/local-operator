@@ -393,7 +393,13 @@ class AttachmentContent(BaseModel):
     #: layer down. A required field is always on the row, so the durable
     #: identity is the format's own invariant rather than a producer habit.
     kind: Literal["image", "video", "audio"]
-    content_type: str = "application/octet-stream"
+    #: MIME of the cached bytes. NULLABLE, unlike ``kind``: the design rule is
+    #: "absent where unknown", and a hand-built or older block without it must
+    #: parse (surfaces fall back to their own sniffs/constants).  The truthy
+    #: default this class first shipped made three consumer fallbacks —
+    #: ``daemon._image_bytes``'s sidecar mime, the TUI adapter's ``image/png``,
+    #: and the mobile ref walk — unreachable code (agent review round 1, F5).
+    content_type: str | None = None
     #: Digest of the cached bytes in the attachment store — the LOCAL copy
     #: every surface fetches first. ``None`` only when the store refused the
     #: write (the producer was then told ``None`` by ``cache_media`` and
@@ -416,7 +422,12 @@ class AttachmentContent(BaseModel):
 #: The media families :class:`AttachmentContent` may name, and — because the
 #: coercion below routes on ``kind`` — the set every durable-shape check is
 #: built on. Closed on purpose: a typo'd kind fails loudly at the ``Literal``
-#: parse seam instead of rendering as an unknown block nothing handles.
+#: parse seam wherever a block is ROUTED there — every LIVE frame (the
+#: ``type`` discriminant routes it regardless of ``kind``), and durable rows
+#: whose ``kind`` is in this vocabulary. A durable row whose ``kind`` was
+#: mangled OUT of vocabulary is not routed and reads as empty text, silently;
+#: unreachable from in-tree producers (``cache_media`` types its argument),
+#: and stated here rather than papered over (agent review round 1, F6).
 ATTACHMENT_KINDS = frozenset({"image", "video", "audio"})
 
 

@@ -15,7 +15,9 @@ import base64
 import pytest
 
 from local_operator.harness.types import (
+    AgentMessage,
     AttachmentContent,
+    Content,
     ImageContent,
     Message,
     TextContent,
@@ -57,7 +59,7 @@ def test_refs_count_inline_and_artifact_images_on_one_index():
     artifact = cache_media(PNG_1X1, "image/png")
     assert artifact is not None
     video = AttachmentContent(kind="video", content_type="video/mp4", attachment="a" * 32)
-    content = [
+    content: list[Content] = [
         TextContent(text="generated a still"),
         artifact,
         video,
@@ -79,7 +81,7 @@ def test_history_fold_attaches_artifact_refs_to_the_settled_row():
     artifact = cache_media(PNG_1X1, "image/png")
     assert artifact is not None
     call = ToolCall(id="c1", name="generate_image", arguments={"prompt": "a fox"})
-    history = [
+    history: list[AgentMessage] = [
         Message.assistant("", tool_calls=[call]),
         Message.tool_result(
             ToolResult(
