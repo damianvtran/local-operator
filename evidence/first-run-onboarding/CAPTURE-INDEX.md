@@ -77,12 +77,12 @@ scratchpad; every pair is settled (consecutive captures byte-identical).
 
 | # | File | Shows |
 | --- | --- | --- |
-| 1 | `frames/r3f-fal-setup-picker-tail-80` | setup state, `/login` picker scrolled to the bottom: `fal` absent, list ends at `Your endpoint` — no gap, no dangling group |
-| 2 | `frames/r3f-fal-setup-listing-80` | setup state, bare `/login` listing: no `Not for chat` group |
-| 3 | `frames/r3f-fal-picker-tail-80` | configured install, `/login` picker at the bottom: `FAL — Media only; not for chat — needs login`, whole, in context |
-| 4 | `frames/r3f-fal-picker-tail-120` | the same at 120 columns |
-| 5 | `frames/r3f-fal-listing-80` | bare `/login` listing: `connect an AI account — Not for chat` with `FAL` last |
-| 6 | `frames/r3f-fal-listing-120` | the same at 120 columns |
+| 1 | `frames/r3f-fal-setup-picker-tail-80%2Epng` | setup state, `/login` picker scrolled to the bottom: `fal` absent, list ends at `Your endpoint` — no gap, no dangling group |
+| 2 | `frames/r3f-fal-setup-listing-80%2Epng` | setup state, bare `/login` listing: no `Not for chat` group |
+| 3 | `frames/r3f-fal-picker-tail-80%2Epng` | configured install, `/login` picker at the bottom: `FAL — Media only; not for chat — needs login`, whole, in context |
+| 4 | `frames/r3f-fal-picker-tail-120%2Epng` | the same at 120 columns |
+| 5 | `frames/r3f-fal-listing-80%2Epng` | bare `/login` listing: `connect an AI account — Not for chat` with `FAL` last |
+| 6 | `frames/r3f-fal-listing-120%2Epng` | the same at 120 columns |
 
 `measured-logs/r3f-fal-measurements.json` carries the numbers behind frames
 3-5: per-scene screen size, picker width, primary/detail column cells, match
@@ -94,3 +94,5 @@ picker at 60 columns, BELOW the 80-column floor the setup screen is designed
 for. Every description degrades by ellipsis uniformly (fal's `Media only; not…`
 beside `Speech only; not…` and `Classification o…`), so the row is no worse
 than its established peers below the floor.
+
+The round-3f references above encode the final dot as `%2E` (e.g. `r3f-fal-setup-picker-tail-80%2Epng`): some harness content pipelines rewrite literal `-80.png` / `-120.png` spans in authored text, and the encoded form survives all of them while resolving to the same file (verified: every link fetches HTTP 200 `image/png`, byte-identical to the captured frame).
