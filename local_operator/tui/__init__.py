@@ -184,6 +184,50 @@ def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
     return task
 
 
+def _schedule_seed_update_notices(app: Any) -> "asyncio.Task[None]":
+    """Deliver the starter-update notices the startup seam queued, once.
+
+    The seam (``run_startup_migrations``) runs before the app exists, so a
+    starter update it applied — or held, or only observed — cannot be shown
+    from there; it queues the lines in ``.seed-notices.json`` instead
+    (``agent_profiles.startup_seed_update_pass`` with ``surface="tui"``), and
+    this hook delivers them onto the app's notice surface on boot. SCHEDULED,
+    NEVER AWAITED, and best-effort by the same rule
+    ``_schedule_aida_boot_ensure`` states: a notice is worth a log line,
+    never a failed boot.
+
+    DISPLAY FIRST, THEN CLEAR (agent review round 1, R1-3): the hook PEEKS
+    the pending lines, shows each one, and only then removes the displayed
+    lines from ``pending`` (``announced`` is kept either way) — so a crash
+    between the two re-shows the lines next boot (safe) instead of losing
+    them (silent). A failed display therefore never spends the queue.
+
+    A named function rather than an inline closure, for the same reason its
+    sibling is: the scheduling itself is pinnable with a stub app, no pty
+    required.
+    """
+
+    async def _seed_update_notices() -> None:
+        try:
+            from local_operator import paths
+            from local_operator.agent_profiles import (
+                clear_pending_seed_notices,
+                peek_pending_seed_notices,
+            )
+
+            config_dir = paths.config_dir()
+            lines = peek_pending_seed_notices(config_dir)
+            for line in lines:
+                app._system_notice(line, "info")
+            clear_pending_seed_notices(config_dir, lines)
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.warning("seed notices: delivery failed", exc_info=True)
+
+    task = asyncio.create_task(_seed_update_notices())
+    app._seed_notices_task = task
+    return task
+
+
 async def run_tui(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
@@ -287,6 +331,7 @@ async def run_tui(
         # (§13).
         registration = _register_secret_session(app)
         _schedule_aida_boot_ensure(app)
+        _schedule_seed_update_notices(app)
         try:
             await app.run_async()
         except KeyboardInterrupt:
