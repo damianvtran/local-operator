@@ -267,7 +267,12 @@ def _usage_components(
 
 
 def job_subtree_components(
-    job: Any, *, seen: set[int] | None = None, detach: bool = True, live: bool = True
+    job: Any,
+    *,
+    seen: set[int] | None = None,
+    detach: bool = True,
+    live: bool = True,
+    problems: list[str] | None = None,
 ) -> list[Usage]:
     """Every priceable component one task row is responsible for, unmerged.
 
@@ -307,7 +312,13 @@ def job_subtree_components(
     design: swallowing it here would turn an unreadable branch into a silently
     low figure, so the caller decides how to mark it (``live=False`` retries
     without the branch).
+
+    ``problems`` collects what could NOT be read from the row itself (a malformed
+    descendant, an unreadable ``usage``). Each readable part still contributes —
+    one bad descendant must not erase the row's own spend — and a caller that
+    passes the list marks the figure a lower bound when it comes back non-empty.
     """
+    components: list[Usage] = []
     try:
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
@@ -317,22 +328,40 @@ def job_subtree_components(
             getattr(job, "model_label", None),
             detach=detach,
         )
+    except Exception:  # noqa: BLE001 — an unreadable row is not a render error
+        if problems is not None:
+            problems.append("usage")
+    try:
         descendants = getattr(job, "descendant_usage", None)
         if isinstance(descendants, Sequence) and not isinstance(descendants, (str, bytes)):
-            components.extend(
-                item if isinstance(item, Usage) else Usage.model_validate(item)
-                for item in descendants
-                if isinstance(item, (Usage, dict))
-            )
+            for item in descendants:
+                try:
+                    if isinstance(item, Usage):
+                        components.append(item)
+                    elif isinstance(item, dict):
+                        components.append(Usage.model_validate(item))
+                    else:
+                        raise TypeError(type(item).__name__)
+                except Exception:  # noqa: BLE001 — skip the one bad component, keep the rest
+                    if problems is not None:
+                        problems.append("descendant_usage")
+    except Exception:  # noqa: BLE001
+        if problems is not None:
+            problems.append("descendant_usage")
+    try:
         nested = getattr(job, "child_jobs", None) if live else None
-    except Exception:  # noqa: BLE001 — an unreadable row is not a render error
-        return []
+    except Exception:  # noqa: BLE001
+        nested = None
+        if problems is not None:
+            problems.append("child_jobs")
     if nested is not None:
-        components.extend(_nested_components(nested, seen, detach))
+        components.extend(_nested_components(nested, seen, detach, problems))
     return components
 
 
-def _nested_components(nested: Any, seen: set[int] | None, detach: bool) -> list[Usage]:
+def _nested_components(
+    nested: Any, seen: set[int] | None, detach: bool, problems: list[str] | None = None
+) -> list[Usage]:
     """The components of one attached child manager, whatever shape the host gave."""
     if isinstance(nested, AsyncJobManager):
         if seen is not None:
@@ -356,11 +385,15 @@ def _nested_components(nested: Any, seen: set[int] | None, detach: bool) -> list
         return []
     components: list[Usage] = []
     for row in list(lister()):  # type: ignore[operator]
-        components.extend(job_subtree_components(row, seen=visited, detach=detach))
+        components.extend(
+            job_subtree_components(row, seen=visited, detach=detach, problems=problems)
+        )
     return components
 
 
-def job_subtree_summary(job: Any, *, live: bool = True) -> list[Usage]:
+def job_subtree_summary(
+    job: Any, *, live: bool = True, problems: list[str] | None = None
+) -> list[Usage]:
     """:func:`job_subtree_components`, collapsed exactly as the ledger collapses it.
 
     Grouped by serving identity and receipt-vs-estimate through the SAME
@@ -376,7 +409,7 @@ def job_subtree_summary(job: Any, *, live: bool = True) -> list[Usage]:
     total has always been priced that way, and the row now agrees with it.
     """
     grouped: dict[tuple[str | None, str | None, str], Usage] = {}
-    for component in job_subtree_components(job, detach=False, live=live):
+    for component in job_subtree_components(job, detach=False, live=live, problems=problems):
         if type(component) is not Usage:
             # A follower's rows carry frozen ``Usage`` subclasses; the merge
             # accumulates in place, so it needs the plain mutable model.

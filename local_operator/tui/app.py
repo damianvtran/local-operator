@@ -53355,9 +53355,17 @@ class OperatorApp(App[None]):
         label = getattr(session, "model_label", "")
         for job in jobs:
             cost, lower_bound = job_subtree_cost(job, default_model_label=label)
-            stored = carry_floor(self._subagent_costs.get(job.id), cost, lower_bound)
+            if cost is None:
+                # Unpriced rows are skipped before their id is ever read: reduced
+                # and embedder hosts hand this poll id-less job objects, and an
+                # AttributeError on the 1 Hz timer takes the whole band repaint down.
+                continue
+            job_id = getattr(job, "id", None)
+            if job_id is None:
+                continue
+            stored = carry_floor(self._subagent_costs.get(job_id), cost, lower_bound)
             if stored is not None:
-                self._subagent_costs[job.id] = stored
+                self._subagent_costs[job_id] = stored
 
     def _search_spend_is_floor(self) -> bool:
         """Whether the search half makes the band's figure a lower bound.
