@@ -201,3 +201,60 @@ def test_an_unreadable_store_is_none_not_an_error(
 
     monkeypatch.setattr(auth_store_mod.AuthStore, "list_credentials", _boom)
     assert model_access.credentialed_chat_providers_here(config_dir=root) is None
+
+
+# ---------------------------------------------------------------------------
+# The FIRST-LOGIN rule (operator refinement, round 1): the session re-home is
+# scoped to the login that turns "nothing" into "something"
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_set_is_not_a_first_login() -> None:
+    """The provider just added must BE in the set — an empty read proves nothing.
+
+    A credential write precedes every call, so an empty set means the read is
+    wrong rather than the user has nothing; moving sessions on it would be a
+    guess, and every doubt here answers "no move".
+    """
+    from local_operator.providers.model_access import is_first_provider_login
+
+    assert is_first_provider_login(set(), "openai") is False
+    assert is_first_provider_login(None, "openai") is False
+
+
+def test_a_single_provider_login_is_the_first() -> None:
+    """One credentialed chat provider, the one just added: the repair's whole case."""
+    from local_operator.providers.model_access import is_first_provider_login
+
+    assert is_first_provider_login({"openai"}, "openai") is True
+    # A login FLAVOUR is the same account: ``openai-device`` stores under
+    # ``openai``, and signing in with it while only ``openai`` is credentialed is
+    # still that account's login, not a second one.
+    assert is_first_provider_login({"openai"}, "openai-device") is True
+    assert is_first_provider_login({"anthropic"}, "anthropic-key") is True
+
+
+def test_a_second_provider_login_never_moves_sessions() -> None:
+    """The refinement's core: N>1 credentialed providers means "not the first".
+
+    A user who can already run turns has conversations of their own; a later
+    sign-in adds a provider to switch models with, and must not re-point them.
+    Radient counts like any other provider, deliberately: a prior Radient/web
+    sign-in means "already logged in", so a later OpenAI login is not a first.
+    """
+    from local_operator.providers.model_access import is_first_provider_login
+
+    assert is_first_provider_login({"openai", "deepseek"}, "openai") is False
+    assert is_first_provider_login({"radient", "openai"}, "openai") is False
+
+
+def test_a_configured_local_counts_as_an_earlier_login() -> None:
+    """A pointed-at local server is a working choice, so it makes the next login non-first.
+
+    ``credentialed_chat_providers`` includes a configured ``ollama`` precisely
+    because the user opted in; the rule reads that same set, so the two cannot
+    disagree about whether this user already had somewhere to run.
+    """
+    from local_operator.providers.model_access import is_first_provider_login
+
+    assert is_first_provider_login({"ollama", "openai"}, "openai") is False

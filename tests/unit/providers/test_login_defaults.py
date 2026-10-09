@@ -669,9 +669,10 @@ def test_a_stranded_default_is_replaced_by_the_provider_just_signed_in() -> None
     assert plan.hosting == "openai"
     assert plan.model_name == "gpt-6-astra"
     assert plan.model_label == "GPT-6 Astra"
-    assert plan.receipt == (
-        "Replaced unreachable hosting 'radient' with 'openai', model to 'gpt-6-astra'."
-    )
+    # The wording says WHY in the session sentence's own vocabulary ("not signed
+    # in"), because the two rows land two lines apart in the TUI and one
+    # condition spelled two ways read as two causes (UX review U2 / design D4).
+    assert plan.receipt == ("Default moved to openai/gpt-6-astra — not signed in to radient.")
     # NOT the registry-repair flag: ``radient`` IS a provider this build owns,
     # and callers read that flag as "the stored id was not a provider at all".
     assert plan.repairing is False
@@ -776,8 +777,7 @@ def test_a_provider_with_no_default_model_clears_the_stranded_one() -> None:
     assert plan.hosting == "openai-compatible"
     assert plan.model_name == ""
     assert plan.receipt == (
-        "Replaced unreachable hosting 'radient' with 'openai-compatible', cleared the "
-        "model it left behind (no default known)."
+        "Default moved to openai-compatible — not signed in to radient; model cleared."
     )
 
 
@@ -800,3 +800,64 @@ def test_the_stranded_receipt_fits_a_row_at_100_columns() -> None:
     plan = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible={"openai"})
     assert plan.receipt is not None
     assert len(plan.receipt) <= 90, len(plan.receipt)
+
+
+# ---------------------------------------------------------------------------
+# The SUBSCRIPTION arm's model (operator refinement, round 1): the first login's
+# target must be the latest model the subscription route serves
+# ---------------------------------------------------------------------------
+
+
+def test_the_openai_subscription_login_picks_the_subscription_latest_model() -> None:
+    """``openai``/``openai-device`` are OAuth arms; their target is GPT-6 Astra.
+
+    Both arms resolve to hosting ``openai`` and pass ``oauth=True`` into
+    ``suggested_model_for``; with no OAUTH override for this provider the
+    suggestion is the SHARED latest, which is also the id the ChatGPT/Codex
+    subscription route serves — ``model/defaults.py``'s own sourcing comment
+    ("The ChatGPT-subscription (Codex) route serves the same id, which is what
+    ``scripts/bench_openai_oauth_cache.py`` drives over OAuth") and
+    ``model/registry.py``'s ``gpt-6-astra`` row (``recommended=True``, "OpenAI's
+    most capable model"). Pinned per provider, because this is the model a
+    first-login re-home will put a conversation on.
+    """
+    from local_operator.model.defaults import suggested_model_for
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    suggested = suggested_model_for("openai", oauth=True)
+    assert suggested is not None and suggested.id == "gpt-6-astra"
+    for flavour in ("openai", "openai-device"):
+        plan = plan_login_defaults(flavour, "", "", oauth=None, accessible={"openai"})
+        assert plan.hosting == "openai"
+        assert plan.model_name == "gpt-6-astra", flavour
+
+    # The API-key arm agrees: one account, one latest id, whichever door the
+    # credential came through (`store_credentials_as` puts both under `openai`).
+    api_key_plan = plan_login_defaults("openai-api-key", "", "", oauth=None, accessible={"openai"})
+    assert api_key_plan.model_name == "gpt-6-astra"
+
+
+def test_the_anthropic_subscription_login_picks_the_subscription_latest_model() -> None:
+    """``anthropic`` is the Claude Pro/Max OAuth arm; its target is Opus 5.5.
+
+    ``model/registry.py``'s ``claude-opus-5-5`` comment records the evidence:
+    "also served by the live /v1/models listing under a Claude Pro/Max OAuth
+    grant", and the row is ``recommended=True`` ("the recommended starting
+    model"). ``anthropic-key`` (the API-key flavour) resolves to the same
+    hosting and the same suggestion, so the subscription and keyed routes cannot
+    drift apart on what "latest" means.
+    """
+    from local_operator.model.defaults import suggested_model_for
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    suggested = suggested_model_for("anthropic", oauth=True)
+    assert suggested is not None and suggested.id == "claude-opus-5-5"
+
+    subscription = plan_login_defaults("anthropic", "", "", oauth=None, accessible={"anthropic"})
+    assert subscription.hosting == "anthropic"
+    assert subscription.model_name == "claude-opus-5-5"
+
+    api_key_plan = plan_login_defaults(
+        "anthropic-key", "", "", oauth=None, accessible={"anthropic"}
+    )
+    assert api_key_plan.model_name == "claude-opus-5-5"

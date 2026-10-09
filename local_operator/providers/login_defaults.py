@@ -293,13 +293,26 @@ def plan_login_defaults(
         # stream time, where the app cannot explain it. ``repairing`` stays False
         # because the registry DOES own this hosting -- that flag means "the id
         # was not a provider at all", and callers read it as such.
-        model_to_write = default_model
-        receipt = f"Replaced unreachable hosting '{hosting}' with '{resolved}'"
+        #
+        # The wording says WHY ("not signed in to <old>"), matching the session
+        # sentence the re-home paints (``model_access.rehome_notice``): the two
+        # rows land two lines apart in the TUI, and one condition spelled two
+        # ways -- "unreachable hosting" here, "not signed in" there -- read as
+        # two different causes for one event (design review D4 / UX review U2).
+        # "Unreachable" is kept for the REGISTRY-UNKNOWN branch below, where the
+        # cause genuinely is the id, not a missing credential.
+        #
+        # NOT first-login-gated, deliberately: the operator's first-login rule
+        # scopes the SESSION move (a repair to conversations the user did not
+        # ask to move). This default rewrite is the config repair the stranded
+        # state has always needed, on any login -- a later sign-in to a provider
+        # that fixes an unrunnable default is still a fix.
         if default_model:
-            receipt += f", model to '{default_model}'"
+            receipt = f"Default moved to {resolved}/{default_model} — not signed in to {hosting}."
+            model_to_write = default_model
         else:
-            receipt += ", cleared the model it left behind (no default known)"
-        receipt += "."  # the sentence is complete here; see the note below
+            receipt = f"Default moved to {resolved} — not signed in to {hosting}; model cleared."
+            model_to_write = ""
         return LoginDefaults(
             hosting=resolved,
             model_name=model_to_write,

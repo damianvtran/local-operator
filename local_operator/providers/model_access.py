@@ -24,11 +24,12 @@ provider as usable, always — right for a picker (show what could run), wrong f
 
 * an empty account is NOT "has Ollama", or the first sign-in of a new user would
   never count as their first;
-* a default of ``ollama`` with no credential is not stranded — it needs none, and
-  the user may well be running it on its preset port (config records a deliberate
-  endpoint only when it is moved off it, so absence of ``base_url`` proves nothing).
-  Flipping that default away on an OpenAI sign-in would be the exact surprise the
-  "hosting already set and usable" rule exists to prevent.
+* an unconfigured keyless local (``ollama`` with no ``base_url``) has never
+  served a chat, so a default naming one is STRANDED like any unreachable
+  hosting: a later sign-in replaces it, which is the repair, not the surprise.
+  A local server the user pointed somewhere (``base_url`` on record) is in the
+  set like any other working choice, so it is neither stranded nor a target —
+  see :func:`is_stranded`, which states the same rule at the predicate.
 
 Pure of side effects apart from the credential-store read the controller does,
 and imported lazily by its front ends (the TUI, the CLI and the server each pull
@@ -38,7 +39,8 @@ it in only at login time).
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -166,22 +168,10 @@ def credentialed_chat_providers_here(
     A store that cannot be opened is "cannot tell" (``None``), not an error.
     """
     import sqlite3
-    from contextlib import closing
 
-    from local_operator.paths import config_dir as resolve_config_dir
-    from local_operator.providers.auth_store import AuthStore
-    from local_operator.providers.controller import ProviderController
-
-    root = config_dir if config_dir is not None else resolve_config_dir()
     try:
-        # The DB path is spelled from ``root`` explicitly, exactly as
-        # ``DesktopAuth`` does: ``config_dir`` alone feeds only the store's
-        # env-override tier, so a caller whose root is not the ambient one would
-        # otherwise silently read the AMBIENT auth.db.
-        with closing(AuthStore(root / "auth.db", config_dir=root)) as store:
-            return credentialed_chat_providers(
-                ProviderController(store, root), config_values=config_values
-            )
+        with _own_controller(config_dir) as controller:
+            return credentialed_chat_providers(controller, config_values=config_values)
     except sqlite3.ProgrammingError:
         # A connection crossing threads is a caller BUG, not an unreadable store:
         # ``usable_providers`` re-raises it before its degradation for the same
@@ -193,6 +183,49 @@ def credentialed_chat_providers_here(
         # store that cannot even be OPENED (deleted, corrupt, unwritable) is as
         # unknowable as one that cannot be read, and must move nothing.
         return None
+
+
+def usable_providers_here(*, config_dir: Path | None = None) -> set[str] | None:
+    """``ProviderController.usable_providers`` against THIS process's own store.
+
+    The WIDE access answer — keyless locals and ``test`` included — which is the
+    predicate the published model-access claim is defined against (the TUI and
+    the serve-side runtime both answer the band from it). Narrower questions use
+    :func:`credentialed_chat_providers_here`; both open the store through
+    :func:`_own_controller`, so they cannot drift on how it is found, closed or
+    degraded: an unopenable store is ``None`` ("cannot tell"), never an empty
+    set, and a cross-thread connection is re-raised as the caller bug it is.
+    """
+    import sqlite3
+
+    try:
+        with _own_controller(config_dir) as controller:
+            return controller.usable_providers()
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError):
+        return None
+
+
+@contextmanager
+def _own_controller(config_dir: Path | None) -> Iterator[Any]:
+    """This process's own store, opened for ONE read and closed after it.
+
+    The DB path is spelled from ``root`` explicitly, exactly as ``DesktopAuth``
+    does: ``config_dir`` alone feeds only the store's env-override tier, so a
+    caller whose root is not the ambient one would otherwise silently read the
+    AMBIENT auth.db. One shape for both readers above, because "which store did
+    this open" is the kind of thing a second copy gets wrong quietly.
+    """
+    from contextlib import closing
+
+    from local_operator.paths import config_dir as resolve_config_dir
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+
+    root = config_dir if config_dir is not None else resolve_config_dir()
+    with closing(AuthStore(root / "auth.db", config_dir=root)) as store:
+        yield ProviderController(store, root)
 
 
 def _storage_ids(providers: Collection[str]) -> set[str]:
@@ -263,3 +296,73 @@ def rehome_notice(old_label: str, new_label: str) -> str:
     """
     old_provider = old_label.partition("/")[0] or old_label
     return f"Switched to {new_label} — not signed in to {old_provider}."
+
+
+#: The owner's reply word for a session that could not be re-homed because it is
+#: mid-turn. One spelling, because a CALLER classifies on it: the desktop pool
+#: counts its deferrals by matching this exact string (the conversation itself is
+#: told by :func:`rehome_deferred_notice`, which the owner emits).
+REHOME_BUSY_REPLY = "kept: the session is working right now"
+
+
+def rehome_deferred_notice(old_label: str, count: int = 1) -> str:
+    """The sentence that tells a user their busy conversation did NOT move.
+
+    A refusal nobody speaks is the silent variant of the bug the re-home exists
+    to end: the receipts around the sign-in read as "fixed" while the
+    conversation keeps using the model the app has just established this user
+    cannot run. So the refusal is said, once, where it is recorded — with the one
+    route out of the state named, because the repair will not retry by itself on
+    every surface.
+
+    Named per conversation rather than in the aggregate for ``count == 1`` (the
+    common case); a multi-session receipt says the count without picking one
+    conversation's model to speak for the others.
+    """
+    if count == 1:
+        return (
+            f"This conversation stays on {old_label} until the current turn ends — "
+            "/model switches it now."
+        )
+    return (
+        f"{count} conversations stay on their current model until their turns end — "
+        "/model switches each one now."
+    )
+
+
+def rehome_still_stranded_notice(old_label: str) -> str:
+    """The sentence for a deferred re-home that could not complete at turn end.
+
+    The other half of :func:`rehome_deferred_notice`'s promise: a deferral the
+    TUI retries when the turn settles either moves the conversation or says it is
+    still where it was, because a pending repair that can silently evaporate is
+    the same silence one turn later.
+    """
+    return f"This conversation is still on {old_label} — /model switches it when you are ready."
+
+
+def is_first_provider_login(accessible: Collection[str] | None, provider: str) -> bool:
+    """True when the provider just signed in to is the ONLY credentialed chat provider.
+
+    The session re-home's gate (operator refinement, round 1): it exists for the
+    state a session can be in BEFORE any provider login — started by an earlier
+    sign-in, pinned to ``radient/auto``, with nothing behind it — and the FIRST
+    provider login is the one that should move it. Every later login is a user
+    adding a second provider to switch models with, and re-pointing their open
+    conversations then is the surprise the planner's case-1 rule exists to
+    prevent, wearing a session-shaped hat. So: re-home iff the credentialed chat
+    providers OTHER than the one just added are empty.
+
+    Radient counts like any other credentialed chat provider, deliberately: a
+    prior Radient/web sign-in means this user already logged in to a provider,
+    and a later OpenAI or Anthropic login therefore must NOT move sessions.
+
+    ``None`` (unknowable store) answers ``False`` — every doubt in this module
+    leans the same way, because the consequence of ``True`` is a switched model
+    the user did not ask for.
+    """
+    if accessible is None:
+        return False
+    providers = _storage_ids(accessible)
+    added = credential_provider_id(provider)
+    return added in providers and not (providers - {added})
