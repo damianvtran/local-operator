@@ -135,7 +135,9 @@ def main() -> None:
                     tool_call_id="call_a77a_01",
                     tool_name="generate_image",
                     content=[
-                        TextContent(text="Generated one image (640x360, %d bytes)." % len(artifact_bytes)),
+                        TextContent(
+                            text="Generated one image (640x360, %d bytes)." % len(artifact_bytes)
+                        ),
                         artifact,
                     ],
                     details={
@@ -156,11 +158,12 @@ def main() -> None:
             )
         )
         await transcript.append_message(
-            Message.user("And a tiny inline one.", [ImageContent(data=tiny_b64, mime_type="image/png")])
+            Message.user(
+                "And a tiny inline one.",
+                [ImageContent(data=tiny_b64, mime_type="image/png")],
+            )
         )
-        await transcript.append_message(
-            Message.assistant("Both are on the transcript now.")
-        )
+        await transcript.append_message(Message.assistant("Both are on the transcript now."))
 
     asyncio.run(seed())
 
@@ -179,12 +182,18 @@ def main() -> None:
         payload = json.loads(line).get("payload", {})
         for block in payload.get("content", []):
             if isinstance(block, dict):
-                kinds.append(block.get("kind") or ("legacy-ref" if "attachment" in block else ("inline" if "data" in block else "text")))
+                shape = block.get("kind")
+                if shape is None:
+                    shape = "legacy-ref" if "attachment" in block else "text"
+                    if "data" in block:
+                        shape = "inline"
+                kinds.append(shape)
     print("block shapes on disk:", kinds)
     digest = artifact.attachment
     store_file = root / "attachments" / f"{digest}.bin"
     print("artifact digest:", digest)
-    print("store file exists:", store_file.exists(), store_file.stat().st_size if store_file.exists() else 0)
+    size = store_file.stat().st_size if store_file.exists() else 0
+    print("store file exists:", store_file.exists(), size)
     history = transcript.build_llm_history()
     from local_operator.harness.types import AttachmentContent
 
@@ -195,7 +204,8 @@ def main() -> None:
         for b in m.content
         if isinstance(b, AttachmentContent)
     ]
-    print("artifacts replayed:", len(found), found[0].model_dump(exclude_defaults=True) if found else None)
+    first = found[0].model_dump(exclude_defaults=True) if found else None
+    print("artifacts replayed:", len(found), first)
     print("SEED OK")
 
 
