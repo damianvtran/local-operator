@@ -131,12 +131,20 @@ def is_pure_addition(old: str, new: str) -> bool:
 
     Guard: at least one added line must carry content beyond the line-number
     gutter and the ``<ts>`` scrub marker, so a delta that adds only blank or
-    timestamp-only lines still goes to the gate. ``old`` empty is not an
-    addition (that is baseline establishment, handled before any delta).
+    timestamp-only lines still goes to the gate.
+
+    An EMPTY ``old`` (the watched command printed nothing last time) counts as
+    zero lines, so ``"" -> "ERROR x"`` (the ``grep``/``ls`` first-match shape)
+    is an addition; ``"".split("\\n")`` would otherwise be ``[""]`` and make it
+    a replace. This is not baseline establishment: that path has no snapshot
+    and never reaches a delta.
+
+    Callers must not use this on a TRUNCATED snapshot: a tail edit beyond the
+    stored window reads as a pure insert there (the scheduler checks).
     """
-    old_lines = old.split("\n")
-    matcher = difflib.SequenceMatcher(None, old_lines, new.split("\n"), autojunk=False)
+    old_lines = old.split("\n") if old else []
     new_lines = new.split("\n")
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
     carries_content = False
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
         if tag in ("replace", "delete"):

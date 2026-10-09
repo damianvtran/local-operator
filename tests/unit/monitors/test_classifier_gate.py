@@ -373,6 +373,54 @@ async def test_an_appended_log_line_read_through_read_is_delivered(harness: Harn
 
 
 @pytest.mark.asyncio
+async def test_a_pure_addition_is_delivered_without_asking_the_gate(harness: Harness) -> None:
+    """An appended line never reaches the model, so no verdict can swallow it."""
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
+    harness.scheduler.load([spec(name="log", description=LOG_PURPOSE)])
+    harness.results.extend([{"text": "1| a"}, {"text": "1| a\n2| b done rc=0"}])
+    await harness.ripe()
+    await harness.ripe()
+    assert harness.states == [], "the gate was asked about an append"
+    assert len(harness.deliveries) == 1
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_edit_still_goes_to_the_gate(harness: Harness) -> None:
+    harness.script.append(NON_MATERIAL_METADATA)
+    harness.scheduler.load([spec(name="log", description=LOG_PURPOSE)])
+    harness.results.extend(
+        [{"text": "1| a"}, {"text": "1| a\n2| b\n3| c"}, {"text": "1| a2\n2| b\n3| c"}]
+    )
+    await harness.ripe()
+    await harness.ripe()  # append: delivered, no call
+    await harness.ripe()  # edit: asked, suppressed
+    assert len(harness.states) == 1
+    assert len(harness.deliveries) == 1
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_append_to_a_truncated_snapshot_is_still_gated(tmp_path: Any) -> None:
+    """Review R2: beyond the stored window a tail edit looks like an insert."""
+    harness = Harness(tmp_path, settings=MonitorSettings(snapshot_max_chars=20))
+    try:
+        harness.script.append(NON_MATERIAL_METADATA)
+        harness.scheduler.load([spec()])
+        harness.results.extend(
+            [
+                {"text": "aaaa\nbbbb\ncccc\ndddd\neeee"},
+                {"text": "aaaa\nbbbb\ncccc\ndddd\neeee\nffff"},
+            ]
+        )
+        await harness.ripe()
+        await harness.ripe()
+        assert len(harness.states) == 1, "a truncated window must not bypass the gate"
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_gate_state_names_the_monitor_and_its_purpose(harness: Harness) -> None:
     harness.scheduler.load([spec(name="loom-pr", description="flip of review state")])
     harness.results.extend([{"text": "a"}, {"text": "b"}])

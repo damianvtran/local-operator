@@ -805,7 +805,7 @@ class MonitorScheduler:
                     return None
                 delta_text, changes = beyond_window_text(new_hash)
             else:
-                pure_addition = is_pure_addition(blob_text, normalized)
+                pure_addition = not truncated and is_pure_addition(blob_text, normalized)
                 delta_text, changes = render_delta(
                     blob_text,
                     normalized,

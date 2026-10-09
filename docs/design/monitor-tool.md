@@ -751,11 +751,20 @@ The guide says this explicitly.
 Only on a **heuristic hit** — a normalized-output difference (§7). An
 unchanged tick makes **zero** classifier calls. **Each changed monitor is
 classified with its own call** (round-1 review F3): the state is that
-monitor's bounded delta (≤ `classifyMaxChars`) and the answer is attributed to
-it by construction, so the per-monitor counters (§8.4, §10.3) and the delivery
+monitor's bounded delta (≤ `classifyMaxChars`; since 2026-10-09 preceded by
+the monitor's name and a clipped purpose line, which `classifyMaxChars` does
+not count) and the answer is attributed to it by construction, so the per-monitor counters (§8.4, §10.3) and the delivery
 decision can never be blended. Calls are issued sequentially within the pump
 pass — hits are rare, and this keeps the request rate inside the cascade's own
 limits.
+
+**Pure additions skip the gate (2026-10-09 regression).** A delta that only
+*adds* lines (an append-only log, a listing that gained a row) is delivered
+without a call: the live model called `+ 4| === c2 done rc=0 <ts> ===`
+`non-material-metadata` 3/3 on a bare delta and swallowed a build-progress
+monitor's every transition. The gate's suppress classes describe bookkeeping
+that *changed*; an added record is the rubric's own MATERIAL. Not applied to a
+truncated snapshot, where a tail edit beyond the window looks like an insert.
 
 ### 8.2 The service seam
 
