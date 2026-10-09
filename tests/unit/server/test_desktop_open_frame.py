@@ -13,7 +13,6 @@ touched.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -325,7 +324,9 @@ async def test_a_head_beyond_the_budget_is_stated_rather_than_faked(tmp_path: Pa
     ``runs`` carries for it.
     """
     async with _Harness(tmp_path) as harness:
-        harness.seed(turns=3, per_turn_tools=120)
+        # 300 calls in the last turn: its head is further above the window than
+        # the whole head-hunt budget, so this is the shape the trim exists for.
+        harness.seed(turns=3, per_turn_tools=300)
         assert harness.client is not None
         page = (
             await harness.client.get(

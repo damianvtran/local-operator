@@ -111,13 +111,12 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_MAX_EXTRA_ROWS,
     OPEN_FRAME_MAX_RAW_PAGES,
     OPEN_FRAME_MAX_ROWS,
+    align_page,
     build_frame,
-    head_reached,
     page_seq_bounds,
     paintable,
     served_bytes,
     tail_head_reachable,
-    trim_to_limit,
 )
 from local_operator.session.page_cache import load_transcript_page
 
@@ -3543,8 +3542,9 @@ class DesktopSessionBridge:
             collected = rows + collected
             if not collected:
                 break
+            kept, reached = align_page(collected, limit)
             paintable_rows = paintable(collected)
-            if len(paintable_rows) >= limit and head_reached(paintable_rows):
+            if reached and len(paintable(kept)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -3557,6 +3557,9 @@ class DesktopSessionBridge:
                 if index is not None and not tail_head_reachable(index, limit=limit):
                     break
             if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
+                # The head hunt's own budget, in ROWS and not pages: past it the
+                # page is not aligned and the rows above the limit are ones the
+                # cut refuses to serve anyway (see ``align_page``).
                 break
             if (
                 len(paintable_rows) >= OPEN_FRAME_MAX_ROWS
@@ -3570,18 +3573,16 @@ class DesktopSessionBridge:
                 break
         if index is None:
             index = await self._frame_index()
-        if index is not None and not head_reached(paintable(collected)):
-            # THE HEAD HUNT FAILED, SO IT IS NOT PAID FOR. With an index in hand
-            # this is a fact rather than a guess: the page's oldest row is not a
-            # user row, so the oldest run on it is a fragment — and rows pulled
-            # past ``limit`` cannot complete it. The page the client asked for is
-            # served instead, with ``head_cut: true`` saying why and ``runs``
-            # carrying that run's true size. WITHOUT an index the extension is
-            # kept: those extra rows are paintable rows for a client that has no
-            # facts at all, which is the case the walk was written for.
-            collected = list(trim_to_limit(collected, limit))
+        # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
+        # ``limit`` paintable rows, starting at a user row when one is in reach,
+        # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
+        # page whose oldest run is a fragment either way is not made better by
+        # extra rows — measured on the S3 fixture, serving the overshoot was 231
+        # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
+        # not paid for, and ``runs`` carries that run's true size instead.
+        kept, reached = align_page(collected, limit)
         result = build_frame(
-            collected,
+            kept,
             index=index,
             runs_state="building",
             has_more=has_more,
@@ -3602,10 +3603,14 @@ class DesktopSessionBridge:
             ),
         )
         answer = self._frame_answer(result)
-        answer["has_more"] = has_more or result.capped
-        answer["head_cut"] = (not head_reached(result.entries)) and (
-            answer["has_more"] or result.capped
-        )
+        # A cut that DROPPED rows the read had already fetched still owes the
+        # client a "there is more above this page": ``has_more`` describes the
+        # page served, never the reads behind it, and the reader that trimmed
+        # rows above the cut would otherwise be told the conversation starts
+        # there.
+        trimmed = len(kept) < len(collected)
+        answer["has_more"] = has_more or result.capped or trimmed
+        answer["head_cut"] = (not reached) and (answer["has_more"] or result.capped)
         return answer
 
     @staticmethod

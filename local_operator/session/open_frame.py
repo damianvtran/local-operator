@@ -283,50 +283,64 @@ def tail_head_reachable(
     return rows_above_head <= limit + extra_rows + 1
 
 
-def head_reached(paintable_rows: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether the page's oldest row is a run's opening user row.
-
-    The extension's stop condition, stated in ROWS rather than in the index's
-    turns on purpose: it is a fact about the page the client will paint, it holds
-    for a conversation whose index has never been built, and it is the client's
-    own run opener (``walkTurns``). A page whose oldest row is anything else may
-    be a run's middle, which is what ``head_cut`` exists to say out loud.
-    """
-    if not paintable_rows:
-        return True
-    oldest = paintable_rows[0]
-    payload = oldest.get("payload")
+def is_user_row(entry: Mapping[str, Any]) -> bool:
+    """Whether a SERVED row is a user message row — the client's own run opener."""
+    payload = entry.get("payload")
     return (
-        str(oldest.get("type") or "") == "message"
+        str(entry.get("type") or "") == "message"
         and isinstance(payload, Mapping)
         and str(payload.get("role") or "") == "user"
     )
 
 
-def trim_to_limit(rows: Sequence[Mapping[str, Any]], limit: int) -> list[Mapping[str, Any]]:
-    """The newest ``limit`` PAINTABLE rows of ``rows``, oldest first.
+def align_page(
+    rows: Sequence[Mapping[str, Any]],
+    limit: int,
+    *,
+    extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    """Cut ``rows`` to the page the contract promises: (kept rows, head reached).
 
-    THE HONEST ANSWER WHEN THE HEAD HUNT FAILS. A page whose oldest run could not
-    be completed — the operator's 600-row run, whose head is 500 rows above
-    anything a sane budget reaches — is a page whose oldest run is a fragment
-    either way, so the rows the extension added buy the client nothing: it still
-    cannot condense that run from them, and ``runs`` states its true size. Serving
-    them anyway was measured at 2.3x the payload of the page the client asked for
-    on the S3 fixture (231 paintable rows, 264 KB against 100 rows and 114 KB) for
-    no boundary and no exactness.
+    THE CUT HAS TWO JOBS AND THEY PULL IN OPPOSITE DIRECTIONS, which is what the
+    first two revisions of this function got wrong in opposite ways.
 
-    The trim runs from the NEWEST end for the same reason the caps do: the rows a
-    reader cannot lose are the recent ones.
+    It must serve at least ``limit`` PAINTABLE rows — that is what the client
+    asked for — and it must not leave a PARTIAL run at the page's top, because a
+    partial run is what makes a client condense a turn, then re-condense it as
+    more pages arrive. So the cut goes back from the newest end until it has
+    counted ``limit`` paintable rows, and then CONTINUES to the next user row
+    above that — a user row is the client's own run opener (``walkTurns``), so a
+    page starting there begins a run rather than cutting one. The rows it took to
+    get there are the head hunt, and they are bounded by ``extra_rows``.
+
+    When no user row is within reach — the operator's 600-row run, whose head is
+    hundreds of rows above anything a sane budget covers — the cut falls back to
+    exactly ``limit`` rows and reports ``head_reached=False``: the page's oldest
+    run is a fragment EITHER WAY, so the rows the hunt added would cost bytes and
+    buy nothing. ``runs`` is where that run's true size lives. Measured on the S3
+    fixture: serving the overshoot was 231 rows and 264 KB against 100 rows and
+    114 KB, both with a partial run at the top.
+
+    Stated as a pure function of the rows so the desktop and the relay can cut
+    their pages identically, and so the rule is testable without a journal.
     """
-    kept: list[Mapping[str, Any]] = []
-    for row in reversed(list(rows)):
-        if strip_entry(row) is None:
-            continue
-        kept.append(row)
-        if len(kept) >= limit:
-            break
-    kept.reverse()
-    return kept
+    if limit < 1:
+        return list(rows), True
+    order = list(rows)
+    painted = [(index, strip_entry(row)) for index, row in enumerate(order)]
+    paintable = [(index, entry) for index, entry in painted if entry is not None]
+    if not paintable:
+        return order, True
+    # ``paintable`` is OLDEST FIRST, so "older" is a smaller position: the page
+    # the client asked for ends at this one, and the hunt walks down from it.
+    base = max(0, len(paintable) - limit)
+    if is_user_row(paintable[base][1]):
+        return order[paintable[base][0] :], True
+    for position in range(base - 1, max(-1, base - extra_rows - 1), -1):
+        if is_user_row(paintable[position][1]):
+            return order[paintable[position][0] :], True
+    # No user row in reach: exactly the rows asked for, and say the head is cut.
+    return order[paintable[base][0] :], False
 
 
 def served_bytes(entries: Sequence[Mapping[str, Any]]) -> int:
@@ -530,35 +544,3 @@ def page_seq_bounds(
     if following < len(index.runs):
         return (first_seq, index.runs[following].first_seq)
     return (first_seq, None)
-
-
-def run_head_of(index: TranscriptIndex, row_id: str) -> str | None:
-    """The opening user row of the run that ``row_id`` belongs to, or ``None``.
-
-    THE INDEX DOES NOT CARRY ROW MEMBERSHIP, so this answers the question the
-    extension needs from the rows it does carry: the run whose span contains a
-    CHECKPOINT row is found by ordinal, and its opening user id is its head. A
-    row that is not a checkpoint (a tool row, a mid-run assistant row) has no
-    ordinal here and answers ``None`` — the caller then simply does not extend,
-    which is today's page.
-    """
-    seq = _checkpoint_seq(index, row_id)
-    if seq is None:
-        return None
-    for run in index.runs:
-        if run.first_seq <= seq <= run.last_seq:
-            return run.opening_user_id or None
-    return None
-
-
-def _checkpoint_seq(index: TranscriptIndex, row_id: str) -> int | None:
-    """The ordinal of a checkpoint row with this id, or ``None``.
-
-    A linear scan over the manifest is the right cost here: it runs once per
-    extension attempt (never per row), and the manifest is small by
-    construction — one entry per user turn and per completion, not per row.
-    """
-    for checkpoint in index.checkpoints:
-        if checkpoint.id == row_id:
-            return checkpoint.seq
-    return None

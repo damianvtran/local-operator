@@ -204,27 +204,60 @@ def test_an_unknown_row_type_is_served_verbatim() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_head_reached_is_the_oldest_served_row_being_a_user_row() -> None:
-    """The extension's stop condition, and it is about the OLDEST row only.
+def test_align_page_starts_the_page_at_a_user_row_when_one_is_in_reach() -> None:
+    """The cut's job, stated on rows alone.
 
-    A page that begins on a completion receipt or a tool row is a page inside a
-    run — the receipt belongs to the run whose user row is above it — so the
-    question is never "does the page contain a user row", which every page does.
+    At least ``limit`` paintable rows, and a page that BEGINS at a user row when
+    the hunt can find one — that user row is the client's own run opener, so the
+    page begins a run instead of cutting one. The rows the hunt added are the
+    extension, and they are bounded.
     """
-    assert of.head_reached([message("u1", "user"), message("t1", "tool")]) is True
-    assert of.head_reached([message("t1", "tool"), message("u1", "user")]) is False
-    assert of.head_reached([]) is True
-    # A PAINTED non-user row is still not a head: the completion receipt paints,
-    # and a page starting on one is a page mid-run.
-    assert (
-        of.head_reached(
-            [custom("c1", "completion_attention", {"anchor": "a"}), message("u1", "user")]
-        )
-        is False
-    )
-    # A STRIPPED row never reaches ``head_reached``: the caller hands it the
-    # paintable rows, which is what makes the rule a fact about the paint.
-    assert of.paintable([custom("c1", "system_prefix"), message("u1", "user")])[0]["id"] == "u1"
+    rows = [
+        message("u1", "user"),
+        message("t1", "tool"),
+        message("t2", "tool"),
+        message("u2", "user"),
+        message("t3", "tool"),
+        message("t4", "tool"),
+        custom("c1", "session_spend.v1"),
+        message("t5", "tool"),
+    ]
+    kept, reached = of.align_page(rows, 2)
+    assert reached is True
+    # The cut is a cut over the rows it was given, so a row the strip drops is
+    # still IN the slice — what changes is what a client paints:
+    assert [row["id"] for row in kept] == ["u2", "t3", "t4", "c1", "t5"]
+    assert [row["id"] for row in of.paintable(kept)] == ["u2", "t3", "t4", "t5"]
+    # The newest two PAINTABLE rows are t4 and t5, and the hunt found u2 above
+    # them — so the page opens on a run's own user row, not mid-run.
+    assert of.is_user_row(kept[0]) is True
+
+
+def test_align_page_refuses_to_pay_for_a_head_it_cannot_reach() -> None:
+    """A partial run either way is not made better by rows the hunt overshot to.
+
+    The measured shape: a run of hundreds of rows ends above the window, so no
+    budget reaches its head. The page is then exactly the rows asked for, and
+    ``reached`` says the head is cut so the caller can state it on the wire.
+    """
+    rows = [message("u1", "user")] + [message(f"tool{i}", "tool") for i in range(60)]
+    kept, reached = of.align_page(rows, 3, extra_rows=10)
+    assert reached is False
+    assert [row["id"] for row in kept] == ["tool57", "tool58", "tool59"]
+    # The same rows, with the head inside the budget: reached, and the page is
+    # bigger by exactly the rows between the limit and that head.
+    kept_near, reached_near = of.align_page(rows, 3, extra_rows=60)
+    assert reached_near is True
+    assert kept_near[0]["id"] == "u1"
+    assert len(kept_near) == 61
+
+
+def test_align_page_leaves_a_short_journal_whole() -> None:
+    """Fewer rows than asked for is the journal's answer, not a cut."""
+    rows = [message("u1", "user"), message("t1", "tool")]
+    kept, reached = of.align_page(rows, 50)
+    assert [row["id"] for row in kept] == ["u1", "t1"]
+    assert reached is True
 
 
 def test_a_cap_keeps_the_NEWEST_rows_and_says_it_dropped_the_oldest() -> None:
