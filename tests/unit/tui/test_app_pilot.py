@@ -8642,6 +8642,155 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
     assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
 
 
+async def _type_model_argument(app, pilot, argument: str) -> None:
+    """Type ``argument`` after the open ``/model `` query, then Enter.
+
+    The real keystroke route rather than calling the handler: ``--all`` has to
+    survive the editor's own interception (no printable key is a picker action,
+    so the characters reach the query and the Enter is a submit) for the
+    dispatch to happen at all.
+    """
+    key_for = {"-": "minus", "/": "slash", " ": "space"}
+    await pilot.press(*[key_for.get(char, char) for char in argument])
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+    await pilot.pause()
+
+
+def _style_color_at(text, needle: str) -> str | None:
+    """The colour of the first style span covering ``needle``'s first character.
+
+    Used to hold the one property the plain string cannot: an unusable row is
+    DIM. Returns ``None`` when no span carries an explicit colour there.
+    """
+    index = text.plain.index(needle)
+    for span in text.spans:
+        if span.start <= index < span.end:
+            style = span.style
+            color = getattr(style, "color", None)
+            if color is None:
+                return None
+            # The same hexadecimal spelling theme colours carry, so the
+            # comparison is against one vocabulary rather than rich's repr.
+            return color.get_truecolor().hex
+    return None
+
+
+@pytest.mark.asyncio
+async def test_model_all_reveals_the_rows_the_filter_hides() -> None:
+    """``/model --all`` is the discoverability half of the usable-only filter.
+
+    The default view is a list of choices and hides the rest — correct for
+    picking, wrong for "does this app support $MODEL?". The toggle shows the
+    whole registry, with the unusable rows dimmed and tagged (their existing
+    ``login required`` rendering) rather than silently looking runnable.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        assert "claude-opus-5" not in picker.render_text(90).plain
+
+        await _type_model_argument(app, pilot, "--all")
+
+        offered = {row.selector for row in picker.rows()}
+        plain = picker.render_text(90).plain
+        dim = theme_mod.semantic_color("dim")
+
+    assert offered == {
+        "openrouter/deepseek/deepseek-chat",
+        "ollama/qwen3:8b",
+        "anthropic/claude-opus-5",
+    }, offered
+    assert "login required" in plain, plain
+    assert "showing all — 1 need sign-in — /model --all hides" in plain, plain
+    # The dim is the claim that the row cannot be run, and it is asserted
+    # rather than assumed: the block above says a user reading a lit row would
+    # take it for a choice.
+    rendered = picker.render_text(90)
+    assert _style_color_at(rendered, "claude-opus-5") == dim, rendered.plain
+    assert _style_color_at(rendered, "deepseek/deepseek-chat") != dim
+
+
+@pytest.mark.asyncio
+async def test_model_all_toggles_back_to_the_filtered_view() -> None:
+    """The word is a TOGGLE, so the way out of the full registry is the way in."""
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+
+        await _type_model_argument(app, pilot, "--all")
+        assert "claude-opus-5" in picker.render_text(90).plain
+
+        await _type_model_argument(app, pilot, "--all")
+        offered = {row.selector for row in picker.rows()}
+        plain = picker.render_text(90).plain
+
+    assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
+    assert "1 hidden — /login <provider>" in plain, plain
+    assert "claude-opus-5" not in plain
+
+
+@pytest.mark.asyncio
+async def test_the_show_all_list_is_painted_whole_not_at_the_fallback_width() -> None:
+    """The frame caught what every assertion missed: a paint at width 20.
+
+    ``ModelPicker._repaint`` falls back to ``max(self.size.width, 20)`` while the
+    widget has no laid-out width. ``/model --all`` clears the buffer, closes the
+    list and reopens it inside one keypress, so both the populate and the live
+    refresh painted at that fallback and the settled screen kept rows truncated
+    to ``openrouter/deeps…`` — while ``picker.size`` read the real 73, which is
+    why ``render_text(width)`` assertions stayed green (they pass the width they
+    want). The assertion therefore reads the widget's own RENDERABLE, not
+    ``render_text``. ``on_resize`` is the fix.
+    """
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        await _open_model_picker(app, pilot)
+        await _type_model_argument(app, pilot, "--all")
+        picker = app.query_one(Editor).model_picker
+        assert picker.size.width > 20, "the fixture must lay the list out wider than the fallback"
+        # ``render()`` is the widget's own renderable — what the compositor
+        # painted, as opposed to ``render_text(width)``'s hypothetical.
+        painted = picker.render()
+        width = picker.size.width
+
+    assert "openrouter/deepseek/deepseek-chat" in painted.plain, painted.plain
+    assert "anthropic/claude-opus-5" in painted.plain, painted.plain
+    assert "showing all — 1 need sign-in — /model --all hides" in painted.plain, painted.plain
+    assert all(
+        len(line) == width for line in painted.plain.splitlines()
+    ), "a row was painted at a width other than the widget's"
+
+
+@pytest.mark.asyncio
+async def test_the_settings_default_dropdown_keeps_the_filtered_view() -> None:
+    """The toggle belongs to the picker, not to every `_catalogue_rows` caller.
+
+    The settings page's Default-model dropdown shares the row-shaping helper
+    but is a different surface, and a boot preference may well name a provider
+    the user signs into later — it must not change behind a key the settings
+    page does not show.
+    """
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        await _open_model_picker(app, pilot)
+        await _type_model_argument(app, pilot, "--all")
+        offered = {row.selector for row in app._settings_model_catalogue()}
+
+    assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
+
+
 class _PruningController(_AccessController):
     """A catalogue that withdrew the model the session is running.
 

@@ -2761,6 +2761,35 @@ class FrontendModelSpec(ModelSpec):
     model_config = ConfigDict(extra="allow")
 
 
+class FrontendModelAccess(BaseModel):
+    """Whether the session's selected model can actually run on its host.
+
+    ADDITIVE and published by the host that knows the credentials, because the
+    truth of it is a fact about a CREDENTIAL STORE, not about the conversation:
+    the same session resumed on a machine without the sign-in is genuinely not
+    runnable there, and the field must therefore be recomputed by whichever
+    host publishes state rather than restored from a checkpoint (see the
+    checker's durable fold). ``None`` on the wire means NO CLAIM is made —
+    either the host does not compute it, or its credential store could not be
+    read, in which case "signed_out" would be an accusation the app failed to
+    establish (the same reason ``picker_rows(usable=None)`` shows everything).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    #: ``ok`` — the selected provider is usable here; ``signed_out`` — it is
+    #: not (no stored row, no env key). One word, so a renderer branches on a
+    #: value rather than parsing a sentence.
+    state: Literal["ok", "signed_out"]
+    #: The selected model's provider id (``anthropic``), not a display name.
+    provider: str
+    #: The provider's human name for the band's sentence ("Not signed in to
+    #: Anthropic"). Carried rather than looked up client-side because the wire
+    #: has no provider registry, and a client inventing one is how the two
+    #: surfaces start describing one situation with two vocabularies.
+    label: str
+
+
 class FrontendUsage(Usage):
     """Lossless wire usage, including future cost component metadata."""
 
@@ -2930,6 +2959,11 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: "Can the model this session is on actually run here" — see
+    #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
+    #: publish it, or one whose store could not be read); old clients ignore
+    #: the key, and this client renders nothing for ``None``.
+    model_access: "FrontendModelAccess | None" = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
     context_tokens: int | None = None
@@ -6916,6 +6950,24 @@ class FrontendStateStore:
         self._released_rows.adopt_from(self._state.jobs)
         return update
 
+    def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
+        """Publish whether the session's selected model can run on this host.
+
+        Owner-side, and called by the same edges that republish the model
+        catalogue (adoption, a login, a model switch) rather than by
+        ``refresh_from_session``: that method runs on every streaming edge of
+        the session loop, and reading a credential store there would put a
+        SQLite read on that path for a field that changes on credential
+        timescales. The caller owns the credential knowledge
+        (``ProviderController.usable_providers``); this is only the wire.
+        """
+        # Dumped to the wire shape rather than stored as the model, matching
+        # ``refresh_model_catalogue``'s rows: this store is JSON in and JSON
+        # out, and a store holding a live pydantic instance would share a
+        # mutable object through ``read_field``.
+        value = access.model_dump(mode="json") if access is not None else None
+        return self.mutate(model_access=value)
+
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
         """Publish the runtime's offerable model rows as canonical state.
 
@@ -7394,6 +7446,13 @@ class FrontendStateStore:
                 "asks": None,
                 "asks_open": None,
                 "asks_truncated": None,
+                # A claim about THIS host's credential store, not about the
+                # conversation: a checkpoint reopened on a machine without the
+                # sign-in would otherwise serve a stale ``ok``, and one that
+                # gained credentials would keep a stale ``signed_out``. The
+                # publishing host recomputes it (``refresh_model_access``), so
+                # the durable copy deliberately carries no claim.
+                "model_access": None,
                 "jobs": [
                     job.model_copy(
                         update={
