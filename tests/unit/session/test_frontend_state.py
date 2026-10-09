@@ -46,6 +46,7 @@ from local_operator.session.frontend_state import (
     TodoItemState,
     TodoPhaseState,
     WakeState,
+    closing_state_overrides,
     sync_wire_payload,
 )
 
@@ -2470,3 +2471,46 @@ def test_monitor_state_carries_the_health_fields() -> None:
     # Declared, not merely allowed through: a viewer reading the model's fields
     # must see them rather than falling back to ``extra``.
     assert {"unavailable_since", "last_error"} <= set(type(row).model_fields)
+
+
+def test_the_closing_merge_never_overrules_a_shrinking_context_reading():
+    """F7 at the rule: ``context_tokens`` is not monotonic.
+
+    The merge this test covers makes a closing checkpoint REPLACEMENT state for
+    every reader, so a rule that keeps "the larger reading" is right for money and
+    duration — and wrong for the context figure, which a compaction legitimately
+    SHRINKS. Holding the larger of the two pins a stale pre-compaction reading
+    above the runtime's current one, and because a cold restore seeds the next
+    runtime's own reading from that row, the figure never comes back down.
+
+    Asserted directly rather than through a session fixture: the session-driven
+    test cannot see it, because ``_restore_cold_details`` seeds the running
+    runtime's reading from the same durable row, so the two agree whatever the
+    rule is. That is why round 1's rule survived a green suite.
+    """
+    durable = FrontendSessionState(
+        session_id="conv",
+        epoch="tui-epoch",
+        context_tokens=48_000,
+        cumulative_parent_cost=12.34,
+        active_duration_s=300.0,
+    )
+    live = FrontendSessionState(
+        session_id="conv",
+        epoch="cli-epoch",
+        context_tokens=12_000,
+        cumulative_parent_cost=1.0,
+        active_duration_s=5.0,
+    )
+
+    overrides = closing_state_overrides(live, durable)
+
+    assert "context_tokens" not in overrides, "a compaction's smaller reading was overruled"
+    # The accumulating fields still take the larger value, and the duration is one
+    # of them (F8): both readings here are real elapsed time.
+    assert overrides["cumulative_parent_cost"] == 12.34
+    assert overrides["active_duration_s"] == 300.0
+
+    # With no reading of its own, the durable figure is the only one there is.
+    quiet = FrontendSessionState(session_id="conv", epoch="cli-epoch")
+    assert closing_state_overrides(quiet, durable)["context_tokens"] == 48_000

@@ -279,7 +279,11 @@ async def test_a_closing_row_never_lowers_the_durable_state_it_read(tmp_path):
     assert len(checkpoint_rows(directory)) == 2, "the closing row must be written"
     assert state.conversation_title == "Real title", "the closing row lowered the title"
     assert state.cumulative_parent_cost == 12.34
-    assert state.active_duration_s == 300.0, "a headless turn invented active duration"
+    # The field is the summed duration of the turns that ran, and the merge takes
+    # the larger of the two (review round 2, F8): the headless run's own turn time
+    # adds to the TUI's 300.0 rather than replacing it. What must never happen is
+    # the durable figure being LOWERED, which is what the N1 defect was.
+    assert 300.0 <= state.active_duration_s < 301.0, "a headless turn lowered active duration"
 
 
 @pytest.mark.asyncio
@@ -317,7 +321,12 @@ async def test_twelve_runtimes_and_a_compaction_keep_the_read_bounded(tmp_path):
         session = make_session(directory)
         try:
             await session.prompt("x" * 100_000 + f" post-compaction turn {turn}")
-            last_tokens = max(last_tokens, int(session.frontend_state.context_tokens or 0))
+            # THE LAST RUNTIME'S READING, not the largest one seen (review round
+            # 2, F7). The max hid the defect this test exists for:
+            # ``context_tokens`` is NOT monotonic — the compaction above shrinks
+            # it — so taking the largest observed value asserts the stale
+            # pre-compaction figure and passes while the newest row carries it.
+            last_tokens = int(session.frontend_state.context_tokens or 0)
         finally:
             await session.dispose()
 

@@ -20716,11 +20716,7 @@ class Session:
             if not isinstance(payload, dict):
                 return
             durable = FrontendSessionState.model_validate(payload)
-            overrides = closing_state_overrides(
-                store.state,
-                durable,
-                attached=bool(self._has_ui or store.has_subscribers),
-            )
+            overrides = closing_state_overrides(store.state, durable)
             if overrides:
                 store.mutate(**overrides)
         except Exception:  # noqa: BLE001 — a merge is not worth failing a teardown for

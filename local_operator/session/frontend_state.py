@@ -818,10 +818,16 @@ def _capped_components(components: Sequence[Any]) -> list[Any]:
 #: Money and tokens are the two the reviewer measured going backwards when the row
 #: was not refreshed: a cold open painted ``context_tokens: 51000`` from a row
 #: written by the FIRST runtime while the journal's own receipts said 121000.
-_MONOTONIC_STATE_FIELDS = ("context_tokens", "cumulative_parent_cost", "subagent_cost")
+#: State fields that only ever accumulate, so the larger of two readings wins.
+#: ``active_duration_s`` is the SUMMED DURATION OF THE TURNS this conversation ran
+#: (the figure the TUI's status line renders); review round 2 (F8) put it here
+#: rather than keeping the durable figure, because a runtime's own turn time is
+#: real elapsed duration either way and the larger value can never lower what a
+#: surface recorded.
+_MONOTONIC_STATE_FIELDS = ("cumulative_parent_cost", "subagent_cost", "active_duration_s")
 
 
-def closing_state_overrides(live: Any, durable: Any, *, attached: bool) -> dict[str, Any]:
+def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
     """What a closing checkpoint must carry over from the durable row it read.
 
     WHY THIS EXISTS. A closing row is REPLACEMENT state for every reader that
@@ -832,20 +838,22 @@ def closing_state_overrides(live: Any, durable: Any, *, attached: bool) -> dict[
     stopping. The rules, field by field, are the ones that test demands and the
     ones the staleness probe demands:
 
-    * **Money and tokens never go backwards** (:data:`_MONOTONIC_STATE_FIELDS`):
-      the larger of the two wins, whoever wrote it. Newer is larger here because
-      both only accumulate.
+    * **Money and time never go backwards** (:data:`_MONOTONIC_STATE_FIELDS`):
+      the larger of the two wins, whoever wrote it — the cost fields and
+      ``active_duration_s``, the summed duration of the turns that ran, only ever
+      accumulate. Review round 2 (F8) folded the duration field into this rule and
+      removed the ``attached`` special case it used to need.
+    * **``context_tokens`` IS NOT MONOTONIC** (review round 2, F7): a compaction
+      SHRINKS it, so "the larger of the two wins" would pin a pre-compaction
+      reading over the runtime's own post-compaction one for the rest of the
+      conversation. The durable row supplies it only when this runtime has no
+      reading of its own — the N1 case, where a headless restore never saw a
+      provider receipt at all.
     * **A blank field never overwrites a set one** — the title
       (``conversation_title`` with its ``user_set``/``forked`` companions) and the
       todo list. A headless runtime has no title of its own and reported ``""``,
       which is how the TUI's title was lost; the title belongs to the
       CONVERSATION, not to the runtime that happens to be closing it.
-    * **``active_duration_s`` is kept from the durable row when no surface was
-      attached.** It measures the time a conversation was OPEN in front of
-      someone: a scheduler- or script-driven runtime accrues the wall time of its
-      turns (0.008 s in the N1 fixture) into a figure a TUI set to 300.0, and the
-      operator's active time is the TUI's. When a surface IS attached this runtime
-      is the one observing that time, so its own (larger) figure wins.
     * **Identity stays this runtime's**: ``session_id``, ``epoch``,
       ``checkpoint_id`` and ``jobs`` are never taken from the durable row. A
       closing row names the runtime that wrote it — for a FORK, whose fixups
@@ -872,19 +880,14 @@ def closing_state_overrides(live: Any, durable: Any, *, attached: bool) -> dict[
         )
     if not getattr(live, "todos", None) and getattr(durable, "todos", None):
         overrides["todos"] = durable.todos
-    if not attached:
-        theirs = getattr(durable, "active_duration_s", None)
-        if theirs is not None:
-            # THE DURABLE FIGURE STANDS, not the larger of the two: the N1 guard
-            # asserts EXACTLY this (300.0, never 300.0141), so the field is read
-            # as the time a surface had the conversation active. This runtime
-            # accrued its own turn's wall clock into the same counter on the way
-            # through `AgentEndEvent`; a scheduler or a script does not observe
-            # the operator's active time, and attributing its processing to the
-            # conversation would be inventing duration rather than preserving it.
-            # A runtime WITH a surface attached keeps its own (larger) figure —
-            # it is the one observing that time.
-            overrides["active_duration_s"] = theirs
+    # ``context_tokens`` has its own rule (see the docstring): taken from the
+    # durable row only when this runtime has NO reading of its own, because a
+    # compaction legitimately lowers it and the larger-of-two rule would hold the
+    # stale figure above the current one forever.
+    live_tokens = getattr(live, "context_tokens", None)
+    durable_tokens = getattr(durable, "context_tokens", None)
+    if not live_tokens and durable_tokens:
+        overrides["context_tokens"] = durable_tokens
     return overrides
 
 

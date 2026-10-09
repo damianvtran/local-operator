@@ -1688,7 +1688,13 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     # and is a fold lookup), so the budget is spent on the children a user is most
     # likely looking at: the newest ones, which is what a roster's append order
     # makes the last rows. Older children still render — with their label, status,
-    # agent and prompt — and simply carry no todo rows; the alternative measured
+    # agent and prompt — and simply carry no todo rows, and NOTHING SAYS SO: the
+    # panel cannot tell "this child has no todos" from "this child is past the
+    # budget", which is a silent loss of information the phone used to show
+    # (review round 2, F10 — accepted with the loss recorded here). The follow-up
+    # that removes it is a LAZY per-child read: ``api_subagent_detail`` already
+    # serves one child on demand, so the todo snapshot belongs there rather than in
+    # a cold projection answering for 96 children at once. The alternative measured
     # worse than the regression it was fixing (2-3x the whole projection).
     todo_children = {str(record["job_id"]) for record in records[-_COLD_TODO_CHILD_LIMIT:]}
     by_parent: dict[str | None, list[str]] = {}
