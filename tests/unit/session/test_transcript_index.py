@@ -1525,6 +1525,7 @@ def test_version_three_cache_is_discarded_so_runs_are_never_missing(tmp_path):
     payload["version"] = 3
     payload.pop("runs", None)
     ti.index_path(tmp_path, SID).write_text(json.dumps(payload))
-    assert ti._read_raw(tmp_path, SID)["version"] == 3
-    assert ti._index_from_raw(ti._read_raw(tmp_path, SID)) is None
+    raw = ti._read_raw(tmp_path, SID)
+    assert raw is not None and raw["version"] == 3
+    assert ti._index_from_raw(raw) is None
     assert len(index.runs) == 1
