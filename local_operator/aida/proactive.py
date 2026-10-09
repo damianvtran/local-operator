@@ -114,7 +114,19 @@ DEFAULT_PAUSED = False
 #: and the settle-time banner veto (``Session._aida_cadence_banner_veto``)
 #: RECOGNISES it through :func:`reply_is_quiet`. A reply that normalises to this
 #: is a quiet day and must never put a banner on the operator's screen.
-QUIET_REPLY = "(no action needed)"
+#:
+#: A READABLE SENTENCE, not a status token (design review D1): this string is
+#: the most-seen text she writes — it is her reply AND the session-list preview
+#: the operator reads on most days — and the old "(no action needed)" read as a
+#: machine status rather than a chief of staff saying there is nothing to do.
+QUIET_REPLY = "Nothing needs your attention today."
+
+#: The PREVIOUS spelling, still recognised. Models carry the old instruction in
+#: their seed/transcript history for a while after an upgrade, and a quiet day
+#: written in the old words must still decide quiet — the alternative is a
+#: daily paraphrase banner, the exact failure the veto exists to prevent.
+#: Bounded on purpose: one string (plus normalisation), never fuzzy synonyms.
+LEGACY_QUIET_REPLY = "(no action needed)"
 
 #: The sentence that asks for :data:`QUIET_REPLY`. Appended to a check-in message
 #: that does not already carry the sentinel (see :func:`with_quiet_clause`) —
@@ -134,7 +146,9 @@ CADENCE_MESSAGE = (
     "Daily proactive check-in. Review the operator's current state — active and "
     "stale sessions, projects and workstreams, scheduled wakes, usage signals, and "
     "anything you started earlier that is still in flight — and report ONLY what "
-    "needs the operator's action, in a few short lines. If there is nothing "
+    "needs the operator's action, in a few short lines. Lead with ONE short "
+    "sentence that fits a notification body (about 120 characters) — it is what "
+    "the operator sees first — and put the details after it. If there is nothing "
     "actionable, give the one quiet-day tip below in a sentence when this message "
     f'carries one, otherwise reply with exactly "{QUIET_REPLY}" and nothing '
     "else. To schedule a follow-up check, write it to the escalation tray described in your "
@@ -199,22 +213,29 @@ def _peel_reply(text: str) -> str:
     return current
 
 
+#: The normalised spellings :func:`reply_is_quiet` matches: the current
+#: sentence and the bounded legacy sentinel, both peeled the same way.
+_QUIET_FORMS = frozenset(
+    _peel_reply(spelling).casefold() for spelling in (QUIET_REPLY, LEGACY_QUIET_REPLY)
+)
+
+
 def reply_is_quiet(text: str | None) -> bool:
     """Whether an assistant reply IS the quiet sentinel (:data:`QUIET_REPLY`).
 
     THE VETO's reply test, and the reason it is not a raw ``==``: the model
-    writes ``(No action needed).``, backticked it, pads it, or capitalises it —
-    and a raw match would then banner every quiet day, which is how a chief of
-    staff gets her notifications switched off (taking the actionable ones with
-    them). Case, whitespace, one symmetric wrapper pair and a trailing period
-    are folded; a paraphrase is NOT, deliberately (a daily paraphrase banner is
-    visible in the ``banners`` ledger, and design option B is the upgrade if
-    the count shows drift).
+    pads it, wraps it in quotes or backticks, capitalises it, or writes the
+    LEGACY ``(no action needed)`` spelling it was once taught — and a raw match
+    would then banner a quiet day, which is how a chief of staff gets her
+    notifications switched off (taking the actionable ones with them). Case,
+    whitespace, one symmetric wrapper pair and a trailing period are folded
+    (:func:`_peel_reply`); a paraphrase is NOT, deliberately (a daily
+    paraphrase banner is visible in the ``banners`` ledger, and design option B
+    is the upgrade if the count shows drift).
     """
     if not text:
         return False
-    folded = _peel_reply(str(text)).casefold()
-    return folded in {QUIET_REPLY.casefold(), QUIET_REPLY.strip("()").casefold()}
+    return _peel_reply(str(text)).casefold() in _QUIET_FORMS
 
 
 def reply_is_tip(text: str | None) -> bool:
@@ -244,7 +265,7 @@ def with_quiet_clause(message: str) -> str:
     banner. Idempotent: a message already carrying the sentinel is unchanged.
     """
     text = message or ""
-    if QUIET_REPLY in text:
+    if QUIET_REPLY in text or LEGACY_QUIET_REPLY in text:
         return text
     return f"{text} {QUIET_CLAUSE}" if text else QUIET_CLAUSE
 
@@ -782,6 +803,32 @@ def reconcile(
     # them ("one wake implementation").
     kept = list(original)
 
+    # -- the banner upgrade, IN PLACE, for any existing cadence row ---------
+    # A cadence row armed BEFORE her check-ins could banner (``WakeSchedule
+    # .notify`` defaulted False and no Aida row ever set it) reads
+    # ``notify=False`` forever if left alone: its fires can never request a banner, so
+    # the reply-aware veto is never reached and the headline fix would reach
+    # only FRESH installs (review MAJOR-1 — the first cut sat inside the
+    # creation block below, which by construction never runs while a row
+    # exists, so it was dead code for exactly the established install it was
+    # written for). On the ACTIVE path only: paused/disabled drops her rows
+    # anyway. Upgraded with ``model_copy`` rather than rebuilt — a rebuild
+    # would mint a new ``created_at`` on every reconcile, the churn the REUSE
+    # note below exists to prevent — and ``changed`` flips exactly once
+    # because the upgraded row is what persists. First banner day on an
+    # upgraded install: the row's next cadence fire notifies when the reply
+    # is actionable, and stays silent for the sentinel/a tip/unsettled-ledger/
+    # spent-budget cases — the same gates a fresh install gets; the reply is
+    # the only thing that decides.
+    kept = [
+        (
+            row.model_copy(update={"notify": True})
+            if row.id == CADENCE_ID and not row.notify
+            else row
+        )
+        for row in kept
+    ]
+
     # -- escalation tray ----------------------------------------------------
     # THE TRAY IS CONSUMED INSIDE THE LOCK (review round 1, M1b). Consuming
     # first and locking second destroyed the whole batch whenever the lock was
@@ -872,17 +919,11 @@ def reconcile(
         # an instant the user may have just read in ``/aida status``. An
         # OVERDUE one is kept on purpose rather than re-armed forward: the
         # generic wake machinery owns missed-while-down delivery, and this
-        # engine deliberately has no second implementation of it.
+        # engine deliberately has no second implementation of it. (The notify
+        # UPGRADE for a legacy row lives above, OUTSIDE this creation-only
+        # block — review MAJOR-1: inside, it never ran for an established
+        # install.)
         existing = next((row for row in original if row.id == CADENCE_ID), None)
-        if existing is not None and not existing.notify:
-            # A LEGACY ROW: armed before her check-ins were allowed to banner
-            # (``WakeSchedule.notify`` defaulted False and no Aida row set it).
-            # Upgraded IN PLACE rather than rebuilt — a rebuild would mint a
-            # new ``created_at`` on every reconcile, which the REUSE note above
-            # exists to prevent — and the upgrade is what makes this fix
-            # effective on an established install at its next persist instead
-            # of only after the current row's next fire.
-            existing = existing.model_copy(update={"notify": True})
         kept.append(
             existing
             if existing is not None

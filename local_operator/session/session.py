@@ -2837,6 +2837,21 @@ class Session:
         #: notify — a trigger check-in, a user-armed wake, a person's message —
         #: so a quiet reply can only ever silence her own check-ins.
         self._run_wake_ids: set[str] = set()
+        #: Whether this run carried an Aida-shaped resume catch-up whose folded
+        #: wake ids were NOT recorded (an empty/missing ``wake_ids`` on a
+        #: ``wake_catchup`` delivery). Set by ``_note_run_input``; read by
+        #: ``_aida_checkin_run`` as FAIL-CLOSED evidence: a lost fold means the
+        #: run cannot be proven free of Aida rows, so it is treated as bearing
+        #: them rather than as bearing none (QA round 1, Q1).
+        self._run_catchup_unidentified: bool = False
+        #: Whether THIS run's True publish is one of her check-in BANNERS, as
+        #: judged once in ``_finalize_attention_notify`` beside ``notify``
+        #: itself (``notify and _aida_checkin_run()``). The banner budget is
+        #: spent off this flag, never off the raw publish value: a plain user
+        #: turn of hers also publishes True (user semantics), and counting
+        #: three of those once vetoed the next actionable check-in's banner
+        #: (review MAJOR-2 — the budget bounds banners, not publishes).
+        self._run_aida_checkin: bool = False
         #: Whether the CURRENT run's end has been CONSUMED for publication.
         #: Set False at every turn start and True the moment
         #: ``_publish_attention_outcome`` takes the end event, so a teardown can
@@ -11771,9 +11786,20 @@ class Session:
                     self._run_wake_ids.add(wake_id)
                 folded = details.get("wake_ids")
                 if isinstance(folded, (list, tuple)):
-                    self._run_wake_ids.update(
-                        str(item) for item in folded if isinstance(item, str) and item
-                    )
+                    named = [str(item) for item in folded if isinstance(item, str) and item]
+                    self._run_wake_ids.update(named)
+                    if not named:
+                        # AN EMPTY FOLD IS MISSING EVIDENCE, NOT "no Aida rows":
+                        # the catch-up builder stamps every id it folded, so an
+                        # empty list means the fold was lost in flight (QA
+                        # round 1, Q1). Fail CLOSED — the veto and the budget
+                        # treat the run as Aida-bearing rather than as having
+                        # no check-in at all.
+                        self._run_catchup_unidentified = True
+                elif details.get("wake_catchup"):
+                    # A catch-up with no ``wake_ids`` key at all (a pre-fix
+                    # producer, a hand-built message): same fail-closed rule.
+                    self._run_catchup_unidentified = True
         elif custom_type is not None or getattr(message, "role", None) != "user":
             self._run_triggers.add("internal")
         else:
@@ -11836,6 +11862,12 @@ class Session:
         ) or kind == "error"
         if notify and kind != "error" and self._aida_cadence_banner_veto(event):
             notify = False
+        # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
+        # of her check-in banners is judged HERE, once, beside ``notify``. The
+        # stamping seam in ``_publish_attention_outcome`` spends the budget
+        # only on this flag, so an ordinary True publish of hers (a user turn)
+        # cannot silently spend it and veto a later actionable banner.
+        self._run_aida_checkin = bool(notify) and self._aida_checkin_run()
         return notify
 
     def _aida_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
@@ -11844,18 +11876,18 @@ class Session:
         THE OPERATOR'S REQUIREMENT, made decidable. With no surface attached
         her check-in must be able to banner when something needs action — and
         must NOT banner when there is nothing to say, because a daily
-        "(no action needed)" toast is how a chief of staff gets muted, which
+        her daily "nothing needs your attention" banner is how a chief of staff gets muted, which
         silences the actionable ones too. The row can only declare INTENT
         (``WakeSchedule.notify``); the reply is the evidence, and this is the
         one place that reads it. Conditions, all required:
 
-        * the session is HERS (``_aida_duty``) — one attribute read for every
-          other session on the machine;
-        * the run has at least one recorded wake id and EVERY one is
-          cadence-family (``proactive.is_cadence_family_row``): the cadence or
-          an escalation extra. A trigger check-in, a user-armed wake, a
-          peer/job/user input — anything else in the run — keeps its normal
-          semantics; user intent is never silenced by this.
+        * the run is EXCLUSIVELY one of her check-ins
+          (:meth:`_aida_checkin_run` — hers, wake-delivery-only inputs, no
+          waiting user, every recorded id cadence-family; an Aida-shaped
+          catch-up with a lost fold counts as hers, FAIL CLOSED). A trigger
+          check-in, a user-armed wake, a peer/job/user input, a mixed
+          user+cadence run — anything else — keeps its normal semantics; user
+          intent is never silenced by this (review MAJOR-3).
 
         Then any ONE of these quiets it:
 
@@ -11876,15 +11908,10 @@ class Session:
         allow), and a defect in a row id can at worst mis-classify a run the
         same way ``_note_run_input`` already would have.
         """
-        if not getattr(self, "_aida_duty", False):
-            return False
-        wake_ids = set(self._run_wake_ids)
-        if not wake_ids:
+        if not self._aida_checkin_run():
             return False
         from local_operator.aida import onboarding, proactive
 
-        if not all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids):
-            return False
         try:
             settled = onboarding.greeting_state(self._config_dir) in (
                 onboarding.GREETING_DELIVERED,
@@ -11904,6 +11931,42 @@ class Session:
         if not reply:
             return True
         return proactive.reply_is_quiet(reply) or proactive.reply_is_tip(reply)
+
+    def _aida_checkin_run(self) -> bool:
+        """Whether THIS run's notifying deliveries are EXCLUSIVELY her check-ins.
+
+        THE SHARED SCOPE of the quiet-reply veto and the banner budget (reviews
+        MAJOR-2/MAJOR-3). True only when every one of these holds:
+
+        * the session is hers (``_aida_duty``);
+        * no plain user message is queued-but-unconsumed (``awaiting_user``);
+        * every recorded wake id is cadence-family (the cadence row or an
+          ``aida-extra-N`` extra) — a user-armed wake or a trigger check-in
+          keeps its normal semantics;
+        * the run's trigger classes are ONLY wake deliveries: any user
+          message, peer note, job result, monitor delivery or internal input
+          beside them keeps normal semantics — user intent is never silenced
+          by the veto, and an ordinary publish never spends the budget;
+        * the run carries at least one recorded wake id — OR is an Aida-shaped
+          resume catch-up whose fold could not be named
+          (``_run_catchup_unidentified``), which FAILS CLOSED: a lost fold is
+          not evidence of no Aida deliveries (QA round 1, Q1).
+
+        Read-only and cheap (attribute reads plus one lazy import inside the
+        id branch); called at settle only, at most twice per run.
+        """
+        if not getattr(self, "_aida_duty", False):
+            return False
+        if self._has_awaiting_user():
+            return False
+        if set(self._run_triggers) != {WAKE_PROMPT_MESSAGE_TYPE}:
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return bool(self._run_catchup_unidentified)
+        from local_operator.aida import proactive
+
+        return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
 
     def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
         """The run's LAST assistant reply text, or ``""`` when it produced none.
@@ -12087,14 +12150,17 @@ class Session:
                     cause=cause,
                     notify=notify,
                 )
-                if notify and getattr(self, "_aida_duty", False):
+                if notify and self._run_aida_checkin:
                     # THE BANNER BUDGET'S STAMP (``aida.proactive``
                     # ``MAX_BANNERS_PER_DAY``): one timestamp per True publish
-                    # of HERS, so ``banner_budget_spent`` can veto her 4th
-                    # banner inside a rolling day. AFTER the row is durable —
-                    # a crash between the two must count a banner that may
-                    # not have been raised rather than forget one that was —
-                    # and OFF the loop, like every locked aida write: the
+                    # that IS one of HER CHECK-IN BANNERS — the flag
+                    # ``_finalize_attention_notify`` judged once, beside
+                    # ``notify`` (review MAJOR-2: stamping every True publish
+                    # let three ordinary publishes of hers spend the budget and
+                    # silently veto the next actionable banner). AFTER the row
+                    # is durable — a crash between the two must count a banner
+                    # that may not have been raised rather than forget one that
+                    # was — and OFF the loop, like every locked aida write: the
                     # cross-process lock waits up to 5 s and this runs in a
                     # turn's ``finally`` on a serving loop. Best-effort: a
                     # stamp failure is bookkeeping, never the outcome it
@@ -13144,6 +13210,8 @@ class Session:
         self._run_triggers = set()
         self._run_notify_requested = False
         self._run_wake_ids = set()
+        self._run_catchup_unidentified = False
+        self._run_aida_checkin = False
         for message in initial:
             self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
@@ -20309,7 +20377,19 @@ class Session:
                 catchup = self._take_resume_catchup()
                 if catchup is not None:
                     self._deliver_resume_catchup(catchup)
-            self._resume_catchup_ids.discard(due.schedule.id)
+            # AN ID IS DROPPED ONLY ONCE THE FOLD IS SECURED (QA round 1, Q1):
+            # this fire can land a millisecond BEFORE the grace deadline (the
+            # re-armed due in ``wake`` and ``_resume_grace_ends_ms`` here are
+            # stamped from two different clocks), so the take above returns
+            # None with the delivery left to the grace timer. Discarding
+            # unconditionally then built the catch-up message from an EMPTY
+            # set — ``wake_ids: []`` — and a quiet day banner-ed, because the
+            # veto read the empty fold as "no Aida rows".
+            # ``_resume_catchup_sent`` is the signal the take has happened:
+            # only then does the message exist with every remaining id, and
+            # only then is this row's id spent.
+            if self._resume_catchup_sent:
+                self._resume_catchup_ids.discard(due.schedule.id)
             return
         await self._deliver_wake(due)
 
