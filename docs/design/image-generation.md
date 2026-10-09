@@ -8,6 +8,12 @@ the result rides `AttachmentContent` and registers bytes through
 `session.attachments.cache_media`; that contract is frozen, this feature adds
 no second transport.
 
+**Superseded in part (media wave-2, 2026-10-09):** the kind-neutral interface
+the image lane now rides — the walk, the rung seam, provider breadth — is
+designed in `docs/design/artifact-generation.md`; read that for the current
+shape of the cascade and rungs. This document remains the frozen image v1
+design (D1–D12), and its behaviour is still the contract.
+
 ## 0. Problem
 
 `local_operator/clients/fal.py` and `local_operator/clients/radient.py` carry
