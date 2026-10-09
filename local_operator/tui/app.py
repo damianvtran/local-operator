@@ -7975,10 +7975,30 @@ class OperatorApp(App[None]):
                 )
                 welcome.set_navigation_visible(False)
                 await replay.view.mount(welcome)
+            # A SAVED POSITION IS NOT A TAIL OPEN, and the difference is a
+            # frame the reader sees. `follow_tail()` does two jobs: it arms the
+            # follower and queues a scroll to the end. For a source the reader
+            # left mid-conversation the second one is a POSITION it must not
+            # take, and it is why a `display_only` saved-anchor return painted
+            # the tail one frame after the commit's own restore put the viewport
+            # at the saved anchor (QA round 2, Q8: state-104ms at the top,
+            # state-146ms at the tail, settled at the saved position — three
+            # frames, two of them content, neither final). So the position is
+            # ARMED instead, before the batch mounts, and `arrange` takes it in
+            # the pass that gives the anchor its rows — the reveal's first frame
+            # is then already the reader's own position.
+            saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+            if saved_position:
+                replay.view.arm_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
-            replay.view.follow_tail()
+            if not saved_position:
+                replay.view.follow_tail()
             # Retained/canonical views benefit from a measured parked layout.
             # A first saved view has no existing geometry to preserve: painting
             # it offscreen first adds a whole extra layout/frame before useful
@@ -9543,10 +9563,22 @@ class OperatorApp(App[None]):
         # changes nothing, so the frame count is unaffected).
         saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
         if saved_position:
+            # ONLY PLACE IT IF THE ANCHOR IS MEASURED, and this is the whole
+            # correctness of the saved-position reveal. A ``display_only`` first
+            # visit skips the prepare-time layout (see the comment in
+            # ``_prepare_sidebar_session``), so every block's region is still a
+            # zero one here: the restore would clamp to the TOP of the
+            # conversation, and the reveal would paint the first message of a
+            # conversation the reader left in the middle — worse than the
+            # tail-first frame it replaced, which at least shared the reader's
+            # end of the transcript. ``restore_revealed_anchor`` below is the net
+            # that places it on the revealed geometry, and the F2 guarantee (no
+            # tail hold for a saved position) is unaffected either way.
             incoming.replay.view.restore_navigation_anchor(
                 source.draft.scroll_anchor_id,
                 source.draft.scroll_anchor_part,
                 source.draft.scroll_offset,
+                only_when_measured=True,
             )
         else:
             self._hold_tail_for_reveal(incoming.replay.view)
