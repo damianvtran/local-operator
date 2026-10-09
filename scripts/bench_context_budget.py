@@ -1321,7 +1321,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: no ``ask_withdraw`` (no ask hook) — which is the check that the 531 is that
 #: tool and nothing else. Re-derive with ``--verbose`` after any change to the
 #: deferred set or to the collapse.
-BUDGET_BILLED_TOKENS = 27_210
+#:
+#: RAISED 27,210 -> 27,217 by the IMAGE-GENERATION RESTORE
+#: (``feat/image-generation-tool``), which merged the same day the diet landed,
+#: so both ledgers here were measured ONCE on the MERGED tree — the same policy
+#: the diet's own entries follow (re-measure on merge, never add two parent
+#: deltas). Same machine, clean arm via ``env -i``:
+#:
+#:   merged head (this branch)       75,510 chars = ~27,162
+#:
+#: against the diet's own head (74,159 = ~26,676): +1,351 chars = ~+486 billed,
+#: exactly the new tool's wire cost rendered through THIS branch's collapse —
+#: 14 name + 186 description + the collapsed JSON schema + its inventory row.
+#: Everything else is byte-identical to the diet's reading. The tool is
+#: createIf-gated on the machine's image credentials, so a session without a
+#: provider pays none of it; the guard measures the fully-capable surface
+#: deliberately (``real_tool_surface`` now binds that predicate the way it
+#: binds the browser and console gates). The band is normalized to the 55-token
+#: band this file keeps — the diet left 48 tokens above its head, so the
+#: ceiling moves by 7: measured head + 55.
+BUDGET_BILLED_TOKENS = 27_217
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1339,7 +1358,19 @@ BUDGET_BILLED_TOKENS = 27_210
 #:   delta                          -17,269 chars = ~-6,212
 #:
 #: ``--no-defer`` measures ~27,334. The ceiling is the measured head + ~2% (475).
-BUDGET_CHILD_BILLED_TOKENS = 24_207
+#:
+#: RAISED (with the top arm, same day, same merge) 24,207 -> 24,273 by the
+#: IMAGE-GENERATION RESTORE: the child arm ALSO carries ``generate_image`` (it is
+#: createIf-gated on the machine, not on the parent), measured on the merged
+#: tree —
+#:
+#:   merged child head (this branch) 67,325 chars = ~24,218
+#:
+#: vs the diet's child head (65,974 = ~23,732): the same +1,351 chars = ~+486
+#: billed the top arm carries, which is the check that the delta is that one
+#: tool and nothing else. Band normalized to the 55-token band; the diet's
+#: child head had 475 of headroom, so the ceiling moves by 66: head + 55.
+BUDGET_CHILD_BILLED_TOKENS = 24_273
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
