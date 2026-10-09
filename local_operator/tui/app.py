@@ -9523,13 +9523,33 @@ class OperatorApp(App[None]):
         # the old composer), so the reveal is a reflow whose tail scroll lands
         # in `_size_updated` — AFTER the compositor placed the rows. Measured on
         # S1 at 160x45: the first painted frame of every switch showed the rows
-        # 15 lines low (the pre-scroll offset) and the next frame moved them up,
-        # one extra visual state per switch. `hold_tail_through_layout` is the
-        # transcript's pre-placement seam for exactly this; it is released on
-        # the refresh after the reveal so it cannot re-land the tail on a later
-        # layout. Only for a follower: a restored scroll anchor must not be
-        # overridden (see `TranscriptView.arrange`).
-        self._hold_tail_for_reveal(incoming.replay.view)
+        # 15 lines low (and, once the prepared transcript was authored at the
+        # destination width, that was the last state left to remove). One extra
+        # visual state per switch, gone.
+        #
+        # A SAVED POSITION IS THE OPPOSITE CASE AND IS ASKED FIRST. The hold is
+        # about the TAIL, and a source the reader left mid-conversation is not
+        # going to the tail — it is going back to its own anchor. The two cannot
+        # both win: `_prepare_sidebar_session` calls ``follow_tail()``
+        # unconditionally (the parked view has no saved geometry to hold), so a
+        # `display_only` source with a saved anchor arrives here with
+        # ``following`` armed, and the reveal would paint the end of a
+        # conversation whose reader is somewhere in the middle before
+        # ``restore_revealed_anchor`` walks it back — the two painted states.
+        # So the anchor is restored on the revealed geometry HERE, in the same
+        # synchronous section, and the post-reveal restore stays as the net it
+        # has always been (it exists because a parked measurement is not the
+        # final geometry for wrapped content; where the offset already agrees it
+        # changes nothing, so the frame count is unaffected).
+        saved_position = not source.draft.following_tail and bool(source.draft.scroll_anchor_id)
+        if saved_position:
+            incoming.replay.view.restore_navigation_anchor(
+                source.draft.scroll_anchor_id,
+                source.draft.scroll_anchor_part,
+                source.draft.scroll_offset,
+            )
+        else:
+            self._hold_tail_for_reveal(incoming.replay.view)
         incoming.replay.view.set_on_clear(self._on_transcript_cleared)
         incoming.replay.view.set_on_user_scroll(self._transcript_scrolled)
         incoming.replay.view.set_on_tail_requested(self._jump_newer_resume_tail)

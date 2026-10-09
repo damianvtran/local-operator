@@ -199,8 +199,8 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
             super().__init__()
             self.notice = notice
 
-    def __init__(self) -> None:
-        super().__init__("More recent messages below", "note")
+    def __init__(self, *, fold_width: int = 0) -> None:
+        super().__init__("More recent messages below", "note", fold_width=fold_width)
         self.add_class("interactive-notice")
 
     def action_more(self) -> None:
@@ -723,7 +723,13 @@ class PreparedReplay(ReplayState):
             )
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
-            self._resume_tail_notice = HistoryPageNotice()
+            # The tail notice takes the width for the same reason the head one
+            # does, even though neither wraps at the widths in play today
+            # (``RESUME_OLDER_NOTICE`` is 42 chars, this one 30 — one row at 80
+            # and at 142, measured): the pair is built here, and a block that
+            # folds at a width its caller did not name is the class of bug this
+            # whole ``fold_width`` argument exists to close.
+            self._resume_tail_notice = HistoryPageNotice(fold_width=fold_width)
             self.blocks.append(self._resume_tail_notice)
         self._block_sink = None
         # One projection's liveness answer must not leak into the next pass:
