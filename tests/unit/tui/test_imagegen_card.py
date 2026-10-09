@@ -20,12 +20,16 @@ from __future__ import annotations
 import pytest
 
 from local_operator.harness.types import (
+    FAULT_KEY,
     AgentToolUpdate,
+    TextContent,
+    ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
+    ToolResult,
 )
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.events import ToolStarted, ToolUpdated
+from local_operator.tui.events import ToolEnded, ToolStarted, ToolUpdated
 from local_operator.tui.widgets.tool_card import IMAGE_INTERRUPT_HINT, ToolCard
 
 from .test_app_pilot import FakeSession, _factory
@@ -160,8 +164,13 @@ def test_the_already_finished_conflict_is_never_an_error() -> None:
     assert "already finished" in body
     assert "✗" not in body
 
-    # And the same rule on the settled failure body, where the sentence the
-    # conflict carried (if any) is NOT used as the account.
+    # ... and on the settled FAILURE body the conflict wears no failure
+    # furniture in the EXPANSION (reviewer F1): no promoted-reason lead, no
+    # ✗-wrapped sentence — the note is the account, and the head line remains
+    # only as the row's own status text. (The collapsed row keeps the
+    # result's own verdict — a surface must not re-classify a result — so
+    # the row's `cancelled ✗` is the harness's receipt, not this variant's
+    # dressing.)
     settled = ToolCard("g5", "generate_image", {"prompt": "p"})
     settled._expanded = True
     settled.mark_failed(
@@ -171,7 +180,35 @@ def test_the_already_finished_conflict_is_never_an_error() -> None:
     )
     body = _content(settled)
     assert "already finished" in body
-    assert "✗ already finished" not in body
+    assert "✗ cancelled" not in body
+    assert "cancelled" in body
+
+
+def test_the_finished_note_survives_a_success_settle() -> None:
+    """The wire freeze decides which arm the conflict settles on; the note is
+    derived from the payload on ALL of them (reviewer F1 / QA Q1) — success
+    included, in the same neutral ink."""
+    card = _running_card()
+    card.mark_done(
+        "Generation cancelled before completion.",
+        details={"error_type": "media_already_completed"},
+    )
+    body = _content(card)
+    assert "already finished" in body
+    assert "✗" not in body
+
+
+def test_the_finished_note_survives_an_interrupt_settle() -> None:
+    """The same rule on the interrupt arm: `mark_interrupted` reads the
+    result payload exactly as done and failed do (reviewer F1 / QA Q1)."""
+    card = _running_card()
+    card.mark_interrupted(
+        reason="Stopped before completion.",
+        details={"error_type": "media_already_completed"},
+    )
+    body = _content(card)
+    assert "already finished" in body
+    assert "✗" not in body
 
 
 # --- the settled success has NO variant furniture --------------------------
@@ -263,6 +300,79 @@ async def test_tool_updates_feed_the_adapter_through_the_app() -> None:
         assert card._imagegen_live.queue_position == 2
         assert card._imagegen_live.fraction == 0.25
         assert card._imagegen_live.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_the_finished_note_survives_every_settle_arm_through_the_app() -> None:
+    """End to end through the real app's ToolEnded path — the seam QA probed:
+    the conflict's payload reaches the expansion whether the result settles as
+    error, success or interrupt (reviewer F1 / QA Q1)."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        for call_id in ("a", "b", "c"):
+            app.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id=call_id, tool_name="generate_image", args={"prompt": "p"}
+                    )
+                )
+            )
+        await pilot.pause()
+        # Settled cards leave `_tool_cards` the instant their result lands
+        # (the live-registry cleanup), so hold the refs before the ends.
+        cards = {call_id: app._tool_cards[call_id] for call_id in ("a", "b", "c")}
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="a",
+                    tool_name="generate_image",
+                    result=ToolResult(
+                        tool_call_id="a",
+                        tool_name="generate_image",
+                        is_error=True,
+                        content=[TextContent(text="image generation failed")],
+                        details={"error_type": "media_already_completed"},
+                    ),
+                )
+            )
+        )
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="b",
+                    tool_name="generate_image",
+                    result=ToolResult(
+                        tool_call_id="b",
+                        tool_name="generate_image",
+                        content=[TextContent(text="Generation cancelled before completion.")],
+                        details={"error_type": "media_already_completed"},
+                    ),
+                )
+            )
+        )
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="c",
+                    tool_name="generate_image",
+                    result=ToolResult(
+                        tool_call_id="c",
+                        tool_name="generate_image",
+                        content=[TextContent(text="Stopped.")],
+                        details={FAULT_KEY: "skipped", "error_type": "media_already_completed"},
+                    ),
+                )
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+        for call_id, expected_state in (("a", "error"), ("b", "success"), ("c", "interrupted")):
+            card = cards[call_id]
+            assert card.state == expected_state
+            card._expanded = True
+            body = _content(card)
+            assert "already finished" in body, (call_id, body)
 
 
 @pytest.mark.asyncio

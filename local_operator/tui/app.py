@@ -54065,7 +54065,10 @@ class OperatorApp(App[None]):
         # Everything else, marker or none, keeps today's `mark_failed`.
         fault = (details or {}).get(FAULT_KEY)
         if fault in INTERRUPTED_FAULTS:
-            card.mark_interrupted(reason=result_text, measured_s=measured_s)
+            # The result's details ride along so a payload that arrived only
+            # with the result (an imagegen settle) reaches the expansion on
+            # this arm too — the card reads it exactly as done/failed do.
+            card.mark_interrupted(reason=result_text, measured_s=measured_s, details=details)
         elif event.is_error:
             card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:
