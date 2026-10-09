@@ -170,6 +170,65 @@ def test_daemon_image_endpoint_resolves_artifact_bytes(tmp_path, monkeypatch):
     assert _image_bytes(record, "nope", 0) is None
 
 
+def test_refs_row_ids_resolve_through_the_endpoint(tmp_path, monkeypatch):
+    """QA round 1, Q-1: refs ride the TOOL ROW's id, never the result message id.
+
+    The projection emits refs on rows whose ids are
+    ``{assistant_message_id}:{call_id}`` (history fold) or ``tc-{call_id}``
+    (live fold). The earlier test passed the RESULT message id directly, so
+    the endpoint's exact-match lookup looked fine while every real phone fetch
+    404'd ('no such image'). This pins the composition the client actually
+    walks: row id in, artifact bytes out, for BOTH row shapes.
+    """
+    from local_operator.mobile.daemon import _image_bytes
+    from local_operator.mobile.types import SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    artifact = cache_media(PNG_1X1, "image/png")
+    assert artifact is not None
+    session_id = "sess-rowid"
+    directory = cfg / "sessions" / session_id
+    directory.mkdir(parents=True)
+    assistant = Message.assistant(
+        "",
+        tool_calls=[ToolCall(id="call_rowid", name="generate_image", arguments={"prompt": "x"})],
+    )
+    result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call_rowid",
+            tool_name="generate_image",
+            content=[TextContent(text="Made one image"), artifact],
+        )
+    )
+    transcript = Transcript(directory)
+    asyncio.run(transcript.append_message(assistant))
+    asyncio.run(transcript.append_message(result))
+
+    record = SessionRecord(
+        pid=1,
+        kind="daemon",
+        session_id=session_id,
+        conversation_name="",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=0,
+        control_key="k",
+    )
+    # The two client-visible row-id shapes.
+    for row_id in (f"{assistant.id}:call_rowid", "tc-call_rowid"):
+        found = _image_bytes(record, row_id, 0)
+        assert found is not None, f"no bytes resolved for row id {row_id!r}"
+        assert found[0] == PNG_1X1 and found[1] == "image/png"
+    # The result's own message id still resolves (older clients/tests), and a
+    # junk id is still an ordinary miss.
+    assert _image_bytes(record, result.id, 0) is not None
+    assert _image_bytes(record, "tc-nope", 0) is None
+
+
 def test_daemon_image_endpoint_index_matches_refs_walk(tmp_path, monkeypatch):
     """ONE index for both sides: an inline image placed BEFORE the artifact
     makes the artifact index 1 on the refs side, and the endpoint must agree
