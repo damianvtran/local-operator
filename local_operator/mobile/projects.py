@@ -201,6 +201,8 @@ def _refusal(exc: Exception) -> ProjectRouteError:
         # `force_done: true`) is a choice the phone can offer only if it can
         # tell this from a malformed value. The sentence is the store's own;
         # the names ride `extra` so the body stays `{error, code, incomplete}`.
+        # Shared with the create route: it would emit this code too if create
+        # ever carried milestones (it cannot today).
         return ProjectRouteError(
             422,
             "project_done_incomplete",
@@ -351,7 +353,9 @@ def patch_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str,
             updated,
             live_sessions=live.get(updated.id, 0),
             window=stale_after_s(registry.config_dir),
-            forced_done=closed_with_open_milestones(updated, force_done=force_done),
+            forced_done=closed_with_open_milestones(
+                updated, force_done=force_done, was_done=found.status == "done"
+            ),
         ).model_dump(mode="json"),
     }
 

@@ -194,6 +194,8 @@ def _refusal(exc: Exception, key: str) -> HTTPException:
         # `force_done: true` — which a client can only offer if it can tell this
         # refusal from a malformed value. `message` is the store's exact
         # sentence; `incomplete` names what the confirm dialog should list.
+        # This mapping is shared with the create routes: they would emit the
+        # same code if create ever carried milestones (it cannot today).
         return HTTPException(
             422,
             {
@@ -414,7 +416,9 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 updated,
                 live_sessions=live.get(updated.id, 0),
                 window=_window(registry),
-                forced_done=closed_with_open_milestones(updated, force_done=force_done),
+                forced_done=closed_with_open_milestones(
+                    updated, force_done=force_done, was_done=found.status == "done"
+                ),
             )
 
         return reply(await asyncio.to_thread(mutate))
