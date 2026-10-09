@@ -114,3 +114,14 @@ digests DO survive (`9a3dd391bff1`) mounts its pictures:
 - Scripts: `seed_output_artifact.py` (the fixture), `artifact_resume_shot.py`
   (capture; `isolate_capture()` before app imports, per the repo's Visual
   validation recipe).
+
+## Additional states (design review round 1, D1 addendum)
+
+Two further states were re-shot by the design round from the same rig (scripts
+`shoot_receipt.py`, `shoot_narrow.py`; geometry in `receipt.geometry.json`):
+
+- `receipt.png` — the MISSING-STORE state: the artifact and the externalised
+  legacy image degrade to `image unavailable — no longer in the transcript`
+  under an amber explanation, while the sub-floor inline image still paints
+  from its own bytes. No crash, no vanishing.
+- `narrow.png` — the same transcript at 80x24.
