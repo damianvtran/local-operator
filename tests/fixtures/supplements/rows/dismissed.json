@@ -1,0 +1,18 @@
+{
+  "id": "78657cbd08943eaf7d0a5e3d1b7ca6d7",
+  "ts": 1791000000.0,
+  "type": "custom",
+  "payload": {
+    "custom_type": "supplement_v1",
+    "details": {
+      "anchor": "c3d4e5f60718293a4b5c6d7e8f90a1b2",
+      "job": "e0b5236f8c47",
+      "version": 2,
+      "state": "skipped",
+      "files": [],
+      "components": [],
+      "dismissed": true,
+      "at": 1791000000.0
+    }
+  }
+}

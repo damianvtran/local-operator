@@ -1,0 +1,104 @@
+{
+  "host": {
+    "theme": {
+      "lo": "supplement-host",
+      "t": "theme",
+      "mode": "light",
+      "vars": {
+        "--lo-canvas": "#ffffff",
+        "--lo-ink": "#1f1f1f",
+        "--font-sans": "system-ui"
+      },
+      "nonce": "n-4f2a9c1e07b3"
+    },
+    "ping": {
+      "lo": "supplement-host",
+      "t": "ping"
+    }
+  },
+  "frame_accepted": {
+    "ready": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "ready"
+    },
+    "resize": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "resize",
+      "h": 312,
+      "n": "n-4f2a9c1e07b3"
+    },
+    "error": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "error",
+      "msg": "unknown dataset missing",
+      "n": "n-4f2a9c1e07b3"
+    },
+    "pong": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "pong",
+      "n": "n-4f2a9c1e07b3"
+    }
+  },
+  "frame_rejected": {
+    "resize_without_nonce": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "resize",
+      "h": 312
+    },
+    "resize_stale_nonce": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "resize",
+      "h": 312,
+      "n": "n-old"
+    },
+    "pong_without_nonce": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "pong"
+    },
+    "error_without_nonce": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "error",
+      "msg": "x"
+    },
+    "resize_negative_height": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "resize",
+      "h": -1,
+      "n": "n-4f2a9c1e07b3"
+    },
+    "resize_boolean_height": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "resize",
+      "h": true,
+      "n": "n-4f2a9c1e07b3"
+    },
+    "unknown_type": {
+      "lo": "supplement",
+      "v": 1,
+      "t": "navigate",
+      "n": "n-4f2a9c1e07b3"
+    },
+    "wrong_version": {
+      "lo": "supplement",
+      "v": 2,
+      "t": "pong",
+      "n": "n-4f2a9c1e07b3"
+    },
+    "wrong_tag": {
+      "lo": "supplement-host",
+      "v": 1,
+      "t": "pong",
+      "n": "n-4f2a9c1e07b3"
+    }
+  }
+}

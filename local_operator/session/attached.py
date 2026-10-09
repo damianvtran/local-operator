@@ -59,6 +59,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    SupplementProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -611,6 +612,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         RetryStartEvent,
         ModelChangeEvent,
         RetryEndEvent,
+        SupplementProgressEvent,
     )
 }
 
