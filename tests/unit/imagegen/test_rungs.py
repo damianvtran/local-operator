@@ -102,7 +102,8 @@ def _radient_handler(
                 json={"request_id": "r1", "status": "IN_QUEUE", "cost_usd": 0.08},
             )
         if path.endswith("/tools/media/status"):
-            return httpx.Response(200, json=status_script.pop(0) if status_script else {"status": "COMPLETED"})
+            payload = status_script.pop(0) if status_script else {"status": "COMPLETED"}
+            return httpx.Response(200, json=payload)
         if path.endswith("/tools/media/result"):
             return httpx.Response(
                 200,
@@ -231,6 +232,38 @@ async def test_radient_capacity_probe_failure_proceeds_optimistically() -> None:
 
 
 @pytest.mark.asyncio
+async def test_radient_affordability_reads_the_result_envelope() -> None:
+    """The LIVE capacity shape nests ``total_balance`` under ``result``.
+
+    Measured against production 2026-10-08: the hub answers
+    ``{"msg": ..., "result": {"total_balance": ...}}``. A low balance inside
+    the envelope must skip the rung exactly as a top-level one does — a
+    silently unread balance would turn the affordability gate into a no-op.
+    """
+    recorder = _Recorder()
+    envelope = {"msg": "Billing capacity retrieved", "result": {"total_balance": 0.01}}
+    async with _client(_radient_handler(recorder, capacity=envelope)) as client:
+        with pytest.raises(image_rungs.RungSkipped) as caught:
+            await image_rungs.run_radient(
+                prompt="a cat",
+                base_url="https://hub.test",
+                credential="cred",
+                num_images=1,
+                image_size="square_hd",
+                seed=None,
+                strength=None,
+                source_url=None,
+                model=None,
+                handle=image_rungs.CancelHandle(),
+                emit=None,
+                pause=_no_pause,
+                client=client,
+            )
+    assert caught.value.reason_class == "insufficient_balance"
+    assert not any(path.endswith("/tools/media/generate") for path in recorder.paths())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error_type", "expected_code"),
     [
@@ -288,7 +321,9 @@ def _fal_handler(
         if path.endswith(("/custom/req1", "/requests/r1", "/requests/req1")):
             return httpx.Response(
                 200,
-                json={"images": [{"url": "https://falimg.test/a.png", "width": 1024, "height": 1024}]},
+                json={
+                    "images": [{"url": "https://falimg.test/a.png", "width": 1024, "height": 1024}]
+                },
             )
         if request.url.host == "falimg.test":
             return httpx.Response(200, content=PNG_1X1, headers={"content-type": "image/png"})
