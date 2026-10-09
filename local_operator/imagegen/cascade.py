@@ -317,6 +317,37 @@ def _all_failed_message(attempts: list[ImageAttempt]) -> str:
     return "\n".join(lines)
 
 
+def _emit_rung_failure(
+    emit: image_rungs.ProgressFn | None,
+    route: ImageRoute,
+    *,
+    message: str,
+    error_type: str,
+    num_images: int,
+) -> None:
+    """The mid-walk failure update: the pair the surfaces branch on.
+
+    ``error_type`` is the SAME classification the attempt record beside it
+    carries as ``reason_class`` — one classifier, so the update and the
+    attempt cannot disagree (the Q7 wire scope: "map sensibly alongside
+    ``attempts[].reason_class``; don't duplicate/contradict"). ``stage`` is
+    ``None``: no canonical stage names a mid-walk failure — the pair is the
+    semantics, and the next update (the next rung's ``queued``) replaces it.
+    """
+    label = RUNG_LABELS.get(route, str(route))
+    image_rungs.emit_progress(
+        emit,
+        f"Generating via {label}: failed — {message}",
+        **image_rungs.progress_details(
+            stage=None,
+            provider=str(route),
+            num_images=num_images,
+            error=message,
+            error_type=error_type,
+        ),
+    )
+
+
 async def run_image_cascade(
     *,
     prompt: str,
@@ -388,14 +419,24 @@ async def run_image_cascade(
                 # User cancellation is a STOP, not a failure: no failover.
                 raise
             except TimeoutError:
+                timeout_message = (
+                    f"{RUNG_LABELS.get(route, route)} exceeded its "
+                    f"{int(budget)}s generation budget."
+                )
                 attempts.append(
                     ImageAttempt(
                         route=route,
                         outcome="failed",
                         reason_class="timeout",
-                        message=f"{RUNG_LABELS.get(route, route)} exceeded its "
-                        f"{int(budget)}s generation budget.",
+                        message=timeout_message,
                     )
+                )
+                _emit_rung_failure(
+                    emit,
+                    route,
+                    message=timeout_message,
+                    error_type="timeout",
+                    num_images=num_images,
                 )
                 continue
             except image_rungs.RungSkipped as exc:
@@ -409,14 +450,23 @@ async def run_image_cascade(
                 )
                 continue
             except Exception as exc:  # noqa: BLE001 - every rung failure fails forward
+                reason_class = failure_reason_class(exc)
+                attempt_message = _attempt_message(exc)
                 attempts.append(
                     ImageAttempt(
                         route=route,
                         outcome="failed",
-                        reason_class=failure_reason_class(exc),
-                        message=_attempt_message(exc),
+                        reason_class=reason_class,
+                        message=attempt_message,
                         status_code=_status_code_of(exc),
                     )
+                )
+                _emit_rung_failure(
+                    emit,
+                    route,
+                    message=attempt_message,
+                    error_type=reason_class,
+                    num_images=num_images,
                 )
                 continue
             attempts.append(ImageAttempt(route=route, outcome="ok"))
