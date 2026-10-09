@@ -314,10 +314,14 @@ def _stage_config(config_dir: Path, home: Path) -> Path:
     A provider and a model must be configured or the viewer never engages a
     runtime (``OperatorApp._runtime_can_start``) and the "resources finished
     loading" half of this test has nothing to load. The base URL is a loopback
-    port nothing listens on, deliberately: the boot path does not call the
-    provider (measured — no request, no error in the log), so standing a stub
-    HTTP server up would add a fixture to babysit without buying coverage.
-    What the value has to do is resolve a provider/model pair.
+    port nothing listens on, deliberately — and since this PR's first-run work
+    the boot DOES reach it: a fresh config dir with a resolvable provider/model
+    pair routes into her conversation and arms her greeting, whose turn calls
+    the provider and fails. That is the shape this fixture wants (the call
+    fails in milliseconds on a port nothing can answer, so the leg stays
+    hermetic and no stub server has to be stood up and babysat); the clean-log
+    contract at the end of the test allows those failure lines and forbids only
+    a crash marker or a traceback. What the pair has to do is RESOLVE.
 
     The MCP config is a REAL stdio peer, because MCP servers coming up is what
     the operator's crash log shows the app doing when it died. It is copied
@@ -612,6 +616,47 @@ def _stop_other(pid: int | None, *, grace_s: float = 5.0) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def _window_around(data: bytes, marker: bytes, *, before: int = 300, after: int = 2000) -> str:
+    """The block around the FIRST ``marker`` in ONE haystack, decoded.
+
+    Per-haystack rather than per-log-directory on purpose: the terminal frame and
+    the app's log files are different haystacks, and printing log context for a
+    traceback that rendered into the FRAME reports a file the marker is not in
+    (round 3d, N1).
+    """
+    index = data.find(marker)
+    if index < 0:
+        return "the marker is not in this haystack"
+    start = max(0, index - before)
+    end = min(len(data), index + after)
+    return f"at byte {index}:\n{data[start:end].decode('utf-8', errors='replace')}"
+
+
+def _marker_context(
+    config_dir: Path, marker: bytes, *, before: int = 300, after: int = 2000
+) -> str:
+    """The same window, NAMING the file it is in — the log branch's context.
+
+    The message used to print the tail of the concatenated logs, and that hid
+    exactly the case it exists for: measured on CI (`tui-e2e (ubuntu-latest,
+    1)`, run 37886200214), the log carried `Traceback` somewhere before the
+    last 3000 bytes — ``_logs()`` joins every file in ``logs/`` (the app's own
+    log, the stall watchdog's dump, the runtime's), and pytest then elides the
+    middle of the compared operand — so the reader could tell the marker was
+    there and nothing about what wrote it. This walks the files one at a time,
+    which is the difference between a red cell and a diagnosis.
+    """
+    directory = config_dir / "logs"
+    if not directory.is_dir():
+        return "no logs directory"
+    for path in sorted(directory.glob("*.log")):
+        with contextlib.suppress(OSError):
+            data = path.read_bytes()
+            if data.find(marker) >= 0:
+                return f"{path.name} {_window_around(data, marker, before=before, after=after)}"
+    return "the marker is in no log file"
+
+
 def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_terminal_input(
     headless_tui_env: Path,
     tmp_path: Path,
@@ -698,20 +743,25 @@ def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_termina
             # own file logging is where the operator read it in production (the
             # sink is fd 2, which the TUI's logging guard points at the log
             # file, so the driver's own panic report lands there).
-            for where, text in (
-                ("the terminal", bytes(terminal.output)),
-                ("the log", _logs(config_dir).encode()),
+            for where, text, context in (
+                (
+                    "the terminal",
+                    bytes(terminal.output),
+                    _window_around(bytes(terminal.output), b"Traceback"),
+                ),
+                (
+                    "the log",
+                    _logs(config_dir).encode(),
+                    _marker_context(config_dir, b"Traceback"),
+                ),
             ):
                 for marker in _CRASH_MARKERS:
                     assert marker.encode() not in text, (
                         f"{where} carries the decode failure that killed 0.54.37 "
                         f"({marker}); "
-                        f"tail:\n{text[-3000:].decode('utf-8', errors='replace')}"
+                        f"{_window_around(text, marker.encode())}"
                     )
-                assert b"Traceback" not in text, (
-                    f"{where} carries a traceback; "
-                    f"tail:\n{text[-3000:].decode('utf-8', errors='replace')}"
-                )
+                assert b"Traceback" not in text, f"{where} carries a traceback; {context}"
     finally:
         if terminal is not None:
             _stop_child(pid, terminal)

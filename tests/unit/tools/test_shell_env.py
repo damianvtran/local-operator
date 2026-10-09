@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -663,3 +664,83 @@ def test_denying_a_parent_defined_name_is_a_denial_that_happened(
     assert any(
         "GH_TOKEN" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
     ), "a name nothing defines must still warn"
+
+
+def test_lop_resolves_to_this_build_when_the_path_has_none(tmp_path, monkeypatch) -> None:
+    """A desktop-managed backend's PATH has no `lop`, so Aida's documented
+    `lop aida note` answered "command not found". The bash tool prepends a
+    shim directory holding THAT name — and only when `lop` is otherwise absent,
+    so an operator's own pinned launcher still wins.
+
+    The shim (not the interpreter's own ``bin``) is the whole point of review
+    round 1's R-1: prepending the venv ``bin`` also put the app's ``python3``,
+    ``pip`` and console scripts ahead of the user's. So this pins BOTH halves —
+    ``lop`` resolves, and nothing else the child might mean changes resolution.
+    """
+    import sys
+
+    from local_operator.tools import builtin
+
+    scripts = tmp_path / "venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "lop").chmod(0o755)
+    # The shadowing half of R-1: the app's venv carries its own python/pip, and a
+    # naive PATH prepend made the child resolve THOSE.
+    (scripts / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "python3").chmod(0o755)
+    (scripts / "pip").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "pip").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shim_root = tmp_path / "scratch"
+    shim_root.mkdir()
+    injected = builtin.own_launcher_path_injection(shim_root, parent_path=str(empty))
+    first = injected["PATH"].split(os.pathsep)[0]
+    # The injected directory holds `lop` and nothing else, and it is not the venv.
+    assert sorted(os.listdir(first)) == ["lop"]
+    assert Path(first) != scripts
+    assert os.access(str(Path(first) / "lop"), os.X_OK)
+    assert str(empty) in injected["PATH"]
+    # The app's own venv never reaches the child, so its python3/pip cannot win.
+    assert str(scripts) not in injected["PATH"]
+
+    elsewhere = tmp_path / "global"
+    elsewhere.mkdir()
+    (elsewhere / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (elsewhere / "lop").chmod(0o755)
+    assert builtin.own_launcher_path_injection(shim_root, parent_path=str(elsewhere)) == {}
+
+
+def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch) -> None:
+    """R-1's user-visible harm, asserted directly on PATH resolution.
+
+    With the app's venv on PATH ahead of ``/usr/bin``, ``which python3`` in the
+    child resolved the app's interpreter. The shim directory must leave that
+    resolution untouched while still making ``lop`` resolve.
+    """
+    import sys
+
+    from local_operator.tools import builtin
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (venv_bin / "lop").chmod(0o755)
+    (venv_bin / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (venv_bin / "python3").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(venv_bin / "python"))
+
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    (user_bin / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (user_bin / "python3").chmod(0o755)
+
+    shim_root = tmp_path / "scratch"
+    shim_root.mkdir()
+    injected = builtin.own_launcher_path_injection(shim_root, parent_path=str(user_bin))
+
+    assert shutil.which("python3", path=injected["PATH"]) == str(user_bin / "python3")
+    assert shutil.which("lop", path=injected["PATH"]) is not None

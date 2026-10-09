@@ -29,7 +29,6 @@ from local_operator.providers.registry import (
     credential_provider_id,
     env_key_name,
     get_provider_definition,
-    list_login_providers,
 )
 
 logger = logging.getLogger("local_operator.providers.auth_cli")
@@ -67,7 +66,17 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     """
 
     def on_auth_url(url: str, instructions: str | None = None) -> None:
-        print(f"\nOpen this URL to authorize:\n  {url}")
+        # THE VERB MATCHES THE FLOW (review round 1, Q3). An OAuth URL is one
+        # you authorize; a paste-key row's URL is a dashboard page where the key
+        # is CREATED, and telling the user to "authorize" it sent them looking
+        # for a sign-in button on a page that only has "Create new secret key".
+        # Same reason the prompt below says "API key" and not "code".
+        header = (
+            "Open this page to create a key:"
+            if definition.paste_prompt_required
+            else "Open this URL to authorize:"
+        )
+        print(f"\n{header}\n  {url}")
         if instructions:
             print(instructions)
 
@@ -103,6 +112,17 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         protect a value that is not worth protecting.
         """
         if wants_api_key:
+            if not sys.stdin.isatty():
+                # A PIPED key (`echo $KEY | lop login deepseek`, a provisioning
+                # script) has no terminal to hide it on. ``getpass`` then falls
+                # back with a ``GetPassWarning`` plus "Password input may be
+                # echoed" — noise that reads as a failure in exactly the
+                # unattended runs that cannot ask what it meant (audit Q10).
+                # Nothing is echoed either way: the value comes from the pipe,
+                # not from a keyboard. The prompt goes to stderr so stdout
+                # stays the command's own output.
+                print(prompt, end="", file=sys.stderr, flush=True)
+                return sys.stdin.readline().rstrip("\r\n")
             # Imported here rather than at module scope: this module is on the
             # CLI's startup path and getpass drags in termios/tty for a prompt
             # only an interactive login reaches.
@@ -326,11 +346,27 @@ def run_login(
         # argument first), so the two surfaces answer one spelling one way.
         return list_logins(auth_store, _config_dir)
     if provider_id is None:
-        print("Available login providers:")
-        for candidate in list_login_providers():
-            marker = "*" if candidate.store_credentials_as else " "
-            print(f"  {marker} {candidate.id:<16} {candidate.name}")
-        print("\nUsage: local-operator login <provider>   (or: login status)")
+        # Grouped like the desktop with Radient first (``login_catalog``), every
+        # row labelled and described. The old flat registry dump led with
+        # ``openai``, put Radient 20th and marked flavour rows with an
+        # unexplained ``*`` (audit D3/U9/D13) — the marker is gone because the
+        # group heading and description now say what it tried to.
+        from local_operator.providers.login_catalog import (
+            RECOMMENDED_LOGIN,
+            login_groups,
+        )
+
+        print("Connect an AI account:")
+        for heading, rows in login_groups():
+            print(f"\n  {heading}")
+            for row in rows:
+                tag = " (recommended)" if row.recommended else ""
+                print(f"    {row.id:<25} {row.label}{tag}")
+                print(f"    {'':<25} {row.description}")
+        print(
+            f"\nStart with: lop login {RECOMMENDED_LOGIN}"
+            "\nUsage: lop login <provider>   (or: lop login status)"
+        )
         return 0
 
     definition = get_provider_definition(provider_id)
@@ -343,6 +379,14 @@ def run_login(
 
     login = definition.login
     callbacks = _callbacks_interactive(definition)
+    from local_operator.providers.login_catalog import remote_login_hint
+
+    hint = remote_login_hint(provider_id)
+    if hint:
+        # Before the flow starts: a remote user otherwise watches a URL that
+        # redirects to a loopback port on a machine they are not sitting at,
+        # and finds out only at the 300 s timeout (audit Q8).
+        print(hint)
 
     async def _run() -> str | dict[str, Any]:
         # A Ctrl+C during a PENDING login has to cancel the login, not merely
@@ -434,6 +478,12 @@ def run_login(
     print(f"Logged in to '{storage_provider}'{suffix}.")
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
+    if storage_provider == "radient":
+        # See ``ProviderController.login``: the identity the Radient sign-in
+        # proved lands in the instructions file's "About the operator".
+        from local_operator.aida.profile import record_radient_login
+
+        record_radient_login(result, config_dir=_config_dir)
     _apply_login_defaults(storage_provider, oauth=True)
     _ = row
     return 0

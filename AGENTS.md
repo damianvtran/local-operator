@@ -935,8 +935,16 @@ set reads and writes `~/.local-operator/cache` while believing it is isolated.
 agree:
 
 ```sh
-env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
+cd /tmp/iso-run && env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
 ```
+
+**And `cd` into the isolated root before running `lop`.** The CWD is a config
+source too: `lop` reads a project-scoped `.local-operator/mcp.json` from the
+directory it starts in, so a run started with a cwd of `~` reads
+`~/.local-operator/mcp.json` AS PROJECT CONFIG and connects the operator's live
+MCP servers — with `HOME` and `LOCAL_OPERATOR_CONFIG_DIR` both redirected
+(measured in the first-run onboarding audit, 2026-10-08). A cwd inside the
+isolated root has no such file.
 
 **And strip what a `lop` parent exports, because two of its prefixes are read by
 the child product rather than only by a terminal.** `CMUX_*` is the one already

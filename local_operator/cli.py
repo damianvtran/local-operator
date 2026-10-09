@@ -2279,13 +2279,23 @@ def credential_update_command(args: argparse.Namespace) -> int:
     from local_operator.ansi import strip_control_sequences
     from local_operator.cli_style import ERROR, WARNING, paint
     from local_operator.providers.key_prompt import prompt_for_provider_key
-    from local_operator.providers.registry import PROVIDER_REGISTRY, env_key_name
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_file_names,
+    )
 
     # Warn when the key is not one the registry knows, with the closest match \u2014
     # a typo'd ``OPENAI_API_KY`` otherwise stores silently and the provider
     # never sees it. Arbitrary keys stay allowed (custom providers are
     # legitimate); this is advice, not a gate.
-    known_keys = {name for p in PROVIDER_REGISTRY if (name := env_key_name(p.id))}
+    #
+    # ``credential_file_names``, not the single-name ``env_key_name``: the
+    # latter answers ``None`` for a CALLABLE resolver, so the one provider whose
+    # key people most often set by hand (``ANTHROPIC_API_KEY``) was warned about
+    # as unknown ("Did you mean ZAI_API_KEY?") while the provider reads it
+    # (audit Q2). It also covers a provider's second name (TypeSafe's
+    # ``JEV_API_KEY``), the asymmetry that function exists to close.
+    known_keys = {name for p in PROVIDER_REGISTRY for name in credential_file_names(p.id)}
     if args.key not in known_keys:
         import difflib
 
@@ -13282,6 +13292,7 @@ def _print_first_run_quickstart() -> None:
     equivalent of.
     """
     from local_operator.cli_style import ERROR, INFO, paint
+    from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 
     print(
         paint(
@@ -13294,15 +13305,19 @@ def _print_first_run_quickstart() -> None:
     )
     print(
         paint(
-            "Set it up with (pick a provider, e.g. openai / anthropic / deepseek):\n"
-            "  local-operator login <provider>          "
-            "# stores the key AND sets hosting + a default model\n"
+            # Radient first, from the shared constant (audit Q3/U2): the CLI,
+            # the TUI splash and the README now recommend the same first step.
+            f"Set it up (recommended: {RECOMMENDED_LOGIN}, one browser sign-in, no key):\n"
+            f"  lop login {RECOMMENDED_LOGIN}\n"
+            "or any other provider, including a plain API key (`lop login` lists them):\n"
+            "  lop login <provider>          "
+            "# stores the credential AND sets hosting + a default model\n"
             "or configure the pieces individually:\n"
-            "  local-operator config edit hosting <provider>\n"
-            "  local-operator config edit model_name <model>\n"
-            "  local-operator credential update <PROVIDER_API_KEY>\n"
+            "  lop config edit hosting <provider>\n"
+            "  lop config edit model_name <model>\n"
+            "  lop credential update <PROVIDER_API_KEY>\n"
             "or pass them per-run with the --hosting and --model flags.\n"
-            "On an interactive terminal, just run `local-operator` and log in "
+            "On an interactive terminal, just run `lop` and sign in "
             "from the setup screen.",
             INFO,
             stream=sys.stderr,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -132,3 +134,99 @@ async def test_radient_auth_store_round_trip(tmp_path):
     assert oauth_access is not None
     assert oauth_access.access_token == "rad-jwt-access-token"
     assert oauth_access.kind == "oauth"
+
+
+def _jwt(claims: dict[str, Any]) -> str:
+    """An UNSIGNED JWT carrying ``claims`` — the decoder never verifies."""
+    import base64
+    import json
+
+    def seg(value: dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    return f"{seg({'alg': 'HS256'})}.{seg(claims)}.sig"
+
+
+@pytest.mark.asyncio
+async def test_the_login_keeps_the_identity_its_id_token_carries():
+    """agent-server mints ``id_token`` with sub/email/name on the code grant;
+    the stored credential now carries them (audit A5/A6) — the label the
+    profile writer and the desktop's ``operator`` field read."""
+    id_token = _jwt({"sub": "acct_123", "email": "jane@x.com", "name": "Jane Doe"})
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "a",
+                "refresh_token": "r",
+                "id_token": id_token,
+                "expires_in": 3600,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        flow = RadientOAuthFlow(http_client=client)
+        await flow.generate_auth_url("s", "http://localhost:54549/callback")
+        creds = await flow.exchange_token("c", "s", "http://localhost:54549/callback")
+    assert creds["email"] == "jane@x.com"
+    assert creds["name"] == "Jane Doe"
+    assert creds["account_id"] == "acct_123"
+
+
+def test_a_missing_or_malformed_id_token_changes_nothing():
+    from local_operator.providers.oauth.radient import identity_from_token_response
+
+    assert identity_from_token_response({}) == {}
+    assert identity_from_token_response({"id_token": "not-a-jwt"}) == {}
+    assert identity_from_token_response({"id_token": _jwt({"email": "  "})}) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_grant_updates_the_identity_label():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "a2",
+                "refresh_token": "r2",
+                "id_token": _jwt({"sub": "acct_123", "email": "jane@x.com", "name": "Jane Q"}),
+                "expires_in": 3600,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        refreshed = await refresh_radient_token(
+            {"type": "oauth", "refresh": "r", "name": "Jane", "authorized_at": 1},
+            http_client=client,
+        )
+    assert refreshed["name"] == "Jane Q"
+
+
+def test_a_pre_identity_radient_row_is_upgraded_in_place(tmp_path):
+    """The first login after the upgrade must not leave two Radient rows.
+
+    The row written before id_token decoding is keyed ``oauth:radient``; the
+    new login is keyed by the account id. Adopting the constant-keyed row is
+    what the constant key did before, so one account stays one row.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    old = store.upsert_credential(
+        "radient", {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+    )
+    assert old.identity_key == "oauth:radient"
+    new = store.upsert_credential(
+        "radient",
+        {"type": "oauth", "access": "a2", "refresh": "r2", "expires": 2, "account_id": "acct_1"},
+    )
+    rows = store.list_credentials("radient")
+    assert len(rows) == 1 and rows[0].id == old.id == new.id
+    assert rows[0].identity_key == "acct_1"
+    # A SECOND account is still its own row.
+    store.upsert_credential(
+        "radient",
+        {"type": "oauth", "access": "b", "refresh": "rb", "expires": 3, "account_id": "acct_2"},
+    )
+    assert len(store.list_credentials("radient")) == 2

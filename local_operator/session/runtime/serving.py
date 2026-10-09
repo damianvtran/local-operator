@@ -5224,6 +5224,15 @@ class ServingSessionHandle(SessionHandle):
         flaps with window focus, which is the one thing a block inside the
         persisted system prefix must never do.
         """
+        # The greeting's FIRE-TIME gate (review round 1, R-3) rides the same
+        # install, because it needs the same thing — the connection table this
+        # runtime owns — and the same lifetime. A separate probe rather than the
+        # interactivity one: that answer counts relayed and phone surfaces,
+        # which the operator named as places the greeting must NOT land.
+        try:
+            self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
+        except Exception:  # noqa: BLE001 — a session without the slot keeps its default
+            logger.debug("could not install the attended probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -5231,6 +5240,34 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _attended_surfaces(self) -> frozenset[str]:
+        """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).
+
+        Empty for a registrant that predates the reader: an older server cannot
+        say, and the gate this feeds must WITHHOLD when it cannot tell (the
+        withheld greeting is re-armed by the next attended moment, while a wrong
+        "attended" spends it where nobody can read it).
+        """
+        reader = getattr(self._registrant, "attended_surfaces", None)
+        if not callable(reader):
+            return frozenset()
+        try:
+            return frozenset(cast("frozenset[str]", reader()))
+        except Exception:  # noqa: BLE001 — unreadable means "cannot tell"
+            logger.debug("could not read the attended surfaces", exc_info=True)
+            return frozenset()
+
+    def aida_attended(self) -> None:
+        """A local human surface arrived: let a withheld greeting re-arm now.
+
+        Called by ``RuntimeServer._note_attended`` on the session's loop. The
+        session decides whether it is hers and whether anything is owed; this is
+        only the doorbell.
+        """
+        hook = getattr(self._session, "aida_attended", None)
+        if callable(hook):
+            hook()
 
     def _desktop_notification_available(self) -> bool:
         reader = getattr(self._registrant, "notification_surfaces", None)

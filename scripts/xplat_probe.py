@@ -677,6 +677,65 @@ def probe_secret_roundtrip(env: dict[str, str]) -> Result:
     )
 
 
+def probe_login_list(env: dict[str, str]) -> Result:
+    """`lop login` with no provider: the first-run provider list, on this OS.
+
+    The list a new user reads first (first-run onboarding audit Q12). PASS
+    needs the recommended provider FIRST and the desktop's group headings, so
+    a regression to the flat registry dump fails here on every leg rather than
+    only in a unit test that never ran the console script.
+    """
+    proc = run(_cli_argv("login"), env, timeout=120.0)
+    text = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        return Result("login.list", "FAIL", _tail(text), {"rc": proc.returncode})
+    # Row lines are indented four; their description lines are indented past
+    # the id column, so only the former start a provider id.
+    ids = [
+        line.split()[0]
+        for line in proc.stdout.splitlines()
+        if line.startswith("    ") and not line.startswith("     ") and line.split()
+    ]
+    first = ids[0] if ids else ""
+    ok = first == "radient" and "Use an API key" in text and "Use a subscription" in text
+    return Result(
+        "login.list",
+        "PASS" if ok else "FAIL",
+        f"first={first or '-'}, {len(ids)} rows",
+        {"first": first, "rows": len(ids)},
+    )
+
+
+def probe_login_api_key(env: dict[str, str]) -> Result:
+    """A paste-key login with a DUMMY key through a pipe: store + defaults, no noise.
+
+    Exercises the CLI login path that has no browser at all — the one a
+    headless or scripted first run uses — and pins two first-run findings on
+    every OS: a piped key prints no ``GetPassWarning`` (Q10), and the chat
+    API-key row stores under the chat provider and sets hosting (Q1). The key
+    is a fixed fake in the probe's isolated root; nothing is sent anywhere.
+    """
+    proc = run(
+        _cli_argv("login", "anthropic-key"),
+        env,
+        timeout=180.0,
+        stdin="sk-ant-xplat-probe-not-a-key\n",
+    )
+    text = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        return Result("login.api_key", "FAIL", _tail(text), {"rc": proc.returncode})
+    noisy = "GetPassWarning" in text or "may be echoed" in text
+    stored = "Stored API key for 'anthropic'" in text
+    status = run(_cli_argv("login", "status"), env, timeout=120.0)
+    listed = "anthropic" in status.stdout and "api_key" in status.stdout
+    ok = stored and listed and not noisy
+    return Result(
+        "login.api_key",
+        "PASS" if ok else "FAIL",
+        f"stored={stored} listed={listed} getpass_noise={noisy}",
+    )
+
+
 def probe_sessions_list(env: dict[str, str]) -> Result:
     proc = run(_cli_argv("sessions", "--json"), env, timeout=120.0)
     if proc.returncode != 0:
@@ -1179,6 +1238,13 @@ def probe_tui_boot(env: dict[str, str]) -> Result:
     )
 
 
+#: The smallest capture that can be a full-screen boot rather than a truncated
+#: stream. A real TUI boot emits tens of KB (measured: 53 KB at 100x30); the
+#: number is a floor for "something happened", and the alternate-screen marker
+#: below is what says WHAT happened (review round 1, R-7).
+_TUI_MIN_BYTES = 2000
+
+
 def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     """Boot the console script against a REAL pty and type into it.
 
@@ -1187,6 +1253,19 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     platform difference in terminal handling actually lives. Windows gets its
     own console API (ConPTY) and no `termios`, so a difference here is exactly
     what we are looking for.
+
+    THE VERDICT KEYS ON A REAL FULL-SCREEN FRAME, not a byte count (review
+    round 1, R-7). The old criterion was ``count >= 500``, and on this fleet it
+    reported ``PASS tui.tty tty rendered 854 bytes`` — byte-identical on
+    ``origin/main`` and on the branch under test, while a branch that changes
+    the splash copy cannot produce the same 854 bytes a TUI boot emits tens of
+    KB of. So the instrument was PASSing on a truncated or foreign stream it
+    could not distinguish from a boot (two lanes re-implemented the same driver
+    and found no boot at all). What discriminates is the alternate-screen enter
+    sequence a full-screen Textual app writes on start plus a boot-sized
+    capture; when neither is there the honest verdict is SKIP — the instrument
+    could not observe the thing, and saying so is what stops the next person
+    re-chasing it as a product failure.
     """
     driver = textwrap.dedent("""
         import os, pty, select, signal, sys, time
@@ -1211,16 +1290,35 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
                 elif not sent and len(buf) > 2000:
                     os.write(fd, b"\\x03")  # Ctrl-C: reach the input path
                     sent = True
-                    time.sleep(1.0)
+                    time.sleep(0.5)
                     break
             print("BYTES", len(buf))
+            # The alternate-screen enter sequence, spelled as bytes rather than
+            # as an escape inside this generated source, so the discrimination
+            # is the ESC byte itself and not a quoting accident.
+            print("ALTSCREEN", 1 if bytearray([0x1B]) + b"[?1049h" in buf else 0)
             print(buf[-400:].decode("utf-8", "replace"))
         finally:
+            # The TEARDOWN is bounded and group-scoped, which is the second
+            # half of R-7: a plain ``os.kill(pid)`` + blocking ``waitpid`` left
+            # the driver waiting on a pty child that could not be reaped (the
+            # hang two lanes reproduced by hand), and it left the child's own
+            # group alive. Kill the GROUP, then reap with a bounded poll.
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
             except OSError:
-                pass
-            os.waitpid(pid, 0)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            for _ in range(100):
+                try:
+                    done, _status = os.waitpid(pid, os.WNOHANG)
+                except OSError:
+                    break
+                if done == pid:
+                    break
+                time.sleep(0.05)
         """)
     if os.name != "posix":
         return Result(
@@ -1236,14 +1334,18 @@ def probe_tui_driver_tty(env: dict[str, str]) -> Result:
     if "BYTES" not in out:
         return Result("tui.tty", "FAIL", _tail(out or proc.stderr))
     count = int(out.split("BYTES", 1)[1].split()[0])
-    if count < 500:
+    saw_alt_screen = "ALTSCREEN 1" in out
+    if count < _TUI_MIN_BYTES or not saw_alt_screen:
         return Result(
             "tui.tty",
-            "FAIL",
-            f"tty produced only {count} bytes before exiting",
+            "SKIP",
+            f"no full-screen frame captured ({count} bytes, altscreen="
+            f"{'yes' if saw_alt_screen else 'no'}): the byte-count criterion this "
+            "replaced could not tell a boot from a foreign stream (review round 1, "
+            "R-7); a run that reaches the alternate-screen sequence reports PASS",
             {"raw": out[-600:]},
         )
-    return Result("tui.tty", "PASS", f"tty rendered {count} bytes", {"raw": out[-600:]})
+    return Result("tui.tty", "PASS", f"full-screen TUI frame, {count} bytes", {"raw": out[-600:]})
 
 
 def probe_exec_offline(env: dict[str, str]) -> Result:
@@ -2062,6 +2164,8 @@ PROBES = (
     probe_paths_roots,
     probe_config_roundtrip,
     probe_secret_roundtrip,
+    probe_login_list,
+    probe_login_api_key,
     probe_sessions_list,
     probe_wake_status,
     probe_wake_install,

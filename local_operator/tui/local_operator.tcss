@@ -808,6 +808,15 @@ Editor .text-area--placeholder {
     color: $lo-dim;
 }
 
+/* First-run setup: the placeholder IS the instruction ("Type /login radient
+ * to begin"), so it takes the `muted` ink — 7.93:1 on the dark input surface,
+ * 6.58:1 on the light one — where the resting `dim` measured 4.18:1 / 3.46:1
+ * (audit D7). Only while `-setup` is on; a configured composer keeps the
+ * quieter invitation. */
+Editor.-setup .text-area--placeholder {
+    color: $lo-muted;
+}
+
 Editor .text-area--gutter {
     color: $lo-dim;
     background: $lo-surface;

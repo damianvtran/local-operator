@@ -3838,6 +3838,17 @@ class Session:
             on_job_change=self._schedule_frontend_jobs,
             **_configured_max_running(),
         )
+        #: The config root THIS session's own state resolves to, captured once
+        #: here rather than re-read from the environment at each write. The
+        #: greeting ledger is the case that made this concrete (review round 1,
+        #: R-2): the row is armed by an attended surface against the root IT
+        #: names and settled by this session's wake delivery, so a host whose
+        #: environment moved after construction (or that built this session
+        #: against an injected root) would otherwise stamp ``delivered``
+        #: somewhere the arming root can never read.
+        from local_operator.paths import config_dir as _resolve_session_root
+
+        self._config_dir = _resolve_session_root()
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             # Deliveries route through the indirection hook: at resume the
@@ -3928,6 +3939,15 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Distinct wake-supervisor refusal reasons already reported (M3). The
+        #: install hook runs on every schedule persist, so the set is what keeps
+        #: "your check-ins need a session open" from printing on every write.
+        self._wake_supervisor_refusals: set[str] = set()
+        #: Live "a LOCAL human front end holds this session" probe, installed by
+        #: the serving runtime (``serving._install_interactivity_probe``) from
+        #: the connection table it owns. ``None`` until then, which the greeting
+        #: gate reads as "no runtime to ask" — see :meth:`_aida_greeting_may_land`.
+        self._aida_attended_probe: Callable[[], bool] | None = None
         #: Set by the deliver trampoline, consumed by the next persist, which
         #: is what stamps ``last_fired_at`` on the wake index entry. See
         #: :meth:`_persist_wake_schedules`.
@@ -19488,10 +19508,16 @@ class Session:
         """Drop her ``aida-*`` rows when she is paused, disabled or reactive."""
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             return proactive.filter_on_load(
-                schedules, config_dir=config_dir(), class_reactive=self._class_reactive()
+                schedules,
+                # THE SESSION'S OWN ROOT, not the ambient one (review round 2,
+                # M3): the stamp, the withhold and the doorbell all read
+                # ``self._config_dir``, so a session built against an injected
+                # root must not have its rows filtered by a different store
+                # than the one it settles against.
+                config_dir=self._config_dir,
+                class_reactive=self._class_reactive(),
             )
         except Exception:  # noqa: BLE001 — the fire-time guard still holds
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
@@ -19508,7 +19534,6 @@ class Session:
         """
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             # The stash is cleared BEFORE the reconcile: a token may only ever
             # describe the consume that is about to run, or a crash-window
@@ -19516,9 +19541,10 @@ class Session:
             self._aida_pending_trigger_settle = None
             result = proactive.reconcile(
                 schedules,
-                config_dir=config_dir(),
+                config_dir=self._config_dir,
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
+                attended=self._aida_greeting_may_land(),
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -19984,7 +20010,19 @@ class Session:
         # grace path, and a stale one is retired by the delivery checks.
         from local_operator.wakes.store import is_internal_wake_row
 
-        missed = [entry for entry in missed if not is_internal_wake_row(entry["schedule"])]
+        # HIDDEN rows leave the fold for the same reason: folding one into the
+        # visible catch-up prompt would paint it. Aida's first-run greeting is
+        # the case that made this concrete — an install whose greeting came due
+        # while no runtime was up opened on ``catch-up — 1 missed wake (Aida's
+        # introduction)`` above her reply, the exact trigger row the hidden
+        # flag exists to keep off screen (audit A4). Left out, the row is
+        # re-armed to now + grace by load() and delivers hidden.
+        missed = [
+            entry
+            for entry in missed
+            if not is_internal_wake_row(entry["schedule"])
+            and not getattr(entry["schedule"], "hidden", False)
+        ]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -20425,14 +20463,26 @@ class Session:
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
         itself promises never to raise, and this guard is belt-and-braces
-        for the same reason the index write has one."""
+        for the same reason the index write has one.
+
+        A REFUSAL IS SAID OUT LOUD, once (design round 2, M3). The install
+        outcome's reason used to go to ``logger.debug``, so the TUI — the
+        surface most custom-store users meet — never said why check-ins stop
+        when no session is open. The default level is WARNING, which is what
+        "visible" has to mean here. It is deduplicated per distinct reason
+        because this hook runs on EVERY persist that carries schedules: one
+        line when the refusal is first heard, and nothing on the thousandth
+        repeat.
+        """
         try:
             from local_operator.paths import config_dir
             from local_operator.wakes.install import ensure_supervisor_installed
 
             outcome = ensure_supervisor_installed(config_dir())
             if not outcome.installed:
-                logger.debug("wake supervisor not installed: %s", outcome.reason)
+                if outcome.reason not in self._wake_supervisor_refusals:
+                    self._wake_supervisor_refusals.add(outcome.reason)
+                    logger.warning("wake supervisor not installed: %s", outcome.reason)
         except Exception:  # noqa: BLE001
             logger.warning("wake supervisor install hook failed", exc_info=True)
 
@@ -21042,6 +21092,118 @@ class Session:
         """Full-list update from the monitor tool: persists then re-arms."""
         await self._monitors.update(schedules)
 
+    def _stamp_aida_greeting_delivered(self, due: DueWake) -> None:
+        """Move Aida's greeting ledger to ``delivered`` at the actual fire.
+
+        The ledger used to stamp at ARM time, so a row armed and then lost (a
+        crash before the fire, a runtime that never came up) was reported as a
+        greeting the user had seen, and the cadence it now gates would have
+        started on the strength of it. Stamped HERE, after the hold guard has
+        let the fire through and before the turn is spawned, so the stamp
+        means "her greeting turn is running". Best-effort: the ledger is
+        observation, never the delivery's dependency.
+
+        Writes to ``self._config_dir`` (the root resolved when THIS session was
+        built), never to a fresh ``paths.config_dir()`` read: the row this
+        stamp settles was armed by an attended surface against the root that
+        surface named, and a host whose environment moved since (or that built
+        this session against an injected root) would otherwise stamp
+        ``delivered`` in a different root — leaving the arming root pinned at
+        ``armed`` forever, its cadence withheld and its ledger never settling.
+        """
+        try:
+            from local_operator.aida import onboarding
+
+            if due.schedule.id == onboarding.GREETING_WAKE_ID:
+                onboarding.mark_delivered(self._config_dir)
+        except Exception:  # noqa: BLE001 — the turn runs regardless
+            logger.debug("aida: could not stamp the greeting delivery", exc_info=True)
+
+    def _aida_greeting_may_land(self) -> bool:
+        """Whether a due Aida greeting may actually land in THIS runtime.
+
+        The state machine gates the REQUEST; this is the FIRE half (review
+        round 1, R-3). A person asks for the greeting (TUI first contact, or
+        the desktop ``greet`` route) and quits before the armed row comes due:
+        any later runtime that loads her session — a wake-supervisor
+        engagement, ``lop exec``, the mobile daemon — then takes the row,
+        delivers it into a turn nobody can read and stamps ``delivered``, so
+        the greeting is spent where no person could engage with her and the
+        cadence it gates starts on the strength of it.
+
+        THE PREDICATE: "a LOCAL attach or a live desktop pane holds THIS
+        session" — ``RuntimeServer.attended_surfaces``, read through the probe
+        the serving runtime installs. True for a TUI attached to the runtime
+        and for a desktop pane (lease, 45 s memory, or the app's record naming
+        this session); false for ``lop exec`` (no attach at all), the wake
+        supervisor's engagement, a relayed phone or peer attach. Focus is NOT
+        an input: the TUI reports none, and the desktop already decides when to
+        press ``greet`` from its own focus state.
+
+        WHY NOT ``activation.human_surface_present`` (the first version): it
+        asks about THIS PROCESS — a tty, or the desktop token in its env — and a
+        TUI's session runs in a detached runtime child spawned with
+        ``stdin=DEVNULL``, so it answered "nobody" for the one surface the
+        greeting is requested from most. It stays the answer for the one host
+        with no runtime around the session: an in-process session (no probe
+        installed), where the process IS the surface.
+        """
+        try:
+            probe = self._aida_attended_probe
+            if probe is not None:
+                return bool(probe())
+            from local_operator.aida.activation import human_surface_present
+
+            return human_surface_present()
+        except Exception:  # noqa: BLE001 — a gate that cannot read its signal
+            # must withhold: the whole point is that delivery waits for a
+            # person, and the request survives for the next attended moment.
+            logger.debug("aida: could not read the attended signal", exc_info=True)
+            return False
+
+    def aida_attended(self) -> None:
+        """A local human surface just arrived: re-arm a withheld greeting NOW.
+
+        The doorbell for :meth:`_withhold_aida_greeting`. A withheld greeting
+        goes back to ``requested``, and the engine arms ``requested`` only on a
+        reconcile; a runtime still warm when the person returns would otherwise
+        hold the request until its next persist. Cheap for every session that
+        is not hers (one attribute read) and for hers when nothing is owed (the
+        reconcile is a no-op that persists only when something moved).
+        """
+        if not getattr(self, "_aida_duty", False):
+            return
+        try:
+            from local_operator.aida import onboarding
+
+            if onboarding.greeting_state(self._config_dir) != onboarding.GREETING_REQUESTED:
+                return
+        except Exception:  # noqa: BLE001 — the ledger is observation
+            logger.debug("aida: could not read the greeting ledger", exc_info=True)
+            return
+        self._spawn_background(self._aida_reconcile_now())
+
+    def _withhold_aida_greeting(self, due: DueWake) -> None:
+        """Put an unattended greeting fire back to ``requested`` (R-3).
+
+        The row itself is already consumed by the pump (a fire advances the
+        schedule, by design — one broken wake must not become a hot loop), so
+        the ledger is what carries the intent forward: ``armed → requested`` is
+        the same move a pause makes, and it means the user's request survives
+        this runtime. The next attended moment's ``proactive.reconcile`` finds
+        ``requested`` + a provider and arms it again.
+        """
+        logger.info(
+            "aida: withholding greeting %s — no attended surface in this runtime",
+            due.schedule.id,
+        )
+        try:
+            from local_operator.aida import onboarding
+
+            onboarding.clear_greeted(self._config_dir)
+        except Exception:  # noqa: BLE001 — the ledger is observation
+            logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
+
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
@@ -21076,14 +21238,30 @@ class Session:
             await self._deliver_patience_wake(due)
             return
         if getattr(self, "_aida_duty", False):
+            # Two fire-time guards, both keyed on facts the ledger records and
+            # neither of which the state machine can express: the HOLD (a pause
+            # that landed in another process) and the ATTENDED gate (R-3 — the
+            # request was a person's, so the fire must reach a person).
             try:
-                from local_operator.aida import proactive
-                from local_operator.paths import config_dir
+                from local_operator.aida import onboarding, proactive
 
                 if proactive.is_aida_row(due.schedule.id) and not proactive.delivery_allowed(
-                    config_dir(), class_reactive=self._class_reactive()
+                    self._config_dir, class_reactive=self._class_reactive()
                 ):
                     logger.info("aida: dropping held wake %s (%s)", due.schedule.id, "paused")
+                    return
+                if (
+                    due.schedule.id == onboarding.GREETING_WAKE_ID
+                    and not self._aida_greeting_may_land()
+                ):
+                    # FIRE-TIME ATTENDANCE (R-3). Withheld BEFORE any text is
+                    # composed or any turn spawned: a greeting delivered into a
+                    # headless turn is both unreadable to the person who asked
+                    # for it and, until this guard, stamped ``delivered`` —
+                    # spending it where nobody could engage with her. Returning
+                    # here leaves the transcript untouched and re-owes the
+                    # ledger through ``_withhold_aida_greeting``.
+                    self._withhold_aida_greeting(due)
                     return
             except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
                 logger.debug("aida: delivery guard could not read the hold", exc_info=True)
@@ -21099,18 +21277,29 @@ class Session:
             # CONTINUE that work. Idle-path deliveries stay clean — they open
             # their own turn, so there is no prior work to resume.
             text = self._append_busy_resume_note(text)
+        details: dict[str, Any] = {
+            "wake_id": due.schedule.id,
+            "occurrence": due.occurrence,
+            "text": text,
+            # §14.4: the delivery's control parameter, read by the trigger
+            # record at fold-in; never re-derived later.
+            "notify": bool(due.schedule.notify),
+        }
+        if due.schedule.hidden:
+            # The DISPLAY half of a hidden row: every replay surface (TUI
+            # replay, the desktop history window, the mobile fold) keys on
+            # ``details.hidden`` through ``harness.rows.is_hidden_wake_delivery``,
+            # and the receipt event below is skipped for the live half. Without
+            # this a hidden row's text vanished live and then reappeared as a
+            # wake line on the next resume.
+            details["hidden"] = True
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
-            details={
-                "wake_id": due.schedule.id,
-                "occurrence": due.occurrence,
-                "text": text,
-                # §14.4: the delivery's control parameter, read by the trigger
-                # record at fold-in; never re-derived later.
-                "notify": bool(due.schedule.notify),
-            },
+            details=details,
         )
+        if getattr(self, "_aida_duty", False):
+            self._stamp_aida_greeting_delivered(due)
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no

@@ -2304,6 +2304,14 @@ class CommandPicker(Static):
         overflow = self._overflow_row(width)
         if overflow is not None:
             rows.append(overflow)
+        # A notice beside a POPULATED list (design round 2, M1). Until the
+        # `/login` picker needed it, the notice row could only ever BE the whole
+        # render: every caller set one to say why a list was empty. Painting it
+        # below the rows therefore changes nothing for them, and gives a list
+        # that has rows a place to state a fact about itself — the login
+        # picker's ordering. Same dim treatment as the marker above.
+        if self._notice:
+            rows.append(self._notice_row(width))
         out = Text()
         for index, row in enumerate(rows):
             if index:
@@ -2328,7 +2336,14 @@ class CommandPicker(Static):
         rows = self.render_rows(width)
         above = self._above_row(width)
         overflow = self._overflow_row(width)
-        row_count = len(rows) + (0 if above is None else 1) + (0 if overflow is None else 1)
+        row_count = (
+            len(rows)
+            + (0 if above is None else 1)
+            + (0 if overflow is None else 1)
+            # Counted here because `render_text` paints it below the rows: a
+            # height that ignored it would leave the last row clipped.
+            + (1 if self._notice else 0)
+        )
         # Pin the height: `auto` would measure content before layout knows the
         # real width and settle one row too tall per suggestion, exactly the
         # trap ToolCard documents.

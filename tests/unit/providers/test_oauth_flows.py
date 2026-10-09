@@ -1339,6 +1339,10 @@ def test_cli_hides_an_api_key_and_echoes_an_oauth_code(
     from local_operator.providers.registry import get_provider_definition
 
     used: list[str] = []
+    # An interactive terminal: the getpass branch is the TTY branch. A PIPED
+    # key (no tty) reads the line directly instead — first-run Q10, pinned in
+    # ``test_a_piped_key_is_read_without_getpass_noise`` below.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: used.append("getpass") or "sk-x")
     monkeypatch.setattr("builtins.input", lambda *a, **k: used.append("input") or "code#state")
 
@@ -1591,6 +1595,10 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # changes WHERE the credential is used (never chat) rather than how it
         # is obtained.
         "typesafe",
+        # The chat API-key logins (first-run onboarding, audit Q1): a plain
+        # OpenAI or Anthropic key, pasted, stored under the chat provider.
+        "openai-api-key",
+        "anthropic-key",
         # ElevenLabs joined with the mobile voice path: same story one flag
         # over — its key is pasted from the console, and speech-only changes
         # WHERE the credential is used (speech-to-text, never chat) rather
@@ -2976,3 +2984,30 @@ async def test_a_listen_failure_closes_the_bound_server(monkeypatch: pytest.Monk
         assert flow._server is not None and flow._server.is_serving()
     finally:
         await flow._stop_server()
+
+
+def test_a_piped_key_is_read_without_getpass_noise(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``echo $KEY | lop login deepseek``: no ``GetPassWarning``, no echo claim.
+
+    ``getpass`` on a pipe falls back with a warning and "Password input may be
+    echoed" — noise in exactly the unattended runs that cannot ask what it
+    meant (first-run audit Q10). With no tty the line is read directly.
+    """
+    import getpass as getpass_mod
+    import io
+
+    from local_operator.providers.auth_cli import _callbacks_interactive
+    from local_operator.providers.registry import get_provider_definition
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("sk-piped\n"))
+    monkeypatch.setattr(
+        getpass_mod, "getpass", lambda *a, **k: pytest.fail("getpass must not run on a pipe")
+    )
+    key_def = get_provider_definition("deepseek")
+    assert key_def is not None
+    prompt = _callbacks_interactive(key_def).on_manual_code_input
+    assert prompt is not None
+    assert asyncio.run(_maybe(prompt())) == "sk-piped"
+    assert "echoed" not in capsys.readouterr().err

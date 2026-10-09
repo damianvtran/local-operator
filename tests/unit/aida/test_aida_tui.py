@@ -136,7 +136,10 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
     """
     from local_operator import aida as aida_pkg
     from local_operator.config import ConfigManager
+    from tests.unit.aida.conftest import mark_met
 
+    # Steady state: she has met the operator, so her ensure arms the cadence.
+    mark_met(tmp_path)
     her_id = await aida_pkg.ensure_session(tmp_path)
     assert her_id is not None
     # The cadence arm is what gives ``pause`` an index entry to stamp: her
@@ -896,7 +899,7 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         editor = app.query_one(Editor)
 
         # The SPLASH arm's refusal (before `/aida` opens her view): the shared
-        # cue carries the diagnosis, so "no provider configured" appears
+        # cue carries the diagnosis, so the cue appears
         # exactly ONCE — the prefix this PR used to add put it at both ends of
         # one line (design review round 2, NIT).
         editor.focus()
@@ -904,8 +907,10 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
         await pilot.press("enter")
-        await _until(pilot, lambda: "your message was not sent" in _transcript_text(app))
-        assert _transcript_text(app).count("no provider configured") == 1
+        await _until(pilot, lambda: "Not sent" in _transcript_text(app))
+        # The recommended command, named once (audit D1/U2: Radient first).
+        assert _transcript_text(app).count("connect an AI account") == 1
+        assert _transcript_text(app).count("/login radient") == 1
 
         async def send(line: str, until: object = None) -> None:
             editor.focus()
@@ -919,7 +924,7 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
                 await _settle(pilot, 3.0)
 
         # The predicate must be a fact ONLY her view can satisfy. The splash
-        # block above already put "no provider configured" in the transcript,
+        # block above already put the no-provider cue in the transcript,
         # so waiting on the cue returned on its first pause — while
         # `_aida_open_without_provider` still had `ensure_session()` to run —
         # and the `"Aida" in body` assertion below raced the render. Waiting
@@ -928,10 +933,10 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         # 150-270 with the cue as the predicate, mechanism in this diff).
         await send("/aida", lambda: "chief of staff" in _transcript_text(app))
         assert app._aida_setup_view is True
-        assert "/login openai" in (app._splash_notice or "")
+        assert "/login radient" in (app._splash_notice or "")
         body = _transcript_text(app)
         assert "Aida" in body
-        assert "no provider configured" in body
+        assert "connect an ai account" in body.lower()
         assert "still starting" not in body
         # D1: no introduction promise — the greeting is gated on
         # `first_run_pending` and an install with conversations never gets it,
@@ -950,7 +955,7 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         body = _transcript_text(app)
         assert "can't reply yet" in body
         assert "your message was not sent" in body
-        assert "/login openai" in body
+        assert "/login radient" in body
         assert "still starting" not in body
 
         # `/aida <text>` opens the view and says the request was not sent.
@@ -992,10 +997,10 @@ async def test_a_typed_message_at_the_setup_splash_names_login(tmp_path, monkeyp
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
         await pilot.press("enter")
-        await _until(pilot, lambda: "/login openai" in _transcript_text(app))
+        await _until(pilot, lambda: "/login radient" in _transcript_text(app))
 
         body = _transcript_text(app)
-        assert "/login openai" in body
+        assert "/login radient" in body
         assert "still starting" not in body
         assert "Settings > Providers" not in body
 
@@ -1144,4 +1149,164 @@ async def test_opening_her_conversation_arms_the_owed_greeting(tmp_path, monkeyp
     assert boots == [her_id], boots
     from local_operator.aida import onboarding
 
-    assert onboarding.greeted_at(tmp_path) is not None
+    # Armed by an ATTENDED surface (the TUI), hidden, and not yet delivered:
+    # ``greeted_at`` now means "delivered", stamped at the actual fire.
+    assert onboarding.greeting_state(tmp_path) == onboarding.GREETING_ARMED
+    assert onboarding.greeting_record(tmp_path)["surface"] == "tui"
+    assert onboarding.greeted_at(tmp_path) is None
+    row = next(r for r in entry.get("schedules") or [] if r.get("id") == "aida-greeting")
+    assert row.get("hidden") is True
+
+
+# --------------------------------------------------------------------------- #
+# First-run onboarding (Lane B): boot routing, the setup composer, /credential
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_first_boot_with_a_provider_already_configured_opens_her(
+    tmp_path, monkeypatch
+) -> None:
+    """A8: a provider set up BEFORE the first launch (env key, `lop login`,
+    the desktop) never passes the setup state, so the post-login seam never
+    ran and the user met an empty chat. The boot now routes to her, requests
+    the greeting from this ATTENDED surface, and arms it hidden."""
+    from local_operator.aida import onboarding
+    from local_operator.config import ConfigManager
+    from local_operator.tui.app import OperatorApp
+    from local_operator.wakes import store as wake_store
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+
+    boots: list[str | None] = []
+
+    async def resume_factory(session_id):
+        boots.append(session_id)
+
+        class Hers(FakeSession):
+            @property
+            def session_id(self) -> str:  # type: ignore[override]
+                return session_id or ""
+
+        return Hers()
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _until(pilot, lambda: bool(boots))
+        her_id = onboarding.state.session_id_of(tmp_path)
+        assert her_id and boots == [her_id], boots
+
+        def _armed() -> bool:
+            entry = wake_store.read_entry(tmp_path, her_id) or {}
+            return any(r.get("id") == "aida-greeting" for r in entry.get("schedules") or [])
+
+        await _until(pilot, _armed)
+    assert onboarding.greeting_state(tmp_path) == onboarding.GREETING_ARMED
+    assert onboarding.greeting_record(tmp_path)["surface"] == "tui"
+
+
+@pytest.mark.asyncio
+async def test_the_first_run_route_waits_for_the_launch_hook_task(tmp_path, monkeypatch) -> None:
+    """ORDER, not race (round 3d): the route awaits ``app._aida_boot_task`` first.
+
+    Both attended armers take the store lock for the same row, so while they
+    overlapped one of them waited out the peer for the whole ``LOCK_WAIT_S`` —
+    measured 5.09 s parked on this seam, with the app unable to paint and the
+    peer unable to release, since the park held the lock open. ``_route_first_run_boot``
+    now awaits the launch hook's task before its own store reads; pinned here by
+    holding that task open and watching whether the route's first read happens.
+
+    Mutation: delete the ordering block and this cell goes red — the route reads
+    the ledger while the hook is still pending.
+    """
+    from local_operator.aida import onboarding
+
+    reads: list[str] = []
+    real_settled = onboarding.greeting_settled
+
+    def settled(root):
+        reads.append("route-read")
+        return real_settled(root)
+
+    monkeypatch.setattr(onboarding, "greeting_settled", settled)
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # The boot above ran its own route call against the real (unscheduled)
+        # task, so the observations start clean and the held task is this cell's.
+        reads.clear()
+        release = asyncio.Event()
+
+        async def held() -> None:
+            await release.wait()
+
+        app._aida_boot_task = asyncio.create_task(held())
+        route = asyncio.create_task(app._route_first_run_boot())
+        for _ in range(20):
+            await pilot.pause()
+        assert reads == [], "the route read the store while the launch hook was still pending"
+
+        release.set()
+        await route
+    assert reads == ["route-read"], reads
+
+
+@pytest.mark.asyncio
+async def test_an_existing_install_boots_as_before_and_is_never_greeted(
+    tmp_path, monkeypatch
+) -> None:
+    """R22 under the boot route: conversations exist, so no reroute, no greeting,
+    and the ledger records ``skipped`` so the question is never asked again."""
+    from local_operator.aida import onboarding
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+    _seed_session(tmp_path, "aaaaaaaaaaa1", prompt="fix the flaky login test")
+
+    boots: list[str | None] = []
+    app = _boot(tmp_path, monkeypatch, resume_boots=boots)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _until(pilot, lambda: bool(app._conversation_id()))
+        await _settle(pilot, 1.0)
+    assert boots == []
+    assert onboarding.greeting_state(tmp_path) == onboarding.GREETING_SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_the_setup_composer_names_the_command_and_credential_refuses(
+    tmp_path, monkeypatch
+) -> None:
+    """D7 + U11: the setup placeholder is the instruction (painted in the
+    stronger ink via ``-setup``), and ``/credential`` refuses up front with the
+    `/login` remedy instead of walking the user into a masked paste."""
+    from local_operator.session_factory import HostingNotConfiguredError
+    from local_operator.tui.app import SETUP_PLACEHOLDER, OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeProviderController, _await_setup_state
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    async def _no_hosting():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    app = OperatorApp(_no_hosting, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        editor = app.query_one(Editor)
+        assert editor.placeholder == SETUP_PLACEHOLDER == "Type /login radient to begin"
+        assert editor.has_class("-setup")
+        editor.focus()
+        editor.text = "/credential GITHUB_TOKEN"
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+        await _until(pilot, lambda: "/credential stores secrets" in _transcript_text(app))
+        assert "/login radient" in _transcript_text(app)
+        # Leaving the state takes the class and the placeholder with it.
+        app._setup_state = False
+        assert not editor.has_class("-setup")
+        assert editor.placeholder != SETUP_PLACEHOLDER

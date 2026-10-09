@@ -505,6 +505,44 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://api.anthropic.com",
         wire="anthropic",
     ),
+    # CHAT API-KEY LOGINS for the two providers whose own login is a
+    # subscription sign-in (audit Q1/U10). Before these rows a user holding a
+    # plain OpenAI or Anthropic API key had no `/login` route at all — the only
+    # OpenAI key row was SPEECH-only, and `/login anthropic` demanded a Claude
+    # Pro/Max browser grant — so first run silently pushed them to env vars.
+    # Both are login FLAVOURS (``store_credentials_as``) of the chat provider:
+    # the key lands beside the subscription rows under ``openai``/``anthropic``,
+    # and the wire already routes by credential KIND (an ``api_key`` row goes to
+    # the public API with ``x-api-key``/Bearer; only an ``oauth`` row takes the
+    # ChatGPT/Claude-subscription path — ``providers/clients.py``), so no second
+    # chat provider id exists for the model picker to disagree about.
+    ProviderDefinition(
+        id="openai-api-key",
+        search_aliases=("gpt", "openai-api", "openai-chat-key"),
+        name="OpenAI (API key)",
+        env_keys="OPENAI_API_KEY",
+        login=create_api_key_login(
+            "OpenAI",
+            "https://platform.openai.com/api-keys",
+            "Paste an API key from the OpenAI platform (it starts with sk-).",
+        ),
+        store_credentials_as="openai",
+        base_url="https://api.openai.com/v1",
+    ),
+    ProviderDefinition(
+        id="anthropic-key",
+        search_aliases=("claude", "anthropic-api-key", "claude-api-key"),
+        name="Anthropic (API key)",
+        env_keys=("ANTHROPIC_API_KEY",),
+        login=create_api_key_login(
+            "Anthropic",
+            "https://console.anthropic.com/settings/keys",
+            "Paste an API key from the Anthropic Console (it starts with sk-ant-).",
+        ),
+        store_credentials_as="anthropic",
+        base_url="https://api.anthropic.com",
+        wire="anthropic",
+    ),
     ProviderDefinition(
         id="kimi",
         search_aliases=(
@@ -683,8 +721,10 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     ),
     ProviderDefinition(
         id="openai-key",
-        search_aliases=("openai-api-key", "openai-speech"),
-        name="OpenAI (API key)",
+        # ``openai-api-key`` moved to the CHAT key row above: a user typing it
+        # wants chat, and the speech row's name now says what it is for.
+        search_aliases=("openai-speech", "openai-tts"),
+        name="OpenAI (speech API key)",
         # NO ``env_keys``, on purpose, and that is the whole safety property of
         # this row: this login exists for OpenAI SPEECH under the user's own API
         # key, and the speech availability rule is "advertised only from a key

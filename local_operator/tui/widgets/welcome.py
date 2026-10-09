@@ -86,6 +86,7 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import terminals
+from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
 from local_operator.tui.widgets.status_line import format_model_label
@@ -267,12 +268,65 @@ HINTS: tuple[tuple[str, str], ...] = (
 #: that also names `/login` is exactly the line that truncates first (D2/D3), so
 #: relying on it alone left a scanning user pointed at the picker and quit but
 #: never at the action that unblocks them.
+#:
+#: The first two rows are now the first-run PATH rather than a list of keys
+#: (audit D2/U3/U4): the recommended sign-in, then "any other provider", so the
+#: screen answers "what do I run". WHAT THE SCREEN ALSO OWES is the sequence
+#: itself — "connect · sign in · she says hello" — which a table of typeable
+#: keys cannot say (design round 1, D1); that reading is
+#: :func:`setup_step_line`, painted above this table. The ``ctrl/cmd+d`` quit row
+#: is gone in the setup state (D11): it does not advance the task, the keys-only
+#: tier of the table still names every affordance that does, and quitting is a
+#: binding the user already has. Its row is what pays for the step line, so the
+#: first screen's height budget is unchanged.
 HINTS_SETUP: tuple[tuple[str, str], ...] = (
-    ("/login", "set up a provider"),
-    ("/", "command picker"),
+    (f"/login {RECOMMENDED_LOGIN}", "sign in — recommended, no key to paste"),
+    ("/login", "another provider, including API keys"),
     ("/help", "all commands"),
-    ("ctrl/cmd+d", "quit"),
 )
+
+
+#: The checklist above the setup table, longest form first. Each entry is tried
+#: in order and the first that fits the width wins, so the step reading degrades
+#: to the two steps that matter rather than being truncated mid-word (the same
+#: rule the table's own width tiers follow). The numeral and the step are joined
+#: by a middle dot separator the whole line shares.
+SETUP_STEPS: tuple[str, ...] = (
+    "1 connect an account  ·  2 sign in or paste a key  ·  3 {aida} says hello",
+    "1 connect  ·  2 sign in or paste a key  ·  3 {aida} says hello",
+    "1 connect  ·  2 sign in  ·  3 {aida} says hello",
+)
+
+
+def setup_step_line(width: int, aida_name: str | None) -> Text | None:
+    """The 3-step checklist for the first-run screen, or ``None`` when it cannot fit.
+
+    Rendered as its own line above the key table (design round 1, D1): the table
+    answers "what do I run", and the step reading answers "what happens", which
+    is the question a non-technical first-run user actually has. It names HER
+    live configured name, so it promises the person the screen is about — and
+    with her disabled (``aida_name`` is ``None``) there is no third step to
+    promise, so the whole line is withdrawn rather than promising a greeting
+    that never comes.
+    """
+    if not aida_name:
+        return None
+    for template in SETUP_STEPS:
+        body = template.replace("{aida}", aida_name)
+        if cell_len(body) <= width:
+            return Text(body, style=Style(color=theme_mod.semantic_color("fg")), no_wrap=True)
+    return None
+
+
+def setup_hint_rows(aida_name: str | None = None) -> tuple[tuple[str, str], ...]:
+    """The setup table; her name no longer appears in it (:func:`setup_step_line`).
+
+    Kept as a function because the disabled case (``aida_name`` is ``None``) is
+    read by callers that pass the name through: when she is off the table is the
+    plain command list, which is exactly this table without the step line.
+    """
+    return HINTS_SETUP
+
 
 #: Key column width for the hint rows: the roomy default, and the squeezed
 #: fallback of "longest key plus one space". A narrow terminal drops to the
@@ -563,7 +617,7 @@ TIPS: tuple[str, ...] = (
 #: prior sessions to resume, so the most-read row would advertise a command that
 #: does nothing for them (D4). Once a session exists the rotation resumes into
 #: the normal ring, so this only replaces the opening frame.
-TIP_SETUP = "/login <provider> sets up a provider (e.g. /login openai)"
+TIP_SETUP = f"New here? {RECOMMENDED_LOGIN.title()} is one browser sign-in; no key to paste"
 
 #: The tip a Terminal.app launch opens on, in place of the pinned ``TIPS[0]``.
 #:
@@ -676,6 +730,15 @@ class WelcomeInfo:
     #: stacking would shove the lockup the way a transcript notice already
     #: does. ``None`` when nothing has been announced.
     notice: str | None = None
+    #: The KIND of ``notice``, so the row can wear its own ink (design round 2,
+    #: M2). The splash painted every notice in the warning treatment — amber
+    #: body, ``!`` glyph — which made the login receipt (``✓ Connected to
+    #: Radient — opening Aida…``) announce success in the colour of a problem,
+    #: with an ``!`` in front of its own ``✓``. Defaults to ``"warning"``
+    #: because that is what every non-receipt notice is at the source
+    #: (``ModelConfigurer._notice`` defaults to it) and what a hand-built
+    #: dataclass — an embedding host, the welcome tests — has always painted.
+    notice_kind: str = "warning"
     #: PyPI version strictly newer than the installed distribution, or
     #: ``None``. A new field rather than overwriting ``notice``: that slot
     #: is the quota fallback, and an update probe must not hide a failover.
@@ -687,6 +750,9 @@ class WelcomeInfo:
     #: hint table leads with, and which tip opens the rotation — so the screen
     #: reads as "you need to act" rather than "a session is still booting".
     setup: bool = False
+    #: Her configured display name for the setup table's "then … says hello"
+    #: row, or ``None`` when she is disabled (the row is dropped).
+    aida_name: str | None = None
 
 
 def app_version() -> str:
@@ -707,6 +773,7 @@ def session_welcome_info(
     providers: Any | None,
     *,
     notice: str | None = None,
+    notice_kind: str = "warning",
     setup: bool = False,
     update_available: str | None = None,
 ) -> WelcomeInfo:
@@ -758,9 +825,27 @@ def session_welcome_info(
         cwd=os.getcwd(),
         missing_credential=missing,
         notice=notice or None,
-        update_available=update_available or None,
+        notice_kind=notice_kind,
+        # No update row in the setup state (audit D8): the first screen a new
+        # install shows has one job, and "latest is vX — /update" competes with
+        # the sign-in line for a user who just installed the latest.
+        update_available=(update_available or None) if not setup else None,
         setup=setup,
+        aida_name=_aida_name() if setup else None,
     )
+
+
+def _aida_name() -> str | None:
+    """Her live display name, or ``None`` when she is disabled. Never raises."""
+    try:
+        from local_operator import aida
+        from local_operator.aida import naming
+
+        if not aida.enabled():
+            return None
+        return naming.display_name()
+    except Exception:  # noqa: BLE001 — decoration on the first frame
+        return None
 
 
 def _shorten_home(path: str) -> str:
@@ -882,6 +967,10 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     dim = Style(color=theme_mod.semantic_color("dim"))
     muted = Style(color=theme_mod.semantic_color("muted"))
     warn = Style(color=theme_mod.semantic_color("warning"))
+    #: The informational notice ink (M2): the same green the transcript's
+    #: notice block tints a success/info/note row with, so one statement has
+    #: one colour wherever it lands.
+    ok = Style(color=theme_mod.semantic_color("success"))
 
     rows: list[tuple[int, Text]] = []
     if info.version:
@@ -929,16 +1018,29 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
             body = f"{glyph} latest is v{info.update_available}"
         rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
     if info.notice:
-        # Same glyph and tint as the credential warning: both are "something
-        # about the harness you should know before you type". Truncated from
-        # the RIGHT — the head names the condition (`anthropic quota low`),
-        # the tail names the fallback, and a half-printed selector is still
-        # a selector. The login warning drops its remedy WHOLE because a
-        # half-printed `/logi…` is an instruction nobody can follow; a
-        # notice is a fact, not a command.
-        glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {info.notice}"
-        rows.append((_PRIORITY_NOTICE, Text(body, style=warn, no_wrap=True)))
+        # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
+        # EVERY notice in the warning treatment — amber, `!` — so the login
+        # receipt (`✓ Connected to Radient — opening Aida…`) announced the
+        # transition into Aida in the colour of a problem, with an `!` in front
+        # of its own `✓`. The kind now picks both: the ambiguous kinds keep the
+        # warning ink and its `!`, and the informational kinds (info/note/
+        # success) paint in the success green the transcript's notice block
+        # already uses for them (NOTICE_GLYPHS / `NoticeKind`, D14).
+        # The glyph is added only when the text does not already LEAD with it,
+        # because the receipt carries its own `✓` — prefixing here would print
+        # `✓ ✓ Connected…`.
+        #
+        # Clipped from the RIGHT (`no_wrap`): the head names the condition
+        # (`anthropic quota low`) and a notice is a FACT rather than a command,
+        # so a partly-printed tail is still readable — unlike the login
+        # warning below, which drops its `/login …` remedy WHOLE rather than
+        # print an instruction nobody can follow.
+        glyph = NOTICE_GLYPHS.get(info.notice_kind, NOTICE_GLYPHS["info"])
+        style = warn if info.notice_kind in ("warning", "error") else ok
+        body = info.notice
+        if not body.startswith(glyph):
+            body = f"{glyph} {body}"
+        rows.append((_PRIORITY_NOTICE, Text(body, style=style, no_wrap=True)))
     if info.missing_credential:
         # The single most common first-run failure, so it is spelled as the
         # command that fixes it. `!` is the app's warning glyph (D14). When the
@@ -952,7 +1054,7 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     return rows
 
 
-def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
+def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None) -> list[Text]:
     """Hint rows, left-aligned to a shared key column, block-centered.
 
     Centering each row independently would ragged the key column; the rows are
@@ -960,7 +1062,11 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
 
     ``setup`` swaps in the first-run table (:data:`HINTS_SETUP`), whose leading
     row teaches ``/login`` — the one command the setup state exists to teach and
-    the affordance the notice line drops first at narrow widths (D3).
+    the affordance the notice line drops first at narrow widths (D3) — and, when
+    she is enabled, PREPENDS the three-step checklist (:func:`setup_step_line`,
+    design round 1's D1). The checklist is a plain line rather than a table row
+    because it has no key to type: it says what happens, which is the half a
+    list of typeable keys cannot answer.
 
     Three width tiers, because the alternative — letting the final truncation
     pass eat the descriptions — turns "command picker" into "command pi…",
@@ -970,7 +1076,12 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     2. the tight key column (longest key plus one space),
     3. keys only, which still names every affordance the user can try.
     """
-    hints = HINTS_SETUP if setup else HINTS
+    hints = setup_hint_rows(aida_name) if setup else HINTS
+    # The checklist is composed HERE rather than by the caller so the line
+    # above the table and the table's own width tiers are measured against the
+    # same column arithmetic the block is painted into.
+    step_line = setup_step_line(width, aida_name) if setup else None
+    steps = [step_line] if step_line is not None else []
     # The same tint pair the PICKER uses for name/description (fg over muted),
     # not a step quieter. These rows are a preview of the picker — one of them
     # literally says "/  command picker" — and rendering the identical
@@ -998,9 +1109,9 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     # the same ragged-edge effect that was removed from inside the status stack,
     # surviving one level up.
     if not key_column:
-        return [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
+        return steps + [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
 
-    lines: list[Text] = []
+    lines: list[Text] = list(steps)
     for key, desc in hints:
         line = Text(no_wrap=True)
         line.append(key.ljust(key_column), style=key_style)
@@ -1207,7 +1318,7 @@ def build_welcome_lines(
     # actionable login warning last.
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
-    hints = _hint_lines(width, setup=info.setup)
+    hints = _hint_lines(width, setup=info.setup, aida_name=info.aida_name)
     tip = _tip_lines(width, tip_index, setup=info.setup, pin_paste=pin_paste, pin_mesh=pin_mesh)
     show_hints = False
     show_tip = False

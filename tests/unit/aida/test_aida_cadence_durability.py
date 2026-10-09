@@ -41,6 +41,7 @@ from local_operator.agent_profiles import (
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.aida import proactive, state
 from local_operator.wakes import store as wake_store
+from tests.unit.aida.conftest import mark_met
 
 DEAD_ONE = "0827221cce46"
 #: A well-formed install fingerprint that is NOT the packaged starter's — the
@@ -49,6 +50,18 @@ STALE_SHA = "a" * 64
 #: A second well-formed-but-foreign fingerprint, for the rows that must not move.
 OTHER_SHA = "b" * 64
 DEAD_TWO = "ce526344aa86"
+
+
+@pytest.fixture(autouse=True)
+def _she_has_met_the_operator(isolated_root: Path) -> None:
+    """Every cell here is about an ESTABLISHED install's cadence surviving.
+
+    A first-run install withholds the cadence until her greeting is delivered
+    (``onboarding.cadence_allowed``); that rule has its own tests in
+    ``test_aida_onboarding.py``. Here it is stated once so the durability
+    invariants are measured on the install shape they were written for.
+    """
+    mark_met(isolated_root)
 
 
 def _fields(**overrides: Any) -> AgentEditFields:
@@ -660,6 +673,7 @@ def test_the_stale_day_marker_and_unconsumed_tray_share_the_one_root_cause(
         extras={"armed": 2, "day": "2026-09-29"},
     )
     _escalate(isolated_root)
+    mark_met(isolated_root)
     now = int(datetime(2026, 9, 30, 9, 0).timestamp() * 1000)
 
     # Reactive (the accident): the tray is left exactly where it was.

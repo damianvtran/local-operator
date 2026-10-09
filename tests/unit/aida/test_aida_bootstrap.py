@@ -15,11 +15,14 @@ import pytest
 
 from local_operator import aida
 from local_operator.aida import state
-from tests.unit.aida.conftest import tree, write_config
+from tests.unit.aida.conftest import mark_met, tree, write_config
 
 
 @pytest.mark.asyncio
 async def test_ensure_creates_her_session_once_and_returns_the_same_id(isolated_root: Path) -> None:
+    # An install she has already met: the cadence half below is armed by the
+    # ensure only once the greeting is delivered (onboarding.cadence_allowed).
+    mark_met(isolated_root)
     first = await aida.ensure_session(isolated_root)
     second = await aida.ensure_session(isolated_root)
 
@@ -39,6 +42,44 @@ async def test_ensure_creates_her_session_once_and_returns_the_same_id(isolated_
     entry = json.loads((isolated_root / "wakes" / f"{first}.json").read_text())
     ids = [row["id"] for row in entry["schedules"]]
     assert ids == ["aida-cadence"]
+
+
+@pytest.mark.asyncio
+async def test_her_id_is_recorded_before_her_directory_exists(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The create ORDER is load-bearing: a scan mid-create must not see her as a stranger.
+
+    Two boot hooks run concurrently — this ensure, and the TUI's first-run route,
+    which asks ``onboarding.cadence_allowed`` whether the install already has
+    conversations and SETTLES the ledger on that answer. ``other_user_sessions``
+    excludes the one session ``aida/state.json`` names, so a create that
+    materialises the directory first leaves a window in which a scan excludes
+    NOTHING and counts her own born journal (title + birth rows — never a
+    message) as the operator's. On CI that window was lost every run: a fresh
+    isolated root came out of its first boot with the greeting ``skipped``,
+    stamped in the same millisecond as ``state.created_at`` (``tui-e2e``,
+    ubuntu-latest, 2026-10-09).
+    """
+    from local_operator.aida import bootstrap
+
+    observed: list[str | None] = []
+    real_create = bootstrap._create_session_dir
+
+    async def spy(config_dir: Path, session_id: str) -> None:
+        # Exactly what a concurrent scan reads, at the instant before the
+        # directory that scan would count comes into existence.
+        observed.append(state.session_id_of(config_dir))
+        await real_create(config_dir, session_id)
+
+    monkeypatch.setattr(bootstrap, "_create_session_dir", spy)
+    session_id = await aida.ensure_session(isolated_root)
+
+    assert session_id is not None
+    assert observed == [session_id], (
+        "her id must already be recorded when her directory is materialised, "
+        "or a concurrent sessions scan counts her as the operator's conversation"
+    )
 
 
 @pytest.mark.asyncio

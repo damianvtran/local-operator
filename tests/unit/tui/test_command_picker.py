@@ -2555,3 +2555,45 @@ def test_the_overflow_row_counts_the_directory_not_the_capped_set() -> None:
     # number about a directory that is not on screen.
     picker.sync("/")
     assert picker._unlisted == 0, "the count outlived the listing it described"
+
+
+def test_a_notice_beside_a_populated_argument_list_paints_below_the_rows() -> None:
+    """A notice is not only for an EMPTY list (design round 2, M1).
+
+    Every caller before the `/login` ordering fact used ``set_notice`` to say
+    why a list had nothing in it, so the row was the whole render. The login
+    picker needs the same dim line UNDER rows it does have — a user who never
+    submits the bare listing has no other way to learn the order is "how you
+    pay" — and that is what this pins: the notice is the last line, the
+    suggestions are all still there, and the height counts the extra row (a
+    pin that ignored it would clip the last one).
+    """
+    picker = _argument_picker(list(PROVIDER_CHOICES))
+    assert picker._notice == ""
+    rows_before = len(picker.render_text(80).plain.splitlines())
+
+    picker.set_notice("ordered by how you pay")
+
+    text = picker.render_text(80).plain
+    lines = text.splitlines()
+    assert lines[-1].strip() == "ordered by how you pay", lines[-3:]
+    first = picker.suggestions()[0][0]
+    assert first in text, f"the suggestions must still be there: {first!r}"
+    assert len(lines) == rows_before + 1, (rows_before, lines)
+
+
+def test_a_laddered_notice_keeps_the_row_it_is_pinned_to() -> None:
+    """The rungs degrade by width, and the pin follows the row either way.
+
+    ``set_notice`` CLEARS rungs (the widget's own contract), so the ordering
+    fact has to be set through ``set_notice_rungs`` — which is also the only
+    shape that survives a resize mid-listing.
+    """
+    picker = _argument_picker(list(PROVIDER_CHOICES))
+    picker.set_notice_rungs(
+        ("ordered by how you pay — bare /login lists the groups", "ordered by how you pay")
+    )
+    wide = picker.render_text(120).plain.splitlines()[-1].strip()
+    narrow = picker.render_text(40).plain.splitlines()[-1].strip()
+    assert wide == "ordered by how you pay — bare /login lists the groups", wide
+    assert narrow == "ordered by how you pay", narrow

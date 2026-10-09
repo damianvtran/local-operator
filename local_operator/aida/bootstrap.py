@@ -85,6 +85,7 @@ import uuid
 from pathlib import Path
 
 from local_operator.aida import naming, proactive, state
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +222,18 @@ async def ensure_session(
     lock = state.wake_lock(root)
     try:
         await asyncio.to_thread(lock.acquire)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # A refusal, not a defect: the shared shape (:func:`state.note_lock_refusal`)
+        # is what keeps a stack out of the operator's log. The line used to be an
+        # INFO WITH ``exc_info`` — quiet to read, and still a `Traceback` block in
+        # the file the e2e clean-log contract greps, which is the residual the
+        # reviewer measured on a held lock. The next ensure tries again.
+        state.note_lock_refusal("her session ensure", exc)
+        return None
     except Exception:  # noqa: BLE001 — contention/unsupported dir: try next time
-        logger.info("aida: ensure lock busy; skipping this attempt", exc_info=True)
+        logger.info(
+            "aida: the ensure lock could not be taken; skipping this attempt", exc_info=True
+        )
         return None
     created: str | None = None
     hers: str | None = None
@@ -239,12 +250,35 @@ async def ensure_session(
             hers = existing
         else:
             session_id = uuid.uuid4().hex[:12]
+            # HER ID IS RECORDED BEFORE HER DIRECTORY EXISTS, and that order is
+            # load-bearing rather than tidy. Two boot hooks run concurrently: this
+            # one, and the TUI's ``_route_first_run_boot`` — which asks
+            # ``cadence_allowed`` whether the install already has conversations,
+            # and whose verdict SETTLES the ledger (``owed`` -> ``skipped``,
+            # permanently; see its docstring). ``other_user_sessions`` excludes
+            # the one session ``aida/state.json`` names, so in the window where
+            # the directory existed and the id did not, a scan excluded NOTHING
+            # and counted her own brand-new session as the operator's — its
+            # born journal (the title and birth custom rows written just below)
+            # is non-empty, which is all ``_counts_as_operator_conversation``
+            # needs. CI ``tui-e2e`` on ubuntu-latest lost that race every run
+            # (2026-10-09): a fresh isolated root came out of its first boot with
+            # ``greeting: {state: skipped}`` stamped in the same millisecond as
+            # ``state.created_at``, so she never introduced herself and the
+            # cadence armed instead — the failure the leg's diagnosis dump
+            # pinned. Recording the id first removes the window: at every
+            # instant a scan can run, either her directory does not exist yet
+            # (nothing to count) or it is the one her recorded id excludes.
+            state.update_state(root, session_id=session_id, paused_at=None)
             try:
                 await _create_session_dir(root, session_id)
             except Exception:
                 _discard_failed_create(root, session_id)
+                # Put the record back: the id above names a directory that does
+                # not exist, and leaving it would exclude nothing while looking
+                # like a recorded session until the next attempt overwrites it.
+                state.update_state(root, session_id=None, paused_at=None)
                 raise
-            state.update_state(root, session_id=session_id, paused_at=None)
             created = session_id
             hers = session_id
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
