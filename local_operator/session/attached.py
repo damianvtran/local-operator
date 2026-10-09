@@ -2346,8 +2346,14 @@ class AttachedSession:
                     # fields without breaking older owners. Reconstruct only
                     # from persisted bills/estimates here: a daemonless viewer
                     # must not need credentials or trigger model discovery.
+                    # Own calls PLUS settled descendants: the row's figure is its
+                    # whole subtree everywhere else (``job_subtree_cost``), and the
+                    # sidecar row carries the same ``descendant_usage`` the owner
+                    # filled at detach. Receipts and recorded estimates only, so no
+                    # live manager is needed — there is none in a cold viewer.
                     cost, unknown = cost_summary(
-                        job.usage.cost_components or [job.usage], recorded_only=True
+                        [*(job.usage.cost_components or [job.usage]), *job.descendant_usage],
+                        recorded_only=True,
                     )
                     previous = rows.get(str(job.id))
                     if cost is not None or previous is None:
