@@ -169,9 +169,12 @@ from local_operator.redaction_shapes import (
     stream_hold_window,
 )
 from local_operator.scratchpad import (
+    SCRATCHPAD_BUDGET_SCAN_ENTRIES,
+    SCRATCHPAD_ELSEWHERE,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
+    SCRATCHPAD_TOTAL_BUDGET_BYTES,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadContentError,
     ScratchpadPathError,
@@ -180,6 +183,8 @@ from local_operator.scratchpad import (
     parse_scratchpad_url,
     scratchpad_dir_of,
     scratchpad_env_injection,
+    scratchpad_footprint,
+    scratchpad_refusal,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
@@ -5036,10 +5041,19 @@ async def execute_bash(
     if scratch:
         parts.insert(insert_at, scratch)
         insert_at += 1
-    # The missing-tool advisory rides the same head window and RANKS BELOW the two
-    # above by inclusion only, not by importance: a secret already in the
-    # transcript outranks it, the scratch nudge is a destination for a file that
-    # was just written, and this one is a next-step. On the ordinary command it
+    # The pad audit rides the same head window, ranked below the scratch nudge:
+    # the nudge is a destination for a file that was just written, while this
+    # line reports the pad state a command that NAMED the pad left behind (see
+    # ``_bash_pad_write_check``). It costs nothing when it does not fire, which
+    # is the ordinary command.
+    pad_write = _bash_pad_write_check(params.command, context)
+    if pad_write:
+        parts.insert(insert_at, pad_write)
+        insert_at += 1
+    # The missing-tool advisory rides the same head window and RANKS BELOW the
+    # advisories above by inclusion only, not by importance: a secret already in
+    # the transcript outranks it, the scratch nudge is a destination for a file
+    # that was just written, and this one is a next-step. On the ordinary command it
     # costs one empty-string check, because the trigger is a shell's own line in
     # stderr and nothing else.
     #
@@ -7389,6 +7403,159 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
             relation=relation,
         )
     return ""
+
+
+def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
+    """One ``[scratch]`` line when ``command`` NAMED the pad and left it in a
+    state its write tools refuse, else ``""``.
+
+    The shell is the channel the pad's content policy could not reach: ``write``
+    and ``edit`` refuse this material BEFORE it lands, while a command's bytes
+    are already on disk by the time any check can run — so this channel reports
+    AFTER the fact, appends ONE line to the tool result, and never undoes. It
+    exists because the measured bypass was the loud one: pads taken from
+    kilobytes to multiple gigabytes by ``cp``/package builds that nothing on the
+    result ever mentioned.
+
+    Contract, all of it load-bearing:
+
+    * THE MENTION GATE is the no-latency guarantee. This runs on every bash
+      result, so a command that spells neither ``$LOCAL_OPERATOR_SCRATCHPAD`` /
+      ``${LOCAL_OPERATOR_SCRATCHPAD}`` nor the pad's literal path returns ``""``
+      after pure string work — ZERO filesystem calls. A command that reaches the
+      pad through an alias spelling of the store (``/tmp`` against
+      ``/private/tmp``) is a MISS, deliberately: resolving the alias here would
+      cost a syscall on every command to serve a spelling nothing writes.
+    * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
+      parts are a refused segment or whose leaf carries a refused suffix gets
+      the sentence the write tools raise, ``[scratch]``-tagged (see
+      ``scratchpad.scratchpad_refusal``). The leaf is judged by the SUFFIX rule
+      and never the segment rule for the reason the write path judges the same
+      way: a token at a leaf is a file TYPE (``build.log``, ``out.json`` are
+      ordinary scratch), so segment-shaped leaves stay allowed — which also
+      means a bare ``mkdir $LOCAL_OPERATOR_SCRATCHPAD/node_modules`` draws no
+      line, because nothing distinguishes that target from a file of the same
+      name, and the file is allowed.
+    * BUDGET arm: ONE bounded walk (``scratchpad.scratchpad_footprint``) — over
+      budget or past the entry cap, one line. At most ONE line per result: a
+      shape hit returns without walking, because it attributes the change to
+      THIS command while the budget line reports pad state.
+    * NOT a ``background: true`` call — the deliberate gap ``_bash_scratch_hint``
+      documents one level up: a detached command settles through
+      ``_detach_to_job``, whose job result is assembled on its own path and
+      never reaches the advisory insert below. Inherited unchanged.
+    """
+    if not command:
+        return ""
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return ""
+    if str(pad) not in _expand_scratchpad_spellings(command, pad):
+        return ""
+    for candidate in _bash_created_paths(command):
+        target = _pad_target(candidate, pad)
+        if target is None:
+            continue
+        clause = scratchpad_refusal(target, pad)
+        if clause is not None:
+            return f"[scratch] {target}: {clause}"
+    return _pad_budget_line(pad)
+
+
+def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
+    """The pad audit for one ``eval`` cell: ``_pad_budget_line`` when ``code``
+    names the pad, else ``""``.
+
+    BUDGET arm only, and that is the whole difference from the shell: Python
+    creations cannot be attributed the way a command's creating positions can,
+    and a line about a name the cell may never have touched would be worse than
+    the miss. What IS reportable is pad state, and this channel needs it most —
+    a cell writes bytes through plain Python (``open``, ``shutil``, a library)
+    with no tool-level refusal anywhere in the path.
+
+    The gate mirrors ``_bash_pad_write_check``'s no-latency guarantee: the
+    pad's exported variable NAME (``LOCAL_OPERATOR_SCRATCHPAD``, bare — Python
+    reaches the value through ``os.environ``/``getenv`` string spellings, not a
+    shell's ``$`` expansion) or the literal pad path, and nothing else, so a
+    cell that never mentions the pad costs ZERO filesystem calls.
+
+    The background path is the same deliberate gap the shell channel has:
+    ``_run_in_background`` settles through ``_background_summary``, which
+    assembles its own result text and never reaches ``_build_render_result``,
+    so a detached cell gets no line.
+    """
+    if not code:
+        return ""
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return ""
+    if SCRATCHPAD_PATH_ENV not in code and str(pad) not in code:
+        return ""
+    return _pad_budget_line(pad)
+
+
+def _pad_budget_line(pad: Path) -> str:
+    """The ``[scratch]`` line when ``pad`` is over its byte budget or its entry
+    cap, else ``""`` — the BUDGET arm every pad-audit channel shares.
+
+    One bounded walk, and the line carries the same numbers and the same
+    :data:`SCRATCHPAD_ELSEWHERE` tail as the write path's refusals, so where the
+    material belongs cannot drift between the channels that refuse and the
+    channels that report.
+    """
+    held, over_budget, too_wide = scratchpad_footprint(pad)
+    if over_budget:
+        return (
+            f"[scratch] The pad now holds at least {held:,} bytes — over the "
+            f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte budget its tools enforce, which now "
+            f"refuse further writes. {SCRATCHPAD_ELSEWHERE}"
+        )
+    if too_wide:
+        return (
+            f"[scratch] The pad holds more than {SCRATCHPAD_BUDGET_SCAN_ENTRIES:,} entries, "
+            f"a tree rather than a pad. {SCRATCHPAD_ELSEWHERE}"
+        )
+    return ""
+
+
+def _expand_scratchpad_spellings(text: str, pad: Path) -> str:
+    """``text`` with the shell's two ``$LOCAL_OPERATOR_SCRATCHPAD`` spellings
+    expanded to the pad path.
+
+    Mirrors :func:`_expand_tmpdir_spellings` — the ``${…}`` spelling first, the
+    ordering that helper's comment states — and exists so the gate and the shape
+    arm resolve the COMMON spelling of a pad target
+    (``$LOCAL_OPERATOR_SCRATCHPAD/ui-copy``) exactly as its absolute spelling.
+    Pure string work: this is one half of the no-latency gate.
+    """
+    for spelling in (f"${{{SCRATCHPAD_PATH_ENV}}}", f"${SCRATCHPAD_PATH_ENV}"):
+        text = text.replace(spelling, str(pad))
+    return text
+
+
+def _pad_target(candidate: str, pad: Path) -> Path | None:
+    """``candidate`` expanded and resolved when it can NAME a path, else ``None``.
+
+    The pad audit's naming step, the sibling of :func:`_temp_root_target` and
+    :func:`_scratch_dir_target` and sharing their refusals: a relative path and
+    anything carrying a scheme are not guessed at (this scan has no working
+    directory), and the two pad spellings, ``$TMPDIR`` and a leading ``~`` are
+    expanded first so the shell's ordinary way of writing the target reaches the
+    scan as its absolute spelling does. Whether the path is INSIDE the pad is
+    asked by ``scratchpad.scratchpad_refusal`` (which owns the symlinked-root
+    second attempt), so this helper stays pure spelling and its name promises
+    nothing about containment.
+    """
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
+    text = _expand_scratchpad_spellings(text, pad)
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        return Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
 
 
 def _bash_created_paths(command: str) -> Iterator[str]:
