@@ -33636,7 +33636,9 @@ class OperatorApp(App[None]):
             try:
                 if turns is None:
                     turns = await getattr(session, "materialize_history")()
-                result = await naming.refresh_title(current, session.complete_once, turns=turns)
+                result = await naming.refresh_title(
+                    current, naming.refresh_completer(session), turns=turns
+                )
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001 — silence is the one defect here

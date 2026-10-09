@@ -1851,6 +1851,35 @@ async def test_a_refresh_retitles_a_session_the_growth_gate_would_decline() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_local_refresh_asks_the_conversations_own_model() -> None:
+    """The TUI-owned path, not only the routed one: ``/title refresh`` on a
+    session the app owns asks the session-model seam, and the cheap-tier
+    ``complete_once`` gets no call from the refresh."""
+
+    app, session = await _boot(title="<title>Houseplant names</title>")
+    on_session_model: list[tuple[str, str]] = []
+
+    async def answer(system: str, prompt: str) -> str:
+        on_session_model.append((system, prompt))
+        return "<title>Autovacuum tuning for orders</title>"
+
+    session.complete_once_on_session_model = answer  # type: ignore[attr-defined]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "name my houseplant")
+        tier_calls = len(session.completions)
+        session.grow_transcript(3)
+
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert len(on_session_model) == 1, "the refresh never asked the session model"
+        assert on_session_model[0][0] == naming.REFRESH_SYSTEM_PROMPT
+        assert len(session.completions) == tier_calls, "the refresh spent a cheap-tier call"
+        assert session.conversation_name == "Autovacuum tuning for orders"
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_releases_a_human_rename_only_when_a_title_lands() -> None:
     """``user_set`` is a one-way latch everywhere else; this is the exception.
 
@@ -2233,6 +2262,52 @@ async def test_a_slow_provider_gets_a_receipt_not_a_raised_cancellation() -> Non
     assert (
         elapsed < naming.ROUTED_TITLE_TIMEOUT_S + 2
     ), f"the op ran {elapsed:.1f}s: the deadline did not fire"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_refresh_asks_the_conversations_own_model() -> None:
+    """``/title --refresh`` is a person asking THIS conversation to name itself,
+    so the model serving the conversation answers — not the ``lo`` tier that
+    ``complete_once`` prefers for unattended naming. The tier's slow tail
+    overran the routed 8 s budget, and the receipt read "could not reach the
+    model" while the session model would have answered in two seconds.
+    """
+
+    asked: list[str] = []
+
+    class _Owner:
+        conversation_name = "Houseplant names"
+
+        def history(self) -> list[Any]:
+            return _turns("name my houseplant", "Leaf Erikson", "tune autovacuum for orders")
+
+        async def complete_once(self, system: str, prompt: str) -> str:
+            asked.append("tier")
+            await asyncio.sleep(60)  # the slow cheap tier
+            return "<title>Never reached</title>"
+
+        async def complete_once_on_session_model(self, system: str, prompt: str) -> str:
+            asked.append("session")
+            return "<title>Autovacuum tuning for orders</title>"
+
+    result = await asyncio.wait_for(
+        naming.routed_refresh("Houseplant names", _Owner()), naming.ROUTED_TITLE_TIMEOUT_S + 4
+    )
+
+    assert asked == ["session"], "the refresh asked the cheap tier instead of the session model"
+    assert result == naming.TitleRefresh(naming.TITLE_REFRESHED, "Autovacuum tuning for orders")
+
+
+def test_the_refresh_completer_falls_back_to_complete_once_without_the_seam() -> None:
+    """A facade without the session-model seam still refreshes, through the
+    errand it always used, rather than failing on a missing attribute."""
+
+    class _Reduced:
+        async def complete_once(self, system: str, prompt: str) -> str:
+            return ""
+
+    reduced = _Reduced()
+    assert naming.refresh_completer(reduced) == reduced.complete_once
 
 
 @pytest.mark.asyncio
