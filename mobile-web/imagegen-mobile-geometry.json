@@ -149,11 +149,11 @@
     },
     "card": {
       "top": 150,
-      "bottom": 387,
+      "bottom": 414,
       "left": 12,
       "right": 378,
       "width": 366,
-      "height": 237
+      "height": 264
     },
     "row": {
       "top": 150,
@@ -173,8 +173,8 @@
     },
     "bar": {
       "box": {
-        "top": 372,
-        "bottom": 374,
+        "top": 385,
+        "bottom": 387,
         "left": 42,
         "right": 291,
         "width": 249,
@@ -577,11 +577,11 @@
     },
     "card": {
       "top": 150,
-      "bottom": 387,
+      "bottom": 414,
       "left": 12,
       "right": 348,
       "width": 336,
-      "height": 237
+      "height": 264
     },
     "row": {
       "top": 150,
@@ -601,8 +601,8 @@
     },
     "bar": {
       "box": {
-        "top": 372,
-        "bottom": 374,
+        "top": 385,
+        "bottom": 387,
         "left": 42,
         "right": 261,
         "width": 219,
