@@ -234,6 +234,20 @@ async def test_radient_happy_path_request_id_only_and_passthrough() -> None:
     assert handle.provider is None
 
 
+def test_emit_progress_swallows_a_raising_emitter() -> None:
+    """The rungs' guard (reviewer round-1 pin): progress never rides control flow.
+
+    A raising emitter must never escape into its caller — the poll loop, the
+    cascade's failure path, or a cancellation handler. ``None`` stays a no-op.
+    """
+
+    def raiser(text: str, details: dict[str, Any]) -> None:
+        raise RuntimeError("emitter exploded")
+
+    image_rungs.emit_progress(raiser, "line", stage="queued")  # must not raise
+    image_rungs.emit_progress(None, "line", stage="queued")  # no-op
+
+
 @pytest.mark.asyncio
 async def test_radient_affordability_skips_the_rung() -> None:
     recorder = _Recorder()
@@ -403,14 +417,18 @@ def _fal_handler(
     *,
     submit: dict[str, Any],
     derived: bool = False,
+    statuses: list[dict[str, Any]] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
+    status_script = list(statuses or [{"status": "COMPLETED"}])
+
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.record(request)
         path = request.url.path
         if request.method == "POST" and path.startswith("/fal-ai/"):
             return httpx.Response(200, json=submit)
         if path.endswith("/status"):
-            return httpx.Response(200, json={"status": "COMPLETED"})
+            payload = status_script.pop(0) if status_script else {"status": "COMPLETED"}
+            return httpx.Response(200, json=payload)
         if path.endswith(("/custom/req1", "/requests/r1", "/requests/req1")):
             return httpx.Response(
                 200,
@@ -436,7 +454,14 @@ async def test_fal_uses_response_carried_urls_and_key_header() -> None:
         "response_url": "https://queue.fal.test/custom/req1",
         "cancel_url": "https://queue.fal.test/custom/req1/cancel",
     }
-    async with _client(_fal_handler(recorder, submit=submit)) as client:
+    progress: list[tuple[str, dict[str, Any]]] = []
+    async with _client(
+        _fal_handler(
+            recorder,
+            submit=submit,
+            statuses=[{"status": "IN_QUEUE", "queue_position": 1}, {"status": "COMPLETED"}],
+        )
+    ) as client:
         result = await image_rungs.run_fal(
             prompt="a fox",
             key="fk",
@@ -447,20 +472,34 @@ async def test_fal_uses_response_carried_urls_and_key_header() -> None:
             source_url=None,
             model="fal-ai/flux/dev",
             handle=handle,
-            emit=None,
+            emit=lambda text, details: progress.append((text, details)),
             pause=_no_pause,
             base_url="https://queue.fal.test",
             client=client,
         )
     assert result.model == "fal-ai/flux/dev"
     assert result.generation_id == "req1"
-    assert recorder.paths().count("/custom/req1/status") == 1, "the carried status URL is used"
+    assert (
+        recorder.paths().count("/custom/req1/status") == 2
+    ), "the carried status URL is used — both polls (queued, then completed)"
     assert "/custom/req1" in recorder.paths()
     submit_body = recorder.bodies[0]
     assert submit_body["sync_mode"] is False
     assert submit_body["image_size"] == "landscape_4_3"
     assert submit_body["seed"] == 7
     assert recorder.requests[0].headers["authorization"] == "Key fk"
+    # The FAL branches emit the canonical set (reviewer round-1 pin): the poll
+    # update carries queue_position, the download folds into in_progress —
+    # both present every canonical key with honest nulls.
+    stages = [details["stage"] for _, details in progress]
+    assert stages == ["queued", "in_progress"]
+    canonical = {"stage", "queue_position", "progress_fraction", "log_lines", "error", "error_type"}
+    assert all(canonical <= set(details) for _, details in progress)
+    assert progress[0][1]["queue_position"] == 1
+    assert all(details["provider"] == "fal" for _, details in progress)
+    assert all(
+        details["error"] is None and details["error_type"] is None for _, details in progress
+    )
 
 
 @pytest.mark.asyncio
@@ -575,6 +614,7 @@ async def test_openai_decodes_b64_items() -> None:
 @pytest.mark.asyncio
 async def test_openai_downloads_url_items() -> None:
     recorder = _Recorder()
+    progress: list[tuple[str, dict[str, Any]]] = []
     body = {"data": [{"url": "https://oai.test/a.png"}]}
     async with _client(_openai_handler(recorder, body)) as client:
         result = await image_rungs.run_openai(
@@ -584,13 +624,20 @@ async def test_openai_downloads_url_items() -> None:
             image_size="square_hd",
             source_url=None,
             model="dall-e-3",
-            emit=None,
+            emit=lambda text, details: progress.append((text, details)),
             pause=_no_pause,
             base_url="https://oai.test/v1",
             client=client,
         )
     assert result.assets[0].source_url == "https://oai.test/a.png"
     assert result.assets[0].data == PNG_1X1
+    # The OpenAI url branch emits the canonical set too (reviewer round-1 pin):
+    # one download-phase update, stage folded to in_progress.
+    assert len(progress) == 1
+    assert progress[0][1]["stage"] == "in_progress"
+    assert progress[0][1]["provider"] == "openai"
+    canonical = {"stage", "queue_position", "progress_fraction", "log_lines", "error", "error_type"}
+    assert canonical <= set(progress[0][1])
 
 
 @pytest.mark.asyncio

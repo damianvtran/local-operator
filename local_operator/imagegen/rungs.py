@@ -377,8 +377,10 @@ def emit_progress(emit: ProgressFn | None, text: str, **details: Any) -> None:
     """One progress line; a broken emitter must never break a generation.
 
     Public beside the private helpers because the cascade's failure updates
-    and the tool's terminal updates emit through it too — one guarded
-    spelling for "progress is presentation, never control flow".
+    (another module) emit through it — one guarded spelling for "progress is
+    presentation, never control flow". The tool's own terminal updates route
+    through ITS guarded emitter (``image_tool._progress_emitter``'s closure),
+    which carries the same contract.
     """
     if emit is None:
         return
