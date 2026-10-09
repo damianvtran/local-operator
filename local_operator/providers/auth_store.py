@@ -1408,6 +1408,32 @@ class AuthStore:
                 "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
+            if row is None and provider == "radient" and identity != f"oauth:{provider}":
+                # ADOPT THE PRE-IDENTITY ROW. A provider that starts returning
+                # an IdP identity (Radient's id_token claims, decoded from this
+                # release on) moves its dedupe key from the per-provider
+                # constant to the account id, so the first re-login after the
+                # upgrade found no row and INSERTED a second one beside the
+                # constant-keyed row — the stale-refresh-token duplicate the
+                # constant exists to prevent. Upgrading that one row in place is
+                # exactly what the constant key did before (every login of that
+                # provider landed on it), so this never merges two rows that
+                # would not have been one row yesterday. Scoped to Radient, the
+                # one provider whose identity changed shape in this release:
+                # xAI/Anthropic have carried an id_token identity for a while,
+                # and a constant-keyed row there can be a DIFFERENT account.
+                row = self._conn.execute(
+                    "SELECT id FROM auth_credentials WHERE provider = ? "
+                    "AND identity_key = ? ORDER BY id",
+                    (provider, f"oauth:{provider}"),
+                ).fetchone()
+                if row is not None and credential_type == "oauth":
+                    self._conn.execute(
+                        "UPDATE auth_credentials SET identity_key = ? WHERE id = ?",
+                        (identity, row[0]),
+                    )
+                else:
+                    row = None
             if row is not None:
                 self._conn.execute(
                     "UPDATE auth_credentials SET credential_type = ?, data = ?, "

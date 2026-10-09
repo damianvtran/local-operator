@@ -361,14 +361,14 @@ async def test_bash_empty_command_is_error(tools, context) -> None:
 
 
 def test_resolve_bash_shell_prefers_the_configured_value(monkeypatch) -> None:
-    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    monkeypatch.setattr(builtin.shutil, "which", lambda name, *args, **kwargs: "/path/which/bash")
     assert builtin.resolve_bash_shell("/opt/custom/bash") == "/opt/custom/bash"
     # Surrounding whitespace is a typo, not an interpreter.
     assert builtin.resolve_bash_shell("  /opt/custom/bash \n") == "/opt/custom/bash"
 
 
 def test_resolve_bash_shell_falls_back_to_bash_on_path(monkeypatch) -> None:
-    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    monkeypatch.setattr(builtin.shutil, "which", lambda name, *args, **kwargs: "/path/which/bash")
     assert builtin.resolve_bash_shell(None) == "/path/which/bash"
     # Empty and blank both mean "unset": the registry's empty_unsets row and a
     # hand-edited `shell: "  "` must resolve the same way.
@@ -377,7 +377,7 @@ def test_resolve_bash_shell_falls_back_to_bash_on_path(monkeypatch) -> None:
 
 
 def test_resolve_bash_shell_last_resort_is_sh(monkeypatch) -> None:
-    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    monkeypatch.setattr(builtin.shutil, "which", lambda name, *args, **kwargs: None)
     assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK == "/bin/sh"
 
 
@@ -395,7 +395,12 @@ def test_resolve_bash_shell_expands_a_tilde(monkeypatch) -> None:
 
 def _as_windows_without_bash(monkeypatch, tmp_path, *, program_files: Path | None = None) -> None:
     """A Windows host with no ``bash`` on PATH and no OTHER source of one."""
-    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    # ``*args, **kwargs``: the real ``shutil.which`` takes ``path=``, and the
+    # bash tool now asks it about ``lop`` with an explicit PATH (the launcher
+    # injection). A double that accepts only the name turns that call into a
+    # TypeError inside the tool, which this file then reports as a tool failure
+    # rather than as the Windows refusal it is testing.
+    monkeypatch.setattr(builtin.shutil, "which", lambda name, *args, **kwargs: None)
     # The platform fact has one home (`procstate._PLATFORM`), which every
     # Windows branch in the package — this module's included — reads.
     monkeypatch.setattr(procstate, "_PLATFORM", "win32")

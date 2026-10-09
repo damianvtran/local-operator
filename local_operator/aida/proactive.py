@@ -64,6 +64,7 @@ because "disabled installs" are installs that never wanted her.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ from typing import Any, Mapping, Sequence
 
 from local_operator.aida import state
 from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES, WakeSchedule
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 from local_operator.wakes.store import is_patience_row
 
 logger = logging.getLogger(__name__)
@@ -116,8 +118,9 @@ CADENCE_MESSAGE = (
     "stale sessions, projects and workstreams, scheduled wakes, usage signals, and "
     "anything you started earlier that is still in flight — and report ONLY what "
     "needs the operator's action, in a few short lines. If there is nothing "
-    'actionable, reply with exactly "(no action needed)" and nothing else. To '
-    "schedule a follow-up check, write it to the escalation tray described in your "
+    "actionable, give the one quiet-day tip below in a sentence when this message "
+    'carries one, otherwise reply with exactly "(no action needed)" and nothing '
+    "else. To schedule a follow-up check, write it to the escalation tray described in your "
     "instructions instead of arming wakes directly."
 )
 
@@ -287,7 +290,19 @@ def cadence_message(config_dir: Path | str, now_ms: int) -> str:
     except Exception:  # noqa: BLE001 — a ledger miss must not cost the check-in
         logger.warning("aida: could not resolve the nudge window", exc_info=True)
         clause = None
-    return f"{CADENCE_MESSAGE}\n\n{clause}" if clause else CADENCE_MESSAGE
+    # ONE quiet-day tip (audit A10/U15): the "(no action needed)" reply was the
+    # only thing a fresh install ever heard from its check-in, and the tips
+    # that would have helped (phone access via the Radient relay first) were
+    # nowhere. Same ledger discipline as the nudge — offered = stamped.
+    try:
+        from local_operator.aida import onboarding
+
+        tip = onboarding.tip_offer(config_dir, now_ms=now_ms)
+    except Exception:  # noqa: BLE001
+        logger.warning("aida: could not resolve the tip", exc_info=True)
+        tip = None
+    clauses = [c for c in (clause, tip) if c]
+    return "\n\n".join([CADENCE_MESSAGE, *clauses]) if clauses else CADENCE_MESSAGE
 
 
 def session_class_reactive(config_dir: Path | str, session_id: str) -> bool:
@@ -504,8 +519,14 @@ def reconcile(
     session_id: str,
     now_ms: int | None = None,
     class_reactive: bool = False,
+    attended: bool = True,
 ) -> ReconcileResult:
     """The in-session full-list reconcile. Pure file side effects: the ledger.
+
+    ``attended`` is whether a local human surface holds this session right now
+    (``Session._aida_greeting_may_land``). It gates ONE thing — arming the
+    greeting — and defaults ``True`` so every caller that predates it keeps its
+    behaviour; the fire-time check stays the authority either way.
 
     Order and content, in one place so the persist seam and the after-turn seam
     cannot diverge:
@@ -627,7 +648,14 @@ def reconcile(
         notes.append("escalation tray left unread (another operation is in flight).")
 
     # -- cadence ------------------------------------------------------------
-    if not any(row.id == CADENCE_ID for row in kept):
+    # NOT BEFORE SHE HAS MET THE USER (audit A9): on a fresh install the first
+    # thing she says must be her greeting in a window the user is looking at,
+    # never an 08:30 check-in fired by the supervisor into a conversation
+    # nobody has opened. ``cadence_allowed`` answers True for delivered,
+    # skipped (an existing install) and legacy ledgers, so only a genuinely
+    # first-run install waits — and an existing cadence row is never dropped
+    # by this gate, only not created.
+    if not any(row.id == CADENCE_ID for row in kept) and _cadence_allowed(config_dir):
         # REUSE the existing cadence row whenever one exists — rebuilding it
         # would mint a new ``created_at`` on every reconcile, which makes
         # ``changed`` permanently true (so a watcher tick or an after-turn
@@ -643,19 +671,24 @@ def reconcile(
             else cadence_schedule(now, pol.at, config_dir=config_dir)
         )
 
-    # -- the one-time greeting, on the same ensure rule as the cadence -------
+    # -- the one-time greeting, armed only once a PERSON asked for it --------
     # A live session is the ONLY writer that can arm it when the owner holds
-    # the rows (`arm_wake` refuses with a 503), so an owed greeting is
-    # re-armed here rather than left to a caller that cannot write (review
-    # round 1, m1). Owed means ``greeted_at is None`` — never armed, or
-    # un-stamped by the pause above — and the provider gate is the same one
-    # ``onboarding.greet`` applies, because the turn cannot run without one.
+    # the rows (`arm_wake` refuses with a 503), so a REQUESTED greeting is
+    # armed here rather than left to a caller that cannot write (review round
+    # 1, m1). ``greeting_armable`` is "requested + a provider": the old gate
+    # was ``greeted_at is None``, which let any headless runtime of her
+    # session (a supervisor fire, `lop exec`, the mobile daemon) greet an
+    # install nobody was looking at (audit A1). Only an attended surface moves
+    # the ledger to requested (``onboarding.request_greeting``).
     if not any(row.id == GREETING_WAKE_ID for row in kept):
         from local_operator.aida import onboarding as _onboarding
 
-        if _onboarding.greeted_at(config_dir) is None and _onboarding.provider_configured(
-            config_dir
-        ):
+        # ``attended`` as well as armable (review round 1, R-3): a fire withheld
+        # in a headless runtime goes back to ``requested``, and without this the
+        # SAME runtime's next persist would arm it again, due now, and withhold
+        # it again — a loop bounded only by the runtime's lifetime. The arm waits
+        # for a person exactly as the fire does.
+        if attended and _onboarding.greeting_armable(config_dir):
             kept.append(
                 WakeSchedule(
                     id=GREETING_WAKE_ID,
@@ -663,11 +696,14 @@ def reconcile(
                     next_due_at=now,
                     every_ms=None,
                     created_at=now,
+                    # Hidden: the trigger is a model-facing fact line, and her
+                    # reply must be the first VISIBLE row (audit A3/A4).
+                    hidden=True,
                 )
             )
-            # And the ledger moves WITH the arm on this path too: without the
-            # stamp a later reconcile (the row retired after firing) would find
-            # no greeting row and arm a second one.
+            # The ledger moves WITH the arm on this path too: without it a
+            # later reconcile (the row retired after firing, before the
+            # delivery stamp landed) would arm a second greeting.
             _onboarding.mark_greeted(config_dir, now)
 
     # -- wake triggers -------------------------------------------------------
@@ -1067,12 +1103,33 @@ def wake_display_label(wake_id: str) -> str:
     return template.format(name=naming.display_name())
 
 
+def _cadence_allowed(config_dir: Path | str) -> bool:
+    """Whether the cadence may be CREATED now (see ``onboarding.cadence_allowed``).
+
+    Lazy import for the module-cycle reason the other onboarding reads give;
+    fail-OPEN, because an existing user losing their check-in to a ledger read
+    error is the worse failure than a first-run user getting one early.
+    """
+    try:
+        from local_operator.aida import onboarding as _onboarding
+
+        return _onboarding.cadence_allowed(config_dir)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the cadence gate's ledger read", exc)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("aida: cadence gate failed; allowing", exc_info=True)
+        return True
+
+
 def _clear_greeted(config_dir: Path | str) -> None:
     """Un-stamp the greeting via `onboarding`, best-effort."""
     try:
         from local_operator.aida import onboarding as _onboarding
 
         _onboarding.clear_greeted(config_dir)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the greeting un-stamp", exc)
     except Exception:  # noqa: BLE001 — a stamp must not cost a pause/reconcile
         logger.warning("aida: could not clear the greeting stamp", exc_info=True)
 
@@ -1218,13 +1275,16 @@ async def ensure_armed(
     fresh value instead.
 
     Returns ``"armed"`` (a cadence row was written), ``"present"`` (one was
-    already there), ``"paused"``/``"disabled"``/``"reactive"``/``"held"``
+    already there), ``"waiting"`` (a first-run install whose greeting has not
+    been delivered yet — the cadence follows the greeting),
+    ``"paused"``/``"disabled"``/``"reactive"``/``"held"``
     (nothing armed; for the first three any existing Aida rows were best-effort
     cancelled, and ``"held"`` leaves a stopped session dormant), ``"owner"`` (a
     live runtime holds the session — it will reconcile on its own watcher tick),
-    ``"no-session"`` (nothing on disk to arm against) or ``"failed"`` (a
-    refusal/logged error). Never raises: the callers are boot paths whose
-    failures must not fail them.
+    ``"busy"`` (a peer held the STORE lock for the whole wait; benign and
+    retried on the next tick or boot — see that handler), ``"no-session"``
+    (nothing on disk to arm against) or ``"failed"`` (a refusal/logged error).
+    Never raises: the callers are boot paths whose failures must not fail them.
     """
     from local_operator.wakes import store as wake_store
     from local_operator.wakes.arm import (
@@ -1278,7 +1338,13 @@ async def ensure_armed(
         if wake_store.is_held(entry):
             return "held"
         result = "present"
-        if CADENCE_ID not in ids:
+        if CADENCE_ID not in ids and not _cadence_allowed(root):
+            # First run, greeting not yet delivered: the boot paths call this
+            # on every launch, and arming here would schedule a headless 08:30
+            # turn before she has met the user (audit A9). The delivery's own
+            # reconcile arms it right after the greeting fires.
+            result = "waiting"
+        elif CADENCE_ID not in ids:
             try:
                 await arm_wake(
                     root,
@@ -1309,6 +1375,33 @@ async def ensure_armed(
                 result = "present"
         await _drain_tray_external(root, session_id, pol, now)
         return result
+    except WakeLockBusy as exc:
+        # A PEER HOLDS THE STORE LOCK, and that is a normal answer here rather
+        # than a failure. Why it needs saying: this seam has several attended
+        # writers (the TUI launch hook's ensure task, the app's first-run
+        # route, the runtime's reconcile, the wake supervisor), and the two
+        # boot hooks used to RUN CONCURRENTLY — the launch hook is an asyncio
+        # task and the route armed the same row from its own coroutine. Both
+        # take the store lock for the row write and again for the tray, so one
+        # waited out the peer and was refused; the app's first-run boot then
+        # printed a traceback for a boot that was working correctly (CI
+        # `tui-e2e (ubuntu-latest, 1)`, run 37886200214). Two things prevent
+        # that now: ``App._route_first_run_boot`` awaits the launch hook's task
+        # before its own ensure (order, not race), and this refusal — the
+        # fallback for a peer OUTSIDE this process — is answered quietly
+        # through :func:`state.note_lock_refusal`, sharing one shape with every
+        # other site on the seam. "busy" is a miss for this tick: whoever loses
+        # arms nothing, the row it would have written is the row the winner is
+        # writing, and the next tick or boot arms it anyway.
+        state.note_lock_refusal("the cadence arm", exc)
+        return "busy"
+    except WakeLockUnavailable as exc:
+        # Not retryable, unlike the busy lock: the lock FILE could not be
+        # created at all, so the next attempt is refused too (the lock module's
+        # own distinction) — the word stays ``"failed"`` so callers keep
+        # treating it as one, and the line is quiet for the same reason.
+        state.note_lock_refusal("the cadence arm", exc)
+        return "failed"
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
         logger.warning("aida: ensure_armed failed", exc_info=True)
         return "failed"
@@ -1337,7 +1430,19 @@ async def _drain_tray_external(
     entry = wake_store.read_entry(root, session_id)
     ids = _row_ids(entry)
     taken = 0
-    with state.locked(root):
+    # ACQUIRED OFF THE LOOP — `wakes.lock`'s own documented pattern for a lock
+    # held across awaits (``WakeWriteLock``'s docstring; ``state.wake_lock``
+    # exists for exactly this). ``state.locked`` acquires on the CALLER's
+    # thread, so a contended take parks whoever runs it for the whole
+    # ``LOCK_WAIT_S`` — measured 5.09 s on this seam, with the app unable to
+    # paint for the duration and no way for the peer to release early, since
+    # the peer is blocked on a lock this wait holds open. On a worker thread
+    # the wait costs a thread rather than the frame, and the refusal still
+    # arrives as the same ``WakeLockBusy`` — answered quietly by
+    # :func:`state.note_lock_refusal` where the caller asked for the arm.
+    lock = state.wake_lock(root)
+    await asyncio.to_thread(lock.acquire)
+    try:
         # CONSUMED INSIDE THE LOCK, like the in-session branch (review round
         # 1, M1b): a contended lock must leave the tray untouched rather than
         # eat it on the way to writing a note about a file that is gone.
@@ -1424,6 +1529,8 @@ async def _drain_tray_external(
             taken += 1
         if taken:
             state.update_state(root, extras=dict(ledger, armed=armed + taken))
+    finally:
+        await asyncio.to_thread(lock.release)
     # WARNING, not info (QA round 2, Q3): every note here is an operation the
     # operator asked for that did NOT take effect (a refusal) or was handed to
     # another writer — and `lop serve` configures its console logging at the
@@ -1602,6 +1709,8 @@ async def resume(config_dir: Path | str, session_id: str, *, now_ms: int | None 
         from local_operator.aida import onboarding as _onboarding
 
         await _onboarding.greet(root, session_id, now_ms=now)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the resume's greeting arm", exc)
     except Exception:  # noqa: BLE001 — a greeting must not fail the resume
         logger.warning("aida: could not re-arm the greeting on resume", exc_info=True)
     return await ensure_armed(root, session_id, now_ms=now)

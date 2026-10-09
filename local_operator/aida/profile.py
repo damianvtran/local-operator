@@ -67,6 +67,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -235,3 +236,113 @@ def _atomic_write(path: Path, content: str) -> None:
         except OSError:
             pass
         raise
+
+
+#: The suffix that marks a bullet the SIGN-IN wrote rather than one Aida
+#: recorded with the operator's consent. It is what lets a re-login replace
+#: its own lines (a renamed account, a different account) instead of
+#: appending a second "Name:" beside the first, while never touching a line
+#: she or the operator wrote.
+RADIENT_ACCOUNT_TAG = "(Radient account)"
+
+
+def record_account_identity(
+    name: str,
+    email: str,
+    *,
+    config_dir: Path | str | None = None,
+    tag: str = RADIENT_ACCOUNT_TAG,
+) -> str:
+    """Write ``Name:``/``Email:`` bullets from a provider SIGN-IN. Idempotent.
+
+    WHY THIS EXISTS. A Radient sign-in proves who the operator is (the
+    ``id_token`` claims, see ``providers/oauth/radient.py``), and the
+    instructions file is the stable prefix every session and subagent reads
+    (``session_factory``'s custom-instructions block). Writing the identity
+    there means every conversation knows the operator's name from the first
+    turn, and Aida's first contact confirms it instead of asking for an email
+    the login already recorded (audit A5/A6).
+
+    IDEMPOTENT BY REPLACEMENT, not by dedupe: every bullet ending in ``tag`` is
+    the sign-in's own, so they are dropped and rewritten as one pair. A second
+    login with the same identity therefore answers ``"duplicate"`` and writes
+    nothing; a changed name replaces the old line. Bullets without the tag —
+    what she recorded, what the operator typed — are never touched.
+
+    Same guards and refusal words as :func:`record_profile_note` (it routes
+    through the same path checks and atomic write). Never raises.
+    """
+    wanted = []
+    if name.strip():
+        wanted.append(f"- Name: {name.strip()} {tag}")
+    if email.strip():
+        wanted.append(f"- Email: {email.strip()} {tag}")
+    if not wanted:
+        return "empty"
+    if any(SECTION_START in line or SECTION_END in line for line in wanted):
+        return "invalid"
+    path = instruction_file(config_dir)
+    try:
+        root_real = Path(os.path.realpath(path.parent))
+        if not Path(os.path.realpath(path)).is_relative_to(root_real):
+            return "unsafe"
+        write_target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    except OSError:
+        return "unsafe"
+    try:
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
+        logger.warning("aida: could not read %s", path, exc_info=True)
+        return "failed"
+
+    bounds = _section_bounds(content)
+    if bounds is None:
+        base = content.rstrip("\n") + "\n\n" if content.strip() else ""
+        new_content = base + _render_section(wanted) + "\n"
+    else:
+        start, end = bounds
+        lines = content[start:end].splitlines()
+        kept = [line for line in lines if not line.strip().endswith(tag)]
+        existing_tagged = [line.strip() for line in lines if line.strip().endswith(tag)]
+        if existing_tagged == wanted:
+            return "duplicate"
+        # The tagged pair goes FIRST under the heading: it is the fact every
+        # later note is about, and a stable position keeps the prefix stable
+        # across re-logins (a moved line is a cache miss on every session).
+        heading_at = next(
+            (i for i, line in enumerate(kept) if line.strip() == SECTION_HEADING), None
+        )
+        insert_at = (heading_at + 1) if heading_at is not None else 1
+        body_lines = kept[:insert_at] + wanted + kept[insert_at:]
+        body = "\n".join(body_lines)
+        new_content = content[:start] + body.rstrip("\n") + "\n" + content[end:]
+
+    if len(new_content) > MAX_FILE_CHARS:
+        return "oversize"
+    try:
+        _atomic_write(write_target, new_content)
+    except OSError:
+        logger.warning("aida: could not write %s", write_target, exc_info=True)
+        return "failed"
+    return "recorded"
+
+
+def record_radient_login(
+    credential: dict[str, Any], *, config_dir: Path | str | None = None
+) -> str:
+    """Record a fresh Radient OAuth credential's identity. Never raises.
+
+    The ONE call both login hosts make (``providers.controller`` for the TUI
+    and desktop, ``providers.auth_cli`` for ``lop login``), so the two cannot
+    disagree about what lands in the file. A credential without claims (an
+    older Radient backend, a pasted key) answers ``"empty"`` and writes nothing.
+    """
+    try:
+        return record_account_identity(
+            str(credential.get("name") or ""),
+            str(credential.get("email") or ""),
+            config_dir=config_dir,
+        )
+    except Exception:  # noqa: BLE001 — a label must never fail a login
+        logger.warning("aida: could not record the Radient identity", exc_info=True)
+        return "failed"

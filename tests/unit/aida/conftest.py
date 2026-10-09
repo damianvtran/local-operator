@@ -40,6 +40,31 @@ def isolated_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return isolated_root_path(tmp_path, monkeypatch)
 
 
+@pytest.fixture()
+def attended_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend a human surface is attached to this process.
+
+    The fire-time attendance gate (``Session._aida_greeting_may_land``) reads
+    ``aida.activation.human_surface_present`` — true for a real tty or a
+    desktop-governed daemon, false under pytest's pipes and under every
+    headless runtime. A test that is ABOUT a greeting landing is by definition
+    describing the attended case (that is the only case in which one lands),
+    so it says so explicitly rather than inheriting whatever stdin the runner
+    happens to hand it. ``headless_surface`` below is the other half.
+    """
+    from local_operator.aida import activation
+
+    monkeypatch.setattr(activation, "human_surface_present", lambda: True)
+
+
+@pytest.fixture()
+def headless_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend NO human surface is attached (``lop exec``, supervisor, phone)."""
+    from local_operator.aida import activation
+
+    monkeypatch.setattr(activation, "human_surface_present", lambda: False)
+
+
 def tree(root: Path) -> set[str]:
     """Every path under ``root``, as relative strings — a footprint snapshot."""
     if not root.exists():
@@ -62,3 +87,17 @@ def write_config(root: Path, values: dict[str, Any]) -> None:
     for key, value in values.items():
         merged[key] = value
     path.write_text(yaml.safe_dump(document))
+
+
+def mark_met(root: Path) -> None:
+    """Record that her greeting was DELIVERED: she has met the operator.
+
+    The daily cadence is withheld on a first-run install until the greeting
+    fires (``onboarding.cadence_allowed`` — no headless 08:30 check-in before
+    she has said hello in a window the user is looking at). A test about the
+    CADENCE models the steady state, so it says so explicitly rather than
+    relying on the old behaviour where a fresh root armed one at once.
+    """
+    from local_operator.aida import onboarding
+
+    onboarding.mark_delivered(root, 1_700_000_000_000)

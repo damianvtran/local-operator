@@ -141,6 +141,7 @@ from local_operator.model.effort import (
     resolve_effort_in,
 )
 from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
+from local_operator.providers.login_catalog import RECOMMENDED_LOGIN_COMMAND
 
 # NOT imported here: `providers.catalogue` (the model picker's shared ranking)
 # and `references` (the `@path` resolver). Both are reached only after the user
@@ -2936,6 +2937,10 @@ COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
 #: aside's placeholder restore correct — and NOT counted as guidance anywhere.
 CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it"
 
+#: The composer's placeholder in the first-run setup state (see
+#: ``_composer_placeholder_for``).
+SETUP_PLACEHOLDER = f"Type {RECOMMENDED_LOGIN_COMMAND} to begin"
+
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
 #: ``expiry_text`` reads ``expires_at`` against the client clock AT PAINT TIME
@@ -3047,6 +3052,19 @@ CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
 #: separately because tests and callers that mean "the full string" should not
 #: index into the ladder.
 CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
+
+#: The `/login` PICKER's ordering fact (design round 2, M1). The bare `/login`
+#: LISTING paints a caption per catalogue group, so a reader can see why a
+#: subscription row follows the recommended one; the dropdown those same rows
+#: open from painted no such thing, and a user who never submits the bare
+#: listing had no way to learn the order is "how you pay". One dim row below
+#: the suggestions says it, laddered because it must survive a narrow card
+#: (the picker re-fits on resize — see ``set_notice_rungs``).
+LOGIN_ORDERING_NOTICE_RUNGS: tuple[str, ...] = (
+    "ordered by how you pay — bare /login lists the groups",
+    "ordered by how you pay — /login lists the groups",
+    "ordered by how you pay",
+)
 
 #: What ``/new``'s picker says when this device knows no peers, widest first.
 #:
@@ -4355,9 +4373,14 @@ class TranscriptScreen(Screen[None]):
 #: and the refusal a send gets while she waits for a provider, so the three
 #: surfaces cannot drift apart (the wording is the splash's existing line:
 #: action first, then the diagnosis, then discovery).
-AIDA_NO_PROVIDER_CUE = (
-    "/login openai to get started — no provider configured (/provider lists all)."
-)
+#:
+#: Radient-first and ≤74 cells (the splash paints this row at width − 6, so it
+#: renders whole at 80 columns). It used to name ``/login openai`` — the one
+#: provider that needs an existing ChatGPT subscription — as THE first step
+#: for someone who may have no AI account at all (audit D1/U2/U4/Q3). The
+#: command comes from ``providers.login_catalog`` so the splash, the hints,
+#: the CLI and the README cannot recommend different providers again.
+AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
 
 
 class OperatorApp(App[None]):
@@ -4706,7 +4729,7 @@ class OperatorApp(App[None]):
         #: True between a first-run "no hosting configured" boot failure and the
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
-        self._setup_state = False
+        self._setup_state_flag = False
         self._model_activation_generation = 0
         self._model_activation_pending: int | None = None
         #: The unknown provider id that put us in the setup state, when that is
@@ -5094,6 +5117,11 @@ class OperatorApp(App[None]):
         #: the warning still the only account of why it cannot answer
         #: (see :meth:`_reset_band_for_swap`).
         self._splash_notice: str | None = None
+        #: The KIND of ``_splash_notice`` (M2): the splash row derives its
+        #: glyph and ink from it, so a receipt does not paint in warning amber.
+        #: "warning" is the resting default because it is what an unlabelled
+        #: announcement has always been here; the receipt passes "success".
+        self._splash_notice_kind: str = "warning"
         #: PyPI version strictly newer than this install, filled by the
         #: one-shot mount worker. ``None`` until then AND when current —
         #: the splash does not reserve the row.
@@ -7931,6 +7959,7 @@ class OperatorApp(App[None]):
                         session,
                         self._providers,
                         notice=self._splash_notice,
+                        notice_kind=self._splash_notice_kind,
                         setup=self._setup_state,
                         update_available=self._update_available,
                     )
@@ -11327,6 +11356,7 @@ class OperatorApp(App[None]):
                             self._session,
                             self._providers,
                             notice=self._splash_notice,
+                            notice_kind=self._splash_notice_kind,
                             setup=self._setup_state,
                             update_available=self._update_available,
                         )
@@ -13006,6 +13036,13 @@ class OperatorApp(App[None]):
         # otherwise be lost with it — a coroutine's locals die with the
         # `CancelledError`, but the completed future's result does not. See
         # `_park_unadopted_session`.
+        # FIRST RUN WITH A PROVIDER ALREADY CONFIGURED (audit A8): a user who set a
+        # provider up before the first launch (env key, `lop login`, the
+        # desktop) never passes through the setup state, so the post-login seam
+        # that opens her conversation never ran and they met an empty chat.
+        # Rebinding the factory HERE, before construction, makes the first
+        # thing on screen her conversation, exactly as the setup exit does.
+        await self._route_first_run_boot()
         navigation_generation = self._sidebar_navigation.generation
         built = asyncio.ensure_future(self._construct_session())
         try:
@@ -15801,20 +15838,30 @@ class OperatorApp(App[None]):
             )
         elif unknown_hosting:
             self._announce_on_splash(
-                f"/login openai — '{unknown_hosting}' is not a known "
-                "provider (/provider lists all).",
+                f"{RECOMMENDED_LOGIN_COMMAND} — '{unknown_hosting}' is unknown "
+                "(/provider lists all).",
                 "warning",
                 # The headline is passed rather than sniffed out of the text:
                 # the toast is the ONE element that is never truncated, so it
                 # is where the bad value is guaranteed to reach the user even
                 # on a narrow terminal.
+                #
+                # 64 cells (design round 1, D6): the earlier wording
+                # ("… is not a known provider (/provider lists all).") measured
+                # 78 and lost its "all)." tail at 80 columns, breaking the
+                # ≤74-cell rule this branch's own comment states.
                 headline=f"Unknown provider '{unknown_hosting}'",
             )
         else:
             self._announce_on_splash(
                 AIDA_NO_PROVIDER_CUE,
                 "warning",
-                headline="No provider configured",
+                # The DIAGNOSIS only (design round 1, D7): the notice row
+                # directly below already carries the actionable sentence
+                # (``AIDA_NO_PROVIDER_CUE``), and a toast repeating it a few
+                # rows away read as two competing instructions. The toast is
+                # the heading; the notice is the instruction.
+                headline="No AI account connected",
             )
         if self._status is not None:
             # "setup" rather than a model name: there is no model until the user
@@ -19391,7 +19438,10 @@ class OperatorApp(App[None]):
             # configured (…)". The ONE-cue rule holds either way — this is the
             # same string, without a second copy of its own opening words.
             if unsent:
-                return (f"your message was not sent: {AIDA_NO_PROVIDER_CUE}", starting)
+                return (
+                    f"Not sent — {AIDA_NO_PROVIDER_CUE[0].lower()}{AIDA_NO_PROVIDER_CUE[1:]}",
+                    starting,
+                )
             return (AIDA_NO_PROVIDER_CUE, starting)
         return ("session is still starting…", starting)
 
@@ -26774,6 +26824,29 @@ class OperatorApp(App[None]):
         editor.placeholder = self._composer_placeholder_for(editor)
         return_focus_to_composer(self, editor)
 
+    @property
+    def _setup_state(self) -> bool:
+        """Whether the app is parked in the first-run setup state."""
+        return self._setup_state_flag
+
+    @_setup_state.setter
+    def _setup_state(self, value: bool) -> None:
+        """Set the state AND bring the composer with it, at every writer.
+
+        A property rather than a call at each site: four places enter or leave
+        the setup state (boot failure, `/login`, `/model` recovery, init), and
+        the composer's setup placeholder plus its contrast class (audit D7)
+        must follow every one — a site that forgot would leave "Type /login
+        radient to begin" on a configured composer.
+        """
+        self._setup_state_flag = bool(value)
+        try:
+            editor = self.query_one(Editor)
+        except Exception:  # noqa: BLE001 — not mounted yet (init, teardown)
+            return
+        editor.set_class(self._setup_state_flag, "-setup")
+        editor.placeholder = self._composer_placeholder_for(editor)
+
     def _composer_placeholder_for(self, editor: Any, *, connection: str = "") -> str:
         """The composer's placeholder for the CURRENT mode — one authority.
 
@@ -26801,6 +26874,14 @@ class OperatorApp(App[None]):
             return ASIDE_PLACEHOLDER
         if editor.shell_mode:
             return SHELL_PLACEHOLDER
+        if self._setup_state:
+            # The setup state's ONE action, where the eye already is (audit
+            # D7): the composer said "Message Local Operator…" while every send
+            # was refused. Painted in the stronger ``muted`` ink by the
+            # ``-setup`` class (``local_operator.tcss``) — the resting ``dim``
+            # placeholder measured 4.18:1 on the dark input surface and 3.46:1
+            # on the light one, under the 4.5:1 a call to action needs.
+            return SETUP_PLACEHOLDER
         return "Draft a message…" if connection else editor.resting_placeholder
 
     def _drawable_questions(self, row: AskRow) -> list[Any] | None:
@@ -28691,6 +28772,7 @@ class OperatorApp(App[None]):
                 self._session,
                 self._providers,
                 notice=self._splash_notice,
+                notice_kind=self._splash_notice_kind,
                 setup=self._setup_state,
                 update_available=self._update_available,
             )
@@ -46281,6 +46363,13 @@ class OperatorApp(App[None]):
         # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
         # costs the transcript nothing.
         picker.set_notice(reason)
+        # THE ORDERING FACT, on the picker rather than only on the listing
+        # (design round 2, M1). Set LAST because `set_notice` clears any rungs
+        # (see the widget), and only for a list that actually has rows to order
+        # — on an empty one the slot already carries the more useful sentence
+        # above.
+        if message.command == "login" and choices:
+            picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -46694,17 +46783,62 @@ class OperatorApp(App[None]):
         :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
         and the desktop's census render one fact from one derivation — the
         picker and ``/provider`` had drifted before ("needs login" against "—").
+
+        ORDER AND WORDS come from ``providers.login_catalog`` (audit D3/U2/U9):
+        Radient first and marked recommended, then the desktop's groups, every
+        row described by what the user needs to have. In the SETUP state the
+        speech/decision-only rows are left out — a first-run user who picks
+        ElevenLabs stores a key and still cannot send a message — while a
+        configured install keeps them, labelled "not for chat".
         """
+        from local_operator.providers.login_catalog import (
+            GROUP_NOT_CHAT,
+            RECOMMENDED_TAG,
+            is_non_chat,
+            login_groups,
+            picker_description,
+            picker_label,
+        )
+
         providers = self._providers
         assert providers is not None
         view = self._provider_view()
+        offered = {definition.id: definition for definition in providers.login_providers()}
         choices: list[ArgumentChoice] = []
-        for definition in providers.login_providers():
+        seen: set[str] = set()
+        rows = [
+            row
+            for _, group in login_groups(include_non_chat=not self._setup_state)
+            for row in group
+        ]
+        for row_info in rows:
+            definition = offered.get(row_info.id)
+            if definition is None:
+                continue
+            seen.add(definition.id)
             row = view.get(definition.id) if view is not None else None
+            description = picker_description(definition.id)
+            if row_info.recommended:
+                # The tag rides the END of the description, in the ONE spelling
+                # the catalogue owns (D10), rather than being prefixed: a
+                # prefix pushes the distinguishing words out of the column
+                # first, which is how `radient`'s row lost them (D3).
+                description = f"{description} — {RECOMMENDED_TAG}"
+            elif row_info.group == GROUP_NOT_CHAT and "not for chat" not in description:
+                description = f"{description} (not for chat)"
             choices.append(
                 ArgumentChoice(
                     name=definition.id,
-                    description=_provider_summary(definition.id, definition.name),
+                    # WHAT THE ROW PAINTS (D3): the short human label, while
+                    # ``name`` stays the value completion inserts. The picker
+                    # painted the machine id — `zai-oauth`,
+                    # `alibaba-token-plan-oauth` — for a first-run user who
+                    # cannot tell those from their twins, and painting the FULL
+                    # registry label instead just moved the ellipsis onto the
+                    # label, because the name and description columns share one
+                    # line. `lop login` prints the full label.
+                    display=picker_label(definition.id, row_info.label),
+                    description=description,
                     aliases=tuple(definition.search_aliases),
                     # Blank when the store could not be read: the catalogue is still
                     # entirely answerable from the registry, and a row with no state
@@ -46717,6 +46851,29 @@ class OperatorApp(App[None]):
                     # question is "what do I show beside this row", and a blank
                     # is honest; there it is "what will this switch do", and the
                     # note must SAY something (design review round 1, D4).
+                    detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
+                )
+            )
+        # A controller offering a row the catalogue does not know (an embedder's
+        # own provider, a test double) is still listed, after the known ones,
+        # with the registry-derived summary it always had.
+        for definition in offered.values():
+            # A non-chat row the catalogue LEFT OUT (setup state) stays out;
+            # only rows it does not know about at all take this path.
+            if definition.id in seen or (self._setup_state and is_non_chat(definition.id)):
+                continue
+            row = view.get(definition.id) if view is not None else None
+            choices.append(
+                ArgumentChoice(
+                    name=definition.id,
+                    # Same label/value split as the catalogue rows above, so an
+                    # embedder's own provider does not paint an id beside rows
+                    # that paint names (design round 1, D3). Their own registry
+                    # name is the only label available, and it is the right one:
+                    # the catalogue's short forms are ours to know.
+                    display=definition.name,
+                    description=_provider_summary(definition.id, definition.name),
+                    aliases=tuple(definition.search_aliases),
                     detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
                 )
             )
@@ -46902,6 +47059,48 @@ class OperatorApp(App[None]):
             AIDA_NO_PROVIDER_CUE, "warning", headline=f"{name} — connect a provider"
         )
 
+    async def _route_first_run_boot(self) -> None:
+        """Open her conversation on a fresh install's first ATTENDED boot.
+
+        Cheap in the steady state: one ledger read answers "settled" and
+        returns. Only while the greeting is unsettled does the full predicate
+        run (a sessions scan plus hosting resolution), off the loop; an install
+        with conversations is marked ``skipped`` by that scan's caller
+        (``cadence_allowed``) so it never pays this again. Best-effort: every
+        failure boots exactly as before.
+        """
+        # ORDER, NOT RACE — and this is what removes the park. Two attended
+        # armers exist at boot: the launch hook's task (`tui/__init__.py`'s
+        # `_aida_boot_ensure`, scheduled as a task at launch) and this route.
+        # Both take the store lock for the same row, so while they overlapped
+        # one of them waited out the peer for the whole `LOCK_WAIT_S` —
+        # measured 5.09 s, with the loop unable to paint, because the peer
+        # could not release while the park held the lock open. Awaiting that
+        # task here means this route's store reads start from a store the
+        # launch hook has finished with. A peer OUTSIDE this process can still
+        # refuse the take, and that answer is the quiet one
+        # (`aida.state.note_lock_refusal`, per the sites that take it).
+        launch_ensure = getattr(self, "_aida_boot_task", None)
+        if launch_ensure is not None and not launch_ensure.done():
+            # `asyncio.wait`, not `await`: the hook swallows its own failures, and
+            # awaiting it would re-raise a cancellation aimed at the HOOK as if
+            # this route had been cancelled.
+            await asyncio.wait({launch_ensure})
+        try:
+            from local_operator.aida import onboarding
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            if onboarding.greeting_settled(root):
+                return
+            if not await asyncio.to_thread(onboarding.first_run_pending, root):
+                await asyncio.to_thread(onboarding.cadence_allowed, root)
+                return
+        except Exception:  # noqa: BLE001 — a predicate, never a boot dependency
+            logger.warning("aida: first-run boot predicate failed", exc_info=True)
+            return
+        await self._open_aida_first_run(self._notice)
+
     async def _open_aida_first_run(self, notice: NoticeFn) -> bool:
         """R26: on a fresh install, bind the post-setup rebuild to her session.
 
@@ -46941,7 +47140,10 @@ class OperatorApp(App[None]):
             # Best-effort: "paused"/"owner"/"no-provider" leave the greeting
             # owed (it re-arms on the next resume/reconcile), and a failed arm
             # must not cost the first conversation itself.
-            await onboarding.greet(root, session_id)
+            # ``surface`` is what makes this an ATTENDED request: the TUI is
+            # the person's own window, so this is one of the two places the
+            # ledger may leave ``owed`` (audit A1).
+            await onboarding.greet(root, session_id, surface=onboarding.SURFACE_TUI)
         except Exception:  # noqa: BLE001
             logger.warning("aida: first-run greet failed", exc_info=True)
         self._session_factory = lambda: self._resume_factory(session_id)  # type: ignore[misc]
@@ -46984,10 +47186,10 @@ class OperatorApp(App[None]):
             # resolution, which pulls session_factory in cold on first call)
             # only runs while the greeting may actually be owed. The steady
             # state's cost stays off the open path either way.
-            if onboarding.greeted_at(root) is None and await asyncio.to_thread(
+            if not onboarding.greeting_settled(root) and await asyncio.to_thread(
                 onboarding.first_run_pending, root
             ):
-                word = await onboarding.greet(root, session_id)
+                word = await onboarding.greet(root, session_id, surface=onboarding.SURFACE_TUI)
                 logger.debug("aida: first-contact greeting arm: %s", word)
         except Exception:  # noqa: BLE001 — a greeting must never block her open
             logger.warning("aida: first-contact arm failed", exc_info=True)
@@ -47024,6 +47226,7 @@ class OperatorApp(App[None]):
         from local_operator.aida import naming as aida_naming
         from local_operator.aida import proactive, state
         from local_operator.paths import config_dir
+        from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
         # Read OFF the try, so the failure receipt below can always name her:
         # ``display_name`` never raises (the default stands in for an unset or
@@ -47059,6 +47262,16 @@ class OperatorApp(App[None]):
                 notice(f"{AIDA_MARKER} {name}: active again — next check-in {when}.")
             else:
                 notice(f"{AIDA_MARKER} {name}: active again — her next boot arms the check-in.")
+        except (WakeLockBusy, WakeLockUnavailable) as error:
+            # THE REFUSAL IS THE RECEIPT — the handler below says so and then
+            # logged a stack for it. A control op takes the store lock like every
+            # other aida writer, so a peer holding it (her open session's writer,
+            # the launch hook, the tray drain) refuses this command: the lock
+            # module's sentence already states what happened and that re-running
+            # is the fix, so it goes to the notice unchanged and the log gets the
+            # quiet line instead of a `Traceback` block.
+            state.note_lock_refusal(f"the {word} command", error)
+            self._system_notice(f"could not {word} {name}: {error}", "warning")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
             self._system_notice(f"could not {word} {name}: {error}", "warning")
@@ -47986,6 +48199,51 @@ class OperatorApp(App[None]):
         self._system_notice(tui_spelling(lines[-1]), "error")
 
     # -- login / logout -----------------------------------------------------
+    def _login_listing_blocks(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        """``/login``'s bare listing, one tree per catalogue group (round 1, D4).
+
+        The picker's list cannot carry a heading — no non-selectable row, and no
+        room — so the ordering fact is stated here, in the rows' own words: the
+        same ``_login_choices`` the picker offers, split by
+        ``providers.login_catalog.login_groups`` and captioned with the group
+        name the desktop and `lop login` already print. A row no group knows (an
+        embedder's own provider) keeps a block of its own rather than vanishing
+        from the listing.
+
+        THE PICKER CARRIES THE FACT ITS OWN WAY (design round 2, M1). It cannot
+        paint a heading, but it does have the one dim row below its suggestions
+        (``set_notice_rungs``), so a user who never submits this listing learns
+        the same thing the captions say. One fact, two surfaces, each in the
+        vocabulary it has.
+        """
+        from local_operator.providers.login_catalog import login_groups
+
+        choices = {choice.name: choice for choice in self._login_choices()}
+        blocks: list[tuple[str, list[tuple[str, str]]]] = []
+        known: set[str] = set()
+        for group, rows in login_groups(include_non_chat=not self._setup_state):
+            items: list[tuple[str, str]] = []
+            for row in rows:
+                known.add(row.id)
+                choice = choices.get(row.id)
+                if choice is None:
+                    continue
+                items.append((choice.display or choice.name, choice.description))
+            if items:
+                # The group name STANDS AS THE CATALOGUE SPELLS IT ("Use an API
+                # key"), because that is the string the desktop and `lop login`
+                # print — lowercasing it here would be a third spelling of one
+                # heading.
+                blocks.append((f"connect an AI account — {group}", items))
+        extras = [
+            (choice.display or name, choice.description)
+            for name, choice in choices.items()
+            if name not in known
+        ]
+        if extras:
+            blocks.append(("connect an AI account — other", extras))
+        return blocks
+
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
         """``/login [provider]`` — list loginable providers, or run a flow."""
         # Rejections go through ``_system_notice`` (see `_cmd_usage`): nothing
@@ -47996,16 +48254,24 @@ class OperatorApp(App[None]):
             )
             return
         if not arg:
-            items = [(p.id, p.name) for p in self._providers.login_providers()]
+            # The bare listing is the picker's content as a block: same order,
+            # same words (``_login_choices``), so the two cannot disagree about
+            # what is recommended — and unlike the picker it can afford GROUP
+            # HEADINGS (design round 1, D4): the picker's list is a fraction of
+            # a terminal with no non-selectable row, while this block gets a
+            # tree per group, which is what tells the user why `OpenAI` follows
+            # `Radient`.
+            groups = self._login_listing_blocks()
             # The only one of the five listings with no empty guard. With the
             # echo gone the listing IS the receipt, and `_tree_listing` drops
             # the caption with the rows on an empty list — so an empty registry
             # appended a blank block that retired the splash and rendered
             # nothing at all.
-            if not items:
+            if not groups:
                 self._system_notice("no providers support interactive login", "warning")
                 return
-            self._append_block(RichBlock(_tree_listing(items, "providers with interactive login")))
+            for caption, items in groups:
+                self._append_block(RichBlock(_tree_listing(items, caption)))
             return
         from local_operator.providers.auth_cli import LOGIN_STATUS_WORD
 
@@ -48023,11 +48289,50 @@ class OperatorApp(App[None]):
             self._system_notice(f"provider '{provider}' has no interactive login.", "warning")
             return
         notice(
-            f"configuring {provider}…"
+            f"configuring {definition.name}…"
             if getattr(definition, "local_setup", False)
-            else f"logging in to {provider}…"
+            else f"connecting {definition.name}…"
         )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
+
+    def _connected_receipt(self, provider: str) -> str:
+        """The setup-exit line: who is connected and what opens next (audit U3/D4).
+
+        ``✓ Connected as <identity> — opening <her name>…`` (``Connected to
+        <Provider>`` for a pasted key, which carries no identity) when this is the
+        first run (her conversation is about to open), else ``— starting…``.
+        The identity is the account label the login stored (email / account
+        id), never a secret; a paste-key login has none and names the provider.
+        """
+        definition = self._providers.provider(provider) if self._providers else None
+        label = getattr(definition, "name", "") or provider
+        who = f"to {label}"
+        try:
+            from local_operator.providers.auth_store import credential_identity
+            from local_operator.providers.registry import credential_provider_id
+
+            # ``_providers`` is optional (an embedding host may pass none), so
+            # the store read is guarded rather than assumed.
+            controller = self._providers
+            if controller is None:
+                raise LookupError("no provider facade on this host")
+            rows = controller.auth_store.list_credentials(credential_provider_id(provider))
+            identity = credential_identity(rows[-1]) if rows else None
+            if identity:
+                who = f"as {identity} ({label})"
+        except Exception:  # noqa: BLE001 — a label, never a dependency
+            pass
+        tail = "starting…"
+        try:
+            from local_operator import aida
+            from local_operator.aida import naming, onboarding
+            from local_operator.paths import config_dir
+
+            if aida.enabled() and onboarding.first_run_pending(config_dir()):
+                tail = f"opening {naming.display_name()}…"
+        except Exception:  # noqa: BLE001
+            pass
+        return f"✓ Connected {who} — {tail}"
 
     def _login_status_block(self) -> None:
         """``/login status`` — who is signed in, from the same lines as the CLI.
@@ -48055,6 +48360,22 @@ class OperatorApp(App[None]):
             text.append(line + "\n")
         self._append_block(RichBlock(text))
 
+    def credentials_capturable(self) -> bool:
+        """Whether the composer may ARM its masked ``/credential`` capture (U11/D2).
+
+        The setup state refuses ``/credential`` up front (there is no session to
+        store a secret in), but the refusal lived only in
+        :meth:`_cmd_credential` — reached by the ARGUMENT form. The gesture a
+        first-run user actually makes is ``/credential`` + Enter, and by the
+        time Enter dispatches, the composer had already ARMED the masked
+        capture: the secret became a ``[Credential #1, 5 chars]`` chip, the
+        submit looped a remedy that could not work ("Paste the value again after
+        /credential to retry"), and a user row was left for a secret that was
+        never stored. This is the same question the handler asks, exposed so the
+        editor can ask it BEFORE taking a secret off the operator.
+        """
+        return not (self._session is None and self._setup_state)
+
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.
 
@@ -48070,6 +48391,20 @@ class OperatorApp(App[None]):
         )
 
         session = self._session
+        if session is None and self._setup_state:
+            # REFUSE UP FRONT in the setup state (audit U11). ``/credential``
+            # stores a SESSION secret for the agent's commands, and there is no
+            # session until a provider is connected; a first-run user who
+            # reaches for it almost always meant "add my API key", which is
+            # ``/login``. The old path walked them into a masked paste and
+            # then a "no session" refusal after they had typed the secret.
+            self._system_notice(
+                "/credential stores secrets for a running session, and there is none yet."
+                f" To connect an AI account or paste an API key: {RECOMMENDED_LOGIN_COMMAND}"
+                " (or /login for other providers).",
+                "warning",
+            )
+            return
         if session is None:
             # Genuinely pending (or a definitive boot failure): the shared
             # helper tells those two apart, which "still starting…" alone
@@ -48607,32 +48942,62 @@ class OperatorApp(App[None]):
         from local_operator.providers.oauth.callback_server import LoginCallbacks
 
         def on_auth_url(url: str, instructions: str | None = None) -> None:
-            lines = [
-                Text(
-                    "opening your browser to authorize…",
-                    style=Style(color=theme_mod.semantic_color("muted")),
-                ),
-                Text(url, style=Style(color=theme_mod.semantic_color("signal"))),
-            ]
-            if instructions:
-                lines.append(Text(instructions, style=Style(color=theme_mod.semantic_color("dim"))))
+            # LEAD WITH WHAT IS HAPPENING AND TO WHOM (audit D5/D6/U12). The
+            # block used to open on "opening your browser to authorize…" and
+            # then dump a 300-character OAuth URL across five rows, which a
+            # first-run user read as an error. Now: the provider's NAME, the
+            # SHORT ``/launch`` link (the loopback alias that 302s to the real
+            # URL) as the thing to click, and the full URL still printed — a
+            # remote/SSH user must be able to copy it — but last and in the
+            # quietest ink, so it reads as reference rather than as the event.
+            # ``definition`` is what the controller hands this factory; its
+            # display name is what the user picked from the list.
+            provider_id = str(getattr(definition, "id", "") or "")
+            label = str(getattr(definition, "name", "") or provider_id or "the provider")
+            short, rest = _split_launch_line(instructions)
+            muted = Style(color=theme_mod.semantic_color("muted"))
+            dim = Style(color=theme_mod.semantic_color("dim"))
+            lines = [Text(f"Opening your browser to sign in to {label}…", style=muted)]
+            if short:
+                lines.append(
+                    Text.assemble(
+                        ("Didn't open? ", dim),
+                        (short, Style(color=theme_mod.semantic_color("signal"))),
+                    )
+                )
+            if rest:
+                lines.append(Text(rest, style=dim))
+            from local_operator.providers.login_catalog import (
+                headless_display,
+                remote_login_hint,
+            )
+
+            remote = remote_login_hint(provider_id, command="/login")
+            if remote:
+                # A TUI over SSH: the redirect lands on a machine the user is
+                # not at (audit Q8), so the browser-free route is named here.
+                lines.append(Text(remote, style=Style(color=theme_mod.semantic_color("warning"))))
             # NAME THE ESCAPE AT THE MOMENT THE WAIT BEGINS. A rescue key
             # nobody knows about rescues nobody, and this block is the only
             # surface a loopback-only login puts on screen — no paste prompt
             # mounts for it, so without this line the pending state advertises
-            # no way out at all. The user this is for is watching a browser
-            # that landed somewhere unexpected; the alternative to knowing
-            # about ctrl+C is the 300 s timeout (UX round 1, U4).
-            #
-            # `dim` and last: it is a standing affordance, not an event, and
-            # must not compete with the URL directly above it — which is still
-            # the thing the user came here to act on.
+            # no way out at all (UX round 1, U4). It also says the part a new
+            # user does not know: nothing to do here once the browser is done.
             lines.append(
                 Text(
-                    "waiting for the browser — ctrl+c to cancel this login",
-                    style=Style(color=theme_mod.semantic_color("dim")),
+                    "Finished in the browser? This window continues on its own" " · ctrl+c cancels",
+                    style=dim,
                 )
             )
+            if headless_display():
+                # THE ONE CASE THE DUMP EXISTS FOR (design round 1, D5): a
+                # browser on another machine cannot follow the short /launch
+                # link, which points at THIS host's loopback, so the full URL is
+                # the only copyable thing. Locally it was the largest object on
+                # the screen — three wrapped lines of ~230 cells, uncopyable
+                # across the wrap — and it asked the user to choose between two
+                # URLs for one flow. The short link above already 302s here.
+                lines.append(Text(f"Full link: {url}", style=dim))
             self._append_block(RichBlock(Group(*lines)))
 
         def on_progress(message: str) -> None:
@@ -48939,10 +49304,22 @@ class OperatorApp(App[None]):
                 # same empty config and drops back into setup.
                 if self._on_config_changed is not None:
                     self._on_config_changed()
-                await notice("starting session…", "info")
+                receipt = self._connected_receipt(provider)
                 # R26: a fresh install's first conversation is hers; every
                 # other install rebuilds exactly as before.
                 await self._boot_after_setup()
+                # THE RECEIPT GOES ON THE SPLASH, AFTER THE REBUILD (design round
+                # 1, D8). Appended to the transcript BEFORE it, the line was
+                # replaced before it could be read: the rebuild swaps the
+                # session and the transcript is a projection of the new one, so
+                # the receipt described a conversation that no longer existed on
+                # screen — measured, and a splash row set before the rebuild did
+                # not survive it either. It cannot go in the NEW transcript now:
+                # her greeting must be the first row a person sees. The splash
+                # is the empty-state surface, so the receipt stays there —
+                # naming who is connected and what opens next — until her
+                # message retires it.
+                self._announce_on_splash(receipt, "success", headline="Connected")
             elif getattr(self._providers.provider(provider), "local_setup", False):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
@@ -54166,6 +54543,7 @@ class OperatorApp(App[None]):
         the reason; the toast only has to say that something happened.
         """
         self._splash_notice = text
+        self._splash_notice_kind = kind
         if self._welcome is not None:
             self._welcome.refresh_info()
         try:
@@ -56428,6 +56806,26 @@ def _removal_detail(kinds: tuple[str, ...]) -> str:
     # Both a pasted key and an OAuth login under one id: `/logout` takes the lot,
     # and a row naming only the first would understate the keystroke.
     return f"remove {len(kinds)} credentials"
+
+
+def _split_launch_line(instructions: str | None) -> tuple[str, str]:
+    """``(short launch URL, remaining instructions)`` out of the flow's text.
+
+    The callback server composes its pending-state text as ``Or open: <url>``
+    plus an optional paste sentence (``callback_server._instructions``); the
+    TUI promotes the short URL to the block's "Didn't open?" line and keeps the
+    rest verbatim, so the paste fallback is still announced exactly as before.
+    """
+    if not instructions:
+        return "", ""
+    short = ""
+    rest: list[str] = []
+    for line in instructions.splitlines():
+        if line.startswith("Or open: ") and not short:
+            short = line[len("Or open: ") :].strip()
+        elif line.strip():
+            rest.append(line)
+    return short, "\n".join(rest)
 
 
 def _provider_summary(provider_id: str, name: str) -> str:

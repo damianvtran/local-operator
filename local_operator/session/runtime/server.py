@@ -2334,6 +2334,9 @@ class RuntimeServer:
         #: this runtime down and takes the memory with it, so no in-place
         #: clear exists beside the withdrawal op.
         self._desktop_attach_seen: float = 0.0
+        #: In-flight ``_note_attended`` nudges, held so the loop's weak task
+        #: reference cannot collect one mid-flight (R-3's re-arm half).
+        self._attended_nudges: set[asyncio.Task[None]] = set()
         #: The attach connection that reserved an EXCLUSIVE move, or ``None``.
         #: Set on this loop in the same synchronous step that counts the other
         #: observers, so a viewer arriving after the count cannot be missed:
@@ -4259,6 +4262,7 @@ class RuntimeServer:
         # ``_republish_detached``.
         if kind == "attach":
             self._republish_detached()
+            self._note_attended()
         if kind == "daemon":
             # The daemon is the one client that renders projections (attach
             # clients read the welcome for identity only), so its arrival is
@@ -5285,6 +5289,78 @@ class RuntimeServer:
             attached.add("viewer")
         return frozenset(attached)
 
+    def attended_surfaces(self) -> frozenset[str]:
+        """Which LOCAL human front ends hold this session: ``attach`` / ``desktop``.
+
+        The fire-time gate for Aida's first-run greeting (review round 1, R-3),
+        and deliberately NARROWER than :meth:`attached_surfaces` on exactly two
+        axes, because the requirement is "a person is in the TUI or the desktop
+        UI on this machine", not "something could present a card":
+
+        * ``locality == "local"`` only. A relayed attach (the mobile daemon's
+          dial, a peer's ``/move``) is a remote surface the operator named as
+          NOT one the greeting may land on.
+        * no ``viewer`` (phone watchers) for the same reason.
+
+        And NOT narrower on focus: a TUI reports no focus at all, and the
+        desktop's own focus gating already decides when it presses ``greet``
+        (desktop QA round 2 measured delivery ~7 s after focus). The desktop
+        clause is the same three bounded terms :meth:`attached_surfaces` uses
+        (live lease, the session-scoped 45 s memory, the app's own record naming
+        THIS session), so a renderer re-dial does not read as "nobody here".
+
+        WHY THE RUNTIME AND NOT THE PROCESS. The first version of the gate asked
+        ``activation.human_surface_present`` (a tty, or the desktop token in this
+        process's environment). A TUI's session runs in a DETACHED runtime child
+        spawned with ``stdin=DEVNULL`` (``runtime/launch.py``), so that answer
+        was "no human" for the one surface the greeting is most often requested
+        from. The connection table is the only component that knows.
+        """
+        attended: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while this
+        # loop registers and drops clients in the same dict.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach" or conn.locality != "local":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn):
+                    attended.add("desktop")
+            else:
+                attended.add("attach")
+        if "desktop" not in attended and (
+            self._desktop_attach_recent() or self._desktop_record_shows_this_session()
+        ):
+            attended.add("desktop")
+        return frozenset(attended)
+
+    def _note_attended(self) -> None:
+        """Tell the session a local human surface just arrived (R-3's re-arm half).
+
+        A greeting withheld at fire time goes back to ``requested``, and the
+        engine arms ``requested`` only on a reconcile. A runtime that is still
+        warm when the person comes back would otherwise sit on the request until
+        its next persist, so the arrival itself asks for one. Fire-and-forget on
+        the session's loop; a handle without the hook (every non-Aida session's
+        handle answers it as a no-op) costs nothing.
+        """
+        hook = getattr(self._handle, "aida_attended", None)
+        if not callable(hook) or not self.attended_surfaces():
+            return
+
+        async def _run() -> None:
+            try:
+                await self._handle_call_on_session_loop(hook)
+            except Exception:  # noqa: BLE001 — a nudge is never worth a connection
+                logger.debug("could not tell the session it is attended", exc_info=True)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+            # Held so the loop's weak reference cannot collect it mid-flight.
+            self._attended_nudges.add(task)
+            task.add_done_callback(self._attended_nudges.discard)
+        except RuntimeError:
+            logger.debug("no running loop to nudge the session from", exc_info=True)
+
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
 
@@ -5832,8 +5908,13 @@ class RuntimeServer:
                 # exactly the churn the memory exists to survive (and would
                 # flap the persisted block on a no-notify host, the round-2
                 # churn pin). The explicit withdrawal is its own op, below.
+                first_beat = self._desktop_attach_seen <= 0.0
                 self._desktop_attach_seen = now
                 self._republish_detached()
+                if first_beat:
+                    # Only the FIRST beat of an attachment: a heartbeat every
+                    # few seconds must not become a reconcile every few seconds.
+                    self._note_attended()
                 detail = "desktop lease renewed"
             elif op == "desktop_withdraw":
                 # THE EXPLICIT WITHDRAWAL (the bridge's "the pane left for
