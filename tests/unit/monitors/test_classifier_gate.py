@@ -403,7 +403,7 @@ async def test_an_edit_still_goes_to_the_gate(harness: Harness) -> None:
 @pytest.mark.asyncio
 async def test_an_append_to_a_truncated_snapshot_is_still_gated(tmp_path: Any) -> None:
     """Review R2: beyond the stored window a tail edit looks like an insert."""
-    harness = Harness(tmp_path, settings=MonitorSettings(snapshot_max_chars=20))
+    harness = Harness(tmp_path, settings=MonitorSettings(snapshot_max_chars=19))
     try:
         harness.script.append(NON_MATERIAL_METADATA)
         harness.scheduler.load([spec()])
