@@ -74,6 +74,8 @@ class ImageRoute(StrEnum):
     #: The ChatGPT subscription's Codex-backend image tool (media wave-2,
     #: append-only). Wire spelling is hyphenated, unlike the rest.
     OPENAI_SUB = "openai-sub"
+    #: Google's Gemini API (Nano Banana family; media wave-2, append-only).
+    GOOGLE = "google"
     #: No usable route. Appears in availability/refusal payloads only.
     NONE = "none"
 

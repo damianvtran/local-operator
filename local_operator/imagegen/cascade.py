@@ -80,6 +80,7 @@ RUNG_LABELS: dict[str, str] = {
     ImageRoute.FAL: "FAL",
     ImageRoute.OPENAI: "OpenAI",
     ImageRoute.OPENAI_SUB: "ChatGPT plan",
+    ImageRoute.GOOGLE: "Google",
 }
 
 #: The resolver's fixed order, first match wins. APPEND-ONLY: the three routes
@@ -93,6 +94,7 @@ IMAGE_RUNG_ORDER: tuple[ImageRoute, ...] = (
     ImageRoute.FAL,
     ImageRoute.OPENAI,
     ImageRoute.OPENAI_SUB,
+    ImageRoute.GOOGLE,
 )
 
 #: Every rung's declaration — identity, capability, cancel support and cost
@@ -140,6 +142,16 @@ RUNG_SPECS: dict[str, RungSpec] = {
         # Quota-funded: no cash figure exists, and none is ever synthesized
         # (design D8); the guide states the 3-5x quota burn.
         cost="subscription",
+    ),
+    ImageRoute.GOOGLE: RungSpec(
+        route=ImageRoute.GOOGLE,
+        label="Google",
+        kinds=frozenset({"image"}),
+        capabilities=frozenset({"t2i"}),
+        cancel_support=CancelSupport.NONE,
+        # Synchronous single request, no per-call figure; vendor rate table
+        # (documentation only — see the guide + image-providers matrix).
+        cost="rate_table",
     ),
 }
 
@@ -222,6 +234,8 @@ async def _probe_route(
         return bool(image_availability.openai_images_key(config_dir))
     if route == ImageRoute.OPENAI_SUB:
         return image_availability.openai_subscription_grant(config_dir)
+    if route == ImageRoute.GOOGLE:
+        return bool(image_availability.google_key(config_dir))
     logger.warning("no availability probe for image route %s; reporting unavailable", route)
     return False
 
@@ -237,6 +251,10 @@ _ROUTE_REASONS: dict[ImageRoute, tuple[str, str]] = {
     ImageRoute.OPENAI_SUB: (
         "A ChatGPT subscription sign-in is stored.",
         "No ChatGPT subscription sign-in is stored.",
+    ),
+    ImageRoute.GOOGLE: (
+        "A Google AI Studio key is stored.",
+        "No Google AI Studio key is stored.",
     ),
 }
 
@@ -274,8 +292,9 @@ async def resolve_image_route(
     reason = (
         "No image provider is available: sign in to Radient (`/login radient`), "
         "store a FAL key (`lop login fal`) or export FAL_API_KEY, store an "
-        "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY, or "
-        "sign in to a ChatGPT plan (`lop login openai`)."
+        "OpenAI API key (`lop login openai-key`) or export OPENAI_API_KEY, "
+        "sign in to a ChatGPT plan (`lop login openai`), or store a Google AI "
+        "Studio key (`lop login google`) or export GOOGLE_AI_STUDIO_API_KEY."
     )
     return ImageRouteResolution(route=ImageRoute.NONE, reason=reason, rungs=tuple(rungs))
 
@@ -318,6 +337,13 @@ async def _call_time_key(
         key = image_availability.fal_key(config_dir)
         if not key:
             raise APIError("No FAL key is available.", status_code=None, code="unauthorized")
+        return key
+    if route == ImageRoute.GOOGLE:
+        key = await image_availability.google_call_key(store)
+        if not key:
+            raise APIError(
+                "No Google AI Studio key is available.", status_code=None, code="unauthorized"
+            )
         return key
     key = await image_availability.openai_call_key(store)
     if not key:
@@ -399,6 +425,19 @@ async def _run_route(
             source_url=source_url,
             model=model,
             handle=handle,
+            emit=emit,
+            pause=pause,
+            client=client,
+        )
+    if route == ImageRoute.GOOGLE:
+        return await image_rungs.run_google(
+            prompt=prompt,
+            key=key,
+            num_images=num_images,
+            image_size=image_size,
+            source_url=source_url,
+            seed=seed,
+            model=model,
             emit=emit,
             pause=pause,
             client=client,
