@@ -6826,3 +6826,102 @@ async def test_the_runtime_child_of_a_run_boots_declared(
         assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
     finally:
         await handle._session.dispose()
+
+
+# -- delegated-session sweeps on the store-maintenance thread -----------------
+
+
+def _delegated_store(root: Path, count: int) -> None:
+    """``count`` marked, 100-hour-idle subagent sessions under ``root``."""
+    from local_operator.session.cleanup import mark_store
+
+    mark_store(root / "sessions")
+    stamp = time.time() - 100 * 3600
+    for index in range(count):
+        directory = root / "sessions" / f"kid{index:03d}"
+        directory.mkdir()
+        (directory / "origin.json").write_text('{"origin": "subagent"}')
+        (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+        os.utime(directory / "transcript.jsonl", (stamp, stamp))
+
+
+def test_the_maintenance_thread_drains_a_backlog_across_passes_then_waits_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget-limited pass hands the thread back and the drain CONTINUES.
+
+    The real thread body, the real delegated loop, a 12-session backlog drained 5
+    at a time with a zero budget: it only finishes if the loop re-enters after
+    each partial pass, and it ends parked on the HOURLY wait rather than exiting
+    (a 48-hour window needs steady-state sweeps in a runtime that lives for days).
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session import delegated_retention as dr
+
+    _delegated_store(tmp_path, 12)
+    monkeypatch.setattr(dr, "BATCH_SIZE", 5)
+    monkeypatch.setattr(dr, "PASS_BUDGET_S", 0.0)
+    monkeypatch.setattr(dr, "REMOVAL_PAUSE_S", 0)
+    monkeypatch.setattr(dr, "DRAIN_RESUME_S", 0.01)
+    waits: list[float] = []
+    stop = threading.Event()
+    real_wait = stop.wait
+
+    def recording_wait(seconds: float | None = None) -> bool:
+        waits.append(seconds or 0.0)
+        if seconds is not None and seconds >= dr.STEADY_SWEEP_S:
+            stop.set()
+        return real_wait(min(seconds or 0.0, 0.01))
+
+    monkeypatch.setattr(stop, "wait", recording_wait)
+    session_factory._run_delegated_sweeps(ConfigManager(tmp_path), tmp_path, None, stop)
+    assert not [p for p in (tmp_path / "sessions").iterdir() if p.name.startswith("kid")]
+    assert waits[-1] == dr.STEADY_SWEEP_S and waits.count(0.01) >= 2, waits
+
+
+def test_the_launch_pass_is_released_before_the_delegated_loop_parks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``done_event`` gates ``await_store_maintenance_for_tests`` and teardown; the
+    hourly loop runs for the life of the process, so it must start AFTER the event."""
+    seen: dict[str, bool] = {}
+    stop = threading.Event()
+    done = threading.Event()
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_run_store_maintenance", lambda *a, **k: True)
+
+    def sweeps(*_a: Any, **_k: Any) -> None:
+        seen["done_before_sweeps"] = done.is_set()
+        stop.set()
+
+    monkeypatch.setattr(session_factory, "_run_delegated_sweeps", sweeps)
+    session_factory._store_maintenance_thread_main(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop, done
+    )
+    assert seen == {"done_before_sweeps": True} and done.is_set()
+
+
+def test_a_sweep_that_raises_never_escapes_the_maintenance_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.session.delegated_retention as dr
+
+    monkeypatch.setattr(dr, "run_sweeps", lambda *a, **k: 1 / 0)
+    session_factory._run_delegated_sweeps(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, threading.Event()
+    )
+
+
+def test_a_stopped_thread_runs_no_delegated_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.session.delegated_retention as dr
+
+    called: list[int] = []
+    monkeypatch.setattr(dr, "run_sweeps", lambda *a, **k: called.append(1))
+    stop = threading.Event()
+    stop.set()
+    session_factory._run_delegated_sweeps(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop
+    )
+    assert called == []

@@ -2797,17 +2797,19 @@ async def _construct_child_session(
     # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
-    mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
-    # The DURABLE half of the child→parent link, for code-request attribution. The
-    # live half is the parent handle attached below (see
-    # ``code_requests.hook.attach_parent``); this stamp is what lets a later backfill —
-    # a scan of a child that ran before this feature, or one whose live propagation
-    # failed — attribute the child's rows to the conversation that asked for the work.
-    # Best-effort by its own contract, and it preserves the ``label``/``agent`` keys
-    # the picker reads (it is a read-modify-write, not a second stamp).
-    from local_operator.code_requests.hook import stamp_origin_parent
-
-    stamp_origin_parent(session_dir, str(getattr(parent_session, "session_id", "") or ""))
+    # ``mark_session_origin`` carries the DURABLE child→parent link: ``parent=`` below is
+    # what lets a later backfill attribute a child's code-request rows to the conversation
+    # that asked for the work, and it is the ONLY writer of that key — a second marker
+    # writer in the same function is how the marker's shape and the directory's mtime
+    # start disagreeing between them.
+    parent_id = getattr(parent_session, "session_id", None)
+    mark_session_origin(
+        session_dir,
+        ORIGIN_SUBAGENT,
+        label=label,
+        agent=agent,
+        **({"parent": parent_id} if isinstance(parent_id, str) and parent_id else {}),
+    )
     # Birth metadata must be durable before publication, without its fsync
     # blocking the parent or other children sharing this event loop.
     transcript = await asyncio.to_thread(Transcript, session_dir)

@@ -411,6 +411,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the cleanup log and last-cleanup record (sessions root) and the store marker "
         "that gates removal: none of them is a file a session directory holds",
     ),
+    "local_operator/session/delegated_retention.py": (
+        2,
+        "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
+        "sweep lock): both sit beside the store at the sessions root, never inside a session "
+        "directory. (``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
+    ),
     "local_operator/session_factory.py": (
         2,
         "the store-maintenance lock and stamp at the config root",

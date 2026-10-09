@@ -167,30 +167,6 @@ def test_attach_parent_tolerates_an_object_that_refuses_attributes():
     hook.attach_parent(Frozen(), FakeSession(None))
 
 
-def test_stamp_origin_parent_keeps_what_was_already_recorded(tmp_path):
-    directory = tmp_path / "child"
-    directory.mkdir()
-    (directory / "origin.json").write_text(
-        json.dumps({"origin": "subagent", "label": "coder", "agent": "coder"}), encoding="utf-8"
-    )
-    hook.stamp_origin_parent(directory, "parent123456")
-    payload = json.loads((directory / "origin.json").read_text(encoding="utf-8"))
-    assert payload == {
-        "origin": "subagent",
-        "label": "coder",
-        "agent": "coder",
-        "parent": "parent123456",
-    }
-    # Idempotent, and it never invents a file for a session with no marker.
-    hook.stamp_origin_parent(directory, "parent123456")
-    assert (
-        json.loads((directory / "origin.json").read_text(encoding="utf-8"))["parent"]
-        == "parent123456"
-    )
-    hook.stamp_origin_parent(tmp_path / "absent", "")
-    assert not (tmp_path / "absent" / "origin.json").exists()
-
-
 def test_an_acted_detection_is_recorded_with_its_act(tmp_path):
     directory = tmp_path / "sess"
     directory.mkdir()
