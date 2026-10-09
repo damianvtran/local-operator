@@ -1,6 +1,6 @@
 """Conversation first paint: one painted state per reveal, and the tail kept.
 
-Three seams, one theme — an open that paints an intermediate layout before the
+Two seams, one theme — a reveal that paints an intermediate layout before the
 settled one. Each is measured here as the reader meets it, on the real app in a
 pilot, and each test is written to FAIL on a tree without its fix:
 
@@ -10,13 +10,12 @@ pilot, and each test is written to FAIL on a tree without its fix:
   narrow heights, then real ones (S1 at 160x45: 2/3/5-row blocks in the first
   frame, 1/2/3 in the second, three painted states). The fix is the destination
   width, named by the prepare's caller.
-* ``_hold_tail_for_reveal`` places a follower at the tail through the layout
+* ``_hold_tail_for_reveal`` places a FOLLOWER at the tail through the layout
   that reveals or fills the transcript, rather than letting the tail scroll run
-  a frame later (measured on a resume: the first frame showed the rows 15 lines
-  low).
-* the prompt-host seam: a card mounting into the dock takes its rows out of the
-  transcript's own height, so the frame that carries the card must already
-  carry a follower at the tail (``_hold_tail_across_dock_change``).
+  a frame later (measured on a switch: the first frame showed the rows 15 lines
+  low, and on a resume the same). The saved-position cell below is its
+  complement: a reveal that is going back to a reader's own anchor must NOT be
+  dragged to the tail.
 
 The instrument is ``App.post_display_hook`` — Textual calls it once per
 compositor display, headless included — so "painted states" here means frames
@@ -25,11 +24,21 @@ the compositor actually displayed, not awaits a test counted.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import pytest
 
+from local_operator.harness.types import Message, TextContent
+from local_operator.session.attached import AttachedSession
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
+from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: Frame the switch tests run at: a real lane (the transcript's content box is
@@ -215,3 +224,199 @@ async def test_the_reveal_hold_is_taken_and_released_around_one_layout() -> None
             assert calls == [True, False], f"the hold outlived its frame: {calls}"
         finally:
             _View.hold_tail_through_layout = real  # type: ignore[method-assign]
+
+
+@asynccontextmanager
+async def _viewer(tmp_path, name: str):
+    """A real owner runtime plus a real ``AttachedSession`` viewer over it.
+
+    The saved-position cell needs the commit seam to run for real: a mocked
+    session cannot reach it (``_commit_sidebar_session`` refuses to switch away
+    from anything that is not a viewer), and the behaviour under test —
+    "which frame does the reveal paint" — is about geometry only a laid-out
+    view has. Mirrors ``test_parked_source_seam._remote``.
+    """
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    directory = config / "sessions" / f"synthetic-{name}"
+    rows = [
+        Message(
+            id=f"switch-row-{index:04}", role="assistant", content=[TextContent(text=LONG_PROSE)]
+        )
+        for index in range(6)
+    ]
+    await seed_transcript(directory, rows)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    remote = await AttachedSession.connect(
+        server._record,
+        directory.name,
+        config_dir=config,
+        takeover_factory=_never_take_over,
+        display_window=True,
+    )
+    try:
+        yield remote
+    finally:
+        await remote.dispose()
+        server.close()
+        await handle.dispose()
+
+
+async def _switch_to(app, pilot, remote, *, saved_anchor: bool) -> list[object]:
+    """Prepare and commit ``remote`` as a saved view; return the hold calls."""
+    source = SessionInteraction(remote)
+    app._sidebar_sources[remote.session_id] = source
+    app._interactions[id(remote)] = source
+
+    async def lease(session_id, *, speculative=False):
+        source.preparations += 1
+        return source
+
+    app._lease_sidebar_source = lease  # type: ignore[method-assign]
+    source.display_only = True
+    source.draft.following_tail = not saved_anchor
+    source.draft.scroll_anchor_id = ""
+    source.draft.scroll_anchor_part = 0
+    source.draft.scroll_offset = 0
+
+    prepared = await app._prepare_sidebar_session(remote.session_id)
+    view = prepared[1].replay.view
+    if saved_anchor:
+        anchor = next(
+            (block for block in view.blocks() if block.navigation_anchor_id),
+            None,
+        )
+        assert anchor is not None, "the prepared view has no anchor to save a position on"
+        source.draft.scroll_anchor_id = anchor.navigation_anchor_id
+
+    calls: list[object] = []
+    real = OperatorApp._hold_tail_for_reveal
+
+    def spy(target):  # noqa: ANN001
+        calls.append(target)
+        return real(target)
+
+    OperatorApp._hold_tail_for_reveal = staticmethod(spy)  # type: ignore[method-assign]
+    try:
+        app._commit_sidebar_session(remote.session_id, prepared, app._sidebar_navigation.generation)
+        for _ in range(8):
+            await pilot.pause()
+    finally:
+        # `staticmethod` (both here and at the other restore): the helper IS a
+        # staticmethod, and a plain reassignment would rebind it as an instance
+        # method, so the next production call would pass ``self`` as the view.
+        OperatorApp._hold_tail_for_reveal = staticmethod(real)  # type: ignore[method-assign]
+        if source.controller is not None:
+            source.controller.set_parked(True)
+        app._interactions.pop(id(remote), None)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_saved_position_is_not_dragged_to_the_tail_by_the_reveal(tmp_path) -> None:
+    """The hold is for a FOLLOWER; a saved position is the reveal's own target.
+
+    The two disagree on this path and the reviewer found the gap in a code
+    trace: ``_prepare_sidebar_session`` calls ``follow_tail()`` unconditionally
+    (a parked view has no saved geometry to hold), so a ``display_only`` source
+    with a saved anchor arrives at the reveal with ``following`` armed. Landing
+    the tail there paints the END of a conversation whose reader is in the
+    middle, and ``restore_revealed_anchor`` walks it back on the next frame —
+    the two painted states the operator reported, on the one switch shape the
+    bench cannot open (every bench shape opens a live source).
+
+    Without the guard this test fails on the first assertion: the hold is called
+    for the saved-position cell.
+    """
+    async with _viewer(tmp_path, "home") as home, _viewer(tmp_path, "saved") as saved:
+
+        async def factory():
+            return home
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is home:
+                    break
+
+            saved_calls = await _switch_to(app, pilot, saved, saved_anchor=True)
+            assert saved_calls == [], (
+                "a saved-position reveal was held to the TAIL: the frame the user "
+                "sees is the end of a conversation they left mid-way"
+            )
+
+            tail_calls = await _switch_to(app, pilot, home, saved_anchor=False)
+            # At least once, not exactly once: a switch has TWO commits (the
+            # navigation's and the connect leg's, ``_connect_sidebar_source``),
+            # and each reveal is entitled to its own hold.
+            assert tail_calls, "a follower's reveal was never held to the tail"
+
+
+@pytest.mark.asyncio
+async def test_a_short_resume_holds_the_tail_for_its_first_frame(tmp_path) -> None:
+    """The LAUNCH call site, pinned by a spy.
+
+    The reveal helper has two callers and each needs its own pin: the switch
+    commit is covered by the saved-position test above, and this is the resume's
+    short branch — a conversation whose whole history fits the render window, so
+    the viewport-first split (which holds through its backfill page) does not
+    apply and the first frame would otherwise be placed at scroll 0 and moved to
+    the tail a frame later. Without the call this fails on the assertion.
+    """
+    async with _viewer(tmp_path, "short") as viewer:
+        session = viewer
+
+        async def factory():
+            return session
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+
+            calls: list[object] = []
+            real = OperatorApp._hold_tail_for_reveal
+
+            def spy(target):  # noqa: ANN001
+                calls.append(target)
+                return real(target)
+
+            OperatorApp._hold_tail_for_reveal = staticmethod(spy)  # type: ignore[method-assign]
+            try:
+                app._render_resumed_history(session)
+                for _ in range(4):
+                    await pilot.pause()
+            finally:
+                # `staticmethod`: the helper IS a staticmethod, and a plain
+                # reassignment would rebind it as an instance method, so the
+                # next production call would pass ``self`` as the view.
+                OperatorApp._hold_tail_for_reveal = staticmethod(  # type: ignore[method-assign]
+                    real
+                )
+
+            assert calls, "the resume's first frame was not held to the tail"
+
+
+def test_the_tail_history_notice_takes_the_width_it_is_given() -> None:
+    """F5: the twins are built the same way.
+
+    ``OlderHistoryNotice`` (head) has taken a ``fold_width`` since the prepared
+    replay learned to name one; its twin at the other end hardcoded its own
+    construction, so the pair disagreed about how a block learns its width. No
+    height consequence at today's widths — the copy is 30 cells, one row at 80
+    and at 142 — but the seam is the point: a block that folds at a width its
+    caller did not name is exactly the defect the argument exists to close.
+    """
+    from local_operator.tui.session_presentation import HistoryPageNotice
+
+    assert HistoryPageNotice(fold_width=142).fold_width(0) == 142
+    assert HistoryPageNotice().fold_width(80) == 80
