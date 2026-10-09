@@ -255,6 +255,96 @@ def test_failed_tool_row_carries_the_error() -> None:
     assert "boom" in row.error
 
 
+def test_canonical_image_update_details_reach_the_row_verbatim() -> None:
+    """The live-detail transport seam (the wave this fold change exists for).
+
+    `generate_image` reports its canonical live bag — `stage` / `queue_position`
+    / `progress_fraction` / `log_lines` / `error` / `error_type` plus
+    `tool_name` — as UPDATE details (PR #2089). Until the update arm copied
+    them through, the fold carried no update details at all, so the field
+    names the card's adapter reads never arrived on a real stream; the capture
+    fixtures seed the fold's OUTPUT, which is why the rig replay looked green
+    without it. A present key is copied VERBATIM — `None` included, the
+    canonical "no provider value" statement — and an absent key is left
+    alone: no synthesis.
+    """
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img1", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): queued")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "queued",
+                    "queue_position": 2,
+                    "progress_fraction": None,
+                    "log_lines": [{"message": "queued at 2", "timestamp": "t0"}],
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "running"
+    assert row.details["stage"] == "queued"
+    assert row.details["queue_position"] == 2
+    assert row.details["progress_fraction"] is None
+    assert row.details["log_lines"] == [{"message": "queued at 2", "timestamp": "t0"}]
+    assert row.details["error"] is None
+    assert row.details["error_type"] is None
+    assert row.details["tool_name"] == "generate_image"
+
+    # A later update REPLACES per key: the canonical bag re-sends every key,
+    # so a field that stopped applying arrives as None and overwrites the old
+    # value rather than lingering.
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): running")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "in_progress",
+                    "queue_position": None,
+                    "progress_fraction": 0.42,
+                    "log_lines": None,
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    assert row.details["stage"] == "in_progress"
+    assert row.details["queue_position"] is None
+    assert row.details["progress_fraction"] == 0.42
+    assert row.details["log_lines"] is None
+
+    # An update with NO canonical bag — another tool's, or an older runtime's —
+    # leaves the folded details alone (no synthesis, no clearing) and its
+    # non-canonical keys are never copied.
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="still working")], details={"unrelated": 1}
+            ),
+        )
+    )
+    assert row.details["stage"] == "in_progress"
+    assert row.details["progress_fraction"] == 0.42
+    assert "unrelated" not in row.details
+
+
 def test_a_marked_abort_settles_interrupted_and_an_unmarked_failure_stays_failed() -> None:
     """The phone's live end-event ladder reads the marker before `is_error`.
 
