@@ -463,6 +463,38 @@ EXPAND_MAX_LINES = 40
 #:   budget it is reporting on.
 REASON_MAX_CELLS = 432
 REASON_MAX_ROWS = 8
+#: The leads of a result line the HARNESS wrote, not the command: the
+#: ``[scratch]`` advisories the shell/eval pad audits append to a tool result.
+#:
+#: They are our prose on a card whose other captured rows are the program's own
+#: bytes, which is what earns them the carve-out in :meth:`_append_captured_rows`
+#: — wrap instead of per-line crop, warning ink instead of the stdout ``dim``.
+#: Both halves are that binding's own argument, measured on the card (design
+#: review round 1, D1/D3): the crop left the advisory's remedy past cell 140 at
+#: every standard width (only the prologue, or on the refused-name arm only the
+#: pad path, was visible), and `dim` is exactly how the command's OWN stdout is
+#: painted — ``tool.live.advisory``'s note already records that reading ("never
+#: `dim`: on the same card `dim` is how the command's OWN stdout is painted").
+#:
+#: The leads are the SHIPPED sentences' own openings, not the bare ``[scratch] ``
+#: tag: a program's stdout line that merely begins with the tag was claiming
+#: wrap and amber it has no provenance for — measured, 60 program lines of
+#: ``[scratch] step NN `` + 200 cells made 160 card rows at 80 columns against
+#: 43 for the same count of plain 200-cell lines (review round 2, R2-2 /
+#: design round 2, D2-r2). Each lead below is a shipped builder's opening —
+#: ``builtin._pad_budget_line``'s two arms (``The pad …``),
+#: ``scratchpad.scratchpad_refusal``'s two quoted-name arms, and
+#: ``builtin._temp_scratch_line``'s nudge, the one sentence every channel's
+#: version of it shares — so a rewrite that moves an opening fails the suite's
+#: wrap tests until this list moves with it. A program line that collides with
+#: a FULL shipped opening still gets the treatment: a captured row carries no
+#: per-line provenance, so this narrowing is the discriminator that can be kept
+#: honest (design round 2, D2-r2 records the residual edge).
+_HARNESS_ADVISORY_LEADS = (
+    "[scratch] The pad ",
+    "[scratch] '",
+    "[scratch] Your own scratch belongs in ",
+)
 #: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
 #: a payload argument is unbounded by design — `write` carries a whole file in
 #: `content` — and the block exists to answer "what was this call", which a
@@ -3946,8 +3978,11 @@ class ToolCard(ExpandableActionBlock):
 
         The output block reuses the card's own inner padding budget and
         truncates per line: one output line is one row, so the expanded
-        height is exactly what the marker promises and never reflows — the
-        crop is what keeps a 40-line dump inside 40 rows.
+        height is exactly what the marker promises — the crop is what keeps a
+        40-line dump inside 40 rows. One family does reflow: the
+        ``[scratch]``-led advisories :meth:`_append_captured_rows` carves out
+        (wrap, bounded by the reason block's own pair), the exception this
+        block no longer pretends away.
 
         The one line exempted from that crop is the leading line the collapsed
         row also carries, which wraps (:meth:`_append_reason_body`): the status
@@ -3983,13 +4018,61 @@ class ToolCard(ExpandableActionBlock):
         crop — lines, its cap, and the hidden-count marker that promises the
         expanded height — has one implementation and cannot drift between the
         two painters.
+
+        ONE carve-out: a line led by one of :data:`_HARNESS_ADVISORY_LEADS` —
+        the harness's own advisory sentences, recognised by their shipped
+        openings rather than by the bare ``[scratch] `` tag a program's output
+        could wear (review round 2, R2-2) — takes the treatment the card
+        already gives OUR prose: wrap instead of the per-line crop
+        (:meth:`_append_wrapped_advisory`), in the warning ink the sibling
+        advisory rides. Measured (design review round 1, D1/D3): the crop kept
+        only the prologue at 80/100/150 columns and the refused-name arm lost
+        the diagnosis entirely, and ``dim`` is how the command's OWN stdout is
+        painted, so the advisory read as output the program printed.
         """
         captured = self._captured_output()
         shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
+            if line.startswith(_HARNESS_ADVISORY_LEADS):
+                self._append_wrapped_advisory(row, line, line_width, indent, dim)
+                continue
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
         hidden = len(captured) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _append_wrapped_advisory(
+        self, row: Text, text: str, line_width: int, indent: str, dim: Style
+    ) -> None:
+        """One harness advisory, wrapped and inked for reading.
+
+        The reason block's frame with none of its glyph machinery: every row
+        re-enters at ``OUTPUT_INDENT``, the text wraps at the measure instead of
+        being cropped (the remedy past the crop is exactly what the advisory
+        exists to deliver), and the budget is the reason block's pair — bounded
+        by :data:`REASON_MAX_CELLS` and :data:`REASON_MAX_ROWS`, first row
+        exempt — so a pathological width spends the same bounded rows on an
+        advisory as on a reason. The ink is ``tool.live.advisory``'s warning,
+        not the captured rows' ``dim``: an advisory is the harness speaking,
+        and on this card ``dim`` is the command's own stdout.
+        """
+        advisory_ink = bindings.style("tool.live.advisory")
+        wrapped = wrap_cells(text, line_width)
+        shown: list[str] = []
+        spent = 0
+        for wrapped_line in wrapped:
+            cells = cell_len(wrapped_line)
+            if len(shown) >= REASON_MAX_ROWS or (shown and spent + cells > REASON_MAX_CELLS):
+                break
+            shown.append(wrapped_line)
+            spent += cells
+        for wrapped_line in shown:
+            row.append("\n" + indent, style=dim)
+            row.append(wrapped_line, style=advisory_ink)
+        hidden = len(wrapped) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
