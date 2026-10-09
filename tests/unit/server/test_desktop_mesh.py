@@ -653,6 +653,85 @@ async def test_search_include_peers_matches_by_name_and_never_by_body(
     assert hit["owner_device"] == PEER
 
 
+@pytest.mark.asyncio
+async def test_a_remote_row_carries_the_started_claim_as_its_creation_time(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``created_at`` rides the remote row, from the SAME resolved value as ``mtime``.
+
+    The producer (``session/peer_rows._started_epoch``) resolves the peer's
+    ``started`` claim into both keys — the local half's rows already carry
+    ``created_at`` (the catalogue's own row shape), so a remote row that
+    omitted it was the one row a client's merge could never settle. The claim
+    is the claim; the no-claim stays the no-claim ``0.0``, the same direction
+    ``mtime`` lands it.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _join(monkeypatch)
+    monkeypatch.setattr(
+        "local_operator.session.peer_rows.peer_session_rows",
+        lambda root=None, **kwargs: (
+            _peer_row(mtime=1789400999.0, created_at=1789400999.0),
+            _peer_row(id="c" * 12, mtime=0.0, created_at=0.0),
+        ),
+    )
+    body = await client.get("/v1/desktop/sessions?include_peers=true")
+    assert body.status_code == 200, body.text
+    remote = [row for row in body.json()["result"]["sessions"] if row["locality"] == "remote"]
+    claimed, bare = remote
+    assert claimed["created_at"] == claimed["mtime"] == 1789400999.0
+    assert bare["created_at"] == bare["mtime"] == 0.0
+
+
+class _RowWithLastUser(SessionRow):
+    """A producer row carrying the sidebar lane's ``last_user_at`` claim.
+
+    The shape a later slice's producer emits (the relay-side transcript scan is
+    that slice); this half only forwards a claim that is present, or omits the
+    key entirely. The subclass is the carrier — a plain ``SessionRow`` is a
+    tuple without a dict to hold the extra attribute — and the cell sets the
+    value it means.
+    """
+
+    last_user_at: float | None = None
+
+
+def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """number-or-absent, the sidebar lane's contract: a claim rides, else the key's gone.
+
+    A numeric claim — a number, or the numeric-string spelling the peer
+    boundary documents — is forwarded under the same key; anything
+    ``peer_number`` refuses (absent, a bool, garbage) is OMITTED, never minted
+    and never a null, so the old ``float(True)``-becomes-``1.0`` hazard cannot
+    come back through here and the UI's merge reads absence as no claim,
+    falling back to ``created_at``, then catalogue order.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    # The one read that does not come from the stubbed producer: this device
+    # must LOOK like it is in a network, or ``remote_session_rows`` answers []
+    # before it ever asks for rows (the zero-network guard).
+    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    claimed = _RowWithLastUser(OTHER, 1789400000.0, "build box chat")
+    claimed.last_user_at = 1789400111.5
+    bare = SessionRow("c" * 12, 1789400000.0, "no claim")
+    bool_claim = _RowWithLastUser("d" * 12, 1789400000.0, "old peer")
+    bool_claim.last_user_at = cast(Any, True)
+    monkeypatch.setattr(
+        peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (claimed, bare, bool_claim)
+    )
+
+    rows = remote_session_rows(tmp_path, pins=set())
+
+    assert rows[0]["last_user_at"] == 1789400111.5
+    assert "last_user_at" not in rows[1], "absent is the spelling, never a minted null"
+    assert "last_user_at" not in rows[2], "a bool is a claim that is not a number — refused"
+
+
 # ---------------------------------------------------------------------------
 # Invite and remove: the token is written, the name is typed
 # ---------------------------------------------------------------------------

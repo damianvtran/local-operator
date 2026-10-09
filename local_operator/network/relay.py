@@ -3892,6 +3892,39 @@ def _model_choice(model: Any) -> dict[str, Any] | None:
     return None
 
 
+def _model_choice_refusal(model: Any) -> str:
+    """Why a NAMED model cannot be taken, or ``""`` when there is nothing to explain.
+
+    ``_model_choice``'s companion for the REPLY, and empty means exactly one of
+    two things: no model was named (an absent key, ``None``, an empty choice —
+    all the absent spelling), or the pair is usable and the applied path below
+    reports it. Everywhere else it names the shape it saw — the half-filled pair
+    with the values that arrived, or a value that is not an object at all.
+
+    WHY IT EXISTS. A half-filled choice used to answer ``detail: ""``, which is
+    the vocabulary's "nothing was asked" — so a caller whose request had been
+    dropped read a silent fall back to the device default as the absence of a
+    request. The sentence is the reply's half of the same boundary
+    ``_model_choice`` draws for the runtime.
+    """
+    if isinstance(model, dict):
+        provider = str(model.get("provider") or "")
+        model_id = str(model.get("model_id") or "")
+        if provider and model_id:
+            return ""
+        if not provider and not model_id:
+            return ""
+        return (
+            "the model choice needs both a provider and a model id "
+            f"(got provider={provider!r}, model_id={model_id!r})"
+        )
+    if not model:
+        return ""
+    return (
+        "the model choice must be an object with a provider and a model id " f"(got {str(model)!r})"
+    )
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -6988,14 +7021,15 @@ class RelayServer:
                 "detail": "",
                 "model": {
                     "applied": False,
-                    # WHICH OF THE THREE REASONS, and they are not the same fact: a
-                    # profile that outranks the flag, a warm-up that has not applied the
-                    # model yet, or nothing asked for at all.
+                    # WHICH OF THE REASONS, and they are not the same fact: a
+                    # profile that outranks the flag, a warm-up that has not applied
+                    # the model yet, a choice the wire could not take (its sentence
+                    # names the missing half), or nothing asked for at all.
                     "detail": override
                     or (
                         "the runtime is joining; the model is applied when it arrives"
                         if wanted_model
-                        else ""
+                        else _model_choice_refusal(frame.get("model"))
                     ),
                 },
                 "record": self._row_for(session_id),
@@ -7013,7 +7047,13 @@ class RelayServer:
                 "record": self._row_for(session_id),
             }
 
-        model_result: dict[str, Any] = {"applied": False, "detail": ""}
+        model_result: dict[str, Any] = {
+            "applied": False,
+            # A NAMED choice that could not be taken answers its reason here too
+            # (the warm branch above carries the same sentence); nothing-asked
+            # answers the empty string, exactly as it did before.
+            "detail": _model_choice_refusal(frame.get("model")),
+        }
         if override:
             model_result = {"applied": False, "detail": override}
         elif wanted_model:
