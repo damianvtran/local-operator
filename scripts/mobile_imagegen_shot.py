@@ -77,11 +77,18 @@ GEOMETRY_JS = r"""
   const tile = document.querySelector('.lo-gen-tile');
   const bar = document.querySelector('[role="progressbar"]');
   const scroller = document.querySelector('.lo-scroll');
-  // Every <p> inside the card, in DOM order: the state lines each state
-  // renders (queued / cancelling hold / image ready / failed sentence).
+  // Every <p> inside the card, in DOM order — the state lines each state
+  // renders (queued / image ready / the failed sentence) — PLUS the
+  // cancelling hold, which renders as a <span> and is collected by the test
+  // id the card ships: a `p`-only query named the hold in this dump's
+  // comment while being structurally unable to see it, which is exactly the
+  // instrument that reports nothing as if it had checked (review round 1,
+  // F3).
   const stateLines = card
     ? Array.from(card.querySelectorAll('p')).map((p) => text(p))
     : [];
+  const hold = card ? card.querySelector('[data-testid="image-gen-hold"]') : null;
+  if (hold) stateLines.push(text(hold));
   return JSON.stringify({
     card: box(card),
     row: box(card ? card.querySelector('button') : null),
@@ -215,12 +222,31 @@ def main() -> None:
                 time.sleep(1.5)
         page.close()
     finally:
-        chrome.close()
-        fixture.terminate()
+        # TEARDOWN IS BEST-EFFORT PER RESOURCE, and the first failure is
+        # re-raised after both are attempted (review round 1, F1). The Chrome
+        # teardown fails CLOSED — it raises when a helper outlived the run —
+        # and a bare `chrome.close()` line skipped the fixture's own teardown
+        # below it on exactly that alert path, stranding a live daemon
+        # (loopback-only and isolated, but still a process nobody collects).
+        # Each resource is reclaimed whatever the other did.
+        failure: Exception | None = None
         try:
-            fixture.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            fixture.kill()
+            chrome.close()
+        except Exception as exc:  # noqa: BLE001 — re-raised after both claims
+            failure = exc
+        try:
+            fixture.terminate()
+            try:
+                fixture.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                fixture.kill()
+        except Exception as exc:  # noqa: BLE001
+            if failure is None:
+                failure = exc
+            else:
+                print(f"teardown: second failure: {exc!r}", file=sys.stderr)
+        if failure is not None:
+            raise failure
     (outdir / "imagegen-mobile-geometry.json").write_text(json.dumps(report, indent=2))
     print("shots:", ", ".join(f"{key}.png" for key in report))
 

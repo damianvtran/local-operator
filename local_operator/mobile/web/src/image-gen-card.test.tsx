@@ -277,6 +277,9 @@ describe("cancel gating", () => {
 		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
 		expect(vi.mocked(sendCommand)).toHaveBeenCalledWith("9", { op: "abort" });
 		await screen.findByText("cancelling…");
+		/* The hold carries the harness hook the capture rig's geometry dump
+		   reads (review round 1, F3). */
+		expect(screen.getByTestId("image-gen-hold")).toBeTruthy();
 		/* Not pressable twice, and never painted "cancelled" off the press. */
 		expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
 
@@ -284,6 +287,14 @@ describe("cancel gating", () => {
 		rerender(<Transcript pid="9" entries={[entry({ tool_state: "interrupted" })]} />);
 		expect(screen.getByText("cancelled")).toBeTruthy();
 		expect(screen.queryByText("cancelling…")).toBeNull();
+
+		/* And the settle RETIRED the press (review round 1, F2): if the wire
+		   ever re-reported this call as live, the card must render `running`
+		   with a fresh control, never a "cancelling…" resurrected by a dead
+		   press. No wire path does that today; this pins the invariant. */
+		rerender(<Transcript pid="9" entries={[entry({})]} />);
+		expect(screen.queryByText("cancelling…")).toBeNull();
+		expect(screen.getByRole("button", { name: "cancel" })).toBeTruthy();
 	});
 
 	it("a refused abort puts the control back rather than holding a false 'cancelling'", async () => {
