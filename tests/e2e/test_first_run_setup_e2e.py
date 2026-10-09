@@ -135,6 +135,22 @@ class _TuiChild:
         env["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
         env["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
         env.update(NO_NOTIFY_ENV)
+        # THE SUITE'S OWN STANDBY SWITCH, which the scrub above had been taking
+        # away (CI `tui-e2e`, ubuntu): ``tests/conftest.py`` sets
+        # ``LOP_RUNTIME_STANDBY_DISABLED=1`` process-wide for the very launch
+        # points this child drives — "the suite drives ``cli.main()`` for
+        # ``serve`` and the TUI launch, which are the two warming points, and a
+        # run without this switch left real standbys running under roots the
+        # suite had already deleted". This child inherited none of that: the
+        # filter above drops every ``LOP_*`` name to keep an operator's session
+        # identity out of the sandbox, and the switch travelled with them. So
+        # the one host in the suite still WARMING a spare was this one — the
+        # login leg forked an interpreter, waited on its readiness, and on a
+        # loaded runner stalled there while the durable facts this test asserts
+        # never landed (see the leg's docstring). Set explicitly, at the value
+        # the suite uses, and NOT inherited: the scrub stays, so nothing else
+        # about the parent leaks in.
+        env["LOP_RUNTIME_STANDBY_DISABLED"] = "1"
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         pid = os.fork()
@@ -216,6 +232,49 @@ class _TuiChild:
         if os.WIFSIGNALED(self.exit_status):
             return f"killed by signal {os.WTERMSIG(self.exit_status)}"
         return f"exited with status {os.WEXITSTATUS(self.exit_status)}"
+
+    def diagnosis(self, root: Path, *, lines: int = 20) -> str:
+        """What the child was DOING when it stopped making progress.
+
+        The frames say what was painted; these say what the app was doing, and
+        they are what a runner without an interactive terminal can be asked
+        after the fact. `CI tui-e2e` on ubuntu is why this exists: the login leg
+        stalled with its durable facts unwritten, the child still alive and the
+        last screen cleared, so the job log carried an assertion and nothing
+        else — and the app's own log, which named the step, was thrown away with
+        the tmpdir. Printed INSIDE the failure message for that reason.
+        """
+        out = [f"child: {self.exit_note() if self.exit_status is not None else 'running'}"]
+        for name in ("local-operator.log", "runtime.log"):
+            path = root / "logs" / name
+            if not path.exists():
+                continue
+            tail = path.read_text(errors="replace").splitlines()[-lines:]
+            out.append(f"--- {name}, last {len(tail)} line(s):")
+            out.extend(tail)
+        for name, path in (
+            ("aida/state.json", root / "aida" / "state.json"),
+            ("aida/onboarding.json", root / "aida" / "onboarding.json"),
+        ):
+            out.append(
+                f"--- {name}: {path.read_text(errors='replace') if path.exists() else 'absent'}"
+            )
+        session_id = None
+        state_path = root / "aida" / "state.json"
+        if state_path.exists():
+            try:
+                session_id = json.loads(state_path.read_text()).get("session_id")
+            except ValueError:
+                session_id = None
+        entry = root / "wakes" / f"{session_id}.json" if session_id else None
+        if entry is None:
+            out.append("--- wake index: absent (no session id written yet)")
+        else:
+            out.append(
+                "--- wake index: "
+                + (entry.read_text(errors="replace") if entry.exists() else "absent")
+            )
+        return "\n".join(out)
 
     def reap(self) -> None:
         """End the child by EXACT pid: ``SIGTERM`` for a grace, then ``SIGKILL``.
@@ -352,9 +411,16 @@ def test_the_first_login_routes_to_her_and_arms_the_greeting(tmp_path: Path) -> 
                 if time.monotonic() - gone_since >= _CHILD_GONE_GRACE:
                     raise AssertionError(
                         f"the login child is gone ({child.exit_note()}) and the wake index "
-                        f"still has no aida-greeting row\n{child.screen()[-2000:]}"
+                        f"still has no aida-greeting row\n{child.diagnosis(root)}\n"
+                        f"{child.screen()[-2000:]}"
                     )
-        assert armed, child.screen()[-2500:]
-        assert stamped, child.screen()[-2500:]
+        assert armed, (
+            "the wake index never carried an aida-greeting row (the login leg stalled "
+            f"with its durable facts unwritten)\n{child.diagnosis(root)}\n{child.screen()[-2000:]}"
+        )
+        assert stamped, (
+            f"the row armed but the ledger never stamped greeted_at\n{child.diagnosis(root)}\n"
+            f"{child.screen()[-2000:]}"
+        )
     finally:
         child.reap()
