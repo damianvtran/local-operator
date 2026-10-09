@@ -1599,6 +1599,11 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # The OpenAI speech key: pasted from the platform console, stored under
         # its own namespace, speech-only like ElevenLabs.
         "openai-key",
+        # FAL joined with the image-generation cascade: same story two flags
+        # over — its key is pasted from the FAL dashboard, and media-only
+        # changes WHERE the credential is used (the image cascade, never chat)
+        # rather than how it is obtained.
+        "fal",
     }, required
 
     # And the union a host actually gates on: required plus the browser
