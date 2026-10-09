@@ -730,6 +730,15 @@ class WelcomeInfo:
     #: stacking would shove the lockup the way a transcript notice already
     #: does. ``None`` when nothing has been announced.
     notice: str | None = None
+    #: The KIND of ``notice``, so the row can wear its own ink (design round 2,
+    #: M2). The splash painted every notice in the warning treatment — amber
+    #: body, ``!`` glyph — which made the login receipt (``✓ Connected to
+    #: Radient — opening Aida…``) announce success in the colour of a problem,
+    #: with an ``!`` in front of its own ``✓``. Defaults to ``"warning"``
+    #: because that is what every non-receipt notice is at the source
+    #: (``ModelConfigurer._notice`` defaults to it) and what a hand-built
+    #: dataclass — an embedding host, the welcome tests — has always painted.
+    notice_kind: str = "warning"
     #: PyPI version strictly newer than the installed distribution, or
     #: ``None``. A new field rather than overwriting ``notice``: that slot
     #: is the quota fallback, and an update probe must not hide a failover.
@@ -764,6 +773,7 @@ def session_welcome_info(
     providers: Any | None,
     *,
     notice: str | None = None,
+    notice_kind: str = "warning",
     setup: bool = False,
     update_available: str | None = None,
 ) -> WelcomeInfo:
@@ -815,6 +825,7 @@ def session_welcome_info(
         cwd=os.getcwd(),
         missing_credential=missing,
         notice=notice or None,
+        notice_kind=notice_kind,
         # No update row in the setup state (audit D8): the first screen a new
         # install shows has one job, and "latest is vX — /update" competes with
         # the sign-in line for a user who just installed the latest.
@@ -956,6 +967,10 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     dim = Style(color=theme_mod.semantic_color("dim"))
     muted = Style(color=theme_mod.semantic_color("muted"))
     warn = Style(color=theme_mod.semantic_color("warning"))
+    #: The informational notice ink (M2): the same green the transcript's
+    #: notice block tints a success/info/note row with, so one statement has
+    #: one colour wherever it lands.
+    ok = Style(color=theme_mod.semantic_color("success"))
 
     rows: list[tuple[int, Text]] = []
     if info.version:
@@ -1003,16 +1018,29 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
             body = f"{glyph} latest is v{info.update_available}"
         rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
     if info.notice:
-        # Same glyph and tint as the credential warning: both are "something
-        # about the harness you should know before you type". Truncated from
-        # the RIGHT — the head names the condition (`anthropic quota low`),
-        # the tail names the fallback, and a half-printed selector is still
-        # a selector. The login warning drops its remedy WHOLE because a
-        # half-printed `/logi…` is an instruction nobody can follow; a
-        # notice is a fact, not a command.
-        glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {info.notice}"
-        rows.append((_PRIORITY_NOTICE, Text(body, style=warn, no_wrap=True)))
+        # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
+        # EVERY notice in the warning treatment — amber, `!` — so the login
+        # receipt (`✓ Connected to Radient — opening Aida…`) announced the
+        # transition into Aida in the colour of a problem, with an `!` in front
+        # of its own `✓`. The kind now picks both: the ambiguous kinds keep the
+        # warning ink and its `!`, and the informational kinds (info/note/
+        # success) paint in the success green the transcript's notice block
+        # already uses for them (NOTICE_GLYPHS / `NoticeKind`, D14).
+        # The glyph is added only when the text does not already LEAD with it,
+        # because the receipt carries its own `✓` — prefixing here would print
+        # `✓ ✓ Connected…`.
+        #
+        # Clipped from the RIGHT (`no_wrap`): the head names the condition
+        # (`anthropic quota low`) and a notice is a FACT rather than a command,
+        # so a partly-printed tail is still readable — unlike the login
+        # warning below, which drops its `/login …` remedy WHOLE rather than
+        # print an instruction nobody can follow.
+        glyph = NOTICE_GLYPHS.get(info.notice_kind, NOTICE_GLYPHS["info"])
+        style = warn if info.notice_kind in ("warning", "error") else ok
+        body = info.notice
+        if not body.startswith(glyph):
+            body = f"{glyph} {body}"
+        rows.append((_PRIORITY_NOTICE, Text(body, style=style, no_wrap=True)))
     if info.missing_credential:
         # The single most common first-run failure, so it is spelled as the
         # command that fixes it. `!` is the app's warning glyph (D14). When the

@@ -349,7 +349,14 @@ def mark_delivered(config_dir: Path | str, now_ms: int | None = None) -> None:
 
 
 def clear_greeted(config_dir: Path | str) -> None:
-    """armed → requested: the row was cancelled before it fired (a pause).
+    """armed → requested: the row will not land, so the request stands instead.
+
+    Two callers, and the second one is why this sentence is not about pauses
+    alone (review round 2, N1): a PAUSE cancels the row before it fires, and
+    the fire-time withhold (``Session._deliver_wake``) puts it back AFTER a
+    fire that reached a runtime with no attended surface. Both mean the same
+    thing to the user — she still has not said hello — so both leave the
+    request standing rather than spending it.
 
     The user DID ask (an attended surface requested it), so the greeting stays
     theirs: the next resume — or the live owner's reconcile — arms it again.

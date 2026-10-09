@@ -3052,6 +3052,19 @@ CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
 #: index into the ladder.
 CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
 
+#: The `/login` PICKER's ordering fact (design round 2, M1). The bare `/login`
+#: LISTING paints a caption per catalogue group, so a reader can see why a
+#: subscription row follows the recommended one; the dropdown those same rows
+#: open from painted no such thing, and a user who never submits the bare
+#: listing had no way to learn the order is "how you pay". One dim row below
+#: the suggestions says it, laddered because it must survive a narrow card
+#: (the picker re-fits on resize — see ``set_notice_rungs``).
+LOGIN_ORDERING_NOTICE_RUNGS: tuple[str, ...] = (
+    "ordered by how you pay — bare /login lists the groups",
+    "ordered by how you pay — /login lists the groups",
+    "ordered by how you pay",
+)
+
 #: What ``/new``'s picker says when this device knows no peers, widest first.
 #:
 #: BOTH VERBS, AS LONG AS BOTH FIT — and then ``join``, which is the one that
@@ -5103,6 +5116,11 @@ class OperatorApp(App[None]):
         #: the warning still the only account of why it cannot answer
         #: (see :meth:`_reset_band_for_swap`).
         self._splash_notice: str | None = None
+        #: The KIND of ``_splash_notice`` (M2): the splash row derives its
+        #: glyph and ink from it, so a receipt does not paint in warning amber.
+        #: "warning" is the resting default because it is what an unlabelled
+        #: announcement has always been here; the receipt passes "success".
+        self._splash_notice_kind: str = "warning"
         #: PyPI version strictly newer than this install, filled by the
         #: one-shot mount worker. ``None`` until then AND when current —
         #: the splash does not reserve the row.
@@ -7940,6 +7958,7 @@ class OperatorApp(App[None]):
                         session,
                         self._providers,
                         notice=self._splash_notice,
+                        notice_kind=self._splash_notice_kind,
                         setup=self._setup_state,
                         update_available=self._update_available,
                     )
@@ -11336,6 +11355,7 @@ class OperatorApp(App[None]):
                             self._session,
                             self._providers,
                             notice=self._splash_notice,
+                            notice_kind=self._splash_notice_kind,
                             setup=self._setup_state,
                             update_available=self._update_available,
                         )
@@ -28757,6 +28777,7 @@ class OperatorApp(App[None]):
                 self._session,
                 self._providers,
                 notice=self._splash_notice,
+                notice_kind=self._splash_notice_kind,
                 setup=self._setup_state,
                 update_available=self._update_available,
             )
@@ -46345,6 +46366,13 @@ class OperatorApp(App[None]):
         # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
         # costs the transcript nothing.
         picker.set_notice(reason)
+        # THE ORDERING FACT, on the picker rather than only on the listing
+        # (design round 2, M1). Set LAST because `set_notice` clears any rungs
+        # (see the widget), and only for a list that actually has rows to order
+        # — on an empty one the slot already carries the more useful sentence
+        # above.
+        if message.command == "login" and choices:
+            picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -48156,6 +48184,12 @@ class OperatorApp(App[None]):
         name the desktop and `lop login` already print. A row no group knows (an
         embedder's own provider) keeps a block of its own rather than vanishing
         from the listing.
+
+        THE PICKER CARRIES THE FACT ITS OWN WAY (design round 2, M1). It cannot
+        paint a heading, but it does have the one dim row below its suggestions
+        (``set_notice_rungs``), so a user who never submits this listing learns
+        the same thing the captions say. One fact, two surfaces, each in the
+        vocabulary it has.
         """
         from local_operator.providers.login_catalog import login_groups
 
@@ -49260,7 +49294,7 @@ class OperatorApp(App[None]):
                 # is the empty-state surface, so the receipt stays there —
                 # naming who is connected and what opens next — until her
                 # message retires it.
-                self._announce_on_splash(receipt, "info", headline="Connected")
+                self._announce_on_splash(receipt, "success", headline="Connected")
             elif getattr(self._providers.provider(provider), "local_setup", False):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
@@ -54476,6 +54510,7 @@ class OperatorApp(App[None]):
         the reason; the toast only has to say that something happened.
         """
         self._splash_notice = text
+        self._splash_notice_kind = kind
         if self._welcome is not None:
             self._welcome.refresh_info()
         try:

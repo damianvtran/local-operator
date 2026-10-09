@@ -78,12 +78,19 @@ def test_the_url_header_matches_the_flow_it_belongs_to(capsys) -> None:
 
     paste = get_provider_definition("openai-api-key")
     assert paste is not None and paste.paste_prompt_required is True
-    auth_cli._callbacks_interactive(paste).on_auth_url(url)
+    # ``LoginCallbacks.on_auth_url`` is Optional (a host may not publish on the
+    # URL at all); bind the object and narrow before the call so the type gate
+    # sees the same non-None the assertion pins.
+    paste_callbacks = auth_cli._callbacks_interactive(paste)
+    assert paste_callbacks.on_auth_url is not None
+    paste_callbacks.on_auth_url(url)
     assert "create a key" in capsys.readouterr().out
 
     browser = get_provider_definition("openai")
     assert browser is not None and browser.paste_prompt_required is False
-    auth_cli._callbacks_interactive(browser).on_auth_url(url)
+    browser_callbacks = auth_cli._callbacks_interactive(browser)
+    assert browser_callbacks.on_auth_url is not None
+    browser_callbacks.on_auth_url(url)
     out = capsys.readouterr().out
     assert "authorize" in out
     assert "create a key" not in out

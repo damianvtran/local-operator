@@ -2007,3 +2007,53 @@ def test_a_disabled_aida_leaves_the_step_reading_out() -> None:
     assert not [row for row in lines if row.strip().startswith("1 connect")], lines
     # The table itself is still there — that is the screen's whole job.
     assert any("/login" in row for row in lines)
+
+
+def _notice_row(lines: list[Text], needle: str) -> Text:
+    matches = [line for line in lines if needle in line.plain]
+    assert matches, [line.plain for line in lines]
+    return matches[0]
+
+
+def test_a_success_notice_paints_in_success_ink_with_no_bang() -> None:
+    """The receipt must not read as a warning (design round 2, M2).
+
+    The splash notice row used one treatment for every kind — amber body, ``!``
+    glyph — so the login receipt (``✓ Connected to Radient — opening Aida…``)
+    announced the transition into her conversation in the colour of a problem,
+    with an exclamation mark in front of its own tick. The kind now picks the
+    ink: a success/info/note notice paints in the success green and drops the
+    ``!`` (the receipt carries its own glyph, so a second one is not added).
+    """
+    from local_operator.tui import theme as theme_mod
+
+    success = theme_mod.semantic_color("success")
+    warning = theme_mod.semantic_color("warning")
+    receipt = "✓ Connected to Radient — opening Aida…"
+    info = WelcomeInfo(
+        version="0.68.7",
+        model_label="test/model",
+        cwd="/tmp",
+        notice=receipt,
+        notice_kind="success",
+    )
+    row = _notice_row(build_welcome_lines(info, ROOMY_W, ROOMY_H), "Connected")
+    styles = [str(span.style) for span in row.spans] or [str(row.style)]
+    assert success in " ".join(styles), styles
+    assert warning not in " ".join(styles), styles
+    assert "!" not in row.plain, row.plain
+    assert row.plain.count("✓") == 1, row.plain
+
+    # The WARNING kinds keep exactly what they had: amber, and the `!`.
+    warned = WelcomeInfo(
+        version="0.68.7",
+        model_label="test/model",
+        cwd="/tmp",
+        notice="anthropic quota low — falling back to zai/glm-5.3",
+        notice_kind="warning",
+    )
+    wrow = _notice_row(build_welcome_lines(warned, ROOMY_W, ROOMY_H), "anthropic quota low")
+    wstyles = [str(span.style) for span in wrow.spans] or [str(wrow.style)]
+    assert warning in " ".join(wstyles), wstyles
+    # Centred, so the glyph is not at index 0 — it must simply be there.
+    assert "!" in wrow.plain, wrow.plain

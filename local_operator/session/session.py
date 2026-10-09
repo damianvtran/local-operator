@@ -3881,6 +3881,10 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Distinct wake-supervisor refusal reasons already reported (M3). The
+        #: install hook runs on every schedule persist, so the set is what keeps
+        #: "your check-ins need a session open" from printing on every write.
+        self._wake_supervisor_refusals: set[str] = set()
         #: Live "a LOCAL human front end holds this session" probe, installed by
         #: the serving runtime (``serving._install_interactivity_probe``) from
         #: the connection table it owns. ``None`` until then, which the greeting
@@ -19292,10 +19296,16 @@ class Session:
         """Drop her ``aida-*`` rows when she is paused, disabled or reactive."""
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             return proactive.filter_on_load(
-                schedules, config_dir=config_dir(), class_reactive=self._class_reactive()
+                schedules,
+                # THE SESSION'S OWN ROOT, not the ambient one (review round 2,
+                # M3): the stamp, the withhold and the doorbell all read
+                # ``self._config_dir``, so a session built against an injected
+                # root must not have its rows filtered by a different store
+                # than the one it settles against.
+                config_dir=self._config_dir,
+                class_reactive=self._class_reactive(),
             )
         except Exception:  # noqa: BLE001 — the fire-time guard still holds
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
@@ -19312,7 +19322,6 @@ class Session:
         """
         try:
             from local_operator.aida import proactive
-            from local_operator.paths import config_dir
 
             # The stash is cleared BEFORE the reconcile: a token may only ever
             # describe the consume that is about to run, or a crash-window
@@ -19320,7 +19329,7 @@ class Session:
             self._aida_pending_trigger_settle = None
             result = proactive.reconcile(
                 schedules,
-                config_dir=config_dir(),
+                config_dir=self._config_dir,
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
                 attended=self._aida_greeting_may_land(),
@@ -20242,14 +20251,26 @@ class Session:
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
         itself promises never to raise, and this guard is belt-and-braces
-        for the same reason the index write has one."""
+        for the same reason the index write has one.
+
+        A REFUSAL IS SAID OUT LOUD, once (design round 2, M3). The install
+        outcome's reason used to go to ``logger.debug``, so the TUI — the
+        surface most custom-store users meet — never said why check-ins stop
+        when no session is open. The default level is WARNING, which is what
+        "visible" has to mean here. It is deduplicated per distinct reason
+        because this hook runs on EVERY persist that carries schedules: one
+        line when the refusal is first heard, and nothing on the thousandth
+        repeat.
+        """
         try:
             from local_operator.paths import config_dir
             from local_operator.wakes.install import ensure_supervisor_installed
 
             outcome = ensure_supervisor_installed(config_dir())
             if not outcome.installed:
-                logger.debug("wake supervisor not installed: %s", outcome.reason)
+                if outcome.reason not in self._wake_supervisor_refusals:
+                    self._wake_supervisor_refusals.add(outcome.reason)
+                    logger.warning("wake supervisor not installed: %s", outcome.reason)
         except Exception:  # noqa: BLE001
             logger.warning("wake supervisor install hook failed", exc_info=True)
 

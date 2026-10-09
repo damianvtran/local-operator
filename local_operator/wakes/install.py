@@ -567,6 +567,25 @@ def _task_supervisor_state(config_dir: Path) -> SupervisorState:
             verifiable=False,
             detail="this store is outside the real profile; Task Scheduler cannot supervise it",
         )
+    # THE OWNERSHIP RULE REACHES THIS ARM TOO (review round 2, M1). One task
+    # name per user, so a scratch store INSIDE the real profile — which
+    # ``task_scheduler_is_addressable`` (containment) passes, exactly as
+    # containment passed the launchd incident's store — must not replace the
+    # task the operator's own store registered. The weakest link is stated
+    # rather than hidden: ``USERPROFILE`` is what this asks about the home, and
+    # a process that spoofs it can still answer for the real profile.
+    #
+    # The module's own wrapper (not ``launchd.shared_label_refusal``) so the arm
+    # has ONE seam with the install side, which is the name the tests' allowed-
+    # store fixture patches.
+    refusal = _shared_label_refusal(config_dir)
+    if refusal is not None:
+        return SupervisorState(
+            loaded=False,
+            running=False,
+            verifiable=False,
+            detail=f"this store is not the one the shared task serves; {refusal}",
+        )
     registered, running, detail = supervisors.task_state(TASK_NAME)
     if not registered:
         return SupervisorState(loaded=False, running=False, detail=detail or "not loaded")
@@ -892,6 +911,12 @@ def _ensure_task_installed(config_dir: Path) -> InstallOutcome:
                     "not registering a scheduled task for it"
                 ),
             )
+        # The same one-name-per-user rule the launchd and systemd arms apply
+        # (review round 2, M1): without it a scratch store under the real
+        # profile could re-register the operator's own task.
+        refusal = _shared_label_refusal(config_dir)
+        if refusal is not None:
+            return InstallOutcome(installed=False, reason=refusal)
         current = None
         if record.exists():
             try:
@@ -1026,10 +1051,22 @@ def _is_loaded(config_dir: Path) -> bool:
 
 
 def uninstall() -> InstallOutcome:
-    """Remove the supervisor. Used by ``lop wake status --uninstall`` and tests."""
+    """Remove the supervisor. Used by ``lop wake status --uninstall`` and tests.
+
+    THE REMOVAL PATH OBEYS THE OWNERSHIP RULE TOO (review round 2, M4). The
+    one-label guard covered installing but not removing, and it is the same
+    blast radius: run from a store that is not the shared unit's — a QA
+    scratch root, a deliberate alternate store — ``bootout`` reaches the
+    operator's REAL ``gui/<uid>`` domain and the plist is unlinked, so the
+    supervisor her own store installed is gone. Refusing here means only the
+    store the label actually serves can take it down.
+    """
     kind = supervisors.supervisor()
     if kind is None:
         return InstallOutcome(installed=False, reason=UNSUPPORTED_REASON)
+    refusal = _shared_label_refusal(ambient_config_dir())
+    if refusal is not None:
+        return InstallOutcome(installed=False, reason=refusal)
     if kind == supervisors.SYSTEMCTL:
         unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
         timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
