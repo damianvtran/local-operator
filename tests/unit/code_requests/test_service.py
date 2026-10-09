@@ -1043,3 +1043,151 @@ def test_a_never_fetched_row_states_cooling_not_plain_link_only() -> None:
     row = service.view_row(raw, None)
     assert "cooling_until" not in row
     assert "reason" not in row
+
+
+# ---------------------------------------------------------------------------
+# final round: Q15 (tool surface parity), N5 (keys-scoped all-mark), N6
+# (chained kick), N7 (ignored survives replays)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_show_never_fetched_carries_cooling_and_hint(tmp_path: Path) -> None:
+    """Q15: the entry-less fallback is what a cooling/detect-and-link show hits."""
+    cache.note_rate_limited("github.com", retry_after=120.0)
+    try:
+        view = await service.show(tmp_path, REF)
+    finally:
+        cache._reset_for_tests()
+    assert view["link_only"] is True
+    assert isinstance(view["cooling_until"], float)
+    assert view["link_only_reason"] == f"cooling — {service.cooling_copy(view['cooling_until'])}"
+    assert view["link_only_hint"] == "Link only — sign in with the gh CLI to track this one."
+
+    gitea = parse_any("https://codeberg.org/o/r/pulls/3")
+    assert gitea is not None
+    plain = await service.show(tmp_path, gitea)
+    assert plain["link_only"] is True
+    assert "cooling_until" not in plain
+    assert plain["link_only_hint"] == "Link only — this host isn't tracked yet."
+    assert "detect-and-link" in str(plain["link_only_reason"])
+
+
+@pytest.mark.asyncio
+async def test_an_all_mark_survives_a_keys_scoped_pass(tmp_path: Path, monkeypatch) -> None:
+    """N5: the acted kick's keys-scoped pass must not consume the turn-end mark."""
+    calls: list[str] = []
+
+    async def fetch(ref, validators, token, *, stored=None, client=None):
+        calls.append(ref.key)
+        return _outcome(pieces={"summary": {"title": "t", "head_sha": "a" * 12}})
+
+    _patch_fetch(monkeypatch, fetch)
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    await service.refresh_session(tmp_path, "s1", [ROW], keys=[REF.key])
+    assert calls == [REF.key]
+    assert (
+        cache.read_dirty(tmp_path, "s1")["all"] is True
+    ), "the filtered-out rows were not serviced"
+    # The unfiltered pass covers whatever is left and consumes the mark.
+    await service.refresh_session(tmp_path, "s1", [ROW])
+    assert cache.read_dirty(tmp_path, "s1")["all"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_joined_kick_is_chained_not_lost(tmp_path: Path, monkeypatch) -> None:
+    """N6: a kick that joins an in-flight pass schedules a follow-on for its keys."""
+    runs: list[list[str]] = []
+    gate = asyncio.Event()
+
+    async def slow(config_dir, session_id, rows, *, keys=None, force=False):
+        runs.append(sorted(str(k) for k in (keys or ())))
+        if len(runs) == 1:
+            await gate.wait()
+        return service.RefreshReport()
+
+    monkeypatch.setattr(service, "refresh_session", slow)
+    assert service.schedule_session_refresh(tmp_path, "s1", [], keys=["a"]) is True
+    await asyncio.sleep(0)
+    # Two kicked events join while the first pass is in flight: one follow-on
+    # carries the UNION of their keys, and runs without any read.
+    assert service.schedule_session_refresh(tmp_path, "s1", [], keys=["b"], chain=True) is True
+    assert service.schedule_session_refresh(tmp_path, "s1", [], keys=["c"], chain=True) is True
+    gate.set()
+    for _ in range(200):
+        if len(runs) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert runs == [["a"], ["b", "c"]], runs
+
+
+@pytest.mark.asyncio
+async def test_the_ignored_list_survives_a_replay_only_rebuild(tmp_path: Path, monkeypatch) -> None:
+    """N7: a 304-replayed piece contributes no fresh parse, so its ignored ids replay."""
+    import httpx
+
+    from local_operator.code_requests.adapters import github as gh_module
+
+    real = gh_module.ADAPTER
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "/commits/" in path:
+            return httpx.Response(200, json={"check_runs": [], "total_count": 0})
+        if path.endswith("/issues/7/comments"):
+            return httpx.Response(200, json=[], headers={"ETag": 'W/"c-1"'})
+        if path.endswith("/pulls/7/reviews"):
+            if request.headers.get("if-none-match") == 'W/"r-1"':
+                return httpx.Response(304)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 43,
+                        "body": "LGTM!",
+                        "submitted_at": "2026-10-03T00:00:00Z",
+                        "html_url": "u",
+                    }
+                ],
+                headers={"ETag": 'W/"r-1"'},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "state": "open",
+                "title": "t",
+                "head": {"sha": "a" * 12, "ref": "x"},
+                "base": {"ref": "main"},
+                "user": {"login": "u"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    class Proxy:
+        kind = real.kind
+        full = real.full
+        pieces = real.pieces
+        state = staticmethod(real.state)
+        comments = staticmethod(real.comments)
+        ci = staticmethod(real.ci)
+
+        async def fetch(self, ref, validators, tok, *, stored=None, client=None):
+            async with httpx.AsyncClient(transport=transport, timeout=5) as http:
+                return await real.fetch(ref, validators, tok, stored=stored, client=http)
+
+    monkeypatch.setattr(service, "adapter_for", lambda ref: Proxy())
+    cache.clear_key_backoff(REF.key)
+    await service.refresh_keys(tmp_path, [REF])
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    assert entry["convention"]["ignored"]["reviews"] == ["review:43"]
+    # A replay-only rebuild (everything 304s) keeps it.
+    cache._reset_for_tests()
+    cache.clear_key_backoff(REF.key)
+    await service.refresh_keys(tmp_path, [REF], force=True)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None
+    assert entry["convention"]["ignored"]["reviews"] == ["review:43"]

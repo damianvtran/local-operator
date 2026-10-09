@@ -183,6 +183,16 @@ def _cooling_stamp(until: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
 
 
+def cooling_copy(until: float) -> str:
+    """The ONE cooling sentence every surface renders (route row, tool view, tool text).
+
+    The tool and the route must say the same thing about a rate-limited host
+    (QA round 3, Q15): a reader comparing the pane with the model's answer
+    should not see two different stories about the same wait.
+    """
+    return f"this host is rate-limited until {_cooling_stamp(until)}; nothing was fetched yet"
+
+
 def view_row(
     raw: Mapping[str, Any],
     entry: Mapping[str, Any] | None,
@@ -236,10 +246,7 @@ def view_row(
         if cool_until is not None:
             row["cooling_until"] = cool_until
             if not reason:
-                reason = (
-                    "cooling — this host is rate-limited until "
-                    f"{_cooling_stamp(cool_until)}; nothing was fetched yet"
-                )
+                reason = f"cooling — {cooling_copy(cool_until)}"
         if reason:
             row["reason"] = reason
         if entry and entry.get("refresh_error"):
@@ -358,14 +365,12 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         view["comments"] = convention_comments(entry)
     else:
         # The tool's own never-fetched view carries the same cooling signal
-        # the route's rows do (QA round 2, Q13).
+        # the route's rows do (QA round 2, Q13; one spelling per QA round 3,
+        # Q15).
         cool_until = fetch_cache.cooling_until(ref.host)
         if cool_until is not None:
             view["cooling_until"] = cool_until
-            view["link_only_reason"] = ref.reason or (
-                "cooling — this host is rate-limited until "
-                f"{_cooling_stamp(cool_until)}; nothing was fetched yet"
-            )
+            view["link_only_reason"] = ref.reason or f"cooling — {cooling_copy(cool_until)}"
         else:
             view["link_only_reason"] = ref.reason or str(
                 entry.get("refresh_error") or "no state has been fetched yet"
@@ -461,7 +466,12 @@ async def show(
     view = view_for_ref(config_dir, ref)
     if view is not None:
         return view
-    return {
+    # The NEVER-fetched fallback (no entry at all) must carry the same two
+    # fields the entry-bearing view does (QA round 3, Q15): the model must
+    # see the cooling wait and the per-forge remedy exactly as the UI does,
+    # or a rate-limited host reads as "no state has been fetched yet" and a
+    # detect-and-link host as a bare link.
+    fallback: dict[str, Any] = {
         "key": ref.key,
         "url": ref.url,
         "forge": ref.forge,
@@ -470,6 +480,7 @@ async def show(
         "number": ref.number,
         "link_only": True,
         "link_only_reason": ref.reason or "no state has been fetched yet",
+        "link_only_hint": link_only_hint({"forge": ref.forge, "host": ref.host}),
         "summary": None,
         "ci": None,
         "lanes": None,
@@ -479,6 +490,12 @@ async def show(
         "stale": False,
         "refresh_error": None,
     }
+    cool_until = fetch_cache.cooling_until(ref.host)
+    if cool_until is not None:
+        fallback["cooling_until"] = cool_until
+        if not ref.reason:
+            fallback["link_only_reason"] = f"cooling — {cooling_copy(cool_until)}"
+    return fallback
 
 
 @dataclass
@@ -498,6 +515,13 @@ class RefreshReport:
 #: ``create_task`` has only a weak referent and can be collected mid-flight
 #: (the route's own scan latch documents the same trap).
 _SESSION_TASKS: dict[tuple[str, str], "asyncio.Task[RefreshReport]"] = {}
+
+#: The follow-on scope for chained kicks (review round 3, N6): ident -> the
+#: UNION of the joined kicks' keys, or None when any joined kick was
+#: unfiltered. ``_CHAIN_REGISTERED`` keeps ONE done-callback per in-flight
+#: pass so three kicked events do not queue three identical follow-ons.
+_CHAIN_SCOPE: dict[tuple[str, str], list[str] | None] = {}
+_CHAIN_REGISTERED: set[tuple[str, str]] = set()
 
 #: Per-KEY single-flight locks (design §D.2: "single-flight per key per
 #: process"), pruned opportunistically so the map cannot grow without bound.
@@ -654,6 +678,11 @@ async def refresh_session(
             and len(planned.refs) < MAX_REFS_PER_PASS
             and not planned.cooling
             and not planned.backing_off
+            # A keys-scoped pass (an acted kick) serviced ONLY those keys: the
+            # "all" mark says every row may have moved, and the filtered-out
+            # rows were never looked at (review round 3, N5 — the Q12 kick
+            # made this routine). It stays for the pass that covers them.
+            and not keys
         )
         fetch_cache.clear_dirty(
             config_dir,
@@ -690,16 +719,53 @@ def schedule_session_refresh(
     *,
     keys: Sequence[str] | None = None,
     force: bool = False,
+    chain: bool = False,
 ) -> bool:
     """Kick a background refresh pass (single-flight); True when one is now running.
 
     Called from an event loop only (both routes are async). A pass already in
     flight for this session means "joined", not "skip": the caller still
     returns its cached read immediately, which is the GET contract.
+
+    ``chain=True`` is for callers with NO cached read to fall back on — the
+    acted seam (review round 3, N6). A JOINED kick is otherwise lost until
+    somebody reads: the in-flight pass was planned before the mark landed, so
+    the joined caller's keys are never fetched and its feed frame never
+    moves. With ``chain``, the joined kicks' scope (the UNION of their keys,
+    or unfiltered when any kick had no filter) is scheduled once as a
+    follow-on pass when the in-flight one finishes.
     """
     ident = (str(config_dir), session_id)
     existing = _SESSION_TASKS.get(ident)
     if existing is not None and not existing.done():
+        if chain:
+            if keys:
+                # ``None`` is the UNFILTERED sentinel, not "absent": absent
+                # means no keys accumulated yet.
+                current = _CHAIN_SCOPE.get(ident, [])
+                if current is not None:
+                    merged = list(current)
+                    for key in keys:
+                        if key not in merged:
+                            merged.append(str(key))
+                    _CHAIN_SCOPE[ident] = merged
+            else:
+                _CHAIN_SCOPE[ident] = None
+            if ident not in _CHAIN_REGISTERED:
+                _CHAIN_REGISTERED.add(ident)
+
+                def _resume(_finished: Any, ident: tuple[str, str] = ident) -> None:
+                    follow = _CHAIN_SCOPE.pop(ident, [])
+                    _CHAIN_REGISTERED.discard(ident)
+                    schedule_session_refresh(
+                        config_dir,
+                        session_id,
+                        rows,
+                        keys=None if follow is None else list(follow),
+                        force=force,
+                    )
+
+                existing.add_done_callback(_resume)
         return True
 
     async def _run() -> RefreshReport:
@@ -913,12 +979,18 @@ def _build_entry(
         else None
     )
     piece_groups: dict[str, list[Any]] = {}
-    ignored: list[str] = []
+    piece_ignored: dict[str, list[str]] = {}
+    stored_ignored = (
+        stored_convention.get("ignored")
+        if isinstance(stored_convention, Mapping)
+        and isinstance(stored_convention.get("ignored"), Mapping)
+        else None
+    )
     for name in sorted(_COMMENT_PIECES):
         if name in outcome.pieces:
             piece_report = rounds.parse(adapter.comments({name: pieces.get(name)}))
             piece_groups[name] = piece_report.passes
-            ignored.extend(piece_report.ignored)
+            piece_ignored[name] = list(piece_report.ignored)
             continue
         payload = stored_pieces.get(name) if isinstance(stored_pieces, Mapping) else None
         if isinstance(payload, list):
@@ -927,15 +999,22 @@ def _build_entry(
                 for item in (rounds.ReviewPass.from_payload(entry_) for entry_ in payload)
                 if item is not None
             ]
+            # The ignored ids replay WITH their piece (review round 3, N7):
+            # a 304-replayed piece contributes no fresh parse, and dropping
+            # the stored list made diagnostics vanish on every quiet pass.
+            replayed = stored_ignored.get(name) if isinstance(stored_ignored, Mapping) else None
+            piece_ignored[name] = (
+                [str(item) for item in replayed] if isinstance(replayed, list) else []
+            )
             continue
         # No stored parse for this piece: a pre-upgrade entry, or a piece this
         # host never returned. Best effort from the stored (possibly capped)
         # copy — one pass, then the piece has its own stored parse.
         piece_report = rounds.parse(adapter.comments({name: pieces.get(name)}))
         piece_groups[name] = piece_report.passes
-        ignored.extend(piece_report.ignored)
+        piece_ignored[name] = list(piece_report.ignored)
     report = rounds.RoundReport.combine(list(piece_groups.values()))
-    report.ignored[:] = ignored
+    report.ignored[:] = [item for name in sorted(piece_ignored) for item in piece_ignored[name]]
     states = report.states(head_sha or None, is_open=state in _OPEN_STATES)
     lanes = [item.to_payload() for item in states]
     entry: dict[str, Any] = {
@@ -960,7 +1039,7 @@ def _build_entry(
             "pieces": {
                 name: [item.to_payload() for item in group] for name, group in piece_groups.items()
             },
-            "ignored": list(report.ignored),
+            "ignored": {name: list(items) for name, items in piece_ignored.items()},
         },
         "comments_total": len(all_comments),
         "checked_at": moment,

@@ -14170,6 +14170,10 @@ class Session:
                             self._session_id,
                             rows,
                             keys=list(acted_keys),
+                            # The seam has no cached read to fall back on: a
+                            # kick that joins an in-flight pass must still be
+                            # served (review round 3, N6).
+                            chain=True,
                         )
                     )
                 except Exception:  # noqa: BLE001 - see above

@@ -271,6 +271,15 @@ def _render_show(view: dict[str, Any]) -> str:
         lines.append(f"link-only: {view.get('link_only_reason') or 'no state fetched'}")
         if view.get("refresh_error"):
             lines.append(f"refresh error: {view['refresh_error']}")
+        # The two fields the route already carries must reach the MODEL too
+        # (QA round 3, Q15): a reader comparing the pane with the answer must
+        # not see a rate-limit wait read as "no state" or a detect-and-link
+        # host as a bare link. The cooling sentence is the route's own.
+        if view.get("cooling_until") is not None:
+            lines.append(f"cooling: {service.cooling_copy(float(view['cooling_until']))}")
+        hint = view.get("link_only_hint")
+        if hint:
+            lines.append(f"hint: {hint}")
         lines.append(f"link: {view.get('url')}")
         return "\n".join(lines)
     summary = view.get("summary") or {}
