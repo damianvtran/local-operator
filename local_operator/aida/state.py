@@ -281,6 +281,27 @@ def note_lock_refusal(what: str, exc: BaseException) -> None:
     logger.warning("aida: %s refused: the store lock could not be created (%s)", what, exc)
 
 
+def op_refusal_sentence(verb: str, name: str, exc: BaseException) -> str:
+    """The ONE sentence an attended surface answers a refused control op with.
+
+    ``pause``/``resume`` are reachable from two attended surfaces — the TUI's
+    ``/aida`` handler and the desktop route's POST — and both meet the same
+    refusal: a peer holds the aida store lock for the whole wait, so
+    :func:`locked` raises before the op runs. The COPY is not written here; it is
+    the lock module's own (``str(exc)``: ``WakeLockBusy`` carries
+    ``busy_sentence``, ``WakeLockUnavailable`` names the store), which already
+    says what happened and that re-running is the fix. What this function owns is
+    the SHAPE — in one place, so the terminal's notice and the desktop's refusal
+    body cannot drift into two accounts of one refusal (QA-O1, QA round 3f on
+    #2071; hoisted in review round 1 so the twin is structural rather than a
+    coincidence that only two tests defended).
+
+    ``verb`` is the op word (``"pause"``/``"resume"``), ``name`` her configured
+    display name; :func:`note_lock_refusal` is the log half of the same answer.
+    """
+    return f"could not {verb} {name}: {exc}"
+
+
 def consume_escalations(config_dir: Path | str) -> list[Any]:
     """Read ``escalate.json`` and DELETE it in one step; return its ``wakes`` list.
 
