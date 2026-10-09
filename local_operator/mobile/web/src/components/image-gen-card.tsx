@@ -84,29 +84,38 @@ export function ImageGenCard({
 	/** UNWIRED, same contract as `onRestart` (see above). */
 	onSteer?: () => void;
 }) {
-	/* Component-local, because this fact does not exist on the wire: it is
-	   "the user pressed Cancel and no confirmation has landed on this
-	   client". It never turns into a rendered outcome by itself — the
-	   adapter gives a settle priority over it — so a refresh/reconnect that
-	   drops it loses nothing a repaint does not re-state. */
+	/* Component-local, because this fact does not exist on the wire: a cancel
+	   hold is ENGAGED — pressed on this client, or carried by the feed's own
+	   `cancelling` interim — and no confirmation has landed. It never turns
+	   into a rendered outcome by itself (the adapter gives a settle priority
+	   over it), so its lifecycle is exactly one live view: engaged by the
+	   first cancelling mapping, retired when the view settles. */
 	const [cancelRequested, setCancelRequested] = useState(false);
 	const view = imageGenView(entry, cancelRequested);
 
-	/* A SETTLE RETIRES THE HOLD (review round 1, F2). Rendered behaviour was
-	   already honest — a settle always outranks the flag, and never paints
-	   "cancelled" off the press — but the flag itself outlived the settle, so
-	   a wire that ever re-reported the same entry as live would resurrect
-	   "cancelling…" with no new press. Clearing it when the view leaves every
-	   not-yet-settled state (the hold itself is one of those, so a press
-	   persists exactly as long as the state it describes) means a re-lived
-	   row shows `running` and a fresh control, never a dead press. */
+	/* A SETTLE RETIRES THE HOLD, AND THE WIRE'S OWN HOLD LATCHES IT (review
+	   round 1, F2; design round 1, D1). Rendered behaviour was already
+	   honest — a settle always outranks the flag, and never paints
+	   "cancelled" off the press — but two facts needed fixing: the flag
+	   outlived the settle (a wire that ever re-reported the same entry as
+	   live would resurrect "cancelling…" with no new press), and the FEED's
+	   own interim un-said itself in the terminal-update window — the
+	   producer emits `cancelling` then `cancelled` ONE UPDATE before the
+	   result, and the second fell back to `running`, re-offering the abort
+	   control mid-cancel (a second tap sends a second `{op:abort}`). The
+	   latch engages the moment a live view maps to `cancelling` — the press
+	   or the wire — and the adapter's own pin then carries the held word
+	   over later live updates. It clears only when the view leaves every
+	   not-yet-settled state, so a settle always wins (`done` included), and
+	   a cold `cancelled` that never had an interim latches nothing. */
 	const live =
 		view.state === "queued" ||
 		view.state === "running" ||
 		view.state === "cancelling";
 	useEffect(() => {
-		if (!live) setCancelRequested(false);
-	}, [live]);
+		if (view.state === "cancelling") setCancelRequested(true);
+		else if (!live) setCancelRequested(false);
+	}, [view.state, live]);
 
 	/* THE ROW IS PART OF THE CARD'S STATEMENT, so it must not disagree with
 	   it. The row's own palette is keyed off the wire settle, and for the
@@ -115,10 +124,14 @@ export function ImageGenCard({
 	   had already finished and this call returned no artifact. For exactly
 	   that view state the row renders as the NEUTRAL settle (dim "–", no
 	   wash — the glyph a stop-cut call wears), and the body says why:
-	   "already finished". Every other state passes the entry through
-	   untouched, so ToolRow stays the one renderer of every other row. */
+	   "already finished". A LANDED cancel (review round 1, F2) reaches the
+	   phone the same way — error-shaped, its details naming the cancel — so
+	   it takes the same swap: the body's quiet "cancelled" must not sit
+	   beside a red ✗ and a danger wash. Every other state passes the entry
+	   through untouched, so ToolRow stays the one renderer of every other
+	   row. */
 	const rowEntry =
-		view.state === "finished"
+		view.state === "finished" || view.state === "cancelled"
 			? { ...entry, tool_state: "interrupted" as const }
 			: entry;
 

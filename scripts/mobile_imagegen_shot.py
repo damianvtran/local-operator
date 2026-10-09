@@ -46,12 +46,18 @@ VIEWPORTS = ((390, 844), (360, 780))
 
 #: The sessions to photograph, keyed by the row label the list shows. The value
 #: is the prefix used for the frame's file name. Order is the reading order of
-#: the state machine.
+#: the state machine. The running row ALSO yields the press-driven
+#: ``cancelling-<vw>`` frame below; ``cancelling-wire`` is the feed-driven hold
+#: (``stage: "cancelling"`` with no click) and ``mid-walk`` the
+#: ``stage: None`` failure beat — the two canonical inputs added with the wire
+#: freeze, photographed rather than argued from the adapter tests alone.
 TAP_SESSIONS: dict[str, str] = {
     "Image gen queued": "queued",
     "Image gen queue position": "queued-pos",
     "Image gen running": "running",
+    "Image gen cancelling": "cancelling-wire",
     "Image gen progress": "running-detail",
+    "Image gen mid-walk failure": "mid-walk",
     "Image gen done": "done",
     "Image gen failed": "failed",
     "Image gen already finished": "finished",

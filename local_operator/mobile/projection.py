@@ -161,6 +161,28 @@ TOOL_OUTPUT_TAIL_CHARS = 8_000
 #: Same bound for the args side of an expanded tool row.
 TOOL_ARGS_CHARS = 4_000
 
+#: The canonical live-detail keys a tool UPDATE may carry and the phone folds
+#: through onto its row verbatim (the harness lane's frozen `generate_image`
+#: bag, PR #2089: the six fields, `None` when no provider supplied a value,
+#: plus the producing `tool_name`). The fold is the TRANSPORT SEAM for these —
+#: a producer reports them as update details, and until this allowlist the
+#: update arm carried none of an update's details onto the row, so the field
+#: names the card's adapter reads never reached the phone on a real stream
+#: (the capture fixtures seed the fold's OUTPUT, which is why a replay could
+#: look green without it). Keys outside the list are never copied, so other tools' update
+#: details stay untaxed on the wire, and a key ABSENT from an update is left
+#: as it was: the same "absent means absent" tolerance the card's adapter
+#: renders.
+LIVE_IMAGE_DETAIL_KEYS: tuple[str, ...] = (
+    "tool_name",
+    "stage",
+    "queue_position",
+    "progress_fraction",
+    "log_lines",
+    "error",
+    "error_type",
+)
+
 #: How much of a subagent's launch prompt the roster row carries on the wire.
 #: The list projection is a full repaint pushed ~30x/s and every subagent row
 #: rides in it, so an uncapped prompt is a per-repaint tax that scales with
@@ -508,6 +530,20 @@ def _tool_row_details(
         # Diff payloads ride through whole — the expanded row renders the
         # coloured unified diff from them.
         for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+            if key in result_details:
+                details[key] = result_details[key]
+        # THE SETTLE PATH CARRIES THE CANONICAL BAG TOO (review round 1, F1).
+        # This function REPLACES the row's details at settle, so the live
+        # update pass-through (``LIVE_IMAGE_DETAIL_KEYS``) is discarded here
+        # — and without this read the card's settle arms (a landed cancel's
+        # ``stage``, the ``media_already_completed`` conflict) are unreachable
+        # on a real stream: the capture fixtures seed THIS function's output,
+        # so they cannot see the drop. Same tolerance as the update arm —
+        # present-key verbatim (`None` included), absent key not written —
+        # which also keeps live and replayed rows identical: updates are
+        # live-only, so a replayed row could never reproduce a retained live
+        # value.
+        for key in LIVE_IMAGE_DETAIL_KEYS:
             if key in result_details:
                 details[key] = result_details[key]
     return details
@@ -2114,6 +2150,15 @@ class ProjectionFold:
             text = getattr(event.partial_result, "text", "") or ""
             if text:
                 row.details["partial"] = text[-TOOL_OUTPUT_TAIL_CHARS:]
+            # The canonical live bag folds through VERBATIM (see
+            # ``LIVE_IMAGE_DETAIL_KEYS``): a key the update carries is copied
+            # — `None` included, which is the canonical "no provider value"
+            # statement — and a key it does not carry is left alone.
+            live_details = event.partial_result.details
+            if live_details:
+                for key in LIVE_IMAGE_DETAIL_KEYS:
+                    if key in live_details:
+                        row.details[key] = live_details[key]
         elif isinstance(event, ToolExecutionEndEvent):
             if is_ask_gate_divert_details(event.result.details):
                 # THE DIVERT SETTLES NOTHING (design docs/design/ask-gate.md

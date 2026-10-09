@@ -255,6 +255,189 @@ def test_failed_tool_row_carries_the_error() -> None:
     assert "boom" in row.error
 
 
+def test_canonical_image_update_details_reach_the_row_verbatim() -> None:
+    """The live-detail transport seam (the wave this fold change exists for).
+
+    `generate_image` reports its canonical live bag — `stage` / `queue_position`
+    / `progress_fraction` / `log_lines` / `error` / `error_type` plus
+    `tool_name` — as UPDATE details (PR #2089). Until the update arm copied
+    them through, the fold carried no update details at all, so the field
+    names the card's adapter reads never arrived on a real stream; the capture
+    fixtures seed the fold's OUTPUT, which is why the rig replay looked green
+    without it. A present key is copied VERBATIM — `None` included, the
+    canonical "no provider value" statement — and an absent key is left
+    alone: no synthesis.
+    """
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img1", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): queued")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "queued",
+                    "queue_position": 2,
+                    "progress_fraction": None,
+                    "log_lines": [{"message": "queued at 2", "timestamp": "t0"}],
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "running"
+    assert row.details["stage"] == "queued"
+    assert row.details["queue_position"] == 2
+    assert row.details["progress_fraction"] is None
+    assert row.details["log_lines"] == [{"message": "queued at 2", "timestamp": "t0"}]
+    assert row.details["error"] is None
+    assert row.details["error_type"] is None
+    assert row.details["tool_name"] == "generate_image"
+
+    # A later update REPLACES per key: the canonical bag re-sends every key,
+    # so a field that stopped applying arrives as None and overwrites the old
+    # value rather than lingering.
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): running")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "in_progress",
+                    "queue_position": None,
+                    "progress_fraction": 0.42,
+                    "log_lines": None,
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    assert row.details["stage"] == "in_progress"
+    assert row.details["queue_position"] is None
+    assert row.details["progress_fraction"] == 0.42
+    assert row.details["log_lines"] is None
+
+    # An update with NO canonical bag — another tool's, or an older runtime's —
+    # leaves the folded details alone (no synthesis, no clearing) and its
+    # non-canonical keys are never copied.
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img1",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="still working")], details={"unrelated": 1}
+            ),
+        )
+    )
+    assert row.details["stage"] == "in_progress"
+    assert row.details["progress_fraction"] == 0.42
+    assert "unrelated" not in row.details
+
+
+def test_the_canonical_settle_bag_reaches_the_settled_row() -> None:
+    """The settle REPLACES `row.details`, so the update arm's pass-through is
+    discarded there (review round 1, F1). Without the same allowlist on this
+    path the card's settle arms — a landed cancel's `stage`, the
+    `media_already_completed` conflict — are unreachable on a real stream,
+    and the fixtures seed the fold's OUTPUT (this very function), so they
+    cannot see the drop. Driven start -> update -> end through the REAL fold,
+    with the producer's own settle shapes (#2089: a landed cancel is
+    error-shaped with `stage: "cancelled"` and NO `error_type`; the conflict
+    adds the code beside the platform sentence).
+    """
+    # The landed cancel: the adapter's `cancelled` arm reads stage + the
+    # ABSENCE of `error_type` — both must survive the settle.
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img2", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="img2",
+            tool_name="generate_image",
+            partial_result=AgentToolUpdate(
+                content=[TextContent(text="Generating via Radient (flux): queued")],
+                details={
+                    "tool_name": "generate_image",
+                    "stage": "queued",
+                    "queue_position": 2,
+                    "progress_fraction": None,
+                    "log_lines": None,
+                    "error": None,
+                    "error_type": None,
+                },
+            ),
+        )
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="img2",
+            tool_name="generate_image",
+            result=ToolResult(
+                tool_call_id="img2",
+                tool_name="generate_image",
+                is_error=True,
+                content=[TextContent(text="Cancelled.")],
+                details={
+                    "cancel_handle": {"provider": "radient", "request_id": "r1"},
+                    "stage": "cancelled",
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "failed"
+    assert row.details["stage"] == "cancelled"
+    assert "error_type" not in row.details
+    assert row.details["output"] == "Cancelled."
+    # An absent canonical key is not retained from the live phase: updates
+    # are live-only, so a replayed row could never reproduce a kept value —
+    # the drop is what keeps live and replayed rows identical.
+    assert "queue_position" not in row.details
+
+    # The conflict: the same settle plus the code and the platform sentence.
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="img3", tool_name="generate_image", args={"prompt": "red panda"}
+        )
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="img3",
+            tool_name="generate_image",
+            result=ToolResult(
+                tool_call_id="img3",
+                tool_name="generate_image",
+                is_error=True,
+                content=[TextContent(text="not cancelled — it had already completed")],
+                details={
+                    "stage": "cancelled",
+                    "error": "The generation had already completed when the cancel arrived.",
+                    "error_type": "media_already_completed",
+                },
+            ),
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert row.details["stage"] == "cancelled"
+    assert row.details["error_type"] == "media_already_completed"
+    assert row.details["error"] == "The generation had already completed when the cancel arrived."
+
+
 def test_a_marked_abort_settles_interrupted_and_an_unmarked_failure_stays_failed() -> None:
     """The phone's live end-event ladder reads the marker before `is_error`.
 
