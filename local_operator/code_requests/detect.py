@@ -101,6 +101,23 @@ class Detection:
     hint: Mapping[str, Any] | None = None
     unverified: bool = False
 
+    def candidate_keys(self) -> list[str]:
+        """The refs an unattributable detection printed, as keys — or ``[]``.
+
+        One accessor for the two row writers (``hook.event_details`` and
+        ``scan._apply_detection``): the evidence a reader audits an ``unknown`` row
+        against is the SAME list in both, and a second extraction beside this one is how
+        the two would come to disagree about it (review round 3, N1).
+        """
+        candidates = (self.hint or {}).get("candidates")
+        if not isinstance(candidates, list):
+            return []
+        return [
+            str(item.get("key") or item.get("url") or "")
+            for item in candidates
+            if isinstance(item, Mapping)
+        ]
+
 
 @dataclass(frozen=True)
 class McpServer:
@@ -300,12 +317,18 @@ def _redirect_operator_length(command: str, i: int) -> int:
 
 
 def _skip_redirect(command: str, i: int) -> int:
-    """Index just past a redirection and its target, so neither becomes an argument.
+    """Index just past a redirection, so it never becomes an argument.
 
-    ``&1``/``&2`` are part of the operator; ``/dev/null`` or a filename after it is the
-    target. Quotes are respected: ``> "my file"`` consumes the quoted name as one target.
+    ``&1``/``&2`` are part of the operator, and an OUTPUT target (``> /dev/null``,
+    ``> "my file"``) is consumed with it — where output goes is not an argument.
+
+    An INPUT target is NOT consumed: ``cat < other.txt`` reads that file, and swallowing
+    the name made the stage look like a stdin-only filter, which is what let an unrelated
+    file's URL be attributed to a create whose own stdout had been redirected away
+    (review round 3, F2). The name stays in the stage, where ``_has_file_operand`` sees it.
     """
     length = len(command)
+    is_input = command[i] == "<"
     i += _redirect_operator_length(command, i)
     if i < length and command[i] == "&":
         i += 1
@@ -313,6 +336,8 @@ def _skip_redirect(command: str, i: int) -> int:
     # whether anything is left to consume, or the target stays behind as an argument.
     while i < length and command[i] in " \t":
         i += 1
+    if is_input:
+        return i
     if i >= length or command[i] in _SEPARATORS:
         return i
     while i < length and not command[i].isspace() and command[i] not in _SEPARATORS:
@@ -1024,10 +1049,31 @@ _BLIND_COMMANDS = frozenset(
 #: ``_has_file_operand``; ``tee report.txt`` never reads one).
 _PASS_THROUGH_COMMANDS = frozenset({"cat", "tail", "head", "sort", "uniq", "cut", "tr", "nl"})
 _PASS_THROUGH_ALWAYS = frozenset({"tee", "wc"})
+
+#: Forge verbs whose output is a STATUS SENTENCE (``✓ Merged pull request #1 (title)``),
+#: never a bare url line of its own — which is why a later act cannot make a create's
+#: stdout ambiguous (review round 3, F3: ``gh pr create -f && gh pr merge 1`` is
+#: attributable to the create). Built from the act tables so the two cannot drift.
+_STATUS_ONLY_VERBS = frozenset(
+    [("pr", verb) for verb in _GH_ACTS] + [("mr", verb) for verb in _GLAB_ACTS]
+)
 _INTERPRETERS = frozenset(
     {"bash", "sh", "zsh", "python", "python3", "node", "ruby", "perl", "deno", "bun"}
 )
 _SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".ts", ".rb", ".pl")
+
+#: A create CLI's own REFUSAL, as it appears in the AGGREGATE stdout. gh 2.x prints
+#: ``a pull request for branch "x" into branch "main" already exists:`` (the format string is
+#: in the installed binary) and the url on the next line is the EXISTING request's, not one
+#: this call created. With ``2>&1`` plus any masking stage (``| tail -1``, ``| tee``,
+#: ``|| true``) the pipeline exits 0, so the exit-code guard cannot see it (review round 3,
+#: F1). glab's equivalents were searched for in the installed binary (``strings glab``:
+#: ``already exists``, ``for branch``) and no create-refusal phrase of this shape exists in
+#: 1.9x, so the second pattern is prospective rather than measured.
+_CREATE_REFUSALS = (
+    re.compile(r"already exists:\s*$", re.IGNORECASE),
+    re.compile(r"(?:pull|merge) request for branch .{0,200}already exists", re.IGNORECASE),
+)
 
 #: Shell constructs whose text IS executed but which ``split_stages`` cannot see through
 #: as a stage of its own: a command substitution and a loop body. A create inside one of
@@ -1191,6 +1237,25 @@ def detect_bash(command: str, result_text: str, context: HostContext) -> list[De
     return []
 
 
+def _create_refusal(stdout: str) -> tuple[str, int] | None:
+    """The refusal marker a create CLI printed and the line it sits on, or ``None``.
+
+    A marker never makes a claim; it takes one away. That is why it can be matched
+    generously where the stakes are a false ``opened``: the worst case is a real create
+    reported as ``unknown`` with its candidates, never a non-create reported as opened.
+    The line number comes back too, because every url printed AFTER a refusal belongs to
+    the request that already existed.
+    """
+    for number, line in enumerate(stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for pattern in _CREATE_REFUSALS:
+            if pattern.search(stripped):
+                return stripped[:120], number
+    return None
+
+
 def _create_by_cli(
     result: BashResult,
     context: HostContext,
@@ -1231,12 +1296,44 @@ def _create_by_cli(
        as evidence, never a chosen first or last line.
     """
     stem = _rule_stem(verb)
-    candidates = [
-        ref
-        for line in result.stdout.splitlines()
+    candidate_lines = [
+        (number, ref)
+        for number, line in enumerate(result.stdout.splitlines())
         for ref in [_line_ref(line, context, (forge,))]
         if ref is not None and not _has_fragment_or_query(line)
     ]
+    candidates = [ref for _number, ref in candidate_lines]
+    refusal = _create_refusal(result.stdout)
+    # The FIRST bare url after the marker is the existing request's — the refusal prints
+    # ``already exists:`` and the url on the line below it. A successful create earlier or
+    # later in the same command is not the refused one, but this rule cannot tell which
+    # line is whose beyond that, so the refused line is excluded and the rest stay as the
+    # evidence a reader audits.
+    refused_key: str | None = None
+    if refusal is not None:
+        after_marker = [ref for number, ref in candidate_lines if number > refusal[1]]
+        if after_marker:
+            refused_key = after_marker[0].key
+    if refusal and candidates:
+        marker, _marker_line = refusal
+        # With nothing else to prefer (the single-create case, which is the common one)
+        # the refused line still carries the row — the fact that a create ran is never
+        # dropped, it is just not claimed as this call's own.
+        survived = [ref for ref in candidates if ref.key != refused_key]
+        return [
+            Detection(
+                KIND_UNKNOWN,
+                (survived or candidates)[0],
+                f"{stem}-refused",
+                verb,
+                0,
+                reason=(
+                    f"{verb} was refused ({marker!r}), so the URL below is the existing "
+                    "request's or another stage's: possibly opened by this call"
+                ),
+                hint={"candidates": [ref.to_payload() for ref in candidates]},
+            )
+        ]
     if not candidates:
         # The CLI ran and printed a url of its own, but not in the shape a create prints
         # (a fragment, a comment link, a table). Same answer as before: unshaped.
@@ -1258,28 +1355,42 @@ def _create_by_cli(
         for item, words in enumerate(stages)
         if _url_printer_reason(words, context, forge) is not None
     ]
-    explained: set[str] = set()
+    keys = {ref.key for ref in candidates}
+    # TWO sets, and they answer different questions. ``explained_by_printers`` decides
+    # whether the create's line can be told apart from the others, so only a stage that
+    # COULD have printed a bare url may explain one away. ``named_elsewhere`` asks the
+    # weaker question — which of these lines does another stage's arguments account for —
+    # and it is used only to pick the ref an ``unknown`` row hangs on, where the create's
+    # plausible line (the one nothing else accounts for) is the row a reader wants.
+    explained_by_printers: set[str] = set()
     unexplained: list[int] = []
     for item in printers:
         named = _named_keys(stages[item], context)
-        keys = {ref.key for ref in candidates}
         if item != index and named and named <= keys:
             # Its own arguments name the refs it printed, so this stage accounts for those
             # lines and cannot be the source of the others.
-            explained |= named
+            explained_by_printers |= named
             continue
         unexplained.append(item)
-    remaining = [ref for ref in candidates if ref.key not in explained]
+    named_elsewhere: set[str] = set()
+    for item, words in enumerate(stages):
+        if item != index:
+            named_elsewhere |= _named_keys(words, context)
+    remaining = [ref for ref in candidates if ref.key not in explained_by_printers]
     if unexplained == [index] and len(remaining) == 1:
         return [Detection(KIND_OPENED, remaining[0], f"{stem}-stdout", verb, 0)]
     if unexplained and all(_is_create_stage(stages[item]) for item in unexplained):
         if len(remaining) == len(unexplained):
             return [Detection(KIND_OPENED, ref, f"{stem}-stdout", verb, 0) for ref in remaining]
     reason = _unattributed_reason(stages, unexplained, index, verb)
-    # ``remaining`` can be empty when every candidate line is named by another stage's
-    # arguments. The row is still recorded — the call did run a create — so it reports the
-    # first candidate it saw rather than dropping the fact.
-    subject = remaining[0] if remaining else candidates[0]
+    # A row is still recorded — the call did run a create — so it hangs on the best
+    # remaining line: not one another stage's arguments account for, and not one printed
+    # after a refusal (that url is the request which already existed). With nothing left
+    # to prefer, the first candidate it saw carries the row.
+    unaccounted = [
+        ref for ref in candidates if ref.key not in named_elsewhere and ref.key != refused_key
+    ]
+    subject = (unaccounted or candidates)[0]
     return [
         Detection(
             KIND_UNKNOWN,
@@ -1390,6 +1501,10 @@ def _url_printer_reason(words: list[str], context: HostContext, forge: str) -> s
             if verb in _FRAGMENT_ONLY_VERBS:
                 # A comment/note prints its own url WITH a fragment, so it can never be
                 # mistaken for the create's bare line.
+                return None
+            if verb in _STATUS_ONLY_VERBS:
+                # An act prints a sentence about the request it acted on; it has no bare
+                # url line to confuse with the create's.
                 return None
         return f"the forge CLI '{name}'"
     if _is_script_stage(words):

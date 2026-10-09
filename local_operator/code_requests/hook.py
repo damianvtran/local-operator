@@ -175,16 +175,11 @@ def event_details(
         evidence["exit"] = detection.exit
     if detection.unverified:
         evidence["unverified"] = True
-    candidates = (detection.hint or {}).get("candidates")
-    if isinstance(candidates, list) and candidates:
-        # A `unknown ("possibly opened")` row is only auditable if it says WHICH urls the
-        # call printed: the rule could not choose between them, and a reader is the one who
-        # decides. Carried as keys, the same currency every other row field uses.
-        evidence["candidates"] = [
-            str(item.get("key") or item.get("url") or "")
-            for item in candidates
-            if isinstance(item, Mapping)
-        ]
+    candidates = detection.candidate_keys()
+    if candidates:
+        # An `unknown ("possibly opened")` row is only auditable if it says WHICH urls the
+        # call printed: the rule could not choose between them, and a reader decides.
+        evidence["candidates"] = candidates
     details["evidence"] = evidence
     details["act"] = detection.act
     if detection.reason:
