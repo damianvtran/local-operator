@@ -1,0 +1,127 @@
+{
+  "setup-picker-tail-80": {
+    "screen": {
+      "size": [
+        78,
+        28
+      ],
+      "virtual_size": [
+        78,
+        28
+      ],
+      "vertical_scrollbar": false
+    },
+    "picker_size": [
+      76,
+      14
+    ],
+    "primary_column": 16,
+    "detail_column": 16,
+    "match_count": 24,
+    "fal_present": false,
+    "fal_painted": null,
+    "fal_display": null,
+    "fal_description": null,
+    "fal_detail": null
+  },
+  "setup-picker-120": {
+    "screen": {
+      "size": [
+        118,
+        28
+      ],
+      "virtual_size": [
+        118,
+        28
+      ],
+      "vertical_scrollbar": false
+    },
+    "picker_size": [
+      80,
+      13
+    ],
+    "primary_column": 16,
+    "detail_column": 16,
+    "match_count": 24,
+    "fal_present": false,
+    "fal_painted": null,
+    "fal_display": null,
+    "fal_description": null,
+    "fal_detail": null
+  },
+  "picker-tail-80": {
+    "screen": {
+      "size": [
+        78,
+        28
+      ],
+      "virtual_size": [
+        78,
+        28
+      ],
+      "vertical_scrollbar": false
+    },
+    "picker_size": [
+      76,
+      14
+    ],
+    "primary_column": 16,
+    "detail_column": 16,
+    "match_count": 28,
+    "fal_present": true,
+    "fal_painted": "\u276f  FAL             Media only; not for chat               needs login       ",
+    "fal_display": "FAL",
+    "fal_description": "Media only; not for chat",
+    "fal_detail": "needs login"
+  },
+  "picker-tail-120": {
+    "screen": {
+      "size": [
+        118,
+        28
+      ],
+      "virtual_size": [
+        118,
+        28
+      ],
+      "vertical_scrollbar": false
+    },
+    "picker_size": [
+      80,
+      14
+    ],
+    "primary_column": 16,
+    "detail_column": 16,
+    "match_count": 28,
+    "fal_present": true,
+    "fal_painted": "\u276f  FAL             Media only; not for chat                   needs login       ",
+    "fal_display": "FAL",
+    "fal_description": "Media only; not for chat",
+    "fal_detail": "needs login"
+  },
+  "picker-top-80": {
+    "screen": {
+      "size": [
+        78,
+        28
+      ],
+      "virtual_size": [
+        78,
+        28
+      ],
+      "vertical_scrollbar": false
+    },
+    "picker_size": [
+      76,
+      13
+    ],
+    "primary_column": 16,
+    "detail_column": 16,
+    "match_count": 28,
+    "fal_present": true,
+    "fal_painted": "   FAL             Media only; not for chat               needs login       ",
+    "fal_display": "FAL",
+    "fal_description": "Media only; not for chat",
+    "fal_detail": "needs login"
+  }
+}
