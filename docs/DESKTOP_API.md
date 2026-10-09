@@ -1473,17 +1473,28 @@ and two shapes for one page is the defect the capability exists to prevent.
    actually reads, checked in all three repositories before anything was
    deleted (the file each read was found in is named below, and the whole list
    is in the PR):
-   - **Dropped whole.** A `custom` row whose `custom_type` is
-     `frontend_state_checkpoint_v1`, `session_spend.v1` or `session_state`:
-     the desktop reducer lists all three in `SILENT_CUSTOM_TYPES` and never
-     mints a record for them, the relay web and the native app read neither the
-     row nor the type, and the mobile daemon's fold skips them. `hub_communication`,
-     `wake_schedule` and `prune` are the rest of that silent set and are dropped
-     with them.
-     `system_prefix` and `selected_model` **stay**: they are prefix rows that
-     PAINT (a statement row and the model notice), so dropping them would have
-     changed what the desktop draws — the reason the enumeration is done from
-     the clients rather than from a byte-share table.
+   - **Dropped whole.** The rows the desktop's own projection refuses. It
+     projects a durable row in ONE function (`transcript-reducer.ts::durableRecord`),
+     which ends every non-message row it does not recognise — so among
+     `type: "custom"` rows only `completion_attention` can paint, whatever the
+     row holds. The rows that exist in that shape in real journals are dropped:
+     `frontend_state_checkpoint_v1` (39.1% of the tail bytes on this machine's 40
+     largest journals, in rows of about 349 KB), `session_spend.v1`,
+     `session_state`, `system_prefix` (3.2%), `selected_model` and
+     `attention_started`. The message-row customs the reducer's
+     `SILENT_CUSTOM_TYPES` names go with them — `hub_communication`,
+     `wake_schedule`, `prune` — while the message-row customs it PAINTS
+     (`session_mcp_unavailable`, `todo_snapshot`, `job_result`, the wake and peer
+     receipts, the ask rows) are untouched.
+     `system_prefix` is on this list DESPITE a module comment in
+     `transcript-rows.ts` claiming the prefix rows paint — the audit's strip list
+     repeated that claim. The reducer's own gate refuses them, and the comment
+     describes a shape this build does not write. The reducer is the authority,
+     and the check that caught the difference is the reason the enumeration is
+     done from each client's code rather than from a byte-share table. A row type
+     this build does not know is SERVED: an unknown row is not this contract's to
+     judge, and the fail-safe direction is the one that keeps a future surface
+     working.
    - **Compaction rows** keep their envelope and three payload keys:
      `{id, ts, type, payload: {tokens_before, preview_text}}`. `tokens_before`
      is the pairing fingerprint the reducer matches a live pass against
@@ -1543,6 +1554,16 @@ and two shapes for one page is the defect the capability exists to prevent.
    An incremental refresh (the append case) measured 8/54/160 ms at 5.9/35/118 MB,
    which is why a warm index stays cheap and why an unchanged journal costs a
    stat.
+
+#### The anchored read keeps the reader's own counts
+
+`around_id` is the renderer's FAR JUMP: it asks for a POSITION, and its
+`before`/`after`/`limit` keep counting JOURNAL ROWS exactly as they do today,
+because re-centring the window on paintable rows would move the row the client
+jumped to. The strip still applies (the bytes are the bytes) and `runs` still
+covers the runs intersecting the window, so a jump target's turn facts are
+available; what such a page does NOT promise is that it holds `limit` paintable
+rows.
 
 #### Scope: local journals only, and the seams
 

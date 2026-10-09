@@ -6,7 +6,7 @@ projection would drop new runtime fields and turn unknown accounting into zeros.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from local_operator.session.frontend_state import FrontendSync, SlashResult
 from local_operator.session.runtime.types import reported_subagent_count
@@ -639,6 +639,44 @@ class HistoryEntry(BaseModel):
     ts_source: HistoryTsSource
 
 
+class RunFacts(BaseModel):
+    """One run's facts, for a client that must draw its bar before the turn is
+    fully loaded.
+
+    THE COUNTS ARE FILLED ONLY FOR A SETTLED RUN, and that is the honesty this
+    model exists to carry rather than a default anyone should read past: a live
+    tail's rows are still arriving, so a number taken now is one the client would
+    have to correct in front of the reader — exactly the after-paint change the
+    open frame exists to remove. An unsettled run is still LISTED (a client needs
+    to know which run it is and that it is live) with its counts absent, and a
+    client keeps its own fold for it.
+
+    ``complete`` is false only when the index could not read a row body inside
+    this run, which makes the counts a lower bound. Measured on this machine: 0
+    of 65,755 tool rows across the twelve largest journals exceed that limit.
+    """
+
+    #: The client's own run identity: the closing answer's id when the run has
+    #: one, else its last row's id (``runsOf`` in the desktop renderer), so a bar
+    #: can be matched against the run it already holds.
+    run_key: str
+    #: The run's opening USER row, absent for a run with no user row (a wake or
+    #: hub run). This is the id a client matching by ``opening_user_id`` uses,
+    #: and the one the page's extension guarantees is on the page when
+    #: ``head_cut`` is false.
+    opening_user_id: str | None = None
+    closing_answer_id: str | None = None
+    settled: bool
+    outcome: str | None = None
+    complete: bool = True
+    started_ts: float
+    ended_ts: float
+    #: Absent together whenever ``settled`` is false — see the class note.
+    action_count: int | None = None
+    failed_count: int | None = None
+    worked_seconds: float | None = None
+
+
 class HistoryPage(BaseModel):
     entries: list[HistoryEntry]
     has_more: bool
@@ -650,6 +688,40 @@ class HistoryPage(BaseModel):
     #: made. The frozen wire (design §D9) draws the field as optional for
     #: exactly this reason, and an older client ignores a key it does not know.
     has_newer: bool | None = None
+    #: The open frame's per-run facts, its freshness state and its honest cut
+    #: flag — ABSENT unless the request carried ``open_frame=1`` (see
+    #: ``docs/DESKTOP_API.md`` §"The open frame"). ``None`` rather than a default
+    #: so an older renderer's page carries no new key AT ALL: the promise is
+    #: byte-for-byte, and a defaulted field would serialise as ``null`` on every
+    #: page and break it.
+    runs: list[RunFacts] | None = None
+    #: ``ready`` | ``building`` | ``unavailable`` | ``unsupported``. ``building``
+    #: means an index scan was started and THIS answer carries no facts; a client
+    #: keeps its own condensation and the next frame will have them.
+    runs_state: str | None = None
+    #: True when a cap refused the run extension: the oldest run on the page has
+    #: no opening user row on it, and ``runs`` is where that run's true size
+    #: lives. False when the extension reached a user row, or when there was
+    #: nothing above the page to cut.
+    head_cut: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unnegotiated(self, handler: Any) -> dict[str, Any]:
+        """Drop the open frame's three keys while they are unset.
+
+        WRITTEN AS A SERIALIZER BECAUSE THE PROMISE IS BYTE-FOR-BYTE. The
+        response model serialises every field it declares, so a defaulted field
+        would put ``"runs": null`` on a page served to a client that never asked
+        for the capability — a change to every existing renderer's bytes,
+        invisible in review and exactly the sort of drift this contract's gate
+        exists to prevent. ``has_newer`` keeps its existing ``null`` on purpose:
+        that is today's shape and this serializer must not tidy it away.
+        """
+        data = handler(self)
+        for key in ("runs", "runs_state", "head_cut"):
+            if data.get(key, None) is None:
+                data.pop(key, None)
+        return data
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.
