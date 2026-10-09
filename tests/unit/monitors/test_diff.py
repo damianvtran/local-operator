@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from local_operator.monitors import diff
 
 
@@ -89,3 +91,48 @@ def test_has_line_difference_is_a_sequence_compare() -> None:
     assert diff.has_line_difference("a\nb", "a\nc")
     assert not diff.has_line_difference("", "")
     assert not diff.has_line_difference("a\nb", "a\nb")
+
+
+def test_is_pure_addition_from_empty_output() -> None:
+    """``grep``/``ls`` printing nothing and then a first match (review R3)."""
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert is_pure_addition("", "ERROR x")
+    assert not is_pure_addition("", "")
+
+
+def test_is_pure_addition_survives_a_line_count_crossing_a_power_of_ten() -> None:
+    """QA round 1, Q1: ``read`` re-pads every gutter at 9->10 lines."""
+    from local_operator.monitors.diff import is_pure_addition
+
+    # Faithful to ``_number_lines``: the column is right-aligned to the widest
+    # line number, so 9 lines use ``N| `` and 10 lines `` N| `` on EVERY line.
+    old = "\n".join(f"{i:>1}| line {i}" for i in range(1, 10))
+    new = "\n".join(f"{i:>2}| line {i}" for i in range(1, 11))
+    assert is_pure_addition(old, new)
+
+
+def test_is_pure_addition_still_refuses_a_gutter_only_change() -> None:
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert not is_pure_addition("3| x", "4| x")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("a", "a\nb", True),  # append
+        ("a\nc", "a\nb\nc", True),  # insert-mid (spot-checked, review R6)
+        ("a", "x\na", True),  # prepend (newest-first listing)
+        ("", "ERROR x", True),  # empty old: grep/ls first match
+        ("a\nb", "a", False),  # delete
+        ("a\nb", "a\nc", False),  # replace
+        ("a\nb", "b\na", False),  # reorder without sort_lines
+        ("a", "a\n2| <ts>", False),  # timestamp-only add
+        ("a", "a\n\n", False),  # blank-only add
+    ],
+)
+def test_is_pure_addition_table(old: str, new: str, expected: bool) -> None:
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert is_pure_addition(old, new) is expected
