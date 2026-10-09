@@ -3738,7 +3738,7 @@ def test_a_loop_target_is_a_miss_not_a_raise_under_a_temp_root(tmp_path, monkeyp
     (temp_root / "x").symlink_to("y")
     (temp_root / "y").symlink_to("x")
 
-    target = builtin._temp_root_target(f"{temp_root}/x", builtin._temp_scratch_roots())
+    target = builtin._temp_root_target(f"{temp_root}/x", dict(builtin._temp_scratch_roots()))
 
     assert target is None or target == temp_root.resolve() / "x"
 
