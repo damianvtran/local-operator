@@ -1247,7 +1247,7 @@ lop network identity rotate --json    # for a suspected key compromise
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
   not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — signal a target the
+  --stop`, and it means the owner's own `lop stop --force` — stop a target the
   plain stop skipped (one already leaving, or mid-turn with a socket that will not
   answer), accepting that the turn goes with it.
 
