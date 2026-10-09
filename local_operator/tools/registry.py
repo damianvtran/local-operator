@@ -14,9 +14,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple
 
+from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
-from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.network.tool import build_network_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool

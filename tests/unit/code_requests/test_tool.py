@@ -227,3 +227,71 @@ async def test_show_without_ref_is_a_validation_error(tmp_path: Path) -> None:
         "c5", {"op": "show"}, None, None, context
     )
     assert result.is_error and "ref" in result.text
+
+
+# ---------------------------------------------------------------------------
+# review round 1: Q3 (the advertised qualified ref resolves) and F5
+# (``show`` never writes the ledger)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_show_of_an_unseen_ref_never_writes_the_ledger(tmp_path: Path) -> None:
+    unseen = _ref("https://github.com/other/repo/pull/99")
+    result = await code_requests_tool.execute_code_requests(
+        "c9", {"op": "show", "ref": unseen.url}, None, None, _context(tmp_path)
+    )
+    assert not result.is_error
+    assert ledger.read_index(tmp_path, SESSION) is None, "show is read-only for the ledger"
+    # Offline (no login in the test HOME): the render says what a caller can do.
+    assert "link-only" in result.text
+
+
+@pytest.mark.asyncio
+async def test_show_resolves_a_qualified_ref_to_its_issue_verdict(tmp_path: Path) -> None:
+    async def probe(config_dir, ref, *, timeout_s=15.0):
+        return "issue", None
+
+    async def never_show(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("an issue verdict must not reach the fetch path")
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(code_requests_tool.service, "probe_shorthand", probe)
+        monkeypatch.setattr(code_requests_tool.service, "show", never_show)
+        result = await code_requests_tool.execute_code_requests(
+            "c10", {"op": "show", "ref": "o/r#123"}, None, None, _context(tmp_path)
+        )
+    finally:
+        monkeypatch.undo()
+    assert not result.is_error
+    assert "no pull request #123" in result.text
+    assert "issue" in result.text
+
+
+@pytest.mark.asyncio
+async def test_show_promotes_a_qualified_ref_when_the_pull_exists(tmp_path: Path) -> None:
+    full = _ref("https://github.com/o/r/pull/7")
+    seen: dict[str, object] = {}
+
+    async def probe(config_dir, ref, *, timeout_s=15.0):
+        return "pull", full
+
+    async def fake_show(config_dir, ref, *, session_id="", force=False, timeout_s=25.0):
+        seen["ref"] = ref
+        seen["session_id"] = session_id
+        return {"key": ref.key, "link_only": False, "state": "open", "summary": {}}
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(code_requests_tool.service, "probe_shorthand", probe)
+        monkeypatch.setattr(code_requests_tool.service, "show", fake_show)
+        result = await code_requests_tool.execute_code_requests(
+            "c11", {"op": "show", "ref": "o/r#7"}, None, None, _context(tmp_path)
+        )
+    finally:
+        monkeypatch.undo()
+    assert not result.is_error
+    promoted = seen["ref"]
+    assert getattr(promoted, "full", False) is True
+    assert seen["session_id"] == SESSION, "the dirty-mark arm needs the session id"

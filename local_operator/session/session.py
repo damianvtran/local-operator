@@ -14124,8 +14124,11 @@ class Session:
             blob = " ".join(str(value) for value in args.values() if isinstance(value, str))
             for ref in iter_refs(blob, context):
                 drafts.append(
-                    (ref, f"Tracked: {self._ref_handle(ref)} (armed with {tool_name}). "
-                     "code_requests show for review rounds and CI.")
+                    (
+                        ref,
+                        f"Tracked: {self._ref_handle(ref)} (armed with {tool_name}). "
+                        "code_requests show for review rounds and CI.",
+                    )
                 )
                 if len(drafts) >= 3:
                     break

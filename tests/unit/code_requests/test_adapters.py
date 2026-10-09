@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from local_operator.code_requests.adapters import adapter_for
+from local_operator.code_requests.adapters import adapter_for, base, github, gitlab
 from local_operator.code_requests.adapters.base import ForgeHTTPError
 from local_operator.code_requests.refs import Ref, parse_any
 
@@ -321,3 +321,137 @@ def test_detect_and_link_forges_have_no_adapter() -> None:
     ref = _ref("https://bitbucket.org/team/repo/pull-requests/9")
     assert ref.full is False
     assert adapter_for(ref) is None
+
+
+# ---------------------------------------------------------------------------
+# review round 1: F8 (rel=next stays on the API origin), F4b (a CI error is not
+# flattened), QA Q3 (the pull-request probe)
+# ---------------------------------------------------------------------------
+
+
+def _paged_gh_handler(calls: list[httpx.Request], next_url: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        path = request.url.path
+        if path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_gh_summary_payload())
+        if path.endswith("/issues/7/comments"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": i, "body": "c", "created_at": "2026-10-02T01:00:00Z", "html_url": "u"}
+                    for i in range(100)
+                ],
+                headers={"Link": f'<{next_url}>; rel="next"'},
+            )
+        if path.endswith("/pulls/7/reviews"):
+            return httpx.Response(200, json=[])
+        if "/commits/" in path:
+            return httpx.Response(200, json={"check_runs": [], "total_count": 0})
+        raise AssertionError(f"unexpected path {path}")
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_a_cross_origin_next_link_is_never_followed_github() -> None:
+    calls: list[httpx.Request] = []
+    handler = _paged_gh_handler(calls, "https://evil.example.invalid/issues/7/comments")
+    async with _client(handler) as client:
+        outcome = await github.ADAPTER.fetch(GH, {}, "tok", client=client)
+    assert all(
+        request.url.host == "api.github.com" for request in calls
+    ), "the bearer must not follow a rel=next page to another origin"
+    assert len(outcome.pieces.get("comments") or []) == 100
+
+
+@pytest.mark.asyncio
+async def test_a_same_origin_next_link_still_paginates_github() -> None:
+    calls: list[httpx.Request] = []
+    handler = _paged_gh_handler(
+        calls, "https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2"
+    )
+    async with _client(handler) as client:
+        await github.ADAPTER.fetch(GH, {}, "tok", client=client)
+    assert any(request.url.params.get("page") == "2" for request in calls)
+
+
+@pytest.mark.asyncio
+async def test_a_cross_origin_next_link_is_never_followed_gitlab() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        path = request.url.path
+        if path.endswith("/merge_requests/4"):
+            return httpx.Response(
+                200,
+                json={
+                    "iid": 4,
+                    "state": "opened",
+                    "title": "t",
+                    "sha": "c" * 12,
+                    "source_branch": "b",
+                    "target_branch": "main",
+                    "author": {"username": "u"},
+                    "web_url": "https://gitlab.com/g/s/p/-/merge_requests/4",
+                },
+            )
+        if path.endswith("/notes"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": i,
+                        "body": "n",
+                        "created_at": "2026-10-02T01:00:00Z",
+                        "system": False,
+                    }
+                    for i in range(100)
+                ],
+                headers={"Link": '<https://evil.example.invalid/notes>; rel="next"'},
+            )
+        raise AssertionError(f"unexpected path {path}")
+
+    async with _client(handler) as client:
+        await gitlab.ADAPTER.fetch(GL, {}, "tok", client=client)
+    assert all(request.url.host == "gitlab.com" for request in calls)
+
+
+@pytest.mark.asyncio
+async def test_a_network_error_on_ci_is_not_flattened_into_a_piece() -> None:
+    """F4b: the CI failure PROPAGATES (so the pass can back off), and nothing
+    in the outcome claims the CI is empty."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "/commits/" in path:
+            raise httpx.ConnectError("boom")
+        if path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_gh_summary_payload())
+        return httpx.Response(200, json=[])
+
+    async with _client(handler) as client:
+        with pytest.raises(base.ForgeHTTPError) as caught:
+            await github.ADAPTER.fetch(GH, {}, "tok", client=client)
+    assert caught.value.kind == "network"
+    assert "check-runs" in str(caught.value.piece), "the failing endpoint is named"
+
+
+@pytest.mark.asyncio
+async def test_probe_pull_reads_the_verdict() -> None:
+    def make(status: int):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.endswith("/pulls/7")
+            return httpx.Response(status, json={} if status == 200 else {"message": "x"})
+
+        return handler
+
+    async with _client(make(200)) as client:
+        assert await github.ADAPTER.probe_pull(GH, "tok", client=client) == "pull"
+    async with _client(make(404)) as client:
+        assert await github.ADAPTER.probe_pull(GH, "tok", client=client) == "issue"
+    async with _client(make(429)) as client:
+        with pytest.raises(base.ForgeHTTPError) as caught:
+            await github.ADAPTER.probe_pull(GH, "tok", client=client)
+    assert caught.value.kind == "rate_limited"

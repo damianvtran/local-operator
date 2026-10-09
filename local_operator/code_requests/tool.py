@@ -233,8 +233,36 @@ async def _op_show(
             f"'{ref_text}' is not a PR/MR URL or qualified ref I can parse. Examples: "
             "https://github.com/owner/repo/pull/12, owner/repo#12, group/project!34.",
         )
-    view = await service.show(config_dir, ref)
+    # ``owner/repo#N`` is ambiguous by construction (issue or pull request —
+    # GitHub numbers both from one sequence), and the tool doc + guide
+    # advertise it, so show RESOLVES it: one probe, and a 404 renders as the
+    # issue it is (QA round 1, Q3). Only the exact ambiguous form is probed —
+    # not an unconfirmed host's URL, which stays link-only under the F1 gate.
+    if (
+        not ref.full
+        and ref.forge == "github"
+        and "could be an issue or a pull request" in (ref.reason or "")
+    ):
+        verdict, resolved = await service.probe_shorthand(config_dir, ref)
+        if verdict == "issue":
+            return _ok(tool_call_id, _render_issue(ref))
+        if verdict == "pull" and resolved is not None:
+            ref = resolved
+    session_id = str(getattr(context, "session_id", "") or "")
+    view = await service.show(config_dir, ref, session_id=session_id)
     return _ok(tool_call_id, _render_show(view))
+
+
+def _render_issue(ref: Ref) -> str:
+    """The issue verdict for an ambiguous ``owner/repo#N``: honest, one request."""
+    issue_url = f"https://{ref.host}/{ref.project}/issues/{ref.number}"
+    return (
+        f"{ref.key}\n"
+        f"link-only: no pull request #{ref.number} in {ref.project} — GitHub numbers "
+        "issues and pull requests from one sequence, so this number is an issue "
+        "(or not visible to this login).\n"
+        f"link: {issue_url}"
+    )
 
 
 def _render_show(view: dict[str, Any]) -> str:

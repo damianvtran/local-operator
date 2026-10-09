@@ -135,6 +135,13 @@ class McpServer:
 # Pre-filter
 # ---------------------------------------------------------------------------
 
+#: The name of the tool this package powers. Its OUTPUT is derived from rows
+#: this same package built, so it must never be re-parsed as evidence of a
+#: mention: the tool prints keys like ``gitlab.com/group/project!57``, and a
+#: scan over them used to seed a phantom tool-only row (QA round 1, Q6). One
+#: spelling, shared by the live hook's gate and the scanner's mention loop.
+SELF_TOOL_NAME = "code_requests"
+
 #: Substrings without which a bash call cannot match any rule. The command carries
 #: the verb, and the result carries the URL (the script rule has no verb, so the
 #: result alone must be enough to keep it).
@@ -148,6 +155,10 @@ def could_matter(tool_name: str, args: Mapping[str, Any], result_text: str) -> b
     Called on EVERY tool result by the live hook. It must stay a handful of
     substring checks: no regex, no tokenising, no I/O.
     """
+    if tool_name == SELF_TOOL_NAME:
+        # The named constant makes the exclusion deliberate rather than a
+        # consequence of the "bash only" rule below.
+        return False
     if tool_name.startswith("mcp__"):
         return True
     if tool_name != "bash":

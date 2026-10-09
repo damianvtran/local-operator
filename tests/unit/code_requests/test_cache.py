@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -169,3 +170,86 @@ def test_fetch_dir_is_per_host_and_project_encoded(tmp_path: Path) -> None:
     assert path.name == "a%2Fb%2Fc__4.json"
     dirty = cache.dirty_path(tmp_path, "abcdef123456")
     assert dirty.parent.name == ".dirty"
+
+
+# ---------------------------------------------------------------------------
+# review round 1: F2 (the `all` mark is consumable), F10 (the sweep rotates),
+# F5 (the LRU bound is exercised)
+# ---------------------------------------------------------------------------
+
+
+def _seed_index(tmp_path: Path, session_id: str = "s1") -> None:
+    """An index with one row: ``mark_dirty(all_rows=True)`` is a no-op without rows."""
+    from local_operator.code_requests import ledger
+    from local_operator.code_requests.scan import Row, ScanResult
+
+    assert ledger.write_index(tmp_path, session_id, ScanResult(rows=[Row(ref=REF)]))
+
+
+def test_clear_dirty_consume_all_removes_the_whole_mark(tmp_path: Path) -> None:
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    cache.clear_dirty(tmp_path, "s1", keys=["k1", "k2"], consume_all=True)
+    assert not cache.dirty_path(tmp_path, "s1").exists()
+
+
+def test_clear_dirty_consume_all_still_respects_since(tmp_path: Path) -> None:
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    snapshot = cache.read_dirty(tmp_path, "s1")["at"] - 1.0
+    time.sleep(0.01)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)  # a newer mark
+    cache.clear_dirty(tmp_path, "s1", keys=["k1"], since=snapshot, consume_all=True)
+    assert cache.read_dirty(tmp_path, "s1")["all"] is True  # newer mark survived
+    cache.clear_dirty(tmp_path, "s1", keys=None)
+    assert not cache.dirty_path(tmp_path, "s1").exists()
+
+
+def test_clear_dirty_without_consume_all_leaves_the_all_flag(tmp_path: Path) -> None:
+    _seed_index(tmp_path)
+    cache.mark_dirty(tmp_path, "s1", all_rows=True)
+    cache.clear_dirty(tmp_path, "s1", keys=["k1"])
+    assert cache.read_dirty(tmp_path, "s1")["all"] is True
+
+
+def test_sweep_rotates_across_hosts(tmp_path: Path, monkeypatch) -> None:
+    """A store whose unremovable prefix trips the budget still reaches the rest.
+
+    The stale files live in ``c.example``, and hosts ``a``/``b`` hold FRESH
+    files that the walk counts but cannot remove. Without rotation the walk
+    dies in the same first hosts pass after pass and ``c`` is never visited
+    (review round 1, F10); the cursor resumes past the host the limit fired in.
+    """
+    stale = time.time() - cache.SWEEP_AGE_S - 10
+    for host, count, old in (
+        ("a.example", 4, False),
+        ("b.example", 1, False),
+        ("c.example", 2, True),
+    ):
+        for n in range(1, count + 1):
+            path = cache.entry_path(tmp_path, host=host, project="p", number=n)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+            if old:
+                os.utime(path, (stale, stale))
+    monkeypatch.setattr(cache, "_SWEEP_LIMIT", 4)
+    cache._reset_for_tests()  # other tests may have moved the cursor
+    for _ in range(2):
+        cache.sweep(tmp_path, min_interval_s=0.0)
+    remaining = {p.name for p in cache.fetch_dir(tmp_path).glob("c.example/*.json")}
+    assert remaining == set(), "after the rotation reaches it, host c is swept"
+
+
+def test_lru_eviction_keeps_the_newest_entries(tmp_path: Path) -> None:
+    cap = cache.MEM_ENTRIES_PER_HOST
+    for n in range(1, cap + 6):
+        ref = _ref(f"https://github.com/o/r/pull/{n}")
+        entry = {"key": ref.key, "pieces": {"summary": {"number": n}}}
+        assert cache.write_entry(tmp_path, entry, ref=ref)
+    bucket = cache._MEMORY.get("github.com")
+    assert bucket is not None
+    assert len(bucket) == cap
+    first = _ref("https://github.com/o/r/pull/1")
+    assert first.key not in bucket  # evicted from MEMORY
+    read = cache.read_entry(tmp_path, first)
+    assert read is not None, "the evicted entry is still on disk"

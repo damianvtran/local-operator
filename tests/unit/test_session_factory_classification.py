@@ -1563,3 +1563,77 @@ async def test_an_invalidated_freeze_does_not_ask_for_the_same_message_twice(
     assert "mcp://slack" in second, "the answer still reaches its own message"
     assert "alpha" in second
     assert len(classifier.requests) == 1, "and a message that has an answer is never asked twice"
+
+
+# ---------------------------------------------------------------------------
+# §F: the deterministic code-requests trigger (PR1b) and its F9 tightening
+# ---------------------------------------------------------------------------
+
+
+def _cr_hooks(has_rows: bool) -> session_factory._KnowledgeHooks:
+    hooks = _hooks()
+    hooks.code_requests_ledger = lambda: has_rows
+    return hooks
+
+
+def _cr_trigger(query: str, *, has_rows: bool = True) -> Any:
+    return session_factory._code_requests_recommendation(query, _cr_hooks(has_rows))
+
+
+def test_the_ref_arm_fires_without_the_ledger_and_names_the_tool() -> None:
+    for query in (
+        "what's the state of https://github.com/damianvtran/local-operator/pull/1904?",
+        "did design sign off on minervaai/minerva-skills!57",
+    ):
+        hit = _cr_trigger(query, has_rows=False)
+        assert hit is not None, query
+        assert hit.resource_url == "tool://code_requests"
+
+
+def test_the_vocabulary_arm_needs_a_nonempty_ledger() -> None:
+    for query in ("is round 2 clean?", "merge it once CI is green"):
+        assert _cr_trigger(query) is not None, query
+        assert _cr_trigger(query, has_rows=False) is None, query
+
+
+def test_the_vocabulary_arm_keeps_its_positives() -> None:
+    for query in (
+        "is round 2 clean?",
+        "merge it once CI is green",
+        "is CI green on the PR?",
+        "did the reviewer approve the merge request?",
+        "the pull request needs another review round",
+    ):
+        assert _cr_trigger(query) is not None, query
+
+
+def test_unrelated_turns_stay_silent_even_with_a_nonempty_ledger() -> None:
+    """F9's before/after: the last four fired under the loose vocabulary."""
+    for query in (
+        "pull the latest main",
+        "merge these two CSVs",
+        "request a review from the doctor",
+        "see issue https://github.com/o/r/issues/12",
+        "https://github.com/o/r/pull/new/feat-x",
+        "#1 priority is the release",
+        # review round 1 (F9), the negatives the tightening is FOR:
+        "fix the CI/CD pipeline docs",
+        "our nightly data pipeline needs a retry",
+        "what is a pull request",
+        "we should review the pipeline design",
+    ):
+        assert _cr_trigger(query) is None, query
+
+
+@pytest.mark.asyncio
+async def test_the_trigger_respects_the_configured_cap() -> None:
+    hooks = _cr_hooks(True)
+    block = await session_factory._select_knowledge_block(
+        hooks, "merge it once CI is green", task_id="t-cr"
+    )
+    assert "tool://code_requests" in block
+    hooks.classification_max_recommendations = 0
+    blocked = await session_factory._select_knowledge_block(
+        hooks, "merge it once CI is green", task_id="t-cr2"
+    )
+    assert "tool://code_requests" not in blocked
