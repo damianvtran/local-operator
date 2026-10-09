@@ -54,7 +54,16 @@ from typing import TYPE_CHECKING, Any
 # session layer must not have to import the TUI package to price a turn. They
 # are re-exported here so this module's surface (and every caller's import)
 # is unchanged.
-from local_operator.model.costs import cost_summary, job_cost, turn_cost
+from local_operator.model.costs import (
+    SubtreeComponents,
+    carry_floor,
+    cost_summary,
+    job_cost,
+    job_subtree_cost,
+    subtree_components,
+    subtree_cost,
+    turn_cost,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, see ``SearchSpendSnapshot.of``
     from local_operator.web_search.cost import SearchSpendTotals
@@ -67,6 +76,11 @@ __all__ = [
     "micro_from_usd",
     "turn_cost",
     "job_cost",
+    "job_subtree_cost",
+    "subtree_components",
+    "subtree_cost",
+    "SubtreeComponents",
+    "carry_floor",
     "cost_summary",
 ]
 
