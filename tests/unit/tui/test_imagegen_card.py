@@ -301,6 +301,44 @@ def test_the_hint_leaves_once_the_live_word_says_cancelling() -> None:
     assert "⋯ cancelling" in _content(card)
 
 
+def test_the_cancelling_interim_holds_through_a_terminal_stage_update() -> None:
+    """Design round 1, D1: once a live update maps to `cancelling`, the word,
+    the shed hint and the graphic state hold until the settle — the cancel
+    flow's terminal-stage emit (`cancelled`) arrives one turn before the
+    result and must not un-say the interim."""
+    card = _running_card(stage="cancelling", progress_fraction=0.4)
+    assert "⋯ cancelling" in _content(card)
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    assert card._imagegen_cancel_hold is not None
+
+    # The window: a terminal-stage update arrives before the result lands.
+    card.set_live_details({"stage": "cancelled", "progress_fraction": None})
+    body = _content(card)
+    assert "⋯ cancelling" in body
+    assert "⋯ running" not in body
+    assert "████░░░░░░ 40%" in body
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    assert card._imagegen_live is not None
+    assert card._imagegen_live.state == "cancelling"
+
+    # The settle still wins, and clears the latch with the live view.
+    card.mark_interrupted(reason="Stopped before completion.", details={"stage": "cancelled"})
+    assert "⋯ cancelling" not in _content(card)
+    assert card._imagegen_cancel_hold is None
+    assert "interrupted" in card._build_row(100).plain
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+
+
+def test_a_terminal_stage_without_an_interim_latches_nothing() -> None:
+    """The settled-word non-preemption is untouched: a live `cancelled` with
+    no prior `cancelling` claims nothing, paints the card's own word and
+    leaves no latch behind (design round 1, D1 — scope: the interim only)."""
+    card = _running_card(stage="cancelled")
+    assert "⋯ running" in _content(card)
+    assert "⋯ cancelled" not in _content(card)
+    assert card._imagegen_cancel_hold is None
+
+
 # --- non-imagegen rows are untouched ---------------------------------------
 
 
