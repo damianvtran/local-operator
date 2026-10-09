@@ -879,7 +879,7 @@ def test_uninstall_disables_the_timer_before_the_service(
 
 
 def test_the_windows_uninstall_ends_the_task_before_deleting_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shared_label_allowed: None
 ) -> None:
     """A2: the delete deregisters without stopping the supervisor.
 
@@ -920,7 +920,7 @@ def test_the_windows_uninstall_ends_the_task_before_deleting_it(
 
 
 def test_a_refused_windows_uninstall_is_not_reported_as_success(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shared_label_allowed: None
 ) -> None:
     """A refusal must not read as removed: the supervisor is still registered."""
     import subprocess
@@ -1099,7 +1099,7 @@ def test_the_windows_arm_registers_and_starts_a_task(
 
 
 def test_the_windows_arm_reports_schtasks_refusal_verbatim(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shared_label_allowed: None
 ) -> None:
     """No Windows host here, so a wrong guess must fail LOUDLY with its own words."""
     from local_operator import supervisors
@@ -1176,3 +1176,74 @@ def test_a_server_spool_write_never_reaches_the_shared_unit_for_a_scratch_store(
     assert _stat_key(real_plist) == before, "the operator's real plist was touched"
     sandbox_plist = home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     assert not sandbox_plist.exists(), "a store the shared unit does not own got a unit file"
+
+
+def test_the_windows_arm_obeys_the_one_task_per_user_rule(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A store INSIDE the real profile must not take the operator's own task.
+
+    Review round 2, M1. ``task_scheduler_is_addressable`` is a CONTAINMENT test
+    — "is this store under the real profile" — which is exactly the predicate
+    the launchd incident ran through: the QA store was inside the home, so
+    containment passed and the operator's own unit was repointed at it. The
+    Windows task name is shared the same way, so the ownership rule has to
+    reach this arm too, on both the install path and the status read.
+
+    Nothing here calls ``schtasks``: the refusal fires before any of it, and a
+    test that let the arm through would be registering a real task name.
+    """
+    import subprocess
+
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(supervisors, "task_scheduler_is_addressable", lambda _c: True)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: calls.append(args)
+        or subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    # ``tmp_path`` is not the default config root, which is what the rule asks
+    # about; the home half is irrelevant to the refusal's REASON here, and the
+    # sentence is the module wrapper's own.
+    store = tmp_path / "config"
+
+    state = mod._task_supervisor_state(store)
+    assert state.verifiable is False and state.loaded is False, state
+    assert "not the one the shared task serves" in state.detail, state.detail
+
+    outcome = mod.ensure_supervisor_installed(store)
+    assert outcome.installed is False, outcome
+    assert "not the default one the shared unit serves" in outcome.reason, outcome.reason
+    assert calls == [], f"a refused arm must not reach schtasks: {calls}"
+
+
+def test_the_uninstall_refuses_a_store_the_shared_unit_does_not_serve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The removal path is gated by the same rule as the install path (M4).
+
+    A non-default store could still ``bootout`` the operator's REAL
+    ``gui/<uid>`` job and unlink the plist her own store installed — the same
+    one-label blast radius the install half was fixed for, on the verb that
+    takes the supervisor away rather than puts it there. Asserted on the
+    DECISION (no ``launchctl``, no unlink) so a regression cannot delete the
+    operator's live plist while proving itself.
+    """
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "launchd")
+    monkeypatch.setattr(mod, "ambient_config_dir", lambda: tmp_path / "config")
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(mod, "_launchctl", lambda *args: calls.append(args))
+
+    outcome = mod.uninstall()
+
+    assert outcome.installed is False, outcome
+    assert "not the default one the shared unit serves" in outcome.reason, outcome.reason
+    assert calls == [], f"a refused uninstall must not reach launchctl: {calls}"

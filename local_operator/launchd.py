@@ -1112,7 +1112,8 @@ def shared_label_refusal(config_dir: Path) -> str | None:
         if root != expected:
             return (
                 f"the config dir {root} is not the default one the shared unit serves "
-                f"({expected}); not repointing the shared unit at it"
+                f"({expected}); not repointing the shared unit at it — wakes for a store "
+                "other than the default fire only while a session is open"
             )
         if not Path.home().resolve().is_relative_to(expected.parent):
             # A redirected $HOME with the REAL default config root: the unit file

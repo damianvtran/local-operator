@@ -906,16 +906,16 @@ async def test_the_pending_browser_block_does_not_dump_the_oauth_url(
         assert definition is not None
 
         monkeypatch.setattr(login_catalog, "headless_display", lambda *a, **k: False)
-        app._login_callbacks(definition).on_auth_url(
-            long_url, "Didn't open? http://127.0.0.1:5/launch"
-        )
+        # ``on_auth_url`` is Optional on the callbacks record; narrow once so
+        # both deliveries below go through a non-None attribute (B1).
+        app_callbacks = app._login_callbacks(definition)
+        assert app_callbacks.on_auth_url is not None
+        app_callbacks.on_auth_url(long_url, "Didn't open? http://127.0.0.1:5/launch")
         await pilot.pause()
         local = _transcript_text(app)
 
         monkeypatch.setattr(login_catalog, "headless_display", lambda *a, **k: True)
-        app._login_callbacks(definition).on_auth_url(
-            long_url, "Didn't open? http://127.0.0.1:5/launch"
-        )
+        app_callbacks.on_auth_url(long_url, "Didn't open? http://127.0.0.1:5/launch")
         await pilot.pause()
         headless = _transcript_text(app)
 
