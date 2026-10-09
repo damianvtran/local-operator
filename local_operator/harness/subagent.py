@@ -2798,6 +2798,16 @@ async def _construct_child_session(
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
     mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
+    # The DURABLE half of the child→parent link, for code-request attribution. The
+    # live half is the parent handle attached below (see
+    # ``code_requests.hook.attach_parent``); this stamp is what lets a later backfill —
+    # a scan of a child that ran before this feature, or one whose live propagation
+    # failed — attribute the child's rows to the conversation that asked for the work.
+    # Best-effort by its own contract, and it preserves the ``label``/``agent`` keys
+    # the picker reads (it is a read-modify-write, not a second stamp).
+    from local_operator.code_requests.hook import stamp_origin_parent
+
+    stamp_origin_parent(session_dir, str(getattr(parent_session, "session_id", "") or ""))
     # Birth metadata must be durable before publication, without its fsync
     # blocking the parent or other children sharing this event loop.
     transcript = await asyncio.to_thread(Transcript, session_dir)
@@ -3210,6 +3220,14 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # The LIVE half of the same link: an event this child records for an opened or
+    # acted-on code request is propagated to the parent's transcript as it happens, so
+    # the operator's conversation shows the PR its subagent opened without waiting for
+    # a scan of the child's directory. Best-effort; a session without the handle simply
+    # propagates nothing (the scanner still finds the child's own rows).
+    from local_operator.code_requests.hook import attach_parent
+
+    attach_parent(child, parent_session)
     # THE CHILD CANNOT ANSWER THIS ITSELF, so its own holder gets the PROBE
     # OBJECT rather than a copied value: the child holds no control socket and no
     # registrant, and its only channel to a human is ``hub`` -> parent, so "is an

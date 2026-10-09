@@ -721,5 +721,22 @@ def feature_flags() -> dict[str, Any]:
         # additive — an absent key means the surface is not there, which is the
         # pre-voicing behaviour rather than a degraded one.
         "tts": 1,
+        # THE PER-SESSION CODE-REQUEST SURFACE: `GET
+        # /v1/desktop/sessions/{id}/code-requests` (this conversation's PRs/MRs, from the
+        # derived index) plus its `/refresh` child. ONE key for the family, because the
+        # read and the refresh are one contract revision: a renderer that can draw the
+        # list is the renderer that owns the Retry affordance.
+        #
+        # WHY A KEY AT ALL: the routes are ADDITIVE — an older renderer never calls one —
+        # so this gates nothing for an old client. It is how a renderer learns the surface
+        # EXISTS before it builds a rail item or a chip whose query would 404 on a backend
+        # without it. Absent, the conversation shows no code-request affordance at all,
+        # which is the pre-feature state rather than a degraded one.
+        #
+        # `1` IS THE FEATURE'S FIRST VERSION, not the contract's: this slice's rows are
+        # link-only, and the adapter slice that adds remote state is expected to widen the
+        # row (an additive field) rather than bump this key — a renderer that can read
+        # link-only rows can read a fuller one.
+        "code_requests": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }
