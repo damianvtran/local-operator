@@ -153,14 +153,45 @@ def _log_text(config_dir: Path) -> str:
 
 
 def _capture_text(child: Any) -> str:
-    """Whatever the child wrote to the stdio capture, for a failure message."""
+    """Whatever the child wrote to the stdio capture, for a failure message.
+
+    THE WINDOW IS THE TAIL — the right end for an ordered exit's last words, the
+    wrong end for a faulthandler report, whose "Fatal Python error: …" header and
+    innermost frames sit at the top. The 8000-byte window carries the measured dumps
+    whole: a 52-frame boot crash is 5,773 B. A deeper dump still loses its top here,
+    and the capture file remains the full record while it lives.
+    """
     path = getattr(child, "lop_capture_path", None)
     if path is None:
         return ""
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")[-2000:]
+        return Path(path).read_text(encoding="utf-8", errors="replace")[-8000:]
     except OSError:
         return ""
+
+
+def _exit_summary(child: Any) -> str:
+    """How the child left (or hasn't), as the clause a failure message leads with.
+
+    A NEGATIVE ``poll()`` is a SIGNAL, not an exit: the interpreter was killed at
+    the OS's hand and no Python-level exit path ran — a different failure from a
+    runtime that exited rc=1, and it has to READ differently. This cell's child
+    has produced exactly that shape on CI (run 37851665431, shard (3.12, 2):
+    rc=-11 SIGSEGV with an empty capture and an empty log — a child that never
+    wrote anything), and the sibling P2 rig established the spelling
+    (``rc=-11 (SIGSEGV)``, PR #1753): the name is what makes a death legible
+    without the reader having to know what -11 means.
+    """
+    rc = child.poll()
+    if rc is None:
+        return "is still running"
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:  # an unnamed signal number: the rc alone still reads
+            name = f"signal {-rc}"
+        return f"died of {name} (rc={rc}), a signal death rather than an exit"
+    return f"exited (rc={rc})"
 
 
 def _await_log(config_dir: Path, needle: str, child: Any, *, timeout: float = _WAIT_S) -> str:
@@ -221,8 +252,8 @@ def _wait_for_record(
                 return record
         if child is not None and child.poll() is not None:
             raise AssertionError(
-                f"the runtime exited (rc={child.returncode}) before publishing its "
-                f"record, so no wait can succeed:\n{_log_text(config_dir)[-1200:]}"
+                f"the runtime {_exit_summary(child)}, before publishing its record, "
+                f"so no wait can succeed:\n{_log_text(config_dir)[-1200:]}"
             )
         time.sleep(0.05)
     raise AssertionError(f"no record for {_SESSION_ID} within {timeout}s")
@@ -273,6 +304,15 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
     _seed(config_dir)
     _isolate(monkeypatch, config_dir)
 
+    # A SIGNAL DEATH HERE MUST LEAVE A READING (the sibling P2 rig's rule, PR
+    # #1753): this cell's child has died ``rc=-11`` SIGSEGV on CI (run 37851665431,
+    # shard (3.12, 2)) with an EMPTY capture and no log line — a child that never
+    # wrote anything, which is not diagnosable. ``PYTHONFAULTHANDLER`` makes the
+    # interpreter print its own fatal-error report (the thread and the frame it
+    # died in) into the capture file the spawn already folds stderr into. It
+    # engages only on a fatal signal; the readiness gate below is untouched and a
+    # death still reds the cell.
+    monkeypatch.setenv("PYTHONFAULTHANDLER", "1")
     # The probe's own disposition, set on THIS process so the child inherits it.
     # CPython restores only SIGPIPE/SIGXFZ/SIGXFSZ in a child before exec, so a
     # SIG_IGN set here reaches the child as SIG_IGN, where the runtime's own
@@ -311,8 +351,12 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
         deadline = time.monotonic() + _WAIT_S
         while "state: streaming=" not in _log_text(config_dir):
             assert child.poll() is None, (
-                f"the runtime exited (rc={child.returncode}) before it armed its "
-                f"signal handlers:\n{_capture_text(child)}\n{_log_text(config_dir)[-2000:]}"
+                f"the runtime {_exit_summary(child)}, before it armed its signal "
+                f"handlers. Readiness is the child's own SIGUSR1 dump, and a probe "
+                f"sent before arming is discarded by the inherited SIG_IGN — so "
+                f"this is a DEATH before arming, distinct from the never-armed shape "
+                f"below. Capture and log:\n{_capture_text(child)}\n"
+                f"{_log_text(config_dir)[-2000:]}"
             )
             assert time.monotonic() < deadline, (
                 "the runtime never armed (no SIGUSR1 dump in its log); the debug hook "

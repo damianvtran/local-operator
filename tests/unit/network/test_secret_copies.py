@@ -30,6 +30,7 @@ import pytest
 from local_operator.network import store
 from local_operator.network.credentials import sync
 from local_operator.network.credentials.sync import SyncState
+from tests.conftest import _stop_brokers_in
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_credentials_real_link import (  # noqa: F401
     _lop_network,
@@ -134,6 +135,24 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
         yield mesh
     finally:
         server_b.stop()
+        # THE PER-SIDE BROKERS DIE HERE, because nothing else can reach them. These
+        # cells drive the REAL broker (the copy path goes through it), so each side's
+        # store starts a detached `brokerd` under its own root; the suite-wide sweep in
+        # ``tests/conftest.py`` cannot see those roots — its candidates come from
+        # [redacted], and this module only ever reaches [redacted] through fixtures
+        # (``secret_mesh`` and the network suite's ``root``), so ``item.funcargs``
+        # never holds it and the sweep's list comes back as ``home/.local-operator``
+        # alone. Measured on this fleet: a ``-n0`` run of this file left NINE live
+        # key-holding daemons even though the sweep ran (its own probe logged
+        # ``candidates=1, with_socket=0``, and each two-device cell added two). The
+        # socket lives INSIDE each root (pytest paths here are short enough that no
+        # TMPDIR fallback is in play), and pytest reclaims the directories at
+        # [redacted]'s own teardown, after this finaliser — so this is the last
+        # moment `_stop_brokers_in` (the sweep's own stop, candidate by candidate,
+        # refusing anything it cannot confirm dead) can reach them. Cell 5
+        # (``needs_list``) leaked nothing and needs none of this; the bare-secret cell
+        # shares this fixture and is covered with the rest.
+        _stop_brokers_in([server_a.root, server_b.root])
 
 
 def test_a_shared_secret_copies_re_sealed_and_marked(secret_mesh: Any) -> None:
