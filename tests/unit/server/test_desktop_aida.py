@@ -5,7 +5,8 @@ way the renderer does — ASGI transport, bearer token, JSON bodies — against 
 isolated config root, and pins each clause the UI was written against:
 ``GET`` never creates, ``open``/``greet`` ensure, ``greet`` is idempotent,
 ``pause``/``resume`` move the flag, a disabled install answers ``enabled: false``
-on GET and 409 ``aida_disabled`` on POST, and the read payload carries her
+on GET and 409 ``aida_disabled`` on POST, a store lock held for the whole wait
+refuses with the TUI's own sentence (QA-O1), and the read payload carries her
 configured ``name`` (the renameable-chief-of-staff contract, 2026-09-28).
 """
 
@@ -143,6 +144,93 @@ async def test_a_resume_refused_by_a_held_store_lock_says_so(
     message = resumed.json()["message"]
     assert "busy" in message and "arms" in message, message
     assert "the next check-in is armed" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_lock_held_for_the_whole_wait_answers_the_tuis_sentence(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA-O1: a refused op answers the TUI's sentence — not a 500, not a copy.
+
+    ``pause``/``resume`` take the aida store lock as their first act, so a peer
+    that holds it for the whole wait raises ``WakeLockBusy`` out of both: the
+    route used to let that reach FastAPI as a 500, an internal-error page for a
+    miss the operator clears by trying again. "Not a 500" is not enough to hold
+    the fix — the refusal has to read on the desktop as it already reads in the
+    terminal. So this cell drives the ROUTE and the TUI's own ``/aida`` handler
+    against the SAME held lock and asserts the two sentences are equal byte for
+    byte; a re-worded copy on either side fails here.
+
+    The hold is a real peer take of the real lock (``flock``: a second
+    descriptor contends even inside one process, and ``tests/unit/wakes/
+    test_lock`` drives the cross-interpreter case). The retry WINDOW is
+    shortened to a single attempt on purpose: its length is that file's subject,
+    the refusal is this cell's. The TUI half is the real handler on an
+    UNCOMPOSED app whose notice sink is a recorder — the refusal arm's only
+    collaborator — because booting Textual would test Textual, not the sentence.
+    """
+    from local_operator.aida import state as aida_state
+    from local_operator.tui.app import OperatorApp
+
+    # A single attempt instead of ``LOCK_WAIT_S`` of retries: same lock, same
+    # refusal, same sentence — the peer below still holds a real flock.
+    real_locked = aida_state.locked
+    monkeypatch.setattr(aida_state, "locked", lambda root, **_kw: real_locked(root, timeout_s=0.0))
+
+    async with client as http:
+        await http.post("/v1/desktop/aida", json={"op": "open"})
+        await http.post("/v1/desktop/aida", json={"op": "pause"})
+
+        peer = aida_state.wake_lock(isolated_root)
+        peer.acquire()
+        try:
+            resume_reply = await http.post("/v1/desktop/aida", json={"op": "resume"})
+            pause_reply = await http.post("/v1/desktop/aida", json={"op": "pause"})
+            notices: list[str] = []
+            app = OperatorApp.__new__(OperatorApp)
+            setattr(app, "_system_notice", lambda body, kind="info": notices.append(body))
+            for word, reply in (("resume", resume_reply), ("pause", pause_reply)):
+                notices.clear()
+                await app._aida_control(word, lambda body, kind="info": None)
+                assert reply.status_code == 200, reply.text
+                assert len(notices) == 1, notices
+                assert reply.json()["message"] == notices[0], (word, reply.json(), notices)
+                # THE OP DID NOT RUN, and the receipt may not imply otherwise: a
+                # refused resume leaves her paused, and no live owner carries
+                # the op out on her behalf.
+                assert reply.json()["result"]["paused"] is True, reply.json()
+                assert reply.json()["result"]["held"] is False, reply.json()
+        finally:
+            peer.release()
+
+    refused = resume_reply.json()["message"]
+    assert "could not resume Aida: " in refused, refused
+    assert "Try again in a moment" in refused, refused
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_resume_failure_still_surfaces_as_it_did(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal arm converts the LOCK exceptions only, never a defect.
+
+    QA-O1's other half, and the reason the ``except`` clause names its two
+    types instead of the tempting ``except Exception``: an engine that really
+    breaks must keep answering the way it always did, not with a calm receipt
+    that hides it. The transport re-raises an unhandled server error into the
+    caller, so the assertion is the exception itself — a swallow would show up
+    here as "no exception raised", not as a status code to read.
+    """
+    from local_operator.aida import proactive
+
+    async def broken(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("the engine is broken")
+
+    monkeypatch.setattr(proactive, "resume", broken)
+    with pytest.raises(RuntimeError, match="the engine is broken"):
+        async with client as http:
+            await http.post("/v1/desktop/aida", json={"op": "open"})
+            await http.post("/v1/desktop/aida", json={"op": "resume"})
 
 
 @pytest.mark.asyncio

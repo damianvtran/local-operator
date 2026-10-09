@@ -47,6 +47,17 @@ previous ``true``, or that raced the switch, must be told its op did not run
 rather than receive a session id that will never exist. The code is part of the
 contract because a renderer can only tell "disabled" from "your request was
 malformed" by the code, not the sentence.
+
+WHY A HELD STORE LOCK IS A 200 RECEIPT, NOT A 500. ``pause``/``resume`` take the
+aida store lock as their first act (``aida.state.locked``), so a peer that holds
+it for the whole wait REFUSES the op with ``WakeLockBusy`` — the lock module's
+own documented answer for that case, retryable, and normal on a seam with several
+attended writers. The refusal used to escape this module as a 500, which told the
+operator to read the logs for a miss that fixes itself on the next tick; it now
+answers the receipt the TUI's ``/aida`` handler renders for the identical refusal,
+and the two surfaces are pinned to that ONE sentence by
+``tests/unit/server/test_desktop_aida.py`` (QA-O1). A genuine failure from the op
+still surfaces as it did: this converts the lock refusal only, never a defect.
 """
 
 from __future__ import annotations
@@ -228,6 +239,30 @@ def _op_reply(state: AidaState, message: str, *, held: bool = False) -> CRUDResp
     )
 
 
+def _refuse_lock(root: Any, verb: str, name: str, exc: BaseException) -> CRUDResponse[AidaOpState]:
+    """A store-lock refusal as a receipt — the SAME sentence the TUI answers with.
+
+    The op did not run: a peer held the aida store lock for the whole wait, so
+    ``locked`` raised before anything was unpaused or cancelled. That refusal is
+    retryable and normal on this seam, which is why it answers 200 with the
+    sentence the TUI's ``/aida`` handler renders for the identical refusal
+    (``tui/app.py::_aida_control``) — and why the sentence is built here in the
+    same shape rather than re-worded: the two surfaces are pinned to each other
+    by ``tests/unit/server/test_desktop_aida.py``, so one cannot drift into a
+    second account of the refusal without a red cell.
+
+    NOT the ``busy`` word's receipt below: that word is ``resume``'s arm attempt
+    AFTER the unpause landed (round 3d, N2), while this one is the op never
+    running at all — so the ``result`` here is the state read NOW, still
+    ``paused`` after a refused resume, and ``held`` stays false because no live
+    owner is carrying anything out.
+    """
+    from local_operator.aida import state as aida_state
+
+    aida_state.note_lock_refusal(f"the {verb} command", exc)
+    return _op_reply(_state(root), f"could not {verb} {name}: {exc}")
+
+
 @router.get("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
 async def get_aida(request: Request) -> CRUDResponse[AidaState]:
     """Her state. Never creates: a caller that wants her to exist POSTs ``open``."""
@@ -250,6 +285,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
     from local_operator import aida
     from local_operator.aida import naming, onboarding, proactive
     from local_operator.aida import state as aida_state
+    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     root = _config_dir(request)
     name = naming.display_name(root)
@@ -335,7 +371,12 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
 
     session_id = aida_state.session_id_of(root) or ""
     if body.op == "pause":
-        outcome = await proactive.pause(root, session_id)
+        try:
+            outcome = await proactive.pause(root, session_id)
+        except (WakeLockBusy, WakeLockUnavailable) as exc:
+            # A PEER HELD THE STORE LOCK FOR THE WHOLE WAIT, so nothing was
+            # paused: the refusal is the receipt (see `_refuse_lock`).
+            return _refuse_lock(root, body.op, name, exc)
         state = _state(root)
         message = f"{name} is paused; she will not check in proactively."
         if outcome.owner_blocked:
@@ -343,7 +384,13 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         return _op_reply(state, message, held=bool(outcome.owner_blocked))
 
     # resume
-    arm = await proactive.resume(root, session_id)
+    try:
+        arm = await proactive.resume(root, session_id)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # ``resume`` takes the store lock before it unpauses anything, so a
+        # refusal here means the op did not run — NOT the ``busy`` word below,
+        # which describes a resume whose unpause landed (see `_refuse_lock`).
+        return _refuse_lock(root, body.op, name, exc)
     state = _state(root)
     if arm == "owner":
         # Correct and expected, not a failure: a live session owns its rows and
