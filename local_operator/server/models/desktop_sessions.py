@@ -6,7 +6,7 @@ projection would drop new runtime fields and turn unknown accounting into zeros.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from local_operator.session.frontend_state import FrontendSync, SlashResult
 from local_operator.session.runtime.types import reported_subagent_count
@@ -674,7 +674,18 @@ class RunFacts(BaseModel):
     #: Absent together whenever ``settled`` is false — see the class note.
     action_count: int | None = None
     failed_count: int | None = None
+    #: Absent (``null``) rather than ``0`` when NO row of the run reported a
+    #: duration: the desktop's own ``workedSeconds`` states null for that case,
+    #: and a bar that prints "0s" where the fold prints nothing is the kind of
+    #: disagreement this contract exists to remove.
     worked_seconds: float | None = None
+    #: The subset of ``action_count`` / ``worked_seconds`` that the desktop HIDES
+    #: when ``display.hide_cross_session`` is on — ``send`` tool rows, classified
+    #: by the same arm as ``cross-session-visibility.ts::visibleRecords``. Additive
+    #: and documented for the client that hides them; a client with the setting off
+    #: ignores both.
+    cross_session_action_count: int | None = None
+    cross_session_worked_seconds: float | None = None
 
 
 class HistoryPage(BaseModel):
@@ -694,34 +705,30 @@ class HistoryPage(BaseModel):
     #: so an older renderer's page carries no new key AT ALL: the promise is
     #: byte-for-byte, and a defaulted field would serialise as ``null`` on every
     #: page and break it.
-    runs: list[RunFacts] | None = None
+    #: The open frame's three keys, ABSENT unless the request carried
+    #: ``open_frame=1`` (see ``docs/DESKTOP_API.md`` §"The open frame").
+    #:
+    #: ``exclude_if`` RATHER THAN A SERIALIZER, and the reason is the published
+    #: schema (review round 1, F7): a ``mode="wrap"`` serializer returns
+    #: ``dict[str, Any]``, and pydantic then publishes this model as
+    #: ``{"additionalProperties": true, "type": "object"}`` — so the properties
+    #: this contract is made of would vanish from ``docs/openapi.json`` the next
+    #: time it is regenerated. ``exclude_if`` omits the JSON key when the value is
+    #: unset AND leaves the model's schema intact: the promise is byte-for-byte
+    #: (no new key on an older client's page) and the documented shape at once.
+    #: ``has_newer`` keeps its existing ``null`` — that is today's shape, and only
+    #: these three are conditional.
+    runs: list[RunFacts] | None = Field(default=None, exclude_if=lambda value: value is None)
     #: ``ready`` | ``building`` | ``unavailable`` | ``unsupported``. ``building``
     #: means an index scan was started and THIS answer carries no facts; a client
     #: keeps its own condensation and the next frame will have them.
-    runs_state: str | None = None
-    #: True when a cap refused the run extension: the oldest run on the page has
-    #: no opening user row on it, and ``runs`` is where that run's true size
-    #: lives. False when the extension reached a user row, or when there was
-    #: nothing above the page to cut.
-    head_cut: bool | None = None
-
-    @model_serializer(mode="wrap")
-    def _omit_unnegotiated(self, handler: Any) -> dict[str, Any]:
-        """Drop the open frame's three keys while they are unset.
-
-        WRITTEN AS A SERIALIZER BECAUSE THE PROMISE IS BYTE-FOR-BYTE. The
-        response model serialises every field it declares, so a defaulted field
-        would put ``"runs": null`` on a page served to a client that never asked
-        for the capability — a change to every existing renderer's bytes,
-        invisible in review and exactly the sort of drift this contract's gate
-        exists to prevent. ``has_newer`` keeps its existing ``null`` on purpose:
-        that is today's shape and this serializer must not tidy it away.
-        """
-        data = handler(self)
-        for key in ("runs", "runs_state", "head_cut"):
-            if data.get(key, None) is None:
-                data.pop(key, None)
-        return data
+    runs_state: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: True when the extension was refused or a cap cut rows from the page: the
+    #: oldest run on the page has no opening user row on it, and ``runs`` is where
+    #: that run's true size lives. False only when the page's oldest row IS a user
+    #: row — an anchored page reports True as soon as a cap dropped rows from it,
+    #: because a jump window never claims its oldest run is whole.
+    head_cut: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.
