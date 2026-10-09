@@ -82,6 +82,7 @@ from local_operator.mobile.types import (
     SessionRecord,
     SubagentRow,
 )
+from local_operator.network.types import MeshRefusal
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
@@ -4881,17 +4882,23 @@ def build_app(daemon: MobileDaemon):
         ``request_id`` IS THE IDEMPOTENCE KEY (at-most-once per id): a retried
         request replays its recorded receipt with ``replayed: true`` instead of
         starting a second move, and a same-id retry that ARRIVES MID-MOVE waits
-        on the journal's per-key lock and then replays. The one refusal shape
-        that is RECORDED — so a retry replays it rather than re-dialling — is
+        on the journal's per-key lock and then replays. The refusal shapes that
+        are RECORDED — so a retry replays them rather than re-dialling — are
         the unconfirmed family (``mobile_mesh.MOVE_UNCONFIRMED_CODES``: the
-        request may be in flight, or was never answered); every other refusal
-        left nothing behind and RELEASES the id, so a user who frees the session
-        up and presses again is not answered from a refusal forever.
+        request may be in flight, or was never answered) and a control reply
+        this build cannot read (``relay.control_request``'s ``frame_unreadable``
+        / ``frame_too_large``: the relay ANSWERED, so whether the move ran is
+        unknown and a same-id retry must not start a second one); every other
+        refusal left nothing behind and RELEASES the id, so a user who frees the
+        session up and presses again is not answered from a refusal forever.
 
-        A MOVE THIS DEVICE COULD NOT GET AN ANSWER ABOUT IS A 503, never a 409
-        that reads as "nothing changed" (Addendum 2 C): the request was sent and
-        the outcome is unknown, which is a different instruction to the user than
-        "the move was refused".
+        A MOVE WHOSE ANSWER NEVER CAME IS A 503, never a 409 that reads as
+        "nothing changed" (Addendum 2 C): the request was sent and the outcome
+        is unknown, which is a different instruction to the user than "the move
+        was refused". A reply that CAME back unreadable is the frame family
+        above, mapped as the desktop route maps it: the default 409 with the
+        relay's sentence verbatim (this route reaches that status through its
+        one rule below — 503 only for ``MOVE_UNCONFIRMED_CODES``).
         """
         denied = gate(request)
         if denied is not None:
@@ -4908,14 +4915,32 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": refusal}, status_code=422)
 
         async def operation() -> dict[str, Any]:
-            result = await asyncio.to_thread(
-                mobile_mesh.request_transfer,
-                config_dir(),
-                session_id,
-                to=fields["to"],
-                keep=fields["keep"],
-                wait_s=fields["wait_s"],
-            )
+            try:
+                result = await asyncio.to_thread(
+                    mobile_mesh.request_transfer,
+                    config_dir(),
+                    session_id,
+                    to=fields["to"],
+                    keep=fields["keep"],
+                    wait_s=fields["wait_s"],
+                )
+            except MeshRefusal as error:
+                # A CONTROL REPLY THIS BUILD CANNOT READ (``frame_unreadable`` /
+                # ``frame_too_large`` from ``relay.control_request``): the relay
+                # ANSWERED ``session_move`` — it is not a relay that stayed
+                # silent — so the move may have run and the outcome is unknown.
+                # RETURNED here (so the journal RECORDS it) rather than routed
+                # through the refuse/Unclaimed branch below, which would RELEASE
+                # it as a refusal that "left nothing behind" — untrue of an
+                # answer nobody read. A same-id retry therefore replays this
+                # verbatim sentence instead of starting a second move for a
+                # request whose first attempt may still be running (the
+                # at-most-once rule). Code and sentence are the desktop route's
+                # own vocabulary for these raises, and the status is its own
+                # default for the family too (409, ``_http_refusal``); no
+                # ``changed`` key is carried — a reply this build could not read
+                # makes no claim either way.
+                return {"refused": True, "code": error.code, "message": str(error)}
             if not result.get("refused"):
                 return result
             code = str(result.get("code") or "move_refused")

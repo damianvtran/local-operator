@@ -344,8 +344,10 @@ The move itself runs through this device's network relay —
 terminal cannot disagree about what a move is. The phone plane's error
 vocabulary wins where the two differ: a refusal carries the move's own
 sentence in `error` and its machine `code` beside it, passed through
-un-smoothed, and a refusal this device could not get an answer about is a 503,
-never a 409 that reads as "nothing changed".
+un-smoothed. A move refusal this device could not get an answer about is a
+503, never a 409 that reads as "nothing changed"; a control reply the build
+cannot read (`frame_unreadable` / `frame_too_large`) is a 409 with the relay's
+sentence verbatim — the desktop route's own mapping for the same raises.
 
 The request is long-held BY DESIGN — the move is a retirement, a copy and a
 confirmation, and the only bound is `mobility.request_move`'s own per-shape
@@ -357,7 +359,9 @@ sessions are not parked behind it.
 with `replayed: true` and dials nothing; a same-id retry that arrives
 mid-move waits on the journal's per-key lock and then replays; a same id with
 different input is a 409. An unconfirmed refusal (the request may be in
-flight, or was never answered) is RECORDED, so a retry replays it rather than
+flight, or was never answered) and a control reply the build cannot read
+(`frame_unreadable` / `frame_too_large` — the relay answered, so whether the
+move ran is unknown) are RECORDED, so a retry replays them rather than
 re-arming a move nobody can call settled; every other refusal left nothing
 behind and releases the id, so a user who frees the session up and presses
 again is not answered from a refusal forever. The journal is one small bounded

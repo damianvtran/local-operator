@@ -18,9 +18,11 @@ The rules worth pinning here, each invisible in a green unit suite otherwise:
   read as the no-claim zero and sort last inside its bin, never crash and
   never be special-cased.
 * ``request_id`` is at-most-once: a replay returns the recorded receipt with
-  ``replayed: true`` and does NOT dial again; a same-id DIFFERENT body is a
-  conflict; an unconfirmed refusal is recorded (a retry replays it) while a
-  plain refusal releases the id so a retry may really run.
+  ``replayed: true`` and does NOT dial again; a same-id retry that arrives
+  MID-MOVE coalesces on the journal's per-key lock and replays; a same-id
+  DIFFERENT body is a conflict; an unconfirmed refusal, and a control reply
+  this build cannot read, are recorded (a retry replays them) while a plain
+  refusal releases the id so a retry may really run.
 * The unconfirmed set is the desktop route's, pinned equal here so the two
   planes cannot drift.
 
@@ -31,13 +33,16 @@ own, and the fake socket answers only what a cell sets it to answer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import httpx
 import pytest
 from starlette.requests import Request
 from starlette.testclient import TestClient
@@ -51,6 +56,7 @@ PASSWORD = "pw123"
 SID = "abc123def456"
 DEVICE = "d_9c02aabb"
 REQUEST_ID = "1234abcd-1234-1234-1234-1234abcd1234"
+REQUEST_ID_2 = "5678efab-5678-5678-5678-5678efab5678"
 UNCONFIRMED = "peer_unreachable"
 
 
@@ -78,6 +84,10 @@ class _FakeRelay:
         self.ops: list[dict[str, Any]] = []
         self.connections = 0
         self.detail: Callable[[dict[str, Any]], dict[str, Any]] = lambda op: {}
+        #: A raw line to answer with INSTEAD of the JSON ack — the unreadable-
+        #: reply arm of the protocol (``control_request`` raises ``MeshRefusal``
+        #: for it): non-JSON bytes, or a line over the control bound.
+        self.raw_reply: bytes | None = None
         self._closed = threading.Event()
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
@@ -103,6 +113,13 @@ class _FakeRelay:
             self.hellos.append(json.loads(hello_line))
             op = json.loads(op_line)
             self.ops.append(op)
+            if self.raw_reply is not None:
+                # THE UNREADABLE-REPLY ARM: the client refuses this line by name
+                # instead of reading an ack (``frame_unreadable`` /
+                # ``frame_too_large``).
+                stream.write(self.raw_reply)
+                stream.flush()
+                return
             reply = {"op": "ack", "req": op.get("req", 1), "detail": self.detail(op)}
             stream.write((json.dumps(reply) + "\n").encode())
             stream.flush()
@@ -411,6 +428,54 @@ def test_request_id_replay_returns_the_recorded_receipt_without_dialling_again(
     assert len(relay.ops) == ops_after_first == 1
 
 
+@pytest.mark.asyncio
+async def test_same_id_requests_arriving_mid_move_coalesce_and_replay(
+    relay: _FakeRelay,
+) -> None:
+    """A same-id retry that ARRIVES MID-MOVE waits on the journal lock, then replays.
+
+    The sequential replay cell above cannot pin this: it cannot tell the lock
+    from a plain replay. Two CONCURRENT same-id POSTs over a slow move can —
+    one dial for both, exactly one ``replayed: true``, and a lower bound on
+    the elapsed time so a replayed answer cannot be manufactured before the
+    move settled (its recorded receipt only exists once it has).
+    """
+    slow = 0.5
+    relay.detail = lambda op: (time.sleep(slow), _move_detail())[1]
+    _publish_relay(relay)
+
+    daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(daemon)),
+        base_url="http://fixture",
+        cookies={COOKIE_NAME: sign_cookie(PASSWORD)},
+    ) as client:
+        body = {"to": DEVICE, "request_id": REQUEST_ID}
+        started = time.monotonic()
+        first, second = await asyncio.gather(
+            client.post(f"/api/sessions/{SID}/transfer", json=body),
+            client.post(f"/api/sessions/{SID}/transfer", json=body),
+        )
+        elapsed = time.monotonic() - started
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    first_body, second_body = first.json(), second.json()
+    # Exactly one fresh serve and one replay (which of the two arrived first
+    # is the per-key lock's to decide).
+    assert sorted([first_body["replayed"], second_body["replayed"]]) == [False, True]
+    # ONE dial for two requests: the second waited on the lock, not a socket.
+    assert len(relay.ops) == 1
+    # The replay IS the recorded receipt, identical apart from the flag.
+    assert {k: v for k, v in first_body.items() if k != "replayed"} == {
+        k: v for k, v in second_body.items() if k != "replayed"
+    }
+    # LOWER BOUND (the reviewer's 1.58 s against a 1.5 s move, cheaper scale):
+    # the move takes ``slow`` seconds, so no answer can arrive before it
+    # settled — the cell cannot pass vacuously on unrecorded timing.
+    assert elapsed >= slow
+
+
 def test_same_request_id_with_different_input_is_a_conflict(
     client: TestClient, relay: _FakeRelay
 ) -> None:
@@ -517,6 +582,75 @@ def test_an_unconfirmed_refusal_is_recorded_and_replayed(
     second = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
     assert second.status_code == 503
     assert second.json()["code"] == UNCONFIRMED
+    assert len(relay.ops) == 1
+
+
+def test_an_unreadable_control_reply_is_a_mapped_recorded_refusal(
+    client: TestClient, relay: _FakeRelay
+) -> None:
+    """A reply this build cannot read: mapped like the desktop's, and RECORDED.
+
+    ``relay.control_request`` raises ``MeshRefusal`` when the relay ANSWERED
+    ``session_move`` with a line this build cannot read — so the move may have
+    run. The route maps it as the desktop route does (code and sentence
+    verbatim, 409 by the default rule) and the journal RECORDS it: a same-id
+    retry replays the refusal instead of dead-ending on the indeterminate
+    ``receipt_conflict`` a spent claim used to return.
+    """
+    relay.raw_reply = b"a reply this build cannot parse\n"
+    _publish_relay(relay)
+
+    first = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
+    assert first.status_code == 409, first.text  # mapped, not a bare 500
+    body = first.json()
+    assert set(body) == {"error", "code"}
+    assert body["code"] == "frame_unreadable"
+    # The relay's own sentence, verbatim (no paraphrase from a status).
+    assert "cannot read" in body["error"]
+    assert "whether the op ran is unknown" in body["error"]
+    # RECORDED, not a spent claim: the journal holds the refusal against the id.
+    store = config_dir() / "mobile-transfer-receipts.json"
+    recorded = json.loads(store.read_text(encoding="utf-8"))
+    assert recorded[f"transfer:{SID}:{REQUEST_ID}"]["result"]["code"] == "frame_unreadable"
+
+    # The same-id retry resolves from that record: replayed, not re-dialled.
+    retry = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
+    assert retry.status_code == 409
+    assert retry.json() == body
+    assert len(relay.ops) == 1
+
+    # And a NEW intent still runs — the id's story is settled without wedging
+    # the route (the fresh-id path the read half's recovery also uses).
+    relay.raw_reply = None
+    relay.detail = lambda op: _move_detail()
+    fresh = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID_2})
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["replayed"] is False
+    assert len(relay.ops) == 2
+
+
+def test_an_oversized_control_reply_is_the_same_family(
+    client: TestClient, relay: _FakeRelay
+) -> None:
+    """The other unreadable-reply code: over the control bound, same treatment.
+
+    The relay's line is longer than ``dial.MAX_SESSION_FRAME_BYTES``; the
+    reader refuses it rather than truncating (``frame_too_large``), and it maps
+    and records exactly like ``frame_unreadable``.
+    """
+    from local_operator.network.dial import MAX_SESSION_FRAME_BYTES
+
+    relay.raw_reply = b"x" * (MAX_SESSION_FRAME_BYTES + 1) + b"\n"
+    _publish_relay(relay)
+
+    first = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
+    assert first.status_code == 409, first.text
+    assert first.json()["code"] == "frame_too_large"
+    assert "refused rather than truncated" in first.json()["error"]
+
+    retry = _transfer(client, {"to": DEVICE, "request_id": REQUEST_ID})
+    assert retry.status_code == 409
+    assert retry.json() == first.json()
     assert len(relay.ops) == 1
 
 

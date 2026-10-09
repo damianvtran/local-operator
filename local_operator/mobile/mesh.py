@@ -157,7 +157,7 @@ def remote_session_rows(
 
     BINNING IS THE SHARED RULE, NOT A REMOTE AXIS. ``section`` comes from
     ``session.catalog.entry_for``'s ``active`` — pending, unseen or live is
-    ACTIVE — the SHARED CONVENTION ``tui/session_sidebar._unpinned_rank``
+    ACTIVE — the SHARED CONVENTION ``tui/widgets/session_sidebar._unpinned_rank``
     states for remote rows: they file into the same bins as local rows, one
     list. ``created_at`` is the peer's ``started`` claim (the only per-row time
     the federated listing carries); a claim that is not a number has already
