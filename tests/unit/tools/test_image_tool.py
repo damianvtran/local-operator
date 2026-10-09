@@ -363,6 +363,76 @@ async def test_task_cancellation_cancels_provider_side_and_reraises(
 # ---------------------------------------------------------------------------
 
 
+def test_the_emitter_swallows_a_raising_on_update() -> None:
+    """The tool-level guard (reviewer round-1 pin): progress never rides control flow.
+
+    Same contract as the rungs' own wrapper — a raising ``on_update`` is
+    swallowed, because the terminal cancel-phase lines emit from inside
+    cancellation handlers and must never replace the ``CancelledError``.
+    """
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    emit = image_tool._progress_emitter(raiser)
+    assert emit is not None
+    emit("line", {"stage": "queued"})  # must not raise
+    assert image_tool._progress_emitter(None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_abort_receipt_survives_a_raising_emitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_update cannot break the abort-path cancellation (pin)."""
+
+    async def fake_cascade(**kwargs):
+        kwargs["handle"].provider = ImageRoute.RADIENT
+        kwargs["handle"].request_id = "r1"
+        raise image_cascade.ImageGenerationCancelled()
+
+    async def fake_cancel(handle):
+        return "none"
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    result = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat"}, None, raiser, None
+    )
+    assert result.is_error is True
+    assert (result.details or {})["stage"] == "cancelled"
+    assert "error_type" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_survives_a_raising_emitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising on_update cannot replace the Esc-path CancelledError (pin)."""
+    calls: list[object] = []
+
+    async def fake_cascade(**kwargs):
+        raise asyncio.CancelledError()
+
+    async def fake_cancel(handle):
+        calls.append(handle)
+        return "none"
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    monkeypatch.setattr(image_rungs, "best_effort_cancel", fake_cancel)
+
+    def raiser(update: object) -> None:
+        raise RuntimeError("on_update exploded")
+
+    with pytest.raises(asyncio.CancelledError):
+        await image_tool.execute_generate_image("call-1", {"prompt": "a cat"}, None, raiser, None)
+    assert calls, "the cancel flow continued past the raising emitter"
+
+
 @pytest.mark.asyncio
 async def test_strength_without_a_source_image_is_rejected() -> None:
     result = await image_tool.execute_generate_image(
