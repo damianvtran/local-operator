@@ -88,3 +88,9 @@ scratchpad; every pair is settled (consecutive captures byte-identical).
 3-5: per-scene screen size, picker width, primary/detail column cells, match
 count, and the fal row's painted string (80: 24-cell description in a 37-cell
 allowance; 120: 41-cell allowance — both whole, no ellipsis).
+
+One extra frame in the same round-3f set — `frames/r3f-fal-picker-tail-60.png`: the
+picker at 60 columns, BELOW the 80-column floor the setup screen is designed
+for. Every description degrades by ellipsis uniformly (fal's `Media only; not…`
+beside `Speech only; not…` and `Classification o…`), so the row is no worse
+than its established peers below the floor.
