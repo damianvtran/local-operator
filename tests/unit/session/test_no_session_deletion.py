@@ -1808,6 +1808,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove(listener)",
     ),
     (
+        # The startup notice queue's display half (#2060):
+        # ``clear_pending_seed_notices`` removes the lines it just DISPLAYED
+        # from a ``list[str]`` of queued message strings — the receiver is a
+        # container of notices, never a filesystem path. The file the queue
+        # lives in (``<config_dir>/.seed-notices.json``) is written through
+        # ordinary text I/O as a fixed basename beside ``sessions/``.
+        "local_operator/agent_profiles.py::clear_pending_seed_notices",
+        "<path>.remove",
+        "list.remove(displayed notice line); the receiver is a list[str], never a filesystem path",
+    ),
+    (
         "local_operator/evaluation/adapters/discovery.py::_verified_imports",
         "<path>.remove",
         "sys.meta_path.remove",

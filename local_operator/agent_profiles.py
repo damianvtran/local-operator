@@ -2586,25 +2586,33 @@ def _held_notice_line(display: str, name: str, diverged_fields: tuple[str, ...])
 def _reported_notice_line(display: str, installed: str | None, packaged: str) -> str:
     """The report-only notice (auto-update off, or an install that cannot self-update).
 
-    Carries the off-switch pointer, and ONLY this notice class does: a user
-    who chose \"only tell me\" is exactly the person who may now want to turn
-    the channel off, and the notice is where they are looking (UX round 1,
-    U6a).
+    Deliberately carries NO off-switch pointer (design round 2, D2-1, which
+    moved it to the applied notices): this notice fires exactly when the
+    pointer cannot be satisfied — the setting is already off, or this install
+    cannot self-update at all — so it would name a control already in the
+    state the reader wants. The APPLIED notice is the surprise the pointer
+    exists for; it carries it instead.
     """
 
     return (
         f"{display}: an update to the packaged starter is available"
-        f"{_seed_version_note(installed, packaged)}. Run `lop agents sync` to apply it. "
-        "(turn these off: /settings → Agents)"
+        f"{_seed_version_note(installed, packaged)}. Run `lop agents sync` to apply it."
     )
 
 
 def _applied_notice_line(display: str, installed: str | None, packaged: str) -> str:
-    """The applied notice. Only ever composed AFTER a successful write."""
+    """The applied notice. Only ever composed AFTER a successful write.
+
+    Carries the off-switch pointer (design round 2, D2-1, moved here from the
+    reported notice): an UNEXPECTED write is where a reader most needs to
+    learn the channel exists, and the pointer is satisfiable while reading
+    this line — the reported notice fires exactly when it is not.
+    """
 
     return (
         f"{display}'s instructions updated to the packaged starter"
-        f"{_seed_version_note(installed, packaged)}; your label, model and tags were kept."
+        f"{_seed_version_note(installed, packaged)}; your label, model and tags were kept. "
+        "(stop auto-updates: /settings → Agents → Auto-update built-in roles)"
     )
 
 
@@ -2647,21 +2655,28 @@ def _rollup_members(entries: list[tuple[str, str | None, str]]) -> str:
 
 
 def _applied_rollup_line(entries: list[tuple[str, str | None, str]]) -> str:
-    """The >2-applied roll-up: one line instead of one per role (D4/U2)."""
+    """The >2-applied roll-up: one line instead of one per role (D4/U2).
+
+    Carries the off-switch pointer for the same reason the individual applied
+    line does (design round 2, D2-1); the reported roll-up below does not.
+    """
 
     return (
         f"Updated {len(entries)} built-in roles to the packaged text "
-        f"({_rollup_members(entries)}); your labels, models and tags were kept."
+        f"({_rollup_members(entries)}); your labels, models and tags were kept. "
+        "(stop auto-updates: /settings → Agents → Auto-update built-in roles)"
     )
 
 
 def _reported_rollup_line(entries: list[tuple[str, str | None, str]]) -> str:
-    """The >2-available roll-up (action needed, so it names the command)."""
+    """The >2-available roll-up (action needed, so it names the command).
+
+    No off-switch pointer, for ``_reported_notice_line``'s reason (D2-1).
+    """
 
     return (
         f"{len(entries)} built-in roles have updates available "
-        f"({_rollup_members(entries)}). Run `lop agents sync` to apply them. "
-        "(turn these off: /settings → Agents)"
+        f"({_rollup_members(entries)}). Run `lop agents sync` to apply them."
     )
 
 
@@ -2796,8 +2811,9 @@ def startup_seed_update_pass(
       D3). ``tui`` lines queue in ``pending`` for the boot hook; ``cli``
       lines print plainly to stderr (no ``date - INFO -`` prefix) and record
       only their own slot; ``daemon`` surfaces (``serve``, ``wake serve``,
-      ``mobile start``) log at DEBUG and record NOTHING, so the human
-      surfaces still announce. More than two rows in one group collapse to a
+      ``mobile serve``) are report-only: they write no row, record NOTHING
+      and log at DEBUG, so the first human surface applies and announces.
+      More than two rows in one group collapse to a
       single rolled line (design round 1, D4); held rows stay individual
       because they need action. ``--check``/``--dry-run`` never reach this
       file at all: the seam's carve-out keeps the whole pass off that

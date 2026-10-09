@@ -2226,16 +2226,21 @@ def test_config_edit_of_the_switch_skips_the_pass(scratch_seeds, tmp_path, monke
     assert _tree_bytes(config_dir / "agents") == before  # report-only now
 
 
-def test_the_round_one_notice_sentences() -> None:
-    """The three sentences design round 1 rewrote, pinned verbatim (D2/U4/U6).
+def test_the_notice_sentences_pinned_verbatim() -> None:
+    """The reviewed notice sentences, pinned verbatim (D2/U4/U6; D2-1).
 
     The notices are the feature's user-visible half; asserting them as whole
     sentences keeps a later edit from quietly re-stitching the fragments the
-    review round called out (a "review" that applies, a stranded parenthetical,
-    a pointer-less off switch).
+    review rounds called out (a "review" that applies, a stranded
+    parenthetical, a pointer-less off switch). Design round 2 (D2-1) moved
+    the off-switch pointer onto the APPLIED lines — the reported notice fires
+    exactly when the pointer cannot be satisfied — so both placements are
+    pinned here.
     """
 
     from local_operator.agent_profiles import (
+        _applied_notice_line,
+        _applied_rollup_line,
         _edited_notice_line,
         _held_notice_line,
         _reported_notice_line,
@@ -2252,7 +2257,23 @@ def test_the_round_one_notice_sentences() -> None:
     reported = _reported_notice_line("Aida", "1.0.0", "1.4.0")
     assert reported == (
         "Aida: an update to the packaged starter is available (1.0.0 -> 1.4.0). "
-        "Run `lop agents sync` to apply it. (turn these off: /settings → Agents)"
+        "Run `lop agents sync` to apply it."
+    )
+
+    applied = _applied_notice_line("Aida", "1.0.0", "1.4.0")
+    assert applied == (
+        "Aida's instructions updated to the packaged starter (1.0.0 -> 1.4.0); "
+        "your label, model and tags were kept. "
+        "(stop auto-updates: /settings → Agents → Auto-update built-in roles)"
+    )
+
+    applied_rollup = _applied_rollup_line(
+        [("Aida", "1.0.0", "1.4.0"), ("Coder", "1.0.0", "1.2.0"), ("Designer", "1.0.0", "1.1.0")]
+    )
+    assert applied_rollup == (
+        "Updated 3 built-in roles to the packaged text (Aida 1.0.0 -> 1.4.0, "
+        "Coder 1.0.0 -> 1.2.0, and 1 more); your labels, models and tags were kept. "
+        "(stop auto-updates: /settings → Agents → Auto-update built-in roles)"
     )
 
     edited = _edited_notice_line("Aida", "aida", "1.0.0", "1.4.0")
