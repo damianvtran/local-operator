@@ -186,6 +186,36 @@ async def test_a_missing_store_degrades_without_dropping_the_reference(tmp_path)
     assert AttachmentStore().get_bytes(artifacts[0].attachment) is None
 
 
+def test_relay_resolution_leaves_artifact_references_untouched():
+    """The follower's frame resolver inlines LEGACY image refs (popping the
+    digest as it goes) — an artifact's digest is durable payload and must
+    survive the walk. The guard keys on the legacy mime_type shape, which an
+    artifact block does not have; this pins that separation."""
+    from local_operator.session.attached import resolve_frame_attachments
+
+    frame = {
+        "type": "tool_execution_end",
+        "result": {
+            "content": [
+                {
+                    "kind": "image",
+                    "content_type": "image/png",
+                    "attachment": "a" * 32,
+                    "source_url": "https://provider.example/img/01.png",
+                },
+                {"attachment": "b" * 32, "mime_type": "image/png"},
+            ]
+        },
+    }
+
+    resolved = resolve_frame_attachments(frame, AttachmentStore())
+
+    artifact = resolved["result"]["content"][0]
+    assert artifact["attachment"] == "a" * 32, "the digest is payload, not an encoding"
+    assert "data" not in artifact, "artifact bytes are never inlined into a frame"
+    assert artifact["kind"] == "image"
+
+
 def test_live_and_durable_shapes_parse_to_one_model():
     """The live frame carries `type`; the durable row cannot (the encoder
     excludes defaults). Both must land on AttachmentContent — the durable
