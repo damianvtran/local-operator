@@ -26,10 +26,12 @@ TUI), which is the only thing that legitimately differs between them.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from local_operator.model.defaults import suggested_model_for
+from local_operator.providers.model_access import is_accessible, is_stranded
 from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
@@ -84,6 +86,7 @@ def plan_login_defaults(
     model_name: str | None,
     *,
     oauth: bool | None = None,
+    accessible: Collection[str] | None = None,
 ) -> LoginDefaults:
     """Decide what a just-completed login for ``provider_id`` should write.
 
@@ -147,6 +150,26 @@ def plan_login_defaults(
     is -- which is what the CLI and TUI mean. The desktop's key-save route passes
     ``False`` explicitly, because it stores a key under a provider whose own
     login may be OAuth.
+
+    ``accessible`` names the providers this user can RUN a turn on right now
+    (``providers.model_access.credentialed_chat_providers``), or ``None`` when
+    that is unknowable. It powers the one case registry membership cannot see:
+    a hosting that IS a real provider but has no credential behind it -- the
+    user signed out of Radient (or signed in on another device) and later signed
+    in to OpenAI, and the stale ``radient/auto`` pair survived every login
+    because ``is_unusable_hosting`` only asks whether the registry owns the id.
+    Such a default is STRANDED: every turn fails on a provider this user cannot
+    reach, and nothing in the app ever moved it. When the default is stranded
+    and the provider just signed in to is accessible, both halves are replaced.
+
+    ``accessible=None`` keeps today's behaviour byte for byte, so the callers
+    that have not been taught to compute it (tests, embedders) are unaffected.
+    KEYLESS local providers are deliberately part of the set only when the user
+    configured one (``credentialed_chat_providers``' rule): an unconfigured
+    ``ollama`` default has never served a chat, so a later sign-in replacing it
+    is the repair, while a local server the user pointed somewhere is left alone
+    like any other working choice. See ``model_access.is_stranded`` for the
+    terms.
 
     The credential is never in question here: storing it is the caller's step
     and it has already happened by the time this runs.
@@ -246,6 +269,44 @@ def plan_login_defaults(
         oauth = flavour is not None and flavour.login_kind not in (None, "api_key")
     suggestion = suggested_model_for(resolved, oauth=oauth) if definition is not None else None
     default_model = suggestion.id if suggestion is not None else ""
+
+    # The STRANDED default (see the docstring): a hosting the registry owns and
+    # nobody can reach. Checked HERE, ahead of case 1's early return, because that
+    # return is exactly where a stale default used to survive every later login:
+    # an unauthenticated ``radient/auto`` outlived an OpenAI sign-in forever and
+    # left the user with a working key and no working turn.
+    #
+    # Both halves are required. The new provider must be PROVED accessible (a
+    # credential just landed, but a caller may pass a pre-write set), and the
+    # stored hosting must be PROVED stranded; an unknowable ``accessible`` (None)
+    # moves nothing, exactly like ``is_stranded``'s own contract.
+    if (
+        accessible is not None
+        and bool(hosting)
+        and not is_unusable_hosting(hosting)
+        and is_accessible(resolved, accessible)
+        and is_stranded(str(hosting), accessible)
+    ):
+        # The model belongs to the provider being replaced, so it is overwritten
+        # or cleared for the same reason the ``repairing`` branch does it: a
+        # model id kept beside an unrelated hosting boots and then fails at
+        # stream time, where the app cannot explain it. ``repairing`` stays False
+        # because the registry DOES own this hosting -- that flag means "the id
+        # was not a provider at all", and callers read it as such.
+        model_to_write = default_model
+        receipt = f"Replaced unreachable hosting '{hosting}' with '{resolved}'"
+        if default_model:
+            receipt += f", model to '{default_model}'"
+        else:
+            receipt += ", cleared the model it left behind (no default known)"
+        receipt += "."  # the sentence is complete here; see the note below
+        return LoginDefaults(
+            hosting=resolved,
+            model_name=model_to_write,
+            receipt=receipt,
+            repairing=False,
+            model_label=suggestion.name if (suggestion is not None and model_to_write) else None,
+        )
 
     if hosting and not is_unusable_hosting(hosting):
         if (

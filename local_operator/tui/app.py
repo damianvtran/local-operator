@@ -49212,10 +49212,33 @@ class OperatorApp(App[None]):
             # strictly narrower (it only knows about a value THIS boot
             # reported), so a config corrupted by another route was repaired by
             # the CLI and ignored here.
+            #
+            # ``accessible`` adds the OTHER half of the question the registry
+            # lookup cannot answer: a hosting the registry owns but this user
+            # has no credential for is STRANDED, and a sign-in to a working
+            # provider must replace it rather than bow to case 1 (see
+            # ``providers.model_access``; the read uses this app's own
+            # controller, so it sees the credential the login just stored).
+            # ``None`` on an unreadable store disables only that repair.
+            try:
+                from local_operator.providers.model_access import (
+                    credentialed_chat_providers,
+                )
+
+                accessible = (
+                    credentialed_chat_providers(
+                        self._providers, config_values=manager.get_config().values
+                    )
+                    if self._providers is not None
+                    else None
+                )
+            except Exception:  # noqa: BLE001 — the repair degrades, the login does not
+                accessible = None
             plan = plan_login_defaults(
                 provider,
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
+                accessible=accessible,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -49227,6 +49250,94 @@ class OperatorApp(App[None]):
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
+
+    def _rehome_stranded_session(self) -> str | None:
+        """Move THIS session off a model the sign-in just proved unreachable.
+
+        The TUI's half of the re-home (the desktop's is ``server/utils/
+        desktop_rehome``; the policy, the predicate and the sentence all live in
+        ``providers/model_access``). A conversation's ``selected_model`` outranks
+        config — the owner is the only writer that may move it — so correcting
+        the default alone would leave the user staring at a chat pinned to a
+        provider whose credential is gone: the reported bug.
+
+        Runs AFTER the config write, so the target is the default the user now
+        has, and only for a session this process OWNS: a session reached over a
+        socket is governed by the config of the machine running it, whose own
+        sign-in path repairs it (the design's cross-process rule — lazy by
+        design, never pushed).
+
+        The switch goes through the ``/model`` dispatch rather than the raw
+        setter, for the reason ``_on_model_row_chosen`` gives: a picked or typed
+        selector and this repair must not be able to diverge, and the dispatch
+        carries ``_model_activation_generation`` and the receipt with it. The
+        check-then-dispatch below is atomic by construction (both halves run in
+        one event-loop slot with no await between them), which is this front
+        end's equivalent of the owner-side compare-and-set the runtime uses.
+
+        Returns the receipt sentence to paint, or ``None`` when nothing moved.
+        Never raises: the login it rides on has already succeeded.
+        """
+        session = self._session
+        if session is None or self._providers is None:
+            return None
+        if self._session_runs_elsewhere() or getattr(session, "is_cold", False):
+            return None
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+            from local_operator.providers.model_access import (
+                credentialed_chat_providers,
+                is_accessible,
+                is_stranded,
+                rehome_notice,
+            )
+
+            manager = ConfigManager(config_dir())
+            accessible = credentialed_chat_providers(
+                self._providers, config_values=manager.get_config().values
+            )
+            provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+            model_id = str(manager.get_config_value("model_name", "") or "").strip()
+        except Exception:  # noqa: BLE001 — a repair must never fail a completed login
+            return None
+        if not provider or not model_id or not is_accessible(provider, accessible):
+            return None
+        old_label = str(getattr(session, "model_label", "") or "")
+        old_provider = old_label.partition("/")[0]
+        if not old_label or not is_stranded(old_provider, accessible):
+            return None
+        if not self._idle_for_rehome(session):
+            return None
+        self._run_slash_command(f"/model {provider}/{model_id}")
+        return rehome_notice(old_label, f"{provider}/{model_id}")
+
+    @staticmethod
+    def _idle_for_rehome(session: Any) -> bool:
+        """Whether a re-home would cut across nothing (the design's idle test).
+
+        Streaming is the live-turn signal, and a PARKED GATE is deliberately the
+        second term: the runbook already treats a parked approval as a running
+        turn (the tool slot is held mid-flight), so a model switch there would
+        land between the tool call and its result. Fails closed on an unreadable
+        probe — a skipped repair is recoverable, an interrupted turn is not.
+        """
+        try:
+            if bool(getattr(session, "is_streaming", False)):
+                return False
+            gate = getattr(session, "pending_gate", None)
+            if gate is None and not hasattr(session, "pending_gate"):
+                gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
+            if gate is not None:
+                return False
+            count = getattr(session, "running_subagents", None)
+            if callable(count):
+                running = count()
+                if isinstance(running, int) and running > 0:
+                    return False
+            return True
+        except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
+            return False
 
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
@@ -49296,6 +49407,15 @@ class OperatorApp(App[None]):
                 # longest sentence in the block was also its least legible one while
                 # the two routine confirmations above it were bright.
                 await notice(set_msg, "note")
+            # Repair the conversation this sign-in stranded, if it is one this
+            # process owns and it is idle (see _rehome_stranded_session). AFTER
+            # the defaults write above, because the target is the default the
+            # user now has — and OUTSIDE the ``set_msg`` guard, because a login
+            # that wrote no config can still have stranded a session (its owner
+            # was pinned earlier, by a different sign-in or by /model).
+            rehome_msg = self._rehome_stranded_session()
+            if rehome_msg:
+                await notice(rehome_msg, "note")
             # The credential set just changed, so the owner's offerable-model
             # publication is stale: a follower's picker must see the newly
             # usable provider without waiting for a session restart (D3).
