@@ -67,6 +67,7 @@ __all__ = [
     "best_effort_cancel",
     "emit_progress",
     "progress_details",
+    "run_google",
     "run_openai_sub",
 ]
 
@@ -1162,4 +1163,5 @@ async def best_effort_cancel(handle: CancelHandle | None) -> str:
 # reaches this module's shared plumbing at CALL time (one lazy import per
 # function), which keeps every import order working — this module importing
 # the provider module first, or the provider module imported first.
+from local_operator.imagegen.rungs_google import run_google  # noqa: E402
 from local_operator.imagegen.rungs_openai_sub import run_openai_sub  # noqa: E402

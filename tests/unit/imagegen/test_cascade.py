@@ -29,6 +29,7 @@ def _pin_probes(
     fal: bool = False,
     openai: bool = False,
     openai_sub: bool = False,
+    google: bool = False,
 ) -> None:
     async def fake_radient(config_dir, base_url, *, store):
         return radient
@@ -44,6 +45,9 @@ def _pin_probes(
         image_availability,
         "openai_subscription_grant",
         lambda config_dir=None: openai_sub,
+    )
+    monkeypatch.setattr(
+        image_availability, "google_key", lambda config_dir=None: "gk" if google else None
     )
 
 
@@ -85,6 +89,20 @@ async def test_the_key_rung_still_wins_over_the_subscription(
     resolution = await cascade.resolve_image_route(tmp_path)
     assert resolution.route == ImageRoute.OPENAI_SUB
     assert resolution.reason == "A ChatGPT subscription sign-in is stored."
+
+
+@pytest.mark.asyncio
+async def test_the_google_rung_appends_after_the_subscription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pin_probes(monkeypatch, openai_sub=True, google=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.OPENAI_SUB
+
+    _pin_probes(monkeypatch, google=True)
+    resolution = await cascade.resolve_image_route(tmp_path)
+    assert resolution.route == ImageRoute.GOOGLE
+    assert resolution.reason == "A Google AI Studio key is stored."
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,7 @@ OPENAI_IMAGES_KINDS = frozenset({"api_key"})
 
 FAL_ENV_KEY = "FAL_API_KEY"
 OPENAI_ENV_KEY = "OPENAI_API_KEY"
+GOOGLE_ENV_KEY = "GOOGLE_AI_STUDIO_API_KEY"
 
 
 def _open_store(config_dir: Path | None) -> AuthStore:
@@ -180,6 +181,7 @@ def image_provider_reachable(config_dir: Path | None = None) -> bool:
         or fal_key(config_dir)
         or openai_images_key(config_dir)
         or openai_subscription_grant(config_dir)
+        or google_key(config_dir)
     )
 
 
@@ -227,6 +229,34 @@ async def openai_call_key(store: AuthStore, session_id: str | None = None) -> st
     return exported or None
 
 
+def google_key(config_dir: Path | None = None) -> str | None:
+    """The Google AI Studio key (sync form): ``api_key`` rows → store → env.
+
+    Same precedence as :func:`fal_key`. The namespace is the registry row's
+    ``google`` (``lop login google`` stores there); the env leg is the
+    ``GOOGLE_AI_STUDIO_API_KEY`` name the row declares, and an exported value
+    genuinely runs the call. Never raises.
+    """
+    try:
+        store = _open_store(config_dir)
+        try:
+            key = _api_key_from_rows(store.list_credentials("google"))
+        finally:
+            store.close()
+        if key:
+            return key
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.debug("google login-row probe failed; falling back to store/env", exc_info=True)
+
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value(GOOGLE_ENV_KEY, base=config_dir)
+    if stored:
+        return stored
+    exported = os.environ.get(GOOGLE_ENV_KEY)
+    return exported or None
+
+
 async def openai_sub_access(store: AuthStore, session_id: str | None = None) -> OAuthAccess | None:
     """The identity-carrying grant the subscription rung would send.
 
@@ -241,3 +271,20 @@ async def openai_sub_access(store: AuthStore, session_id: str | None = None) -> 
     except Exception:  # noqa: BLE001 - a probe must never take its caller down
         logger.warning("openai subscription access read failed; reporting none")
         return None
+
+
+async def google_call_key(store: AuthStore, session_id: str | None = None) -> str | None:
+    """The bearer the Google rung would send: persisted rows, then env.
+
+    The ASYNC twin of :func:`google_key` — same credential class, same
+    failure contract (never raises, ``None`` means "no key").
+    """
+    try:
+        key = await store.get_persisted_api_key("google", session_id, kinds={"api_key"})
+    except Exception:  # noqa: BLE001 - a probe must never take its caller down
+        logger.warning("google persisted-key read failed; reporting none")
+        key = None
+    if key:
+        return key
+    exported = os.environ.get(GOOGLE_ENV_KEY)
+    return exported or None

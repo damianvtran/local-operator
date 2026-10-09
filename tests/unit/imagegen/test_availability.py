@@ -162,6 +162,10 @@ def test_reachable_is_the_any_of_matrix(
     )
     assert availability.image_provider_reachable(config_root) is True
 
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "gk")
+    assert availability.image_provider_reachable(config_root) is True
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY")
+
     store.upsert_credential(
         "radient", {"type": "oauth", "refresh": "r", "access": "a", "expires": 4_000_000_000_000}
     )
@@ -180,6 +184,7 @@ def test_probes_never_raise(config_root: Path, monkeypatch: pytest.MonkeyPatch) 
     assert availability.fal_key(config_root) is None
     assert availability.openai_images_key(config_root) is None
     assert availability.openai_subscription_grant(config_root) is False
+    assert availability.google_key(config_root) is None
     assert availability.image_provider_reachable(config_root) is False
 
 
@@ -257,3 +262,53 @@ async def test_the_subscription_access_twin_serves_the_stored_grant(store: AuthS
     assert access.kind == "oauth"
     assert access.access_token == "chatgpt-token"
     assert access.account_id == "acc-1"
+
+
+# ---------------------------------------------------------------------------
+# Google: login row -> provider store row -> exported key (the FAL shape)
+# ---------------------------------------------------------------------------
+
+
+def test_google_reads_the_exported_key_when_nothing_is_stored(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert availability.google_key(config_root) is None
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "exported-key")
+    assert availability.google_key(config_root) == "exported-key"
+
+
+def test_google_login_row_wins_over_the_export(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "exported-key")
+    store.upsert_credential("google", {"type": "api_key", "source": "login", "key": "gkey"})
+    assert availability.google_key(config_root) == "gkey"
+
+
+def test_google_store_row_answers_when_no_login_row_exists(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def fake_provider_secret(name: str, *, base: Path | None = None) -> str | None:
+        seen.append(name)
+        return "store-row-key" if name == "GOOGLE_AI_STUDIO_API_KEY" else None
+
+    monkeypatch.setattr(
+        "local_operator.providers.registry.provider_secret_value", fake_provider_secret
+    )
+    assert availability.google_key(config_root) == "store-row-key"
+    assert seen == ["GOOGLE_AI_STUDIO_API_KEY"]
+
+
+@pytest.mark.asyncio
+async def test_the_google_async_twin_agrees_with_the_sync_probe(
+    store: AuthStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+    assert availability.google_key(config_root) is None
+    assert await availability.google_call_key(store) is None
+
+    store.upsert_credential("google", {"type": "api_key", "source": "login", "key": "gkey"})
+    assert availability.google_key(config_root) == "gkey"
+    assert await availability.google_call_key(store) == "gkey"
