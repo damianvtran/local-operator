@@ -996,7 +996,27 @@ class RemoteOwner:
         from local_operator.network import relay
 
         bound = relay.engage_client_bound_s()
-        detail = _relay_call(
+        # OFF THE LOOP, and not optional. ``_relay_call`` is a blocking socket
+        # round trip bounded by ``bound`` (85 s), and this coroutine runs on the
+        # daemon's one event loop, which serves every HTTP route — local sessions
+        # included. Called inline it froze all of them for the whole wake: a fake
+        # relay answering after 2.0 s stalled the loop 2.17 s (measured), and the
+        # desktop lease-warm loop re-fires this for a visible remote pane, so a
+        # slow peer wake could arm it repeatedly. ``locate`` and
+        # ``peer_stored_history_page`` are already handed to ``asyncio.to_thread``
+        # by their callers; this was the one blocking call made from inside an
+        # ``async def`` here (``connect`` uses asyncio streams). The default
+        # executor is safe: the thread does one socket round trip, holds no lock
+        # and no shared state, and the socket's own timeout bounds its lifetime —
+        # a cancelled awaiter abandons the thread but never strands it past
+        # ``bound``. The pool is capped (min(32, cpu + 4) workers), so a burst of
+        # that many CONCURRENT wakes would queue other ``to_thread`` users for the
+        # wake's duration — still strictly better than the inline call, which
+        # froze every route for one wake; one wake per distinct remote session
+        # (the lease-warm loop is single-flight per pane) keeps real bursts far
+        # under the cap. Audit H2 (remote-audit.md); no timeout or contract change.
+        detail = await asyncio.to_thread(
+            _relay_call,
             self._root,
             OP_PEER_ENGAGE,
             # AN ENGAGE-SHAPED BUDGET, never the control socket's 5 s default: a
