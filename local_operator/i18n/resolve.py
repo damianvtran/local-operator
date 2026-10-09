@@ -270,6 +270,17 @@ def _windows_language() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _kill_switch(environ: Mapping[str, str] | None) -> bool:
+    """``LOP_I18N=0`` forces ``en`` — the RFC §9 operational control.
+
+    Checked BEFORE every other source so a deployment can pin English without
+    editing config, and independent of `language:` so it wins over it. The
+    catalogue route keeps serving whatever it serves; this governs resolution.
+    """
+    source = environ if environ is not None else os.environ
+    return source.get("LOP_I18N") == "0"
+
+
 def resolve_language(
     config: str | None = None,
     *,
@@ -284,6 +295,8 @@ def resolve_language(
     SHIPPED locale — today that means ``"en"`` — so every consumer can treat
     it as renderable.
     """
+    if _kill_switch(environ):
+        return "en"
     if config is None:
         config = config_value()
     candidate: str | None = None

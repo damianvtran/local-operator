@@ -188,7 +188,14 @@ def _call_violations(call: ast.Call) -> list[tuple[str, ast.expr]]:
 
 
 def scan_source(path: str, source: str) -> list[Violation]:
-    """The violations of one file's source, pragmas applied."""
+    """The violations of one file's source, pragmas applied.
+
+    A ``# i18n: ignore <reason>`` comment ANYWHERE between a call's first and
+    last line exempts the literals in that call — not just a comment on the
+    literal's own line, which is what the allowlist docs used to claim
+    (round-1 n2). Multi-line calls are the norm here, so the call span is the
+    span that reads naturally; the allowlist's text now says exactly this.
+    """
     try:
         module = ast.parse(source, filename=path)
     except SyntaxError as exc:  # pragma: no cover - the repo gate parses first
@@ -453,7 +460,10 @@ def main(argv: list[str] | None = None) -> int:
     counts = _counts(scanned, entries)
 
     if args.init:
-        if BASELINE.is_file() and not args.force and load_baseline(BASELINE):
+        # ANY existing baseline refuses, empty or not: an empty file used to be
+        # treated as "no baseline" by a truthiness test and silently
+        # overwritten without `--force` (round-1 n3).
+        if BASELINE.is_file() and not args.force:
             print(
                 "check.py --init: a baseline already exists; use --force only for a reviewed "
                 "scanner-coverage change (say so in the PR body)."

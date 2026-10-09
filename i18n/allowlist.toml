@@ -14,7 +14,9 @@
 # narrow-looking pattern can exempt a whole subtree; a directory must be
 # written as one, where a reviewer sees it. Prefer the narrowest form.
 #
-# Inline exemptions (`# i18n: ignore <reason>` on the literal's line) are for
-# one-off sites; this file is for a file that is SYSTEMATICALLY not user copy.
+# Inline exemptions (`# i18n: ignore <reason>`) may sit anywhere within the
+# call whose arguments carry the literal — its first through last line — so a
+# multi-line call takes one comment instead of one per argument. One-off sites
+# use a pragma; this file is for a file that is SYSTEMATICALLY not user copy.
 
 entries = []

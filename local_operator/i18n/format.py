@@ -286,10 +286,12 @@ def format_datetime(when: "datetime", locale: str) -> str:
 # ---------------------------------------------------------------------------
 #
 # The rule functions below implement CLDR's plural rules for exactly the eight
-# wave locales. They are NOT free-standing: ``scripts/i18n/generate.py``
-# validates each against every sample emitted from `Intl.PluralRules` (a dense
-# 0..200 sweep plus magnitude specials and decimals, per locale), so a rule
-# that disagrees with the JS the TS surfaces use fails generation loudly.
+# wave locales. They are NOT free-standing: the emitter records a golden sample
+# per (locale, value) from `Intl.PluralRules` (a dense 0..200 sweep plus
+# magnitude specials and decimals) and
+# `tests/unit/i18n/test_format.py::test_plural_categories_match_every_generated_sample`
+# re-derives every one of them — generation itself only EMITS the samples, the
+# test is where a rule that disagrees with the JS the TS surfaces use goes red.
 # Adding a locale means adding its rule here AND its entry in emit.mjs.
 #
 # Operands follow CLDR: `n` is the absolute value, `i` its integer part, `v`

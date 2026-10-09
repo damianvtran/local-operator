@@ -123,6 +123,12 @@ class TestRatchet:
         assert i18n_check.main(["--init"]) == 0
         assert i18n_check.main(["--init"]) == 2
         assert i18n_check.main(["--init", "--force"]) == 0
+        # round-1 n3: an existing baseline that is EMPTY is still an existing
+        # baseline — a truthiness test used to treat it as absent and
+        # overwrite it without --force.
+        (tree / "i18n" / "baseline.json").write_text("{}\n", encoding="utf-8")
+        assert i18n_check.main(["--init"]) == 2
+        assert i18n_check.main(["--init", "--force"]) == 0
 
     def test_allowlisted_file_is_exempt(self, tree, i18n_check) -> None:
         _write(
@@ -153,7 +159,9 @@ class TestRatchet:
 
 
 class TestCatalogueParity:
-    def _fixture(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict) -> None:
+    def _fixture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, dict[str, str]]
+    ) -> None:
         root = tmp_path / "catalogues"
         for rel, data in files.items():
             path = root / rel

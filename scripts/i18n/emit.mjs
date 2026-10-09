@@ -14,7 +14,11 @@
 //   - no clock reads, no randomness, no environment reads;
 //   - fixed probe dates/numbers and a fixed `timeZone: 'UTC'` on every
 //     formatter (a host-local timezone would move every date pattern);
-//   - sorted keys everywhere plus a stable, explicit locale order.
+//   - sorted keys everywhere plus a stable, explicit locale order;
+//   - NODE-MAJOR STABLE OUTPUT (see the NNBSP_RE note below): byte-identical on
+//     Node 24 — CI's `setup-node` pin (.github/workflows/ci.yml) — and Node 26,
+//     so a local regeneration reproduces the CI drift check whichever of the
+//     two the host runs.
 //
 // WHAT IS DELIBERATELY *NOT* EMITTED. The tables hold raw data plus golden
 // `probes` (input -> the exact string Node produced). The Python formatter
@@ -196,20 +200,38 @@ function padded(value) {
   return value.length === 2 && value.startsWith("0");
 }
 
+// `formatToParts` and `format` DISAGREE on the narrow no-break space, and the
+// disagreement is MAJOR-DEPENDENT: Node 24's parts carry U+202F in six slots
+// (en time short/medium + datetime; ru date medium/long + datetime) where the
+// string `format()` produces — and where Node 26's parts also carry — U+0020
+// (measured 2026-10-09 across all eight locales and both majors; `format()`
+// itself never emitted U+202F on either). We emit the format() spelling,
+// because that is the string a surface actually shows, and normalising keeps
+// the committed tables byte-identical across the two majors — without it the
+// drift check passes on one Node and fails on the other (round-1 B1).
+const NNBSP_RE = /\u202f/g;
+
+function normalizeSpaces(value) {
+  return value.replace(NNBSP_RE, " ");
+}
+
 function dateTokenFor(part, monthArray, monthToken, where) {
   // Shared by datePattern and datetimeInfo — the same fixture, the same
   // format-case month comparison, the same loud error on an unmatched name.
+  // The value is normalised first (see NNBSP_RE) so the comparison sees the
+  // format() spelling whatever the parts emitted.
+  const value = normalizeSpaces(part.value);
   switch (part.type) {
     case "year":
-      return part.value.length === 2 ? "{yy}" : "{yyyy}";
+      return value.length === 2 ? "{yy}" : "{yyyy}";
     case "month":
-      if (/^\d+$/.test(part.value)) return padded(part.value) ? "{mm}" : "{m}";
-      if (part.value === monthArray[6]) return monthToken;
+      if (/^\d+$/.test(value)) return padded(value) ? "{mm}" : "{m}";
+      if (value === monthArray[6]) return monthToken;
       throw new Error(
-        `emit.mjs: month part ${JSON.stringify(part.value)} for ${where} matches no ${monthToken} entry — refusing to bake a month name into a pattern`
+        `emit.mjs: month part ${JSON.stringify(value)} for ${where} matches no ${monthToken} entry — refusing to bake a month name into a pattern`
       );
     case "day":
-      return padded(part.value) ? "{dd}" : "{d}";
+      return padded(value) ? "{dd}" : "{d}";
     default:
       return null;
   }
@@ -245,7 +267,7 @@ function datePattern(locale, names) {
     return parts
       .map((p) => {
         const token = dateTokenFor(p, expected.months, expected.token, `${locale}/${style}`);
-        return token === null ? p.value : token;
+        return token === null ? normalizeSpaces(p.value) : token;
       })
       .join("");
   };
@@ -269,7 +291,7 @@ function datetimeInfo(locale, names) {
       if (date !== null) return date;
       const time = timeTokenFor(p, hour12);
       if (time !== null) return time;
-      return p.value;
+      return normalizeSpaces(p.value);
     })
     .join("");
 }
@@ -284,7 +306,7 @@ function monthStyleParts(locale, style) {
   for (let m = 0; m < 12; m += 1) {
     const parts = fmt.formatToParts(new Date(Date.UTC(2025, m, 15)));
     const month = parts.find((p) => p.type === "month");
-    months.push(month ? month.value : "");
+    months.push(month ? normalizeSpaces(month.value) : "");
   }
   return months;
 }
@@ -311,7 +333,7 @@ function timeInfo(locale) {
     const pattern = parts
       .map((p) => {
         const token = timeTokenFor(p, hour12);
-        return token === null ? p.value : token;
+        return token === null ? normalizeSpaces(p.value) : token;
       })
       .join("");
     return { pattern, fmt };

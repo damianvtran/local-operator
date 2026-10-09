@@ -86,16 +86,27 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _identifier(name: str) -> str:
+    """A valid Python identifier for a key segment or argument name.
+
+    Two legal catalogue shapes would otherwise emit SYNTAX ERRORS that the
+    text-comparing drift check cannot see (round-1 m2): a digit-leading
+    segment (`demo.bad.2fa` -> `def 2fa`) and a Python-keyword argument
+    (`{class, select, ...}` -> `*, class: str`). The Python spelling moves; the
+    MESSAGE KEY and the argument name in the Msg body stay exactly as the
+    catalogue spells them, so the wire contract is untouched.
+    """
+    safe = name
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
+    if keyword.iskeyword(safe):
+        safe += "_"
+    return safe
+
+
 def _fn_name(namespace: str, key: str) -> str:
     suffix = key[len(namespace) + 1 :] if key.startswith(namespace + ".") else key
-    name = suffix.replace(".", "_").replace("-", "_")
-    # A segment that is a Python keyword (a future `wire.errors.import`-style
-    # key) must not produce a syntax error in generated code; the trailing
-    # underscore is the generated-API convention and keeps the key intact in
-    # the Msg body.
-    if keyword.iskeyword(name):
-        name += "_"
-    return name
+    return _identifier(suffix.replace(".", "_").replace("-", "_"))
 
 
 def _param_types(message: str) -> list[tuple[str, str]]:
@@ -122,8 +133,17 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             needs_datetime = True
         fname = _fn_name(namespace, key)
         if params:
-            signature = ", ".join(f"*, {name}: {ann}" for name, ann in params)
-            pairs = ", ".join(f'"{name}": {name}' for name, _ in params)
+            # Sanitise the ARGUMENT identifiers too (m2) and refuse a
+            # sanitisation collision loudly rather than emitting duplicate
+            # kwargs the compiler would reject far from the cause.
+            sanitised = [_identifier(name) for name, _ in params]
+            if len(set(sanitised)) != len(sanitised):
+                raise SystemExit(
+                    f"generate.py: {namespace}: arguments of {key!r} sanitise to "
+                    f"duplicate identifiers {sanitised}; rename one in the catalogue"
+                )
+            signature = ", ".join(f"*, {safe}: {ann}" for safe, (_, ann) in zip(sanitised, params))
+            pairs = ", ".join(f'"{name}": {safe}' for safe, (name, _) in zip(sanitised, params))
         else:
             signature = ""
             pairs = ""
@@ -221,9 +241,23 @@ def _check(planned: dict[Path, str]) -> int:
             continue
         if path.read_text(encoding="utf-8") != content:
             stale.append(f"changed: {rel}")
+    # ORPHANS, the failure a plan-vs-plan diff can never see (round-1 n4): a
+    # namespace rename/removal leaves `keys/<old>.py` (or a data file) behind,
+    # nothing regenerates it, and the diff stays green while the package grows
+    # a module no catalogue knows about. Checked for the two generated dirs.
+    for directory, pattern in ((KEYS_DIR, "*.py"), (DATA_DIR, "*.json")):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob(pattern)):
+            if path not in planned:
+                stale.append(f"orphaned: {path.relative_to(REPO)}")
     if stale:
         print("generate.py --check: committed artifacts are stale — regenerate with")
         print("  .venv/bin/python scripts/i18n/generate.py")
+        print(
+            "(the emitter is pinned to Node 24 — CI's setup-node major — and its output "
+            "is normalised to be node-major stable; see the note in scripts/i18n/emit.mjs)"
+        )
         for line in stale:
             print(f"  {line}")
         return 1

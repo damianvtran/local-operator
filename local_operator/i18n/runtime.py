@@ -355,8 +355,21 @@ def _select_plural(
                 if Decimal(str(value)) == Decimal(selector[1:]):
                     return dict(parts)[selector]
             except (ValueError, ArithmeticError):
+                # A non-numeric value can never equal an exact selector; the
+                # category step below is where the type failure is REPORTED.
                 continue
-    category = fmt.plural_category(locale, value)
+    try:
+        category = fmt.plural_category(locale, value)
+    except (ValueError, ArithmeticError) as exc:
+        # The category boundary owns the normalisation: `Decimal(str(True))`
+        # raises decimal.InvalidOperation, which is NOT a MessageError, so an
+        # unguarded call would escape `render_message`'s documented outcome
+        # and `messages.envelope`'s never-raise contract (round-1 M1). The
+        # decimal detail stays as the cause; callers see the runtime's own
+        # error type and degrade as designed.
+        raise MessageFormatError(
+            f"plural value {value!r} is not numeric ({type(value).__name__})"
+        ) from exc
     for selector, body in parts:
         if selector == category:
             return body
@@ -370,7 +383,16 @@ def _select_plural(
 
 
 def _select_string(value: Any, parts: Sequence[tuple[str, tuple[_Node, ...]]]) -> tuple[_Node, ...]:
-    key = str(value)
+    # The KEY is normalised like `format._decimal` normalises numbers: an
+    # integral float or Decimal selects by its integer spelling (`3.0` -> `3`),
+    # because the TS surfaces (intl-messageformat over JS numbers) cannot even
+    # express the difference (round-1 m1). Non-integral values keep `str()`.
+    if isinstance(value, float) and value.is_integer():
+        key = str(int(value))
+    elif isinstance(value, Decimal) and value == value.to_integral_value():
+        key = str(int(value))
+    else:
+        key = str(value)
     for selector, body in parts:
         if selector == key:
             return body

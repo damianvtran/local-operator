@@ -42,6 +42,24 @@ async def test_conditional_request_short_circuits_to_304(test_app_client) -> Non
 
 
 @pytest.mark.asyncio
+async def test_weak_and_list_validators_still_revalidate_to_304(test_app_client) -> None:
+    # RFC 9110 §13.1.2 weak comparison (round-1 n5): a client echoing the tag
+    # weak, in a list, or sending `*` must still short-circuit.
+    first = await test_app_client.get("/v1/i18n/catalogues/en/wire.errors")
+    etag = first.headers["etag"]
+    for header in (f"W/{etag}", f'"other", W/{etag}', "*"):
+        response = await test_app_client.get(
+            "/v1/i18n/catalogues/en/wire.errors", headers={"If-None-Match": header}
+        )
+        assert response.status_code == 304, header
+    # A non-matching tag still fetches.
+    response = await test_app_client.get(
+        "/v1/i18n/catalogues/en/wire.errors", headers={"If-None-Match": '"nope"'}
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path",
     [
