@@ -511,6 +511,46 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "beats a chain of shell round-trips; see `tool://eval`."
         ),
     ),
+    # Wire cut: the cost/failover/cancel clauses live here rather than in the
+    # always-loaded description (the slimming-wave trade the module docstring
+    # describes); the description keeps only the capability sentence and the
+    # two pointers.
+    "generate_image": ToolDocNotes(
+        notes=(
+            "Providers, in priority order: Radient (signed-in account), then "
+            "FAL (stored key), then OpenAI (stored API key). Failover is "
+            "automatic — if one refuses, the next runs, and the result's "
+            "`details.attempts` lists what each provider said.\n"
+            "\n"
+            "Cost: Radient reports `cost_usd` per generation (prices come "
+            "from its live model list) and bills your account credits; FAL "
+            "and OpenAI bill your own key, OpenAI per image — `num_images` "
+            "multiplies every provider's cost. The harness prompts for "
+            "approval before spending (write tier); `image_size` and "
+            "`num_images` are the spend knobs.\n"
+            "\n"
+            "`source_image_path` makes it an edit (image-to-image): the file "
+            "is read locally and uploaded to the provider as a data URI; "
+            "`strength` (0..1) only applies with it. `model` picks a "
+            "provider model id — omit it and the provider's default runs; "
+            "Radient model ids are read from its live list at call time.\n"
+            "\n"
+            "Cancelling: stopping the turn (Esc / steering) stops the wait "
+            "and best-effort-cancels the provider-side job; a cancelled "
+            "generation is not resumed — call again with the same or an "
+            "edited prompt for a fresh one. Nothing is resumed after a "
+            "restart of any kind.\n"
+            "\n"
+            "Failure modes: no provider configured (set one up via "
+            "`guide://image-generation`); insufficient credits (402 — top "
+            "up and retry); all providers failed — the error lists every "
+            "attempt so you can decide what to change.\n"
+            "\n"
+            "The generated images are attached to the session — that IS the "
+            "delivery; do not re-save them to disk unless the user asks for "
+            "a file."
+        ),
+    ),
     "grep": ToolDocNotes(
         notes=(
             "Detail moved off the wire in the slimming wave (audit items 2+7):\n"
