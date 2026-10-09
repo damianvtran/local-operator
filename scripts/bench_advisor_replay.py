@@ -62,8 +62,9 @@ sys.path.insert(0, str(REPO))
 
 from local_operator.compaction.tokens import _encode_len  # noqa: E402
 
-#: Trigger sizes replayed. 600k is the shipped default ceiling (and where four
-#: of the seven real passes fired); 300k and 400k are the earlier triggers an
+#: Trigger sizes replayed. 600k was the shipped default ceiling when these
+#: passes were recorded (the default is now 400k; four of the seven real passes
+#: fired at 600k); 300k and 400k are the earlier triggers an
 #: advisor would plausibly ask for.
 DEFAULT_TRIGGERS = (300_000, 400_000, 600_000)
 

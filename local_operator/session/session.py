@@ -27,7 +27,7 @@ Ported semantics:
   that prune,
   trigger on ``compaction_context_tokens`` against the single resolved
   threshold ``min(threshold_percent * window, threshold_tokens)`` (defaults
-  80% and 600k, resolved only by ``compaction.thresholds``), strategy
+  80% and 400k, resolved only by ``compaction.thresholds``), strategy
   resolution with snapcompact preferred for vision models, and the recovery
   band gating auto-continuation.
 - ``agent_start``/``agent_end`` carry a per-session monotonic ``generation``
@@ -16506,7 +16506,7 @@ class Session:
            context size and the local estimate).
         3. Threshold: whatever ``compaction.thresholds.resolve_threshold_tokens``
            resolves for this window — ``min(threshold_percent * context_window,
-           threshold_tokens)``, defaults 80% and 600k. The gate never derives
+           threshold_tokens)``, defaults 80% and 400k. The gate never derives
            it here; a mirrored formula in the session is how a 1M-context
            session ended up compacting at ~235k.
         4. Strategy resolution: snapcompact for vision models (archive stored
