@@ -20,7 +20,6 @@ cannot write to it.
 """
 
 import asyncio
-import json
 import re
 import shutil
 import sys
