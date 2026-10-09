@@ -1404,6 +1404,32 @@ def test_a_handlers_refusal_crosses_the_link_carrying_its_code(root: Path) -> No
     }
 
 
+def test_a_broker_reply_is_marked_so_the_codec_never_compresses_it(root: Path) -> None:
+    """A `net_broker` ack can carry a credential VALUE and has no op of its own for
+    ``seal`` to key on, so ``_run_handler`` marks it; every other op's reply stays a
+    plain dict (wire.py "Record compression")."""
+    from argparse import Namespace
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    link: Any = Namespace(device_id="d_" + "c" * 32, network_id="n_test", epoch=1)
+
+    def _handler(_link: object, _frame: dict[str, object]) -> dict[str, object]:
+        return {"value": "s3cret"}
+
+    broker = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
+        link, {"op": "net_broker", "req": 4}, _handler, types.Granted(action="net_broker")
+    )
+    other = server._run_handler(  # noqa: SLF001
+        link, {"op": "net_catalog", "req": 5}, _handler, types.Granted(action="net_catalog")
+    )
+    assert isinstance(broker, wire.UncompressedFrame)
+    assert broker == {"op": "ack", "req": 4, "detail": {"value": "s3cret"}}
+    assert not isinstance(other, wire.UncompressedFrame)
+    assert other == {"op": "ack", "req": 5, "detail": {"value": "s3cret"}}
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

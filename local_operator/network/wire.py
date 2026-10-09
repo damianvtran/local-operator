@@ -37,6 +37,7 @@ import hmac
 import json
 import socket
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -118,6 +119,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-readiness-v1",
     "mcp-defs-v1",
     "pair-offer-v1",
+    "zlib-records-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The peer-readiness op's capability (``readiness.py``). It is advertised by
@@ -142,6 +144,11 @@ MCP_DEFS_V1 = "mcp-defs-v1"
 #: not move); an old peer ignores the unknown string, which the mixed-build cells
 #: pin.
 PAIR_OFFER_V1 = "pair-offer-v1"
+#: Record compression (see "Record compression" below). Unlike the op
+#: capabilities above it changes the BYTES of records rather than which ops exist,
+#: so it is the one capability the codec itself consumes: ``Handshake.codec``
+#: enables compression on a link only when BOTH ends advertised this string.
+ZLIB_RECORDS_V1 = "zlib-records-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +440,79 @@ def normalize_sas(text: str) -> str:
 LINK_CRYPTO_KINDS = frozenset({"auth", "sequence", "parse", "limit"})
 
 
+# ---------------------------------------------------------------------------
+# Record compression (``zlib-records-v1``)
+# ---------------------------------------------------------------------------
+#
+# WHY. Nothing on the peer link was compressed, and the big frames are
+# repetitive JSON: a remote ``net_session_history`` page (100 rows) is 106-330 KB
+# on the wire at 140-870 ms to first byte, ``stream_open``'s ``frontend_sync`` is
+# ~539 KB, and the federated catalogue grows with the mesh. Measured on real
+# journals (100-row pages of 123-796 KB): zlib level 3 gives 2.1-4.1x in 1-14 ms
+# (~2.7x / 3.6 ms on a 347 KB page), and decompression is ~0.3 ms per 350 KB.
+#
+# THE MIXED-VERSION RULE (the whole compatibility story, in one place):
+#   1. Compression is ON for a link only when BOTH ends advertised
+#      ``ZLIB_RECORDS_V1`` in the handshake (``Handshake.codec`` computes it with
+#      ``negotiate_capabilities``). The capability strings sit inside the
+#      transcript the auth MAC covers, so an on-path attacker cannot strip it to
+#      force a downgrade (the handshake would simply fail).
+#   2. On a link where it is OFF, ``seal`` emits exactly the bytes it always did
+#      and ``open`` treats a compressed-marker record as the parse error it
+#      always was. An old peer therefore never receives a compressed record, and
+#      a new build talking to one is byte-identical to the build before this.
+#   3. No protocol version moves; an old peer simply ignores the unknown string.
+#
+# WHERE THE MARKER LIVES. Inside the AEAD plaintext, as its first byte, and NOT in
+# the length prefix or the AAD. The prefix and AAD are what an on-path observer
+# sees or what an old peer parses; a flag there would be visible (a new tell) or
+# would change AAD bytes (breaking tag verification against the previous build).
+# Inside the plaintext it is authenticated and invisible. It is unambiguous
+# because an uncompressed plaintext is a JSON OBJECT and always starts with
+# ``{`` (0x7B), while the marker byte 0x01 can never begin JSON.
+#
+# WHAT IT LEAKS. The length prefix already reveals each record's ciphertext size.
+# With compression that size is of the COMPRESSED plaintext, so it additionally
+# reflects compressibility; that is the CRIME/BREACH class, and it needs an
+# attacker who both observes record lengths and can inject chosen text into the
+# same record as a secret. Mesh links are between mutually authenticated members
+# and no op co-mingles a member-chosen string with a credential — and the one
+# frame class that carries credential VALUES (``net_broker``, request and reply)
+# is excluded outright (:data:`NEVER_COMPRESS_OPS`, :class:`UncompressedFrame`),
+# so the residual leak is the compressibility of session/catalogue content that
+# the receiving member is already authorised to read.
+
+#: First plaintext byte of a compressed record (see above for why 0x01).
+COMPRESSED_MARKER = b"\x01"
+
+#: Plaintexts shorter than this are sent uncompressed. Measured on real journal
+#: rows: a ~512 B frame compresses 1.5x (saves ~140 B), ~1 KiB 1.7x (~390 B),
+#: ~2 KiB 1.9x (~920 B), ~4 KiB 2.1x (~2 KB). A frame under one TCP segment
+#: (~1.4 KB) cannot save a round trip however well it compresses, and keepalives,
+#: acks and stream deltas — the bulk of frames by COUNT — all sit below 2 KiB, so
+#: they must not pay a zlib call. From 2 KiB the saving is a segment or more.
+COMPRESS_MIN_BYTES = 2048
+
+#: zlib level. Level 1/3/6 on a 347 KB page measured 2.5/3.6/7.9 ms for
+#: 2.5/2.7/2.9x: level 6 buys ~8 % size for 2.2x the writer thread's time, level
+#: 3 is the knee. (zlib releases the GIL on buffers this size.)
+COMPRESS_LEVEL = 3
+
+#: Ops that are never compressed, as REQUESTS: the credential broker's frames
+#: carry secret values (``net_broker`` copy) and a compressed length would
+#: otherwise expose their compressibility. Replies are acks with no op of their
+#: own, so the relay marks them with :class:`UncompressedFrame` instead.
+NEVER_COMPRESS_OPS: frozenset[str] = frozenset({"net_broker"})
+
+
+class UncompressedFrame(dict[str, Any]):
+    """A frame ``LinkCrypto.seal`` must not compress (a credential-bearing reply).
+
+    A plain ``dict`` subclass so every consumer of a frame (JSON encoding, the
+    queues, ``frame.get``) sees an ordinary dict; only ``seal`` looks at the type.
+    """
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -450,8 +530,16 @@ class LinkCrypto:
     #: keep incrementing; the link is closed and re-handshaken, which is free.
     MAX_SEQ = 2**40
 
-    def __init__(self, keys: LinkKeys, *, role: Role) -> None:
+    def __init__(self, keys: LinkKeys, *, role: Role, compression: bool = False) -> None:
+        """``compression`` is the NEGOTIATED outcome, never a local preference.
+
+        Default off, so every construction that does not pass it — the pair
+        ceremony helpers, tests, an old call site — keeps today's bytes exactly.
+        ``Handshake.codec`` sets it only when both ends advertised
+        :data:`ZLIB_RECORDS_V1`.
+        """
         self._keys = keys
+        self._compression = compression
         # ANNOTATED, not inferred: pyright widens an attribute assigned from a
         # ``Literal``-typed parameter to ``str``, so the ``role`` property below
         # would promise a ``Role`` it cannot prove. The annotation is the promise.
@@ -469,6 +557,11 @@ class LinkCrypto:
         return self._role
 
     @property
+    def compression(self) -> bool:
+        """Whether this link negotiated :data:`ZLIB_RECORDS_V1`."""
+        return self._compression
+
+    @property
     def sent(self) -> int:
         return self._send_seq
 
@@ -477,7 +570,16 @@ class LinkCrypto:
         return self._recv_seq
 
     def seal(self, frame: dict[str, Any]) -> bytes:
-        """One record: ``uint32_be(len) || AES-256-GCM(plaintext)``."""
+        """One record: ``uint32_be(len) || AES-256-GCM(plaintext)``.
+
+        On a link that negotiated :data:`ZLIB_RECORDS_V1` a plaintext of at least
+        :data:`COMPRESS_MIN_BYTES` is sent as ``COMPRESSED_MARKER || zlib(json)``
+        when that is smaller. The :data:`MAX_RECORD_BYTES` ceiling is checked on
+        the UNCOMPRESSED frame (so every sender's budget, e.g. the session-history
+        reply budget, means the same thing on a compressing and a non-compressing
+        link, and ``open`` can bound its decompression by the same number) and
+        again by the reader on the compressed length that actually crosses.
+        """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         plaintext = json.dumps(
@@ -489,6 +591,8 @@ class LinkCrypto:
                 "limit; the link is closed rather than fragmented",
                 kind="limit",
             )
+        if self._compression and len(plaintext) >= COMPRESS_MIN_BYTES:
+            plaintext = self._compressed_or_same(frame, plaintext)
         sequence = self._send_seq
         payload = AESGCM(self._key).encrypt(
             self._nonce(self._iv, sequence),
@@ -497,6 +601,56 @@ class LinkCrypto:
         )
         self._send_seq += 1
         return len(payload).to_bytes(LOCAL_PREFIX_LEN, "big") + payload
+
+    @staticmethod
+    def _compressed_or_same(frame: dict[str, Any], plaintext: bytes) -> bytes:
+        """``plaintext`` compressed behind the marker, or unchanged when that loses.
+
+        Never expands a record: a frame that does not shrink (already-compressed
+        base64 blobs, say) goes out exactly as the uncompressed path would send it.
+        """
+        if frame.get("op") in NEVER_COMPRESS_OPS or isinstance(frame, UncompressedFrame):
+            return plaintext
+        packed = COMPRESSED_MARKER + zlib.compress(plaintext, COMPRESS_LEVEL)
+        return packed if len(packed) < len(plaintext) else plaintext
+
+    def _decompress(self, plaintext: bytes) -> bytes:
+        """The frame bytes inside a compressed record, or a fatal ``LinkCryptoError``.
+
+        Bounded by :data:`MAX_RECORD_BYTES` of OUTPUT (an authenticated peer can
+        still send a few KB that inflate to gigabytes, so the ceiling is applied as
+        the stream is inflated, not after) and all-or-nothing: a truncated stream,
+        trailing bytes after the stream's end or any zlib error is a ``parse``
+        failure, and no partial output is ever handed to the JSON parser.
+        """
+        if not self._compression:
+            # Not negotiated: the marker byte is just a malformed JSON record,
+            # exactly as it was before this capability existed.
+            raise LinkCryptoError(
+                "a record decrypted to something that is not a JSON frame; the link is closed",
+                kind="parse",
+            )
+        inflater = zlib.decompressobj()
+        try:
+            inflated = inflater.decompress(
+                plaintext[len(COMPRESSED_MARKER) :], MAX_RECORD_BYTES + 1
+            )
+        except zlib.error as exc:
+            raise LinkCryptoError(
+                "a compressed record did not inflate; the link is closed", kind="parse"
+            ) from exc
+        if len(inflated) > MAX_RECORD_BYTES:
+            raise LinkCryptoError(
+                f"a compressed record inflated past the {MAX_RECORD_BYTES}-byte record limit; "
+                "the link is closed",
+                kind="limit",
+            )
+        if not inflater.eof or inflater.unused_data:
+            raise LinkCryptoError(
+                "a compressed record was truncated or carried trailing bytes; the link is closed",
+                kind="parse",
+            )
+        return inflated
 
     def open(self, payload: bytes) -> dict[str, Any]:
         """Decrypt one record's payload (length prefix already consumed)."""
@@ -526,6 +680,10 @@ class LinkCrypto:
                 kind="auth",
             ) from exc
         self._recv_seq += 1
+        # AFTER authentication and the counter step, like every other failure
+        # below: a record that failed its tag never reaches the inflater.
+        if plaintext.startswith(COMPRESSED_MARKER):
+            plaintext = self._decompress(plaintext)
         try:
             frame = json.loads(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
