@@ -193,14 +193,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if not activation.human_surface_present():
                 logger.info("aida: no human surface at boot; not auto-activating")
                 return
-            # R17's third signal (2026-10-09): a pty carries a RUN, not a
-            # person, when HOME is not the user's — a rig, a container or an
-            # orchestrator under `lop serve` must not create her session, arm a
-            # cadence and install a wake supervisor for a store nobody owns.
-            # Same comparison as the toast gate, through activation's one
-            # spelling; "cannot tell" fails open (behaves as before).
-            if not activation.home_is_the_users():
-                logger.info("aida: boot HOME is not the user's; not auto-activating")
+            # R17's third signal (2026-10-09), SCOPED TO THE TERMINAL ARM
+            # (design §3 / T9): a pty carries a RUN, not a person, when HOME
+            # is not the user's — a rig, a container or an orchestrator under
+            # `lop serve` must not create her session, arm a cadence and
+            # install a wake supervisor for a store nobody owns. The
+            # desktop-token arm is deliberately NOT gated here: the desktop
+            # app spawns its daemon as the user, and gating it would recast
+            # the shipped desktop contract (see
+            # ``activation.terminal_under_a_foreign_home`` for the full
+            # reasoning and the quiet paths that still bound such a boot).
+            if activation.terminal_under_a_foreign_home():
+                logger.info("aida: boot terminal is under a foreign HOME; not auto-activating")
                 return
             await ensure_session(config_dir)
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon

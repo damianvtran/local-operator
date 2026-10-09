@@ -124,12 +124,13 @@ def test_a_redirected_home_boot_is_not_auto_activated(
 ) -> None:
     """T9: a pty is a RUN, not a person, when HOME is not the user's.
 
-    The two original signals each have a gap this closes: a pty-allocating
-    ``lop serve`` under a rig/container HOME satisfies the terminal check, and
-    a desktop token under one satisfies the desktop check. Neither is a seat
-    the user is in, and the toast gate already refuses such a process — the
-    boot hook must agree before it creates a session, a cadence and a wake
-    supervisor for a store nobody owns.
+    The gap this closes is the TERMINAL signal's: it answers True for ANY
+    pty, and a pty-allocating ``lop serve`` under a rig/container HOME is
+    such a run, not a seat — the toast gate already refuses such a process,
+    and the boot must agree before it creates a session, a cadence and a wake
+    supervisor for a store nobody owns. The DESKTOP arm is deliberately not
+    gated here — see the token cell below, and
+    ``activation.terminal_under_a_foreign_home`` for the reasoning.
 
     Mutation: drop the HOME term from the boot hook — ``calls`` becomes 1.
     """
@@ -139,6 +140,28 @@ def test_a_redirected_home_boot_is_not_auto_activated(
     assert calls == [], "a redirected-home boot must not auto-create her"
     assert not (root / "aida").exists()
     assert not (root / "sessions").exists()
+
+
+def test_a_desktop_token_boot_under_a_redirected_home_still_activates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: Calls
+) -> None:
+    """The desktop arm is NOT gated by HOME (T9's exact scope).
+
+    T9 closes the TERMINAL gap: a pty under a foreign HOME is a run. The
+    desktop token is different in kind — the app spawns its daemon as the
+    user, and the platform's desktop simulations (the desktop e2e suites) run
+    token-plus-isolated-HOME by design, so gating this arm would recast the
+    shipped desktop contract. What still bounds such a boot is per-process
+    and unchanged: the toast and announce gates refuse a foreign-HOME
+    process, so it pays no banner and no retry ladder.
+
+    Mutation: widen the HOME gate back over both arms (suppress any boot
+    whose HOME is not the user's) → ``calls`` becomes [] → red.
+    """
+    _boot(tmp_path, monkeypatch, token="desktop-token", terminal=False, home_is_users=False)
+    with TestClient(app) as client:
+        _settle_boot(client)
+    assert len(calls) == 1, "the desktop plane's token is an app-issued human signal"
 
 
 def test_an_explicit_ensure_still_creates_her_on_a_cloud_install(
