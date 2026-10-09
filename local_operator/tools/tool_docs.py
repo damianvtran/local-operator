@@ -493,9 +493,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "manager, designer, scout); the role supplies standing guidance "
             "and may restrict the child's tools.\n"
             "- ``subagents.model_choice=model`` is the operator's switch that "
-            "hands the child's model back (top level only); ``effort`` swaps "
-            "the child's MODEL (not its reasoning level), and omitting it "
-            "inherits this session's model and reasoning effort."
+            "hands the child's model back; ``effort`` swaps the child's MODEL "
+            "(not its reasoning level), and omitting it inherits this session's "
+            "model and reasoning effort."
         ),
     ),
     # -- item-7 notes (failure semantics + the system-prompt cuts) ----------
