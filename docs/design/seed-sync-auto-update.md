@@ -67,8 +67,6 @@ the manifest. Shape:
   first carried the text, so an uncommitted seed refuses) → run the generator (normal mode
   appends) → commit the regenerated ledger in the same PR. The byte-identity test fails
   otherwise, naming the generator command.
-  re-renders byte-identically and, where history resolves, verifies each entry's sha against
-  its blob (skipped on shallow checkouts).
 - **Identity is five fields** — instructions (whitespace-canonicalised: CRLF→LF, per-line
   trailing whitespace stripped, outer blanks stripped), routing text, tools, effort,
   delegate. `class` is CARRIED per entry but excluded from identity: aida's backfilled
@@ -171,7 +169,12 @@ after the class backfill, before the projects arm. What it does:
   never re-derive the event, and the printed line may have gone to a bash call nobody read.
   Report-style lines are not echoed (the TUI announces those itself under its own token),
   and `pending` is capped, oldest first, so a machine that never opens the TUI cannot grow
-  the queue forever.
+  the queue forever. The OFF-SWITCH POINTER `(stop auto-updates: /settings → Agents →
+  Auto-update built-in roles)` rides only the APPLIED lines, individual and rolled-up
+  (design round 2, D2-1): the update-available notice fires exactly when turning the
+  channel off cannot quiet it — the setting is already off, or the install is EDITABLE — so
+  it carries no pointer; the applied lines are the surprise the pointer exists for, and
+  they do.
 
 Why not trust a stamp unattended: a stamp proves the row is what SOME build installed; only
 a ledger position proves the packaged text is PUBLISHED and the row is behind it. That is

@@ -15,13 +15,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from local_operator import paths, tui
 
+if TYPE_CHECKING:
+    import asyncio
+
 
 class _StubApp:
+    # The hook assigns this before returning (``tui._schedule_seed_update_notices``);
+    # declared so pyright checks the assertion below against the real shape
+    # instead of an unknown attribute (CI whole-tree type-check, round 2 — the
+    # bounded run had skipped test files).
+    _seed_notices_task: asyncio.Task[None] | None = None
+
     def __init__(self) -> None:
         self.notices: list[tuple[str, str]] = []
 
