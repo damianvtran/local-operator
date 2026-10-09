@@ -679,7 +679,7 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     )
 
 
-def desktop_belongs_to_this_process() -> bool:
+def desktop_belongs_to_this_process(*, report: bool = True) -> bool:
     """Whether an OS toast posted by THIS process would land on the user's screen.
 
     THE THIRD GATE, and the one the first two structurally cannot be. The kill
@@ -729,23 +729,33 @@ def desktop_belongs_to_this_process() -> bool:
     rewrites ``HOME`` all land here, and the first refusal in a process says so
     at ``warning`` (see :func:`_report_a_refused_desktop`). Once per process,
     not per toast, so a rig is told without having its log flooded.
+
+    ``report`` is for the callers where the refusal must stay QUIET because the
+    process is not a user at all: the runtime's completion arm
+    (``serving._announce_completion``) runs under every per-run HOME
+    (``lop exec``, agent-runtime-svc), where the one-shot warning was printed
+    into every run's audit for a banner nobody there was owed. Those callers
+    pass ``report=False`` and settle before the ladder; a user who genuinely
+    lost toasts still gets the sentence from any interactive path, because
+    reporting is per PROCESS and this flag only silences the caller that asked.
     """
     try:
-        from local_operator.supervisors import real_home
+        from local_operator.supervisors import home_is_the_users
 
-        home = real_home()
-        if home is None:
-            return True
-        allowed = Path.home().resolve() == home
+        # The shared spelling of the comparison (``supervisors``
+        # ``home_is_the_users``): one place decides, so this gate, the runtime's
+        # quiet arm, the boot hooks and the migration's log level cannot drift.
+        allowed = home_is_the_users()
     except (ImportError, OSError, RuntimeError) as exc:
         # EXACTLY the shapes that are reachable here, and no more, because the
-        # tuple is a claim about the platform rather than a net. `real_home()`
-        # answers None for its own platform shapes (it catches ImportError,
-        # KeyError, OSError and AttributeError inside), so what is left is: a
+        # tuple is a claim about the platform rather than a net. The helper
+        # answers None for its own platform shapes (no passwd database, an
+        # unresolvable `$HOME` — it catches OSError/RuntimeError around the
+        # comparison internally), so what is left raising here is: a
         # `local_operator.supervisors` that will not import (ImportError), and
-        # an unreadable or unresolvable home from `Path.home()`/`resolve()` —
-        # `RuntimeError` is what `Path.home()` raises when it cannot resolve one
-        # at all, `resolve()` adds `OSError`. Measured on 3.12.13 and 3.14.7
+        # whatever the passwd read itself raises — `RuntimeError` is what
+        # `Path.home()` raises when it cannot resolve one at all, `resolve()`
+        # adds `OSError`. Measured on 3.12.13 and 3.14.7
         # (round 3, R3-1), which is why `ValueError` is not in the tuple either:
         # it cannot be raised from a `$HOME` an environment variable can even
         # hold. Anything OUTSIDE
@@ -757,7 +767,11 @@ def desktop_belongs_to_this_process() -> bool:
         # same reason.
         logger.debug("could not tell whose desktop this is: %s", exc)
         return True
-    if not allowed:
+    if allowed is None:
+        # No passwd database (or an unresolvable home): the fail-open answer,
+        # documented in the predicate and in this function's docstring above.
+        return True
+    if not allowed and report:
         _report_a_refused_desktop()
     return allowed
 
