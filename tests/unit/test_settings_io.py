@@ -42,6 +42,11 @@ def _consumer_defaults() -> dict[str, object]:
     values here — a second hard-coded table would drift from the first and the
     test would then guard nothing.
     """
+    # The starter-update switch's real consumer constant, from the module that
+    # READS it (``startup_seed_update_pass`` via ``_auto_update_seeds_enabled``).
+    # The registry carries a literal because settings_io stays off that
+    # module's import path; THIS is what turns a drift into a red test.
+    from local_operator.agent_profiles import AUTO_UPDATE_SEEDS_DEFAULT
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
@@ -127,6 +132,7 @@ def _consumer_defaults() -> dict[str, object]:
         SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
     )
+    from local_operator.tools.deferral import DEFAULT_TOOL_DEFERRAL
     from local_operator.tools.query_budget import (
         QUERY_BUDGET_ENABLED_DEFAULT,
         QUERY_BUDGET_SECONDS_DEFAULT,
@@ -188,6 +194,7 @@ def _consumer_defaults() -> dict[str, object]:
         # the reader in tools/builtin.py, so this mapping is what stops the
         # registry default and the code default drifting.
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        "tools.defer": DEFAULT_TOOL_DEFERRAL,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The three query_budget keys, whose consumer constants live in
@@ -211,6 +218,7 @@ def _consumer_defaults() -> dict[str, object]:
         "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
         "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,
         "hub.check_interval_min": DEFAULT_CHECK_INTERVAL_MIN,
+        "agents.auto_update.seeds": AUTO_UPDATE_SEEDS_DEFAULT,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,
         "session.cleanup.max_inactive_days": DEFAULT_MAX_INACTIVE_DAYS,

@@ -1173,7 +1173,8 @@ async def test_child_activation_keeps_the_rebuilt_effort_tier_tools(tmp_path, mo
     assert change is not None
     child._apply_config_change(change)
     rebuilt = next(t for t in child._tools if t.name == "task")
-    assert rebuilt.parameters["properties"]["effort"]["anyOf"][0]["enum"] == ["med"]
+    # Collapsed optional field (``tools.registry.collapse_optional_nulls``).
+    assert rebuilt.parameters["properties"]["effort"]["enum"] == ["med"]
 
     # Activating an MCP tool must refresh AROUND the rebuilt tools, not
     # reinstate the pre-rebuild objects the attach-time snapshot held.

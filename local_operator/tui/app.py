@@ -54314,6 +54314,13 @@ class OperatorApp(App[None]):
         # with no new output still paints it — and cleared when the producer stops
         # sending it, so the line does not outlive the condition.
         card.set_live_advisory(_partial_advisory(message.event.partial_result))
+        # The structured live fields (imagegen progress: queue position, progress
+        # fraction, log tail, provider error) ride the same event's `details`
+        # mapping. Handed to EVERY card unconditionally — the card's own adapter
+        # decides whether they mean anything for its tool, so no tool-name
+        # branch lives here and the one mapping module stays the one mapping
+        # module.
+        card.set_live_details(getattr(message.event.partial_result, "details", None))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
         from local_operator.harness.rows import is_ask_gate_divert_details
@@ -54407,7 +54414,10 @@ class OperatorApp(App[None]):
         # Everything else, marker or none, keeps today's `mark_failed`.
         fault = (details or {}).get(FAULT_KEY)
         if fault in INTERRUPTED_FAULTS:
-            card.mark_interrupted(reason=result_text, measured_s=measured_s)
+            # The result's details ride along so a payload that arrived only
+            # with the result (an imagegen settle) reaches the expansion on
+            # this arm too — the card reads it exactly as done/failed do.
+            card.mark_interrupted(reason=result_text, measured_s=measured_s, details=details)
         elif event.is_error:
             card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:

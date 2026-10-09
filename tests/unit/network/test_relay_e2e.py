@@ -1344,19 +1344,40 @@ def test_a_link_that_has_begun_closing_is_never_handed_out(
     assert (
         link_a.send({"op": "net_catalog", "req": 9002, "locality": "remote"}) is False
     ), "a frame was accepted into a link whose peer has gone"
+    # THE REFUSAL IS OBSERVABLE AT ``send``, and that is what is read — not the
+    # request's return value: a queued frame whose answer never comes returns None
+    # as well, one whole timeout later. THIS frame's refusal is the discriminator,
+    # and no clock is involved in reading it.
+    refusals: list[dict[str, Any]] = []
+    accept = link_a.send
+
+    def _record_refusal(frame: dict[str, Any], **kwargs: Any) -> bool:
+        accepted = accept(frame, **kwargs)
+        if not accepted:
+            refusals.append(dict(frame))
+        return accepted
+
+    link_a.send = _record_refusal  # type: ignore[method-assign]  # noqa: SLF001
     assert (
         link_a.request({"op": "net_catalog", "req": 9003, "locality": "remote"}, timeout=0.5)
         is None
     ), "a closing link answered a request"
-    # NOT MERELY "IT RETURNED None": the slot must be gone. A waiter left behind is a
-    # reply slot nothing will ever fill, and it is what the caller's own timeout would
-    # otherwise have been spent waiting on (see ``RelayServer.fail_replies``).
+    assert any(frame.get("req") == 9003 for frame in refusals), (
+        "the request was not refused at send: it was queued into a link that had"
+        " begun closing, where its only outcome is the timeout it was given"
+    )
+    # AND THE SLOT IS GONE — for THIS request. Deliberately not a reading of the
+    # whole waiter table: the link's establishment pull (a ``net_member_list`` issued
+    # the moment the link registered) may legitimately still await its answer while
+    # the close sits at its first line — the close's own end is what resolves it
+    # (``fail_replies``) — and a global "no waiters" reading turns that race into a
+    # red on a loaded runner (CI, 2026-10-08: leftover ``(<link>, 2)``, a
+    # relay-counter req no frame here uses). A slot for that pull is not this
+    # request's leak; a slot keyed to 9003 would be: it is the caller's own timeout
+    # that slot would have spent.
     with server_a._links_lock:  # noqa: SLF001
-        pending = [
-            key for key in server_a._reply_waiters if key[0] == link_a.link_id  # noqa: SLF001
-        ]
-    assert pending == [], f"a request that got no reply left its slot behind: {pending}"
-
+        leaked = (link_a.link_id, 9003) in server_a._reply_waiters  # noqa: SLF001
+    assert not leaked, "a refused request left its reply slot behind"
     fresh = server_a._ensure_link(peer)  # noqa: SLF001
     assert fresh is not None, "the peer was reachable and nothing was dialled"
     assert fresh.link_id != link_a.link_id, "the dying link was reused instead of replaced"
@@ -1378,10 +1399,17 @@ def test_a_frame_queued_before_its_link_closed_is_still_written(
     accepted BEFORE the close began is still written, so a future tightening of the
     refusal cannot quietly swallow the flush it exists for.
 
-    ``frames_out`` IS THE WRITER'S OWN COUNT, incremented as each frame leaves, which
-    is why the assertion can be an equality rather than a bound: nothing else is due
-    to be written in this window (keepalives are seconds away and this mesh's pulls are
-    on a 15 s cadence), and the frame is the only thing queued between the two reads.
+    WHAT THE ASSERTION READS IS THE WRITER'S OWN SEALED FRAMES, not a count of them.
+    An earlier revision compared ``frames_out`` for equality, on the premise that
+    "nothing else is due to be written in this window"; CI measured the premise to be
+    false (shard failures 2026-10-08 — runs 37848588800: "2 written, 1 expected",
+    37843170163: "3 written, 1 expected"; pre-close count at 0). A fresh link starts a
+    ``net_member_list`` pull over the same socket the moment it is established
+    (``_pull_members``, on the accepting side), so whether that pull's write lands
+    inside this window is a scheduling gap, and the count equality was a bet on it.
+    The writer's write path is wrapped below and records each frame that actually
+    left, so the assertion names ping/9300 and cannot be satisfied by anyone else's
+    write.
     """
     server_a, server_b, host, port = devices
     record, _host, _port = _pair_settled(devices, monkeypatch)
@@ -1390,20 +1418,40 @@ def test_a_frame_queued_before_its_link_closed_is_still_written(
     link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001 — the table under test
     assert link_a is not None, "the peer's dial did not install a link on this side"
 
-    before = link_a.frames_out
+    # WHAT THE WRITER ACTUALLY SEALED, frame by frame — not a count of it. The count
+    # equality this replaces was measured wrong on CI (shard runs 37848588800: "2
+    # written, 1 expected"; 37843170163: "3 written, 1 expected"): the establishment
+    # pull's write and the frame's own landed in the same window, and which adds to
+    # the tally is a race. Recording the frames the writer seals makes the assertion
+    # about THE frame.
+    written: list[dict[str, Any]] = []
+    flush = link_a._write  # noqa: SLF001 — the writer's own write path, wrapped below
+
+    def _record(frame: dict[str, Any]) -> None:
+        out_before = link_a.frames_out
+        flush(frame)
+        if link_a.frames_out > out_before:
+            # Only what really left: ``_write`` returns without writing once the
+            # link is closed (its own guard), and that must not read as a flush.
+            written.append(dict(frame))
+
+    link_a._write = _record  # type: ignore[method-assign]  # noqa: SLF001
     assert (
         link_a.send({"op": "ping", "req": 9300, "locality": "remote"}) is True
     ), "a frame was refused before its link had begun closing"
     link_a.close("test")
 
-    assert link_a.frames_out == before + 1, (
-        f"the close discarded a frame queued before it: {link_a.frames_out} written,"
-        f" {before + 1} expected"
+    assert any(frame.get("req") == 9300 for frame in written), (
+        "the close discarded the frame queued before it: the writer never sealed"
+        f" ping/9300 (frames written in the window: {[f.get('req') for f in written]})"
     )
-    # AND THE OTHER HALF IS STILL REFUSED, which is what makes the equality above a
-    # flush and not a hole: a frame offered once the close has begun is not written.
+    # AND THE OTHER HALF IS STILL REFUSED, which is what makes the flush above a
+    # flush and not a hole: a frame offered once the close has begun is not sent at
+    # all — ``send`` refuses it, and nothing can put it on the writer's list.
     assert link_a.send({"op": "ping", "req": 9301, "locality": "remote"}) is False
-    assert link_a.frames_out == before + 1
+    assert not any(
+        frame.get("req") == 9301 for frame in written
+    ), "a frame offered after the close began was written anyway"
 
 
 def test_a_link_that_dies_answers_the_requests_it_was_carrying(

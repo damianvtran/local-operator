@@ -1616,11 +1616,18 @@ async def test_the_tool_accepts_the_string_forms_models_send_for_to():
 def test_the_hub_schema_still_advertises_a_nullable_array_not_a_union():
     """The coercion lives in a validator because a ``str | list[str]`` schema
     would render a non-nullable ``anyOf`` — the one construct the provider
-    matrix rejects for every request in the session. Pin the nullable-array
-    shape the comment on ``HubParams.to`` promises."""
+    matrix rejects for every request in the session. Pin that the params model
+    keeps the nullable-array shape the comment on ``HubParams.to`` promises,
+    and that the WIRE carries a plain array: ``create_tools`` collapses an
+    optional ``anyOf: [T, null]`` to ``T`` (``collapse_optional_nulls``), so no
+    union of any kind reaches the provider."""
+    from local_operator.tools.builtin import HubParams
+
+    model_to = HubParams.model_json_schema()["properties"]["to"]
+    assert [entry.get("type") for entry in model_to["anyOf"]] == ["array", "null"]
     tool = hub_tool(job_id=None, comms=wire()[0])
-    kinds = [entry.get("type") for entry in tool.parameters["properties"]["to"]["anyOf"]]
-    assert kinds == ["array", "null"]
+    to = tool.parameters["properties"]["to"]
+    assert to.get("type") == "array" and "anyOf" not in to
 
 
 @pytest.mark.asyncio

@@ -6082,6 +6082,37 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             # instructions and the agent's routing. Nothing here silently drops
             # one of them, which is what the old behaviour did to both.
             pass
+        # THE MODEL CHOICE, READ ONCE FOR BOTH ATTEMPTS AND REFUSED HERE RATHER
+        # THAN AT THE PEER. The wire needs a PAIR — ``set_model`` takes a provider
+        # and a model id, and nothing downstream can derive one half from the
+        # other — and ``--model provider/model-id`` is the pair's own spelling, so
+        # it is read as one argument (split on the FIRST ``/``: an aggregator's
+        # genuine namespace like ``ollama/hf.co/...`` keeps the rest). ``--hosting``
+        # keeps today's exact reading: it names the provider half, so ``--model``
+        # is the id verbatim, slash or not. A value that names no provider at all
+        # cannot be honoured, and the sentence it would otherwise get back from
+        # the relay arrives only after the peer has already minted the session —
+        # so it is refused HERE, before a frame is built (the same refusal the
+        # relay composes, said at the door).
+        model_choice: dict[str, str] | None
+        hosting = str(getattr(args, "hosting", "") or "")
+        model_flag = str(getattr(args, "model", "") or "")
+        if hosting:
+            model_choice = {"provider": hosting, "model_id": model_flag}
+        elif model_flag:
+            provider, separator, model_id = model_flag.partition("/")
+            if not (separator and provider and model_id):
+                print(
+                    "--model must name both halves on a peer create: write "
+                    "--model <provider>/<model-id> (for example "
+                    "--model anthropic/claude-sonnet-5-5), or pair a bare model id with "
+                    "--hosting <provider>",
+                    file=sys.stderr,
+                )
+                return 2
+            model_choice = {"provider": provider, "model_id": model_id}
+        else:
+            model_choice = None
         # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
         # defect 2, the create half): a device whose ``tool_approval_mode``
         # resolves ``auto`` asks for an unattended session when it asks a peer
@@ -6117,14 +6148,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # flag here would leave a granted member unable to say what it wants,
                 # which is the dead end this slice removes.
                 yolo=yolo,
-                model=(
-                    {
-                        "provider": str(getattr(args, "hosting", "") or ""),
-                        "model_id": str(getattr(args, "model", "") or ""),
-                    }
-                    if (getattr(args, "hosting", None) or getattr(args, "model", None))
-                    else None
-                ),
+                # The reading (and the refusal for a value that names no pair)
+                # happened above, once for both attempts: see the comment there.
+                model=model_choice,
                 profile=profile,
                 agent_name=agent_name,
                 agent_id=agent_id,
@@ -6194,10 +6220,18 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             )
         if team_info:
             lines.append(f"team: {team_info.get('name')}")
-        if profile or agent_name or agent_id:
-            model_detail = detail.get("model")
-            if isinstance(model_detail, dict) and model_detail.get("detail"):
-                lines.append(str(model_detail["detail"]))
+        # THE MODEL'S OWN SENTENCE, WHEN THE PEER SENT ONE. This used to be gated
+        # on an identity being named, because a pin override was the only detail
+        # the peer could compose into ``model.detail``. The reply can now also
+        # carry the reason a NAMED choice was not taken (a half-filled pair, a
+        # runtime refusal, a warm-up still joining — see
+        # ``relay._model_choice_refusal``), and a pure ``--model`` create is the
+        # caller who TYPED the model, so it must not be the one caller told
+        # nothing. Non-empty is the whole gate: every sentence the peer composes
+        # here is about a model this caller asked for.
+        model_detail = detail.get("model")
+        if isinstance(model_detail, dict) and model_detail.get("detail"):
+            lines.append(str(model_detail["detail"]))
         # WHAT THIS CREATE DID ABOUT DEFINITIONS (QA round 1, Q1). The receipt reported a
         # session that ran the PEER's divergent copy as a plain success — no key in
         # ``--json``, no word about a push that had been refused — which is the "it

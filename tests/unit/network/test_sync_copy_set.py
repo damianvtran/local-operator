@@ -283,6 +283,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),
+    "local_operator/agent_profiles.py": (
+        3,
+        "``SEED_NOTICES_NAME`` (``.seed-notices.json``) and ``SEED_SYNC_LOCK_NAME`` "
+        "(``.seed-sync.lock``): the startup notice queue and its write lock at the "
+        "CONFIG root, beside ``config.yml``; ``SEED_REVISIONS_NAME`` "
+        "(``seed_revisions.json``): the revision ledger inside the packaged "
+        "``agent_seeds/`` directory. None is an entry of a session directory.",
+    ),
     "local_operator/update.py": (
         2,
         "the distribution name and the PyPI version cache: names in the update "

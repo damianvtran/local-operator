@@ -1197,7 +1197,7 @@ async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member(
     assert "" not in _enum_members(captured["body"]["tools"])
     agent = next(tool for tool in captured["body"]["tools"] if tool["function"]["name"] == "agent")
     effort = agent["function"]["parameters"]["properties"]["effort"]
-    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
+    assert effort["enum"] == ["lo", "med", "hi", "inherit"]
 
 
 def test_direct_google_full_tool_bundle_has_no_empty_enum_member(three_effort_tiers) -> None:
@@ -1214,7 +1214,7 @@ def test_direct_google_full_tool_bundle_has_no_empty_enum_member(three_effort_ti
     assert "" not in _enum_members(declarations)
     agent = next(declaration for declaration in declarations if declaration["name"] == "agent")
     effort = agent["parameters"]["properties"]["effort"]
-    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
+    assert effort["enum"] == ["lo", "med", "hi", "inherit"]
 
 
 @pytest.mark.parametrize(
@@ -1236,8 +1236,11 @@ def test_openai_compatible_models_keep_agent_effort_semantics(
     agent = next(tool for tool in body["tools"] if tool["function"]["name"] == "agent")
     effort = agent["function"]["parameters"]["properties"]["effort"]
 
-    assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
-    assert {branch["type"] for branch in effort["anyOf"]} == {"string", "null"}
+    # The optional field rides the wire as its plain enum: ``create_tools``
+    # collapses pydantic's ``anyOf: [T, null]`` for an optional property
+    # (``tools.registry.collapse_optional_nulls``); omitting it still clears.
+    assert effort["enum"] == ["lo", "med", "hi", "inherit"]
+    assert effort["type"] == "string" and "anyOf" not in effort
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "deepseek"])

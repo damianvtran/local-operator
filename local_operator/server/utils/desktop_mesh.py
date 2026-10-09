@@ -40,7 +40,11 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from local_operator.network.types import MeshRefusal, unattended_fallback_notice
+from local_operator.network.types import (
+    MeshRefusal,
+    peer_number,
+    unattended_fallback_notice,
+)
 
 # GLOSSING IS CALLED DIRECTLY, NOT THROUGH A HELPER, and that is a guard's requirement
 # rather than a style choice: ``tests/unit/network/test_reason_surfaces.py`` counts a
@@ -456,43 +460,59 @@ def remote_session_rows(
         if needle and needle not in name.casefold() and needle not in session_id.casefold():
             continue
         reachable = bool(getattr(row, "reachable", True))
-        rows.append(
-            {
-                "id": session_id,
-                "name": name,
-                "mtime": float(getattr(row, "mtime", 0.0) or 0.0),
-                "preview": "",
-                "pinned": session_id in pins,
-                # The PEER's own answer when it sent one; a peer does not offer an
-                # archived session in its listing at all, so anything else is the
-                # honest False rather than a claim that it is unarchived.
-                "archived": bool(getattr(row, "archived", False)),
-                "degraded": [],
-                "subagents_running": None,
-                "subagents_queued": None,
-                "locality": "remote",
-                "owner_device": str(getattr(row, "owner_device", "") or ""),
-                "owner_device_name": str(getattr(row, "owner_device_name", "") or ""),
-                "reachable": reachable,
-                "unreachable_reason": (
-                    ""
-                    if reachable
-                    else peer_reason_words(str(getattr(row, "unreachable_reason", "") or ""))
-                ),
-                "placement": None,
-                "origin": None,
-                "last_synced_at": None,
-                "active": False,
-                # The transport's own state token, in this list's vocabulary
-                # (``session.catalog.live_state_from_flags``'s four words), or "" for
-                # a cold row — the same spellings the local half publishes.
-                "status": {
-                    "code": _remote_status_code(row),
-                    "label": _remote_status_label(row),
-                },
-                "binding": {"agent": None, "team": None},
-            }
-        )
+        # THE SIDEBAR LANE'S CLOCK, CARRIED WHEN THE PEER CLAIMS ONE (number-or-
+        # absent): a real epoch is forwarded under the same key, and anything
+        # else — absent, bool (``peer_number`` refuses it), garbage — is
+        # OMITTED, never minted and never a null, so the renderer falls back to
+        # ``created_at``, then catalogue order. The value's own producer (the
+        # relay-side transcript scan) is a later slice; this half only carries a
+        # claim across.
+        last_user_at = peer_number(getattr(row, "last_user_at", None), default=0.0)
+        emitted: dict[str, Any] = {
+            "id": session_id,
+            "name": name,
+            "mtime": float(getattr(row, "mtime", 0.0) or 0.0),
+            # THE ROW'S BIRTH, from the SAME resolved value as ``mtime``: the
+            # producer stamps both from the peer's ``started`` claim (see
+            # ``session/peer_rows._started_epoch``), and the LOCAL half's rows
+            # already carry ``created_at`` — so a remote row that omitted it was
+            # the one row a client's merge could never settle. ``0.0`` is the
+            # no-claim, in the same direction ``mtime`` lands it.
+            "created_at": float(getattr(row, "created_at", 0.0) or 0.0),
+            "preview": "",
+            "pinned": session_id in pins,
+            # The PEER's own answer when it sent one; a peer does not offer an
+            # archived session in its listing at all, so anything else is the
+            # honest False rather than a claim that it is unarchived.
+            "archived": bool(getattr(row, "archived", False)),
+            "degraded": [],
+            "subagents_running": None,
+            "subagents_queued": None,
+            "locality": "remote",
+            "owner_device": str(getattr(row, "owner_device", "") or ""),
+            "owner_device_name": str(getattr(row, "owner_device_name", "") or ""),
+            "reachable": reachable,
+            "unreachable_reason": (
+                ""
+                if reachable
+                else peer_reason_words(str(getattr(row, "unreachable_reason", "") or ""))
+            ),
+            "placement": None,
+            "origin": None,
+            "last_synced_at": None,
+            "active": False,
+            # The transport's own state token, in this list's vocabulary
+            # (``session.catalog.live_state_from_flags``'s four words), or "" for
+            # a cold row — the same spellings the local half publishes.
+            "status": {
+                "code": _remote_status_code(row),
+                "label": _remote_status_label(row),
+            },
+            "binding": {"agent": None, "team": None},
+        }
+        if last_user_at > 0:
+            emitted["last_user_at"] = last_user_at
+        rows.append(emitted)
     return rows
 
 

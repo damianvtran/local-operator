@@ -14,9 +14,9 @@ The pair can never be honoured, so it is REFUSED, on both halves of the verb, an
 before anything moves:
 
 * the REQUESTING half refuses what it can settle locally — ``--profile`` beside
-  ``--team``, and a held ``--agent`` row whose instructions are attachable —
-  before ``definitions.push_to_peer``: a create that will be refused must not
-  mirror definitions onto the peer as a side effect of asking;
+  ``--team``, and a held ``--agent``/``--agent-id`` row whose instructions are
+  attachable — before ``definitions.push_to_peer``: a create that will be refused
+  must not mirror definitions onto the peer as a side effect of asking;
 * the OWNING half refuses everything that would ATTACH both halves, after both
   names resolve (a name the device does not hold keeps its own, existing sentence)
   and before the mint, the stamp and the sidecar — a refused create leaves nothing
