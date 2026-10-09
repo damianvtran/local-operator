@@ -62,8 +62,8 @@ def test_the_running_card_paints_the_state_line_graphic_queue_and_logs() -> None
     )
     body = _content(card)
     assert "⋯ running" in body
-    assert "▰▰▰▰▱▱▱▱▱▱ 42%" in body
-    assert "queue position 3" in body
+    assert "████░░░░░░ 42%" in body
+    assert "3 requests ahead" in body
     assert "step 13/28" in body
     # The cancel hint has the collapsed row while the call can still be
     # stopped; see `IMAGE_INTERRUPT_HINT`.
@@ -75,8 +75,8 @@ def test_without_a_fraction_the_graphic_is_the_canvas_not_a_bar() -> None:
     the canvas is the honest indeterminate read."""
     card = _running_card(state="running")
     body = _content(card)
-    assert "▱" * 10 in body
-    assert "▰" not in body
+    assert "░" * 10 in body
+    assert "█" not in body
     assert "%" not in body
 
 
@@ -85,17 +85,20 @@ def test_the_provider_word_can_name_cancelling_while_the_call_runs() -> None:
     assert "⋯ cancelling" in _content(card)
 
 
-def test_the_queued_card_paints_the_first_word_and_opens_onto_it() -> None:
-    """A queued imagegen row is expandable — the state line is its body — and
-    paints the vocabulary's first word without a graphic (nothing runs yet)."""
-    card = ToolCard("g1", "generate_image")
+def test_the_queued_card_does_not_repeat_its_status_word() -> None:
+    """A queued imagegen row is expandable, and the expansion does NOT repeat
+    the status cell's `queued` — the arguments are the wait (design round 1,
+    D4): the same word twice is the double-print class this repo polices,
+    milder one word per line but the same read."""
+    card = ToolCard("g1", "generate_image", {"prompt": "a cat"})
     card.set_composing(64, "generate_image")
     card.mark_queued()
     assert card.can_expand()
     card.toggle_expanded()
     body = _content(card)
-    assert "⋯ queued" in body
-    assert "▱" not in body
+    assert "prompt: a cat" in body
+    assert "⋯ queued" not in body
+    assert "░" not in body
     assert IMAGE_INTERRUPT_HINT in card._build_row(100).plain
 
 
@@ -222,7 +225,7 @@ def test_a_settled_card_carries_no_live_furniture() -> None:
     card.mark_done("Generated 1 image (1024x1024): /tmp/opic/img_04.png")
     body = _content(card)
     assert "Generated 1 image" in body
-    assert "▱" not in body and "▰" not in body
+    assert "░" not in body and "█" not in body
     assert "⋯" not in body
     # The kitty placeholder base char would mean the card grew its own image
     # transport; it must not (the attachments lane owns the mount under the
@@ -246,6 +249,15 @@ def test_the_hint_leaves_once_the_call_is_stopped() -> None:
     assert "interrupted" in card._build_row(100).plain
 
 
+def test_the_hint_leaves_once_the_live_word_says_cancelling() -> None:
+    """The hint's contract is "while the call can still be stopped": with the
+    provider word on `cancelling` a stop is already in flight, so the slot
+    yields (design round 1, D2) — the state line is the acknowledgement."""
+    card = _running_card(state="cancelling")
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    assert "⋯ cancelling" in _content(card)
+
+
 # --- non-imagegen rows are untouched ---------------------------------------
 
 
@@ -256,7 +268,7 @@ def test_a_non_imagegen_card_keeps_the_generic_live_body() -> None:
     card.set_live_details({"progress_fraction": 0.42, "queue_position": 1})
     body = _content(card)
     assert "⋯ running" in body  # the generic header, unchanged
-    assert "▱" not in body and "%" not in body
+    assert "░" not in body and "%" not in body
     assert card._imagegen_live is None
     assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
 
@@ -403,7 +415,7 @@ async def test_an_update_without_details_for_a_plain_tool_is_a_noop() -> None:
         # The generic live header, unchanged: the variant never engages for
         # a tool outside the detection set.
         assert "⋯ running" in body
-        assert "▱" not in body
+        assert "░" not in body
         assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
 
 
@@ -517,4 +529,4 @@ def test_a_composing_imagegen_row_keeps_the_generic_dictation_row() -> None:
     card.set_composing(64, "generate_image")
     body = _content(card)
     assert "⋯" not in body
-    assert "▱" not in body
+    assert "░" not in body
