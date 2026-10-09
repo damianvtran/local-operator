@@ -323,9 +323,11 @@ def default_surface(hermetic_config: Path) -> list[AgentTool]:
 
     Reuses ``scripts/real_tool_surface.build_real_tools`` so these drift tests
     and the ``context-budget`` CI guard cannot disagree about what "the default
-    surface" is: it forces the two machine-probing createIf gates (browser and
-    console) deterministically ON, which is what makes a CI runner and a
-    developer box measure the same 34 tools. Function-scoped (not module-scoped)
+    surface" is: it forces the three machine-probing createIf gates (browser,
+    console and the image provider) deterministically ON, which is what makes a
+    CI runner and a developer box measure the same surface — the count is
+    ``len(DEFAULT_TOOL_NAMES)``, asserted below rather than spelled here.
+    Function-scoped (not module-scoped)
     because the builders read the config at BUILD time, so each test's
     :func:`hermetic_config` must apply to its own render; the fixture is taken
     for its env side effect alone.
