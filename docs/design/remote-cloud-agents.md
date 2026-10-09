@@ -450,7 +450,7 @@ move compute out of Canada as well.
 
 | Option | $/task-hour | Source |
 |---|---|---|
-| ECS Fargate ARM | **0.0869** | Price List API `AmazonECS` ca-central-1 (SKUs `MA9ZGYPG5E2CH64A` vCPU $0.03565, `C96MZB6RGQHW2XHW` GB $0.00389) |
+| ECS Fargate ARM | **0.0869** | Price List API `AmazonECS` ca-central-1 (SKUs `MA9ZGYPG5E2CH64A` vCPU $0.03565, `C96MZB6RGQHW2XHW` GB $0.00389). Confirmed against the bill: the 0.5333 task-hours Cost Explorer shows for 2026-10-07 price at $0.0463253 on these SKUs (§9.4, results doc § Test 6) |
 | ECS Fargate Spot ARM | ≈0.026 (up to 70% off; estimate) | ECS pricing page |
 | EKS on shared m7g.xlarge, 2/node | 0.092–0.101 + disk ≈ 0.094–0.103 | Price List API (m7g.xlarge $0.1819; EKS $0.10/cluster-h) |
 | Firecracker on c6g.metal (24–32/host) | 0.074–0.099 (+ our own control plane; host must run) | Price List API ($2.3808/h) |
@@ -492,7 +492,7 @@ margin (the tunnel doc states an 80% gross margin). For a cloud task:
 
 ---
 
-## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6 computed, teardown still needs approval)
+## 9. POC plan — Slice 0 built and run (results: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md); items 1–5 PASS on a real-key run, 6 measured but not reconciled (the tag the criterion names does not attribute), teardown still needs approval)
 
 ### 9.1 Account, first
 
@@ -608,9 +608,12 @@ ECS task definitions or IAM roles**, so a POC there likely needs a contract exte
 on **one** run: `ct_92161251`, a real OpenRouter turn (`anthropic/claude-sonnet-4.5`) on the
 accepted image digest, whose edit to the cloned fixture is verified from the returned bundle
 by `verify` (22 checks, 0 FAIL, 0 BLOCKED). Items 2 and 3 and the real-model half of item 4
-were the ones waiting on a key and are no longer PENDING/BLOCKED. Item 6 is still computed
-from wall-clock × rate rather than reconciled against Cost Explorer; item 7 (teardown) still
-awaits the operator's approval, and the stack is still up. Per-run evidence, the probe
+were the ones waiting on a key and are no longer PENDING/BLOCKED. Item 6 is now **measured, not
+reconciled** — the Cost Explorer lag has cleared for the 2026-10-07 billing day and the billed
+figures are recorded in the results doc's Test 6, but the POC's `lop-poc` key is not an activated
+cost-allocation tag in this linked account, so the tag-filtered query the criterion names returns
+$0 and the service-filtered proxy misses the 20% band: the verdict is PARTIAL, not PASS. Item 7
+(teardown) still awaits the operator's approval, and the stack is still up. Per-run evidence, the probe
 readings with the real key, the cold start and the cost: [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md)
 § Real-key acceptance run. **Nothing in §7 is relaxed by that run**: the pod still holds no
 key on disk, egress is still 443-only, the task role is still empty and names no policy, and
@@ -638,6 +641,18 @@ the `ps`-dependent residual (SEC-11) is still deferred product work.
 | Logs, S3, Secrets Manager | < $1 |
 | **AWS total** | **< $5** |
 | Model spend | **capped at ~$20** (POC key with a hard spend limit) |
+
+**Measured (2026-10-08, Cost Explorer, account `325492156725`, `ca-central-1`, unblended — full
+reconciliation, commands and caveats in
+[remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) § Test 6).** The POC's
+whole billed Fargate usage is the single UTC day `2026-10-07`: **0.5333 task-hours**, an
+on-demand-equivalent **$0.0463253312** that an existing Savings Plan covered and negated to a
+**net unblended $0.0001256431**. The day's `owner=lopdev` total is `$0.0514468804` (≈$0.0051 of
+it non-Fargate — NAT, S3, ECR, Secrets Manager, logs), and the only POC-specific tag that
+attributes anything is that one: `lop-poc=true` returns $0 on every day, so the `lop-poc` budget
+is inert and `lop-poc-fargate` is the sole working backstop. So the estimate above is a ceiling,
+not a bill: the POC bought 0.53 task-hours, not the ten the table prices, and the plan paid for
+them.
 
 ---
 
