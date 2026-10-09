@@ -169,15 +169,11 @@ def image_provider_reachable(config_dir: Path | None = None) -> bool:
     design, not a per-turn scan.
     """
     return bool(
-        radient_available(config_dir)
-        or fal_key(config_dir)
-        or openai_images_key(config_dir)
+        radient_available(config_dir) or fal_key(config_dir) or openai_images_key(config_dir)
     )
 
 
-async def openai_call_key(
-    store: AuthStore, session_id: str | None = None
-) -> str | None:
+async def openai_call_key(store: AuthStore, session_id: str | None = None) -> str | None:
     """The bearer the OpenAI rung would send: persisted api_key rows, then env.
 
     The ASYNC twin of :func:`openai_images_key` — same credential class, same

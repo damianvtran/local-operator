@@ -183,6 +183,7 @@ async def _download_rows(
         )
     return assets
 
+
 #: OpenAI's default image model (the ``gpt-image-1`` class). Same rule: a
 #: default, never a pin.
 OPENAI_DEFAULT_IMAGE_MODEL = "gpt-image-1"
@@ -307,9 +308,7 @@ async def _request_json(
     upstream's own sentence, scrubbed).
     """
     try:
-        response = await client.request(
-            method, url, timeout=httpx.Timeout(timeout_s), **kwargs
-        )
+        response = await client.request(method, url, timeout=httpx.Timeout(timeout_s), **kwargs)
     except httpx.TimeoutException as exc:
         raise APIError(
             f"{label} timed out after {timeout_s:.0f}s.", status_code=None, code="timeout"
@@ -402,7 +401,8 @@ def _pick_radient_model(payload: dict[str, Any], requested: str | None) -> str:
         return requested
     rows = payload.get("models")
     if not isinstance(rows, list):
-        rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+        nested = payload.get("data")
+        rows = nested if isinstance(nested, list) else []
     candidates: list[tuple[bool, str]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -435,7 +435,8 @@ def _radient_unit_price(payload: dict[str, Any], model_id: str) -> float | None:
     """
     rows = payload.get("models")
     if not isinstance(rows, list):
-        rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+        nested = payload.get("data")
+        rows = nested if isinstance(nested, list) else []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -527,6 +528,7 @@ async def run_radient(
             label="Radient",
             timeout_s=RADIENT_MODELS_TIMEOUT_S,
             secrets=(credential,),
+            headers=_bearer_headers(credential),
         )
         model_id = _pick_radient_model(models_payload, model)
         unit_price = _radient_unit_price(models_payload, model_id)
@@ -561,6 +563,7 @@ async def run_radient(
             label="Radient",
             timeout_s=HTTP_TIMEOUT_SUBMIT_S,
             secrets=(credential,),
+            headers=_bearer_headers(credential),
             json=body,
         )
         request_id = generate.get("request_id")
@@ -588,6 +591,7 @@ async def run_radient(
                 label="Radient",
                 timeout_s=HTTP_TIMEOUT_POLL_S,
                 secrets=(credential,),
+                headers=_bearer_headers(credential),
                 # request_id ONLY: no model param, and an unknown/foreign id
                 # answers an identical 404 (non-disclosure; manager freeze
                 # note, 2026-10-08).
@@ -614,9 +618,11 @@ async def run_radient(
                 )
                 message = status_payload.get("error")
                 raise APIError(
-                    message
-                    if isinstance(message, str) and message
-                    else "Radient reported the generation as FAILED.",
+                    (
+                        message
+                        if isinstance(message, str) and message
+                        else "Radient reported the generation as FAILED."
+                    ),
                     status_code=None,
                     code=code,
                 )
@@ -648,6 +654,7 @@ async def run_radient(
             label="Radient",
             timeout_s=HTTP_TIMEOUT_RESULT_S,
             secrets=(credential,),
+            headers=_bearer_headers(credential),
             # request_id only — same freeze note as the status read above.
             params={"request_id": request_id},
         )
@@ -798,9 +805,11 @@ async def run_fal(
             if status in ("FAILED", "ERROR"):
                 message = status_payload.get("error")
                 raise APIError(
-                    message
-                    if isinstance(message, str) and message
-                    else "FAL reported the generation as FAILED.",
+                    (
+                        message
+                        if isinstance(message, str) and message
+                        else "FAL reported the generation as FAILED."
+                    ),
                     status_code=None,
                     code="upstream",
                 )
@@ -949,9 +958,7 @@ async def run_openai(
                 # The images API serves PNG bytes for b64 items and gives no
                 # content type or dimensions; cache_media sniffs dims, and PNG
                 # is the documented container for both response forms.
-                assets.append(
-                    MediaAsset(data=data, content_type="image/png", source_url="")
-                )
+                assets.append(MediaAsset(data=data, content_type="image/png", source_url=""))
                 continue
             url = item.get("url")
             if isinstance(url, str) and url:

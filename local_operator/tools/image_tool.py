@@ -68,9 +68,9 @@ from local_operator.harness.types import (
 from local_operator.imagegen import availability as image_availability
 from local_operator.imagegen import rungs as image_rungs
 from local_operator.imagegen.cascade import (
+    RUNG_LABELS,
     ImageGenerationCancelled,
     ImageGenerationUnavailable,
-    RUNG_LABELS,
     run_image_cascade,
 )
 from local_operator.media import sniff_image_file
@@ -108,9 +108,7 @@ class GenerateImageParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str = Field(
-        description="Text description; with source_image_path, the edit to apply."
-    )
+    prompt: str = Field(description="Text description; with source_image_path, the edit to apply.")
     source_image_path: str | None = Field(
         default=None,
         description="Local image to edit (image-to-image); uploaded as a data URI.",
@@ -129,12 +127,8 @@ class GenerateImageParams(BaseModel):
         "landscape_4_3",
         "landscape_16_9",
     ] = Field(default="square_hd", description="Output size; mapped per provider.")
-    num_images: int = Field(
-        default=1, ge=1, le=4, description="How many images to generate (1-4)."
-    )
-    seed: int | None = Field(
-        default=None, description="Seed for reproducibility where supported."
-    )
+    num_images: int = Field(default=1, ge=1, le=4, description="How many images to generate (1-4).")
+    seed: int | None = Field(default=None, description="Seed for reproducibility where supported.")
     model: str | None = Field(
         default=None, description="Provider model id; its default when omitted."
     )
@@ -254,9 +248,7 @@ def _progress_emitter(
         return None
 
     def emit(text: str, details: dict[str, Any]) -> None:
-        on_update(
-            AgentToolUpdate(content=[TextContent(text=text)], details=dict(details))
-        )
+        on_update(AgentToolUpdate(content=[TextContent(text=text)], details=dict(details)))
 
     return emit
 
@@ -325,7 +317,7 @@ def _load_source_image(raw_path: str, cwd: str) -> str:
         raise InvalidToolArgumentsError(
             f"source_image_path could not be read ({exc.__class__.__name__}): {raw_path}"
         ) from exc
-    return f"data:{info.mime};base64,{base64.b64encode(data).decode('ascii')}"
+    return f"data:{info.mime_type};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def _artifact_name(model: str, content_type: str, index: int) -> str:
