@@ -20,6 +20,7 @@ from local_operator.incidents import (
     format_model_switch_message,
     render_involuntary_attribution,
 )
+from local_operator.providers.failover import ProviderError
 
 
 @pytest.mark.parametrize(
@@ -125,6 +126,48 @@ def test_the_reasoning_echo_hint_does_not_claim_a_retry_that_may_not_have_run():
     ).hint
     assert "did not clear" not in hint
     assert "no such rung" in hint
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The REAL rendered form: enumerated from ``ProviderError.__str__`` rather
+        # than typed, so the test cannot drift from the string users actually see.
+        str(ProviderError(402, "insufficient credits")),
+        str(ProviderError(402, "Insufficient credits", retryable=False)),
+        # The pre-fix rendering, which a transcript written by an older runtime (or
+        # a follower attached to an older owner) still carries. It must classify
+        # billing too: its "quota" wording is what used to win the rate-limit rule.
+        "rate limit or quota exceeded (HTTP 402): insufficient credits",
+        # Provider-side wording with no harness label at all (a relayed body).
+        "insufficient credits",
+    ],
+)
+def test_an_http_402_out_of_credits_refusal_is_billing_never_rate_limit(raw: str) -> None:
+    """Fix at the source: the rate-limit rule's bare ``quota`` marker used to claim it.
+
+    The desktop keys its "top up" affordance off ``category == "billing"``, so a
+    402 filed as ``rate-limit`` sent a user with a spent balance to wait it out.
+    """
+    incident = classify_incident(raw, "radient", "auto")
+    assert incident.category == "billing", raw
+    assert incident.render().startswith("[session incident (radient/auto)] billing:")
+
+
+def test_a_429_rate_limit_and_a_bare_402_digit_run_stay_rate_limit() -> None:
+    """The new billing rule is keyed on the status TOKEN, not any "402" substring."""
+    assert (
+        classify_incident(
+            str(
+                ProviderError(
+                    429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600
+                )
+            )
+        ).category
+        == "rate-limit"
+    )
+    # ``used 402000 tokens`` is a token count, and it mentions a quota.
+    assert classify_incident("quota: used 402000 tokens this window").category == "rate-limit"
 
 
 def test_unknown_has_no_invented_hint():

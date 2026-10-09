@@ -26,7 +26,7 @@ from local_operator.providers.auth_store import AuthStore
 
 from .test_session import MODEL, ScriptedStream, make_session
 
-RENDERED_QUOTA = "rate limit or quota exceeded (HTTP 402): insufficient credits"
+RENDERED_QUOTA = "out of credits (HTTP 402): insufficient credits"
 
 
 @pytest.fixture(autouse=True)
@@ -84,8 +84,10 @@ async def test_radient_quota_incident_carries_the_recovery_line(
 
     # The desktop's row keeps the incident's own shape AND gains the remedy.
     assert text.startswith("[session incident (radient/")
-    assert "rate limit or quota exceeded (HTTP 402)" in text
-    assert "check your email" in text and "$5.00" in text
+    # The incident is classified BILLING (what the desktop keys its action off),
+    # not rate-limit, and carries the account-aware remedy.
+    assert "billing: out of credits (HTTP 402)" in text
+    assert "Check your inbox" in text and "$5 in free credits" in text
 
 
 @pytest.mark.asyncio
@@ -96,7 +98,7 @@ async def test_a_non_quota_failure_stays_bare(
 
     text = await _journal(tmp_path, "authentication failed (HTTP 401): bad key")
 
-    assert "check your email" not in text
+    assert "Check your inbox" not in text
     assert "console.radienthq.com" not in text
 
 
@@ -108,7 +110,7 @@ async def test_a_non_radient_provider_stays_bare(
 
     text = await _journal(tmp_path, RENDERED_QUOTA, provider="openai")
 
-    assert "check your email" not in text
+    assert "Check your inbox" not in text
     assert "console.radienthq.com" not in text
 
 
@@ -133,7 +135,7 @@ async def test_the_line_is_not_duplicated_when_the_text_already_carries_it(
     first = await _journal(tmp_path, RENDERED_QUOTA)
     delivered = first + "\n" + rr.recovery_line(rr.RecoveryFacts(signed_in=True))
 
-    assert rr.append_recovery_line_once(delivered, rr._GENERIC_LINE) == delivered
+    assert rr.append_recovery_line_once(delivered, rr._neutral_text()) == delivered
 
 
 @pytest.mark.asyncio
@@ -158,5 +160,5 @@ async def test_a_failing_remedy_never_replaces_the_incident(
     text = await _journal(tmp_path, RENDERED_QUOTA)
 
     assert text.startswith("[session incident (radient/")
-    assert "rate limit or quota exceeded (HTTP 402)" in text
-    assert "check your email" not in text
+    assert "billing: out of credits (HTTP 402)" in text
+    assert "Check your inbox" not in text
