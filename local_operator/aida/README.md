@@ -87,11 +87,12 @@ found something actionable raises an OS banner through the completion ladder
 (the desktop app, a TUI or a watching surface takes over when one is running),
 and clicking the banner opens the conversation. Whether a banner is actually
 raised is decided at settle time from her ACTUAL REPLY — a quiet day does not
-notify, because a daily "(no action needed)" toast is how a chief of staff gets
-muted, taking the actionable ones with it:
+notify, because a daily "nothing needs your attention" banner is how a chief of
+staff gets muted, taking the actionable ones with it:
 
-- a reply of exactly `(no action needed)` is silent (case, padding, quotes,
-  backticks and a trailing period are tolerated; a paraphrase is not);
+- a reply of exactly `Nothing needs your attention today.` is silent (case,
+  padding, quotes, backticks and a trailing period are tolerated; the legacy
+  `(no action needed)` spelling is still recognised; a paraphrase is not);
 - a quiet-day TIP is a silent row by decision: it lands unread in her
   conversation and shows on any surface you open, but does not interrupt. The
   one-line switch is `TIP_REPLY_NOTIFIES` in `aida/proactive.py`;

@@ -2,7 +2,8 @@
 
 WHAT THESE TESTS PIN (design 2026-10-09 §1/§3/§7, PR-1). With no surface
 attached, Aida's shipped cadence was SILENT whether her reply was actionable or
-exactly ``(no action needed)``: ``WakeSchedule.notify`` defaults False and no
+exactly the quiet sentinel (``Nothing needs your attention today.``; the legacy
+``(no action needed)`` spelling is still recognised): ``WakeSchedule.notify`` defaults False and no
 Aida row set it, so the completion ladder never had permission to speak. The
 fix has two halves and both are pinned here:
 
@@ -13,7 +14,7 @@ fix has two halves and both are pinned here:
   back into a False when her ACTUAL REPLY says there is nothing to say — the
   quiet sentinel (normalised), a ``Tip:`` reply, an unsettled greeting ledger,
   or a spent 24 h banner budget. A blanket ``notify=True`` would banner
-  ``(no action needed)`` every day, which is how a chief of staff gets muted.
+  the quiet sentinel every day, which is how a chief of staff gets muted.
 
 THE RIG IS THE REAL ONE (pattern: ``tests/unit/session/test_attention_notify``):
 a real ``Session`` over her attached session directory, real deliveries through
@@ -151,6 +152,7 @@ async def _deliver_checkin(
     stream is the one the session was built with.
     """
     stream = cast(ScriptedStream, session._stream_fn)
+    before = session._attention.get("completion_token")
     schedule = WakeSchedule(
         id=wake_id,
         message="Daily proactive check-in.",
@@ -163,7 +165,8 @@ async def _deliver_checkin(
     )
     await wait_for(lambda: bool(stream.requests))
     await wait_for(
-        lambda: session._attention_run_settled and bool(session._attention.get("completion_token"))
+        lambda: session._attention_run_settled
+        and session._attention.get("completion_token") not in (None, before)
     )
     return await session.refresh_attention()
 
@@ -218,6 +221,10 @@ def test_quiet_reply_is_one_constant_shared_by_prompt_extras_and_veto() -> None:
         "  (no action needed)  ",
         "NO ACTION NEEDED",
         "No action needed",
+        "Nothing needs your attention today.",
+        "NOTHING NEEDS YOUR ATTENTION TODAY",
+        "`Nothing needs your attention today.`",
+        "  Nothing needs your attention today.  ",
     ],
 )
 async def test_a_quiet_reply_and_its_variants_are_vetoed(isolated_root: Path, reply: str) -> None:
@@ -686,3 +693,224 @@ def test_reconcile_arms_notifying_rows_and_appends_the_quiet_clause(
     extra = next(row for row in result.schedules if row.id.startswith(proactive.EXTRA_ID_PREFIX))
     assert extra.notify is True
     assert proactive.QUIET_REPLY in extra.message, "the custom message lacks the sentinel clause"
+
+
+# ---------------------------------------------------------------------------
+# T12 (remediation round 1) — the catch-up fold, mixed runs, the budget
+# stamp and the legacy upgrade. Each cell names its own mutation.
+# ---------------------------------------------------------------------------
+
+
+def _replies(count: int, text: str) -> ScriptedStream:
+    """``count`` identical model turns — a multi-prompt cell's tape."""
+    return ScriptedStream(
+        [[StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")] for _ in range(count)]
+    )
+
+
+def _pending_catchup(session: Session, *, ids: set[str]) -> None:
+    """Put the session in the pending-catch-up state ``load`` would build.
+
+    ``_prepare_missed_wake_catchup`` is what sets these in production (an
+    overdue row found at load); the cells here build the same state directly
+    so the FIRE / TAKE / delivery / veto machinery under test is the real
+    one. ``_resume_catchup_notify`` mirrors ``_prepare``'s own computation
+    (``any(row.notify for the folded rows)``) — the cadence row's notify is
+    True by this change, so the fold asks to notify.
+    """
+    session._resume_catchup_ids = set(ids)
+    session._resume_catchup_text = "While you were away: " + ", ".join(sorted(ids))
+    session._resume_catchup_sent = False
+    session._resume_catchup_notify = True
+    session._resume_grace_ends_ms = float("inf")  # grace NOT passed yet
+
+
+async def _settle_catchup_turn(session: Session) -> None:
+    stream = cast(ScriptedStream, session._stream_fn)
+    await wait_for(lambda: bool(stream.requests))
+    await wait_for(
+        lambda: session._attention_run_settled and bool(session._attention.get("completion_token"))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pre_grace_fire_keeps_the_fold_for_the_catchup(isolated_root: Path) -> None:
+    """QA Q1: a fire landing before the grace deadline must not spend its id.
+
+    The race: the wake layer's re-armed due and ``_resume_grace_ends_ms`` are
+    stamped from two different clocks, so a fire can beat the deadline by a
+    millisecond — the take returns None and the grace timer still owes the
+    delivery. If the fire drops the id anyway, the timer builds the message
+    from an EMPTY fold (``wake_ids: []``) and a quiet day banner-ed (QA
+    reproduced 2 of 3 sentinel runs through the real supervisor).
+
+    Mutation: reinstate the unconditional ``discard`` in
+    ``_deliver_wake_catchup`` → the retention assert goes red.
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _reply("Nothing needs your attention today.")
+    )
+    try:
+        _pending_catchup(session, ids={proactive.CADENCE_ID})
+        row = WakeSchedule(
+            id=proactive.CADENCE_ID,
+            message="Daily proactive check-in.",
+            next_due_at=0,
+            created_at=0,
+            notify=True,
+        )
+        # The fire that beats the deadline: take returns None, nothing delivered.
+        await session._deliver_wake_catchup(
+            DueWake(schedule=row, occurrence=1, planned_total=1, final=True)
+        )
+        assert (
+            proactive.CADENCE_ID in session._resume_catchup_ids
+        ), "a pre-grace fire spent the fold id — the catch-up would build empty"
+        # The grace timer now delivers with the fold intact, and the sentinel
+        # still vetoes on the catch-up path.
+        session._resume_grace_ends_ms = 0
+        message = session._take_resume_catchup()
+        assert message is not None
+        assert message.details["wake_ids"] == [proactive.CADENCE_ID]
+        session._deliver_resume_catchup(message)
+        await _settle_catchup_turn(session)
+        result = await session.refresh_attention()
+        assert result["kind"] == "complete"
+        assert result["notify"] is False, "the quiet sentinel must still veto on the catch-up path"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_catchup_with_a_lost_fold_fails_closed(isolated_root: Path) -> None:
+    """QA Q1's raced shape, deterministically: ``wake_ids: []`` must NOT read
+    as "no Aida rows".
+
+    The take is handed an EMPTY fold set — exactly the message the race
+    produced. The belt makes the run Aida-bearing, so the sentinel still
+    vetoes; without it the empty ids short-circuit the veto and the banner
+    ships.
+
+    Mutation: drop the ``_run_catchup_unidentified`` branch (return False on
+    empty ids, as before) → this cell's notify assertion goes red.
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _reply("Nothing needs your attention today.")
+    )
+    try:
+        _pending_catchup(session, ids=set())
+        session._resume_grace_ends_ms = 0
+        message = session._take_resume_catchup()
+        assert message is not None
+        assert message.details["wake_ids"] == []
+        session._deliver_resume_catchup(message)
+        await _settle_catchup_turn(session)
+        assert session._run_catchup_unidentified is True, "the belt must record the lost fold"
+        result = await session.refresh_attention()
+        assert result["notify"] is False
+    finally:
+        await session.dispose()
+
+
+def test_a_legacy_cadence_row_is_upgraded_in_place(isolated_root: Path) -> None:
+    """Review MAJOR-1: the upgrade must reach an ESTABLISHED install.
+
+    A row armed before ``notify`` existed (``notify=False``) sits in the
+    resident list; reconcile keeps it and must flip the bit ONCE, preserving
+    ``created_at`` — otherwise the headline fix ships only to fresh installs
+    (the first cut's bug: the upgrade lived inside the create-only branch,
+    which never runs while a row exists).
+
+    Mutation: delete the upgrade block in ``reconcile`` → the notify assert
+    goes red.
+    """
+    _armed_root(isolated_root)
+    legacy = WakeSchedule(
+        id=proactive.CADENCE_ID,
+        message="Daily proactive check-in.",
+        next_due_at=123,
+        created_at=456,
+        notify=False,
+    )
+    first = proactive.reconcile(
+        [legacy], config_dir=isolated_root, session_id=SESSION_ID, now_ms=789_000
+    )
+    kept = next(row for row in first.schedules if row.id == proactive.CADENCE_ID)
+    assert (
+        kept.notify is True
+    ), "the legacy row was not upgraded — established installs stay silent forever"
+    assert kept.created_at == 456, "the upgrade must not remint created_at"
+    assert first.changed is True
+    second = proactive.reconcile(
+        first.schedules, config_dir=isolated_root, session_id=SESSION_ID, now_ms=789_001
+    )
+    assert second.changed is False, "the upgrade must settle — one flip, then stable"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_publishes_do_not_spend_the_banner_budget(isolated_root: Path) -> None:
+    """Review MAJOR-2: only her check-in banners stamp the budget.
+
+    Three ordinary turns of hers (each a True publish by user semantics) used
+    to stamp three timestamps and veto the next actionable check-in. The
+    budget bounds BANNERS, not publishes.
+
+    Mutation: stamp for every True publish of hers (the old gate,
+    ``if notify and self._aida_duty``) → the final assert goes red (budget
+    spent → the actionable check-in is vetoed).
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root,
+        SESSION_ID,
+        _replies(4, "Build 42 is red — restart the renderer (session 121212121212)."),
+    )
+    try:
+        for _ in range(3):
+            before = session._attention.get("completion_token")
+            await session.prompt("Status please")
+            await wait_for(
+                lambda: session._attention_run_settled
+                and session._attention.get("completion_token") not in (None, before)
+            )
+        assert _banner_stamps(isolated_root) == [], "ordinary publishes must not spend the budget"
+        result = await _deliver_checkin(session)
+        assert result["notify"] is True, "the actionable check-in must still banner"
+        assert len(_banner_stamps(isolated_root)) == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_user_and_cadence_run_keeps_its_banner(isolated_root: Path) -> None:
+    """Review MAJOR-3: user intent is never silenced — the veto is exclusive-scope.
+
+    A user prompt that runs while a catch-up is pending INLINES the fold into
+    the SAME turn (``prompt``). The reply is the quiet sentinel, but the run
+    carries a person's message, so notification semantics stay the user's —
+    and the mixed run must not spend the banner budget either.
+
+    Mutation: drop the trigger-classes clause from ``_aida_checkin_run`` → the
+    veto scopes a mixed run and this cell goes red (notify False).
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _reply("Nothing needs your attention today.")
+    )
+    try:
+        _pending_catchup(session, ids={proactive.CADENCE_ID})
+        session._resume_grace_ends_ms = 0
+        await session.prompt("Good morning — anything for me?")
+        await wait_for(
+            lambda: session._attention_run_settled
+            and bool(session._attention.get("completion_token"))
+        )
+        assert "user" in session._run_triggers
+        assert session._run_wake_ids == {proactive.CADENCE_ID}
+        result = await session.refresh_attention()
+        assert result["notify"] is True, "a mixed run must not be silenced by her sentinel"
+        assert _banner_stamps(isolated_root) == [], "a mixed publish is not her banner"
+    finally:
+        await session.dispose()
