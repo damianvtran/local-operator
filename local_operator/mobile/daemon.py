@@ -2513,8 +2513,9 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
     import base64
     import binascii
 
-    from local_operator.harness.types import ImageContent, Message
+    from local_operator.harness.types import AttachmentContent, ImageContent, Message
     from local_operator.paths import config_dir
+    from local_operator.session.attachments import AttachmentStore
     from local_operator.session.transcript import Transcript
 
     directory = config_dir() / "sessions" / record.session_id
@@ -2529,12 +2530,33 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
     message = next((m for m in history if isinstance(m, Message) and m.id == entry_id), None)
     if message is None or not isinstance(message.content, list):
         return None
-    images = [b for b in message.content if isinstance(b, ImageContent)]
     # ``index`` is the position among IMAGE blocks (what _image_refs emits),
-    # not among all content blocks — text blocks do not count.
-    if index < 0 or index >= len(images):
+    # not among all content blocks — text blocks do not count. THE WALK IS THE
+    # CONTRACT with ``projection._image_refs``: both count inline image blocks
+    # and output artifacts of kind ``image`` (``AttachmentContent``) on one
+    # shared index, in content order; either side changing alone fetches the
+    # wrong bytes for every later block.
+    blocks = [
+        block
+        for block in message.content
+        if isinstance(block, ImageContent)
+        or (isinstance(block, AttachmentContent) and block.kind == "image")
+    ]
+    if index < 0 or index >= len(blocks):
         return None
-    data = images[index].data
+    block = blocks[index]
+    if isinstance(block, AttachmentContent):
+        # Artifact bytes live in the attachment store, not in the row: the
+        # digest is the reference, and a miss (hand-pruned store, session
+        # moved without it) is an ordinary 404, never an exception.
+        if not block.attachment:
+            return None
+        resolved = AttachmentStore().get_bytes(block.attachment)
+        if resolved is None:
+            return None
+        raw, sidecar_mime = resolved
+        return raw, block.content_type or sidecar_mime or "image/png"
+    data = block.data
     if not data:
         return None
     try:
@@ -2542,7 +2564,7 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
     except (binascii.Error, ValueError):
         logger.warning("image fetch: undecodable base64 for %s[%d]", entry_id, index)
         return None
-    return raw, images[index].mime_type or "image/png"
+    return raw, block.mime_type or "image/png"
 
 
 def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
