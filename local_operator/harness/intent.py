@@ -68,7 +68,11 @@ INTENT_MAX_CHARS = 200
 #: keeps the shape of the rule ("2-6 words, present participle") and delegates
 #: only the elaboration. Keep the full rule in system.md; do not re-inline it
 #: here.
-INTENT_DESCRIPTION = "Concise intent: 2-6 words, present participle. See the system prompt."
+#:
+#: Shortened once more by the context diet (71 -> 46 chars, on every published
+#: tool): "Concise" and the sentence scaffolding restated what "2-6 words" says.
+#: The rule's SHAPE is kept, per the paragraph above.
+INTENT_DESCRIPTION = "Intent: 2-6 words, present participle; see system prompt."
 
 #: The exact property injected into every tool schema. Compared by VALUE in
 #: :func:`intent_is_injected` to tell our field apart from a tool that

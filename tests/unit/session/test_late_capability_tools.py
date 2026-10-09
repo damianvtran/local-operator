@@ -51,6 +51,10 @@ from local_operator.tools.registry import create_tools
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
+#: The opening of the inventory's deferred-tools line; see
+#: ``tools.deferral.render_deferred_tools_line``.
+DEFERRED_LINE_PREFIX = "Schema on demand"
+
 
 class RecordingStream:
     """Answers every turn with one line, keeping the requests it was given."""
@@ -122,6 +126,12 @@ class RecordingStream:
                 break
             if line.startswith("- "):
                 names.append(line[2:].split(":", 1)[0])
+            elif line.startswith(DEFERRED_LINE_PREFIX):
+                # A DEFERRED tool is described on the inventory's one "schema on
+                # demand" line (``tools/deferral.py``) rather than as a bullet:
+                # ``name (purpose), name (purpose).`` after the colon.
+                listing = line.split(": ", 1)[1].rstrip(".")
+                names += [entry.split(" (", 1)[0] for entry in listing.split(", ")]
         if not names:
             raise AssertionError(
                 f"inventory section parsed to no tool names. Section begins: {section[:120]!r}"
@@ -369,8 +379,14 @@ async def test_no_advertised_tool_is_ever_missing_from_the_prompt_inventory(tmp_
     described = set(stream.described())
     advertised = {tool.name for tool in stream.requests[-1].tools if not tool.hidden}
     assert advertised - described == set()
-    # And the converse: nothing is promised that the request cannot serve.
-    assert described - {tool.name for tool in stream.requests[-1].tools} == set()
+    # And the converse: nothing is promised that the request cannot serve. A
+    # DEFERRED tool (``tools/deferral.py``) is the one sanctioned gap: it is
+    # described on the inventory's "schema on demand" line and absent from the
+    # array, and it IS servable — resolution reads the inventory, not the
+    # array — so the gap must be exactly the deferred set and nothing else.
+    unserved = described - {tool.name for tool in stream.requests[-1].tools}
+    assert unserved <= session.deferred_tool_names()
+    assert unserved <= {tool.name for tool in session._tools}
     await session.dispose()
 
 

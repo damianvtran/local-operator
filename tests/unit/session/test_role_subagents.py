@@ -433,7 +433,33 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
         assert "sessions" in actual_names
     elif agent_name in ("reviewer", "scout"):
         assert "sessions" not in actual_names
-    assert [tool.name for tool in stream.requests[0].tools] == expected_names
+    # The WIRE array, against the inventory this child actually holds. A child
+    # with no allowlist (a plain ``task``) is an ordinary session and pays the
+    # deferral like one, so the wire is the inventory minus exactly the
+    # deferrable-and-un-pinned names — still an EQUALITY, not a subset: a
+    # too-eager filter that dropped a non-deferrable tool fails here.
+    wire = [tool.name for tool in stream.requests[0].tools]
+    withheld = set(child_sessions[0].deferred_tool_names()) & set(expected_names)
+    assert wire == [
+        name for name in expected_names if name not in withheld
+    ], f"{agent_name}: wire={wire!r}, withheld={sorted(withheld)!r}, inventory={expected_names!r}"
+    # Durability pin, and the reason it is not redundant with the equality above:
+    # that comparison is satisfied by any SELF-CONSISTENT child, so a broken pin
+    # passes it. It did: the scout fallback restricted through ``READ_ONLY_TOOLS``
+    # with no profile, the pin read ``profile.tools`` and pinned nothing, and two
+    # schemas left the wire for a role whose allowlist names both (CI round 3).
+    # Named explicitly here so the next such break fails loudly instead.
+    if profile is not None and profile.tools:
+        allowlist = set(profile.tools)
+    elif agent_name == "scout":
+        allowlist = set(READ_ONLY_TOOLS)
+    else:
+        allowlist = set()
+    unpinned_survivors = sorted((allowlist & set(expected_names)) - set(wire))
+    assert not unpinned_survivors, (
+        f"{agent_name}: the allowlist named {unpinned_survivors!r} but their schemas "
+        "are not in the request's tools array — a role's own tools must stay published"
+    )
     assert set(TOOL_BUILDERS) >= set(expected_names)
     await parent.dispose()
 
