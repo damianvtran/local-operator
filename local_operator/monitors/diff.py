@@ -118,6 +118,11 @@ def count_changes(old: str, new: str) -> tuple[int, int]:
 _GUTTER_RE = re.compile(r"^\s*\d+\|\s?")
 
 
+def _strip_gutters(lines: list[str]) -> list[str]:
+    """``read``'s ``N| `` line-number gutter removed from every line."""
+    return [_GUTTER_RE.sub("", line) for line in lines]
+
+
 def is_pure_addition(old: str, new: str) -> bool:
     """Whether ``new`` only ADDS content to ``old``: no line removed or changed.
 
@@ -141,9 +146,16 @@ def is_pure_addition(old: str, new: str) -> bool:
 
     Callers must not use this on a TRUNCATED snapshot: a tail edit beyond the
     stored window reads as a pure insert there (the scheduler checks).
+
+    ``read``'s gutter is stripped from BOTH sides before comparing (QA round 1,
+    Q1): crossing 9→10 lines re-pads every line number (``9| `` -> ``10| ``),
+    which without this reads as a full replace and would gate an append that
+    only gained a line. A content change that merely alters a gutter-like
+    prefix (``3| x`` -> ``4| x``) then shows no opcodes at all and returns
+    False — it keeps going to the gate, which is the conservative direction.
     """
-    old_lines = old.split("\n") if old else []
-    new_lines = new.split("\n")
+    old_lines = _strip_gutters(old.split("\n")) if old else []
+    new_lines = _strip_gutters(new.split("\n"))
     matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
     carries_content = False
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
@@ -151,7 +163,7 @@ def is_pure_addition(old: str, new: str) -> bool:
             return False
         if tag == "insert":
             for line in new_lines[j1:j2]:
-                body = _GUTTER_RE.sub("", line).replace(_TS_MARKER, "")
+                body = line.replace(_TS_MARKER, "")
                 if any(ch.isalnum() for ch in body):
                     carries_content = True
     return carries_content

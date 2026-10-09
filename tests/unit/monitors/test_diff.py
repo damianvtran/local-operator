@@ -97,3 +97,18 @@ def test_is_pure_addition_from_empty_output() -> None:
 
     assert is_pure_addition("", "ERROR x")
     assert not is_pure_addition("", "")
+
+
+def test_is_pure_addition_survives_a_line_count_crossing_a_power_of_ten() -> None:
+    """QA round 1, Q1: ``read`` re-pads every gutter at 9->10 lines."""
+    from local_operator.monitors.diff import is_pure_addition
+
+    old = "\n".join(f"{i}| line {i}" for i in range(1, 10))
+    new = "\n".join(f"{i}| line {i}" for i in range(1, 11))
+    assert is_pure_addition(old, new)
+
+
+def test_is_pure_addition_still_refuses_a_gutter_only_change() -> None:
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert not is_pure_addition("3| x", "4| x")
