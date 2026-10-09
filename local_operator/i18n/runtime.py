@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Callable, Mapping, Sequence, Union
 
 from . import format as fmt
 
@@ -332,16 +332,38 @@ def plural_selectors(source: str) -> tuple[tuple[str, ...], ...]:
 # ---------------------------------------------------------------------------
 
 
-def _interpolate(value: Any, locale: str) -> str:
+def _format_value(value: Any, label: str, render: Callable[[], str]) -> str:
+    """Render through the format layer, normalising conversion failures.
+
+    The runtime's contract (see :func:`render_message`) is that a message
+    either renders or raises a :class:`MessageError` — and
+    :func:`messages.envelope`'s never-raise contract leans on exactly that. A
+    value of the wrong shape bound to a number/percent/date/time argument used
+    to surface the FORMATTER's own exception class instead
+    (``decimal.InvalidOperation`` for numerics, ``AttributeError`` for dates —
+    rounds 1 and 2); this boundary converts them to ``MessageFormatError``,
+    original cause attached, so callers degrade to the code as designed.
+    """
+    try:
+        return render()
+    except (ValueError, TypeError, ArithmeticError, AttributeError) as exc:
+        raise MessageFormatError(
+            f"{label} cannot be rendered from {type(value).__name__} {value!r}: {exc}"
+        ) from exc
+
+
+def _interpolate(value: Any, locale: str, label: str = "argument") -> str:
     """``{name}``'s default formatting: numbers, dates, else ``str()``."""
     if isinstance(value, bool):
         return str(value)
     if isinstance(value, (int, float, Decimal)):
-        return fmt.format_number(value, locale)
+        return _format_value(value, f"{label} (number)", lambda: fmt.format_number(value, locale))
     if isinstance(value, datetime):
-        return fmt.format_datetime(value, locale)
+        return _format_value(
+            value, f"{label} (datetime)", lambda: fmt.format_datetime(value, locale)
+        )
     if isinstance(value, date):
-        return fmt.format_date(value, locale)
+        return _format_value(value, f"{label} (date)", lambda: fmt.format_date(value, locale))
     return str(value)
 
 
@@ -414,7 +436,11 @@ def _render(
             out.append(node.value)
             continue
         if isinstance(node, _Hash):
-            out.append(fmt.format_number(plural_value, locale))
+            out.append(
+                _format_value(
+                    plural_value, "plural number", lambda: fmt.format_number(plural_value, locale)
+                )
+            )
             continue
         assert isinstance(node, _Arg)
         if node.name not in params:
@@ -424,13 +450,34 @@ def _render(
             )
         value = params[node.name]
         if node.kind == "simple":
-            out.append(_interpolate(value, locale))
+            out.append(_interpolate(value, locale, label=f"argument {node.name!r}"))
         elif node.kind == "number":
-            out.append(fmt.format_number(value, locale, skeleton=node.skeleton or None))
+            skeleton = node.skeleton or None
+            out.append(
+                _format_value(
+                    value,
+                    f"number argument {node.name!r}",
+                    lambda: fmt.format_number(value, locale, skeleton=skeleton),
+                )
+            )
         elif node.kind == "date":
-            out.append(fmt.format_date(value, locale, style=node.skeleton or "medium"))
+            style = node.skeleton or "medium"
+            out.append(
+                _format_value(
+                    value,
+                    f"date argument {node.name!r}",
+                    lambda: fmt.format_date(value, locale, style=style),
+                )
+            )
         elif node.kind == "time":
-            out.append(fmt.format_time(value, locale, style=node.skeleton or "short"))
+            style = node.skeleton or "short"
+            out.append(
+                _format_value(
+                    value,
+                    f"time argument {node.name!r}",
+                    lambda: fmt.format_time(value, locale, style=style),
+                )
+            )
         elif node.kind == "plural":
             body = _select_plural(locale, value, node.parts)
             out.append(_render(body, params, locale, plural_value=value))

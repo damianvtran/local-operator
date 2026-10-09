@@ -114,6 +114,22 @@ def test_empty_namespace_module_has_no_dangling_import(generated, i18n_generate)
     assert "from datetime" not in module
 
 
+def test_identifier_collisions_are_refused(generated, i18n_generate) -> None:
+    # round-2 m5: two keys that sanitise to one FUNCTION NAME are refused too
+    # (the kwargs case was guarded in round 1; neither may silently shadow).
+    root, emitted = generated
+    (root / "en" / "demo.words.json").write_text(
+        json.dumps({"demo.words.class": "a", "demo.words.class_": "b"}), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="same function name"):
+        i18n_generate._planned_files(emitted)
+    (root / "en" / "demo.words.json").write_text(
+        json.dumps({"demo.words.k": "{class} {class_}"}), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="duplicate identifiers"):
+        i18n_generate._planned_files(emitted)
+
+
 def test_check_flags_orphaned_generated_files(generated, i18n_generate, capsys) -> None:
     # round-1 n4: a namespace rename/removal leaves keys/<old>.py behind; the
     # plan-vs-plan diff never saw it, so --check now flags files in the
