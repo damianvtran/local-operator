@@ -35,7 +35,12 @@ import pytest
 
 import local_operator.tui.notify as notify_module
 from local_operator.aida import onboarding, proactive, state
-from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+from local_operator.harness.types import (
+    AgentEndEvent,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+)
 from local_operator.harness.wake import DueWake
 from local_operator.harness.wake_types import WakeSchedule
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -708,7 +713,7 @@ def _replies(count: int, text: str) -> ScriptedStream:
     )
 
 
-def _pending_catchup(session: Session, *, ids: set[str]) -> None:
+def _pending_catchup(session: Session, *, ids: set[str], notify: bool = True) -> None:
     """Put the session in the pending-catch-up state ``load`` would build.
 
     ``_prepare_missed_wake_catchup`` is what sets these in production (an
@@ -716,12 +721,14 @@ def _pending_catchup(session: Session, *, ids: set[str]) -> None:
     so the FIRE / TAKE / delivery / veto machinery under test is the real
     one. ``_resume_catchup_notify`` mirrors ``_prepare``'s own computation
     (``any(row.notify for the folded rows)``) — the cadence row's notify is
-    True by this change, so the fold asks to notify.
+    True by this change, so the fold asks to notify. ``_resume_catchup_phantoms``
+    is seeded exactly as prepare seeds it (one owed swallow per folded row).
     """
     session._resume_catchup_ids = set(ids)
+    session._resume_catchup_phantoms = set(ids)
     session._resume_catchup_text = "While you were away: " + ", ".join(sorted(ids))
     session._resume_catchup_sent = False
-    session._resume_catchup_notify = True
+    session._resume_catchup_notify = notify
     session._resume_grace_ends_ms = float("inf")  # grace NOT passed yet
 
 
@@ -912,5 +919,195 @@ async def test_a_mixed_user_and_cadence_run_keeps_its_banner(isolated_root: Path
         result = await session.refresh_attention()
         assert result["notify"] is True, "a mixed run must not be silenced by her sentinel"
         assert _banner_stamps(isolated_root) == [], "a mixed publish is not her banner"
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# T13 (remediation round 2) — the fold is spent by its take, the swallow set
+# is separate, and the exclusivity predicate sees waiting user intent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_fire_after_the_take_delivers_normally(isolated_root: Path) -> None:
+    """Review round 2, R7: the fold must not swallow the NEXT occurrence.
+
+    The pre-grace fire retains the fold id (round 1) — correct for the message
+    build — but once the catch-up is TAKEN the id is spent: nothing may keep
+    swallowing a fire for it, or the row's next real occurrence (24 h for the
+    cadence) disappears silently (both round-2 lanes reproduced: pre-grace
+    fire → take → next fire ⇒ ``_deliver_wake`` never awaited).
+
+    Mutation: reinstate the old rule (leave the ids in place after the take /
+    discard them only on a later fire) → the delivered list below stays empty
+    → red.
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _replies(2, "Nothing needs your attention today.")
+    )
+    try:
+        _pending_catchup(session, ids={proactive.CADENCE_ID})
+        row = WakeSchedule(
+            id=proactive.CADENCE_ID,
+            message="Daily proactive check-in.",
+            next_due_at=0,
+            created_at=0,
+            notify=True,
+        )
+        # The fire that beats the deadline, then the grace timer's take:
+        await session._deliver_wake_catchup(
+            DueWake(schedule=row, occurrence=1, planned_total=1, final=True)
+        )
+        assert (
+            proactive.CADENCE_ID in session._resume_catchup_ids
+        ), "a pre-grace fire must retain the fold for the message build"
+        session._resume_grace_ends_ms = 0
+        message = session._take_resume_catchup()
+        assert message is not None
+        session._deliver_resume_catchup(message)
+        await _settle_catchup_turn(session)
+        # THE NEXT OCCURRENCE — the same row id, one interval later.
+        delivered: list[str] = []
+
+        async def counting_deliver(due: DueWake) -> None:
+            delivered.append(due.schedule.id)
+            await base_deliver(due)
+
+        base_deliver = session._deliver_wake
+        session._deliver_wake = counting_deliver  # type: ignore[method-assign]
+        nextday = row.model_copy(update={"next_due_at": 86_400_000})
+        await session._deliver_wake_catchup(
+            DueWake(schedule=nextday, occurrence=2, planned_total=1, final=True)
+        )
+        assert delivered == [
+            proactive.CADENCE_ID
+        ], "the next occurrence was swallowed by a spent fold id"
+        await wait_for(lambda: len(cast(ScriptedStream, session._stream_fn).requests) >= 2)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_same_batch_phantom_fire_is_still_swallowed(isolated_root: Path) -> None:
+    """R7's companion: the fold clears at take WITHOUT un-suppressing the rest.
+
+    Several folded rows fire in one pump batch; the take may happen between
+    them (timer at grace + 50 ms). A fire arriving AFTER the take is the same
+    batch's phantom — its content is already in the folded text — and must
+    still be swallowed, while the guard is that its id was consumed exactly
+    once (no double suppression of a later occurrence, the sibling cell).
+
+    Mutation: key the swallow on the fold set only (clear at take with no
+    phantom set) → this cell's delivered list gains the second id → red.
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _replies(2, "Nothing needs your attention today.")
+    )
+    try:
+        _pending_catchup(session, ids={proactive.CADENCE_ID, "aida-extra-1200"})
+        row = WakeSchedule(
+            id="aida-extra-1200",
+            message="Proactive follow-up: revisit the deploy.",
+            next_due_at=0,
+            created_at=0,
+            notify=True,
+        )
+        # The take happens first (the timer beat this row's fire past grace)…
+        session._resume_grace_ends_ms = 0
+        message = session._take_resume_catchup()
+        assert message is not None
+        session._deliver_resume_catchup(message)
+        await _settle_catchup_turn(session)
+        # …and only THEN does the second row's phantom fire arrive.
+        delivered: list[str] = []
+
+        async def counting_deliver(due: DueWake) -> None:
+            delivered.append(due.schedule.id)
+            await base_deliver(due)
+
+        base_deliver = session._deliver_wake
+        session._deliver_wake = counting_deliver  # type: ignore[method-assign]
+        await session._deliver_wake_catchup(
+            DueWake(schedule=row, occurrence=1, planned_total=1, final=True)
+        )
+        assert delivered == [], "a same-batch phantom fire must still be swallowed"
+        # …and the row's NEXT occurrence, one interval later, delivers.
+        nextday = row.model_copy(update={"next_due_at": 86_400_000})
+        await session._deliver_wake_catchup(
+            DueWake(schedule=nextday, occurrence=2, planned_total=1, final=True)
+        )
+        assert delivered == ["aida-extra-1200"], "the next occurrence must deliver"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_awaiting_user_message_keeps_the_banner(isolated_root: Path) -> None:
+    """Review round 2, R8: exclusivity must fail when user intent is present.
+
+    A check-in run whose session holds a typed-but-unconsumed message is not
+    exclusively hers: ``awaiting_user`` already makes the run notify by USER
+    semantics, and the veto must stand down whatever the reply says. Dropping
+    the clause from ``_aida_checkin_run`` left every other cell green — this
+    is the cell that pins it (direct-call shape, the same seam
+    ``test_attention_notify``'s Case 5 uses).
+
+    Mutation: remove the ``_has_awaiting_user()`` guard → the second assertion
+    goes red (the empty reply is vetoed and the waiting person gets nothing).
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _reply("Nothing needs your attention today.")
+    )
+    try:
+        session._run_triggers = {"wake_prompt"}
+        session._run_wake_ids = {proactive.CADENCE_ID}
+        session._run_notify_requested = True
+        event = AgentEndEvent(messages=[])  # empty reply: the veto WOULD silence it
+        assert session._finalize_attention_notify(event) is False
+        session.steer("also check staging")
+        assert session._finalize_attention_notify(event) is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_catchup_notify_recomputes_from_live_rows(isolated_root: Path) -> None:
+    """Review round 2, R9: the fold's notify intent is re-read at TAKE time.
+
+    Prepare computes the OR from the rows LOAD found; the legacy-row upgrade
+    runs on the first reconcile AFTER load, so an upgraded install's FIRST
+    catch-up would read the stale False and stay silent one fire longer. The
+    take re-reads the scheduler's live rows.
+
+    Mutation: drop the recompute in ``_take_resume_catchup`` → the stamped
+    notify below stays False → red.
+    """
+    _armed_root(isolated_root)
+    session = make_aida_session(
+        isolated_root, SESSION_ID, _reply("Nothing needs your attention today.")
+    )
+    try:
+        # As LOAD computed it on a legacy row (notify=False)…
+        _pending_catchup(session, ids={proactive.CADENCE_ID}, notify=False)
+        # …then the upgrade lands before the take (the first reconcile's job):
+        session._wake.load(
+            [
+                WakeSchedule(
+                    id=proactive.CADENCE_ID,
+                    message="Daily proactive check-in.",
+                    next_due_at=0,
+                    created_at=0,
+                    notify=True,
+                )
+            ]
+        )
+        session._resume_grace_ends_ms = 0
+        message = session._take_resume_catchup()
+        assert message is not None
+        assert message.details["notify"] is True
     finally:
         await session.dispose()
