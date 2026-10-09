@@ -164,9 +164,9 @@ def _next_link(response: httpx.Response) -> str | None:
 class GitHubAdapter:
     """The registry's ``github`` singleton. Stateless; one instance per process."""
 
-    kind = "github"
-    full = True
-    pieces = ("summary", "comments", "reviews", "ci")
+    kind: str = "github"
+    full: bool = True
+    pieces: tuple[str, ...] = ("summary", "comments", "reviews", "ci")
 
     # -- pure combiners (stored pieces -> normalised values) ---------------
 
@@ -341,9 +341,12 @@ class GitHubAdapter:
         data = response.json()
         if not isinstance(data, Mapping):
             raise ForgeHTTPError("http", "summary", response.status_code, "unexpected body")
-        head = data.get("head") if isinstance(data.get("head"), Mapping) else {}
-        base_branch = data.get("base") if isinstance(data.get("base"), Mapping) else {}
-        user = data.get("user") if isinstance(data.get("user"), Mapping) else {}
+        raw_head = data.get("head")
+        raw_base = data.get("base")
+        raw_user = data.get("user")
+        head: Mapping[str, Any] = raw_head if isinstance(raw_head, Mapping) else {}
+        base_branch: Mapping[str, Any] = raw_base if isinstance(raw_base, Mapping) else {}
+        user: Mapping[str, Any] = raw_user if isinstance(raw_user, Mapping) else {}
         summary = {
             "raw_state": str(data.get("state") or "open"),
             "merged": bool(data.get("merged")),

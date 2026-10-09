@@ -10,11 +10,20 @@ import pytest
 
 from local_operator.code_requests import cache
 from local_operator.code_requests.adapters.base import FetchOutcome
-from local_operator.code_requests.refs import parse_any
+from local_operator.code_requests.refs import Ref, parse_any
 
-REF = parse_any("https://github.com/o/r/pull/7")
-GLREF = parse_any("https://gitlab.com/g/s/p/-/merge_requests/4")
-assert REF is not None and GLREF is not None
+
+def _ref(url: str) -> Ref:
+    """A parsed ref, typed: ``parse_any`` returns ``Ref | None`` and a module
+    constant narrowed by an ``assert`` does not stay narrowed inside functions,
+    which is exactly where these tests consume it."""
+    ref = parse_any(url)
+    assert ref is not None, url
+    return ref
+
+
+REF = _ref("https://github.com/o/r/pull/7")
+GLREF = _ref("https://gitlab.com/g/s/p/-/merge_requests/4")
 
 
 @pytest.fixture(autouse=True)

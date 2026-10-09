@@ -13,11 +13,20 @@ import pytest
 
 from local_operator.code_requests.adapters import adapter_for
 from local_operator.code_requests.adapters.base import ForgeHTTPError
-from local_operator.code_requests.refs import parse_any
+from local_operator.code_requests.refs import Ref, parse_any
 
-GH = parse_any("https://github.com/o/r/pull/7")
-GL = parse_any("https://gitlab.com/g/s/p/-/merge_requests/4")
-assert GH is not None and GL is not None
+
+def _ref(url: str) -> Ref:
+    """A parsed ref, typed: ``parse_any`` returns ``Ref | None`` and a module
+    constant narrowed by an ``assert`` does not stay narrowed inside functions,
+    which is exactly where these tests consume it."""
+    ref = parse_any(url)
+    assert ref is not None, url
+    return ref
+
+
+GH = _ref("https://github.com/o/r/pull/7")
+GL = _ref("https://gitlab.com/g/s/p/-/merge_requests/4")
 
 CWD = "https://api.github.com"
 
@@ -309,6 +318,6 @@ async def test_gitlab_sends_conditional_and_maps_401() -> None:
 
 
 def test_detect_and_link_forges_have_no_adapter() -> None:
-    ref = parse_any("https://bitbucket.org/team/repo/pull-requests/9")
-    assert ref is not None and ref.full is False
+    ref = _ref("https://bitbucket.org/team/repo/pull-requests/9")
+    assert ref.full is False
     assert adapter_for(ref) is None
