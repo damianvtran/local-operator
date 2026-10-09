@@ -108,3 +108,27 @@ def human_surface_present() -> bool:
     this boot create her" cannot disagree about a switch they share.
     """
     return _has_terminal() or _desktop_plane_open()
+
+
+def home_is_the_users() -> bool:
+    """Whether this process's ``$HOME`` is the real user's — R17's third signal.
+
+    THE GAP THIS CLOSES, stated because the two halves above each have one: a
+    ``lop serve`` under a PTY but a redirected HOME satisfies both of them
+    while being exactly the "a run, not a person" shape the toast gate already
+    refuses (``tui.notify.desktop_belongs_to_this_process``). A rig, a
+    container, an orchestrator that allocates a pty — none of them is a seat
+    the user is sitting in, and none should pay for a session, a cadence and a
+    wake supervisor. One spelling of the comparison lives in
+    ``supervisors.home_is_the_users``; this wrapper exists so the boot hook
+    never raises (a boot must degrade to "try again later", never crash) and
+    so "cannot tell" FAILS OPEN, the same direction as the toast gate's — an
+    unknowable platform must not take the feature away.
+    """
+    try:
+        from local_operator.supervisors import home_is_the_users as _shared
+
+        return _shared() is not False
+    except Exception:  # noqa: BLE001 — "cannot tell" means "behave as today"
+        logger.debug("aida: could not tell whose home this boot has", exc_info=True)
+        return True

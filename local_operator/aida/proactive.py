@@ -109,6 +109,23 @@ DEFAULT_MIN_GAP_MINUTES = 90
 DEFAULT_ENABLED = True
 DEFAULT_PAUSED = False
 
+#: The ONE spelling of "nothing needs you today". Three readers share it so they
+#: cannot drift apart: the cadence prompt and the escalation extras ASK for it,
+#: and the settle-time banner veto (``Session._aida_cadence_banner_veto``)
+#: RECOGNISES it through :func:`reply_is_quiet`. A reply that normalises to this
+#: is a quiet day and must never put a banner on the operator's screen.
+QUIET_REPLY = "(no action needed)"
+
+#: The sentence that asks for :data:`QUIET_REPLY`. Appended to a check-in message
+#: that does not already carry the sentinel (see :func:`with_quiet_clause`) —
+#: otherwise an escalation extra whose model-written message never mentions it
+#: would be answered in free prose, and the veto would then let a "nothing to
+#: report" banner through.
+QUIET_CLAUSE = (
+    f'If nothing needs the operator\'s action, reply with exactly "{QUIET_REPLY}" and '
+    "nothing else."
+)
+
 #: The cadence self-prompt. It carries the two rules the engine cannot enforce
 #: on her behalf: report only what needs action (the anti-spam half of R16),
 #: and route escalation requests through the tray rather than arming wakes
@@ -119,7 +136,7 @@ CADENCE_MESSAGE = (
     "anything you started earlier that is still in flight — and report ONLY what "
     "needs the operator's action, in a few short lines. If there is nothing "
     "actionable, give the one quiet-day tip below in a sentence when this message "
-    'carries one, otherwise reply with exactly "(no action needed)" and nothing '
+    f'carries one, otherwise reply with exactly "{QUIET_REPLY}" and nothing '
     "else. To schedule a follow-up check, write it to the escalation tray described in your "
     "instructions instead of arming wakes directly."
 )
@@ -129,8 +146,108 @@ CADENCE_MESSAGE = (
 #: rather than an empty turn.
 DEFAULT_EXTRA_MESSAGE = (
     "Proactive follow-up: revisit what you flagged earlier and report only if "
-    "something still needs the operator's action."
+    f"something still needs the operator's action. {QUIET_CLAUSE}"
 )
+
+#: How many banners Aida may raise in a rolling 24 hours, across the cadence and
+#: every escalation extra. A CONSTANT, not a config key: a key would drag in the
+#: ``/settings`` registry (AGENTS.md "Adding a configuration key") for a safety
+#: net that should never be the thing a user tunes. The arithmetic is why it is
+#: 3: one cadence + ``DEFAULT_MAX_EXTRA_PER_DAY`` extras is the engine's own
+#: ceiling, so the cap only bites when a catch-up or a loop has produced MORE
+#: check-ins than the engine meant to arm. A chief of staff that pings more than
+#: this gets her notifications switched off, which silences the ones that matter.
+MAX_BANNERS_PER_DAY = 3
+
+#: The window :data:`MAX_BANNERS_PER_DAY` is counted over.
+BANNER_WINDOW_MS = 24 * 3_600_000
+
+#: THE ONE-LINE SWITCH FOR TIPS. A quiet-day tip (``onboarding.tip_offer``) is a
+#: SILENT row by decision: it lands in her conversation and keeps the unseen
+#: mark, so any surface shows it unread, but it does not raise an OS banner —
+#: a tip is non-actionable by definition ("use only if nothing needs action") and
+#: at most one per 20 h, so a banner for it is the operator being interrupted to
+#: be told something optional. The operator may overrule this later; flipping the
+#: constant to ``True`` is the whole change (the veto then lets a tip through, and
+#: it still counts against :data:`MAX_BANNERS_PER_DAY`).
+TIP_REPLY_NOTIFIES = False
+
+
+def _peel_reply(text: str) -> str:
+    """``text`` with symmetric wrappers, padding and a trailing period removed.
+
+    The normalisation :func:`reply_is_quiet` documents: repeatedly strip
+    whitespace, one trailing period and ONE symmetric wrapper pair (quotes,
+    backticks, parens/brackets, emphasis) until nothing moves — so
+    ``(No action needed).``, `` `no action needed` `` and ``"NO ACTION
+    NEEDED."`` all land on the bare phrase. Deliberately NO synonym folding:
+    a paraphrase ("No action needed today.") stays a banner, and the count of
+    those is watched via the ``banners`` ledger (design section 9) before any
+    broader matching would be considered.
+    """
+    pairs = (("`", "`"), ('"', '"'), ("'", "'"), ("(", ")"), ("[", "]"), ("*", "*"), ("_", "_"))
+    current = str(text or "")
+    for _ in range(8):  # bounded: each round must peel or strip something to continue
+        before = current
+        current = current.strip().rstrip(".").rstrip()
+        for opener, closer in pairs:
+            if len(current) >= 2 and current[0] == opener and current[-1] == closer:
+                current = current[1:-1].strip()
+                break
+        if current == before:
+            break
+    return current
+
+
+def reply_is_quiet(text: str | None) -> bool:
+    """Whether an assistant reply IS the quiet sentinel (:data:`QUIET_REPLY`).
+
+    THE VETO's reply test, and the reason it is not a raw ``==``: the model
+    writes ``(No action needed).``, backticked it, pads it, or capitalises it —
+    and a raw match would then banner every quiet day, which is how a chief of
+    staff gets her notifications switched off (taking the actionable ones with
+    them). Case, whitespace, one symmetric wrapper pair and a trailing period
+    are folded; a paraphrase is NOT, deliberately (a daily paraphrase banner is
+    visible in the ``banners`` ledger, and design option B is the upgrade if
+    the count shows drift).
+    """
+    if not text:
+        return False
+    folded = _peel_reply(str(text)).casefold()
+    return folded in {QUIET_REPLY.casefold(), QUIET_REPLY.strip("()").casefold()}
+
+
+def reply_is_tip(text: str | None) -> bool:
+    """Whether an assistant reply is the quiet-day tip the row asked for.
+
+    Keyed on the ``Tip:`` prefix ``onboarding.TIP_CLAUSE_PREFIX`` asks for
+    (plus the handful of close shapes a model writes when it half-forgets).
+    A tip is a SILENT row by decision — see :data:`TIP_REPLY_NOTIFIES` for the
+    one-line switch that reverses it.
+    """
+    if TIP_REPLY_NOTIFIES or not text:
+        return False
+    # The markdown a model may wrap the prefix in is stripped by the peel + lstrip;
+    # after that the one shape asked for is a literal "Tip:" opening.
+    folded = _peel_reply(str(text)).lstrip("*_ `").casefold()
+    return folded.startswith("tip:")
+
+
+def with_quiet_clause(message: str) -> str:
+    """``message`` guaranteed to ASK for :data:`QUIET_REPLY` when it is quiet.
+
+    Applied at the two places an escalation extra's message is finalised (the
+    reconcile and the external drain): the cadence prompt carries the sentinel
+    itself, but a custom extra message the model wrote is free prose — without
+    this clause the engine would never be told the one spelling the veto keys
+    on, so a "nothing to report" extra would be reported in paraphrase and
+    banner. Idempotent: a message already carrying the sentinel is unchanged.
+    """
+    text = message or ""
+    if QUIET_REPLY in text:
+        return text
+    return f"{text} {QUIET_CLAUSE}" if text else QUIET_CLAUSE
+
 
 #: The id prefix of trigger check-in rows: ``aida-trigger-<8 hex>``, the hex
 #: deterministic in the consumed record's sorted fingerprints so a re-consume
@@ -271,6 +388,81 @@ def is_aida_row(wake_id: str) -> bool:
     return isinstance(wake_id, str) and wake_id.startswith(ROW_PREFIX)
 
 
+def is_cadence_family_row(wake_id: str) -> bool:
+    """Whether ``wake_id`` is a CHECK-IN row: the cadence or an escalation extra.
+
+    The banner veto (``Session._aida_cadence_banner_veto``) applies to these
+    rows and only these: trigger check-ins (``aida-trigger-*``) ask her to ACT
+    rather than to report, so the sentinel rule does not describe them and their
+    rows stay quiet; a user-armed ``wN`` wake is the user's own intent and a
+    sentinel reply must never silence it. Kept beside :func:`is_aida_row` so the
+    two ownership questions cannot drift apart one call site at a time.
+    """
+    return isinstance(wake_id, str) and (
+        wake_id == CADENCE_ID or wake_id.startswith(EXTRA_ID_PREFIX)
+    )
+
+
+def banner_budget_spent(config_dir: Path | str, *, now_ms: int | None = None) -> bool:
+    """Whether her rolling-24h banner budget (:data:`MAX_BANNERS_PER_DAY`) is used up.
+
+    LOCK-FREE BY DESIGN, and that is the load-bearing property: the decision
+    runs at settle time on the event loop (``Session._emit`` ->
+    ``_finalize_attention_notify``), and ``state.locked`` can park the caller
+    for up to its 5 s wait — a check-in settling must never freeze every other
+    surface in the process. ``state.read_json`` is an atomic-replace read, so an
+    unlocked reader sees either the previous or the next complete file, which
+    is all a rolling count needs. Unreadable/absent ledger answers "not spent":
+    the budget is a safety net, and a transient read failure must not eat a
+    banner the operator asked for (the greeting ledger separately fails
+    CLOSED — that one guards the never-contacted rule).
+    """
+    data = state.read_json(state.onboarding_path(config_dir), what="onboarding") or {}
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    return len(_banner_stamps(data, now=now)) >= MAX_BANNERS_PER_DAY
+
+
+def note_banner_sent(config_dir: Path | str, *, now_ms: int | None = None) -> None:
+    """Record one banner against the rolling budget, under the aida lock.
+
+    Called (via ``asyncio.to_thread``) after a publish that carried
+    ``notify=True`` — the row is durable first, so a crash between the two errs
+    toward one banner counted rather than one forgotten. The write prunes
+    stamps older than :data:`BANNER_WINDOW_MS` in the same locked pass, so the
+    list cannot grow without bound. Best-effort by contract for its caller: a
+    stamp failure must never touch the outcome it describes.
+    """
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    path = state.onboarding_path(config_dir)
+    with state.locked(config_dir):
+        data = state.read_json(path, what="onboarding") or {}
+        stamps = _banner_stamps(data, now=now)
+        stamps.append(now)
+        data["banners"] = stamps
+        state.write_json(path, data)
+
+
+def _banner_stamps(data: Mapping[str, Any], *, now: int) -> list[int]:
+    """The budget timestamps still inside the window, as ints.
+
+    Shape-tolerant on read (ints and floats, bools rejected as the house rule
+    everywhere in this package) because the file is shared state: an older
+    build or a hand-edit must not crash a settle. ``now`` comes from the
+    caller so a single evaluation counts against one instant.
+    """
+    raw = data.get("banners")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    kept: list[int] = []
+    for stamp in raw:
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        value = int(stamp)
+        if 0 <= now - value < BANNER_WINDOW_MS:
+            kept.append(value)
+    return kept
+
+
 def cadence_message(config_dir: Path | str, now_ms: int) -> str:
     """The cadence row's message: the standing prompt plus today's nudge window.
 
@@ -348,6 +540,15 @@ def cadence_schedule(
         next_due_at=next_cadence_ms(now_ms, at),
         every_ms=None,
         created_at=now_ms,
+        # NOTIFY IS THE POINT OF THIS ROW: with no surface attached, a
+        # check-in that finds something actionable must be able to reach the
+        # operator (rung 4 of the completion ladder raises the OS banner).
+        # Whether it ACTUALLY banners is decided at settle time by the veto
+        # (``Session._aida_cadence_banner_veto``), which reads the reply: a
+        # quiet day — the sentinel or a tip — stays silent. Before this flag
+        # no Aida row set it, so her shipped cadence was silent no matter
+        # what the reply said.
+        notify=True,
     )
 
 
@@ -631,10 +832,18 @@ def reconcile(
                     kept.append(
                         WakeSchedule(
                             id=_next_extra_id({row.id for row in kept}),
-                            message=message or DEFAULT_EXTRA_MESSAGE,
+                            # The model-written message gets the sentinel
+                            # clause appended when it lacks one, so the veto's
+                            # reply test applies to extras exactly as it does
+                            # to the cadence (one constant, three writers).
+                            message=with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
                             next_due_at=due,
                             every_ms=None,
                             created_at=now,
+                            # An extra is a check-in like the cadence: it may
+                            # banner when actionable (settle-time veto reads
+                            # the reply).
+                            notify=True,
                         )
                     )
                     taken += 1
@@ -665,6 +874,15 @@ def reconcile(
         # generic wake machinery owns missed-while-down delivery, and this
         # engine deliberately has no second implementation of it.
         existing = next((row for row in original if row.id == CADENCE_ID), None)
+        if existing is not None and not existing.notify:
+            # A LEGACY ROW: armed before her check-ins were allowed to banner
+            # (``WakeSchedule.notify`` defaulted False and no Aida row set it).
+            # Upgraded IN PLACE rather than rebuilt — a rebuild would mint a
+            # new ``created_at`` on every reconcile, which the REUSE note above
+            # exists to prevent — and the upgrade is what makes this fix
+            # effective on an established install at its next persist instead
+            # of only after the current row's next fire.
+            existing = existing.model_copy(update={"notify": True})
         kept.append(
             existing
             if existing is not None
@@ -1352,6 +1570,10 @@ async def ensure_armed(
                     {
                         "message": cadence_message(root, now),
                         "at": _iso_due(next_cadence_ms(now, pol.at)),
+                        # Same contract as ``cadence_schedule``: the row may
+                        # banner; the settle-time veto reads her actual reply
+                        # before one is raised.
+                        "notify": True,
                     },
                     wake_id=CADENCE_ID,
                     now_ms=now,
@@ -1497,7 +1719,14 @@ async def _drain_tray_external(
                 await arm_wake(
                     root,
                     session_id,
-                    {"message": message or DEFAULT_EXTRA_MESSAGE, "at": _iso_due(due)},
+                    {
+                        "message": with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
+                        "at": _iso_due(due),
+                        # Same contract as the reconcile arm above: an extra
+                        # may banner when actionable; a quiet reply is vetoed
+                        # at settle time.
+                        "notify": True,
+                    },
                     wake_id=extra_id,
                     now_ms=now,
                 )

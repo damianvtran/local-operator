@@ -2828,6 +2828,15 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: §14.3's wake-id record, beside the trigger record and consumed the
+        #: same way: EVERY ``details["wake_id"]`` (and every id a resume
+        #: catch-up folds, from ``details["wake_ids"]``) seen in this run's
+        #: inputs. Asked by the Aida banner veto
+        #: (:meth:`_aida_cadence_banner_veto`) to tell a check-in delivery (the
+        #: cadence / an escalation extra) from every other reason a run can
+        #: notify — a trigger check-in, a user-armed wake, a person's message —
+        #: so a quiet reply can only ever silence her own check-ins.
+        self._run_wake_ids: set[str] = set()
         #: Whether the CURRENT run's end has been CONSUMED for publication.
         #: Set False at every turn start and True the moment
         #: ``_publish_attention_outcome`` takes the end event, so a teardown can
@@ -11743,13 +11752,28 @@ class Session:
         result, resume catch-up, incident notice, harness chrome). Called from
         the pipeline head for the opening messages and from ``_drain_steering``
         for messages that folded in mid-turn — both are the run's inputs.
+
+        The delivery's ``wake_id`` (and, for a resume catch-up, the folded
+        ``wake_ids`` list its builder stamps) is recorded into
+        ``_run_wake_ids`` beside the trigger classes: the Aida banner veto needs
+        "which rows woke this run" at settle time, and the delivery row is the
+        only place that fact exists.
         """
         custom_type = getattr(message, "custom_type", None)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
             details = getattr(message, "details", None)
-            if isinstance(details, Mapping) and details.get("notify"):
-                self._run_notify_requested = True
+            if isinstance(details, Mapping):
+                if details.get("notify"):
+                    self._run_notify_requested = True
+                wake_id = details.get("wake_id")
+                if isinstance(wake_id, str) and wake_id:
+                    self._run_wake_ids.add(wake_id)
+                folded = details.get("wake_ids")
+                if isinstance(folded, (list, tuple)):
+                    self._run_wake_ids.update(
+                        str(item) for item in folded if isinstance(item, str) and item
+                    )
         elif custom_type is not None or getattr(message, "role", None) != "user":
             self._run_triggers.add("internal")
         else:
@@ -11784,10 +11808,16 @@ class Session:
           notifies exactly as today — a quiet delivery never suppresses it;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
+        * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
+          ever turning a True into a False: a run of HER session woken only by
+          cadence-family rows stays silent when the reply is the quiet
+          sentinel, a tip, or empty, when her greeting ledger is not settled,
+          or when her 24 h banner budget is spent (see
+          :meth:`_aida_cadence_banner_veto` for each condition and why);
         * ``kind == "error"`` — a provider/tool failure or a classified cut-off
-          — always notifies, whatever the origins were. A deliberate stop
-          (``interrupted``) stays suppressed by the consumers' kind filters
-          whatever this value says.
+          — always notifies, whatever the origins were, and is EXEMPT from the
+          veto. A deliberate stop (``interrupted``) stays suppressed by the
+          consumers' kind filters whatever this value says.
         """
         kind = (
             "error"
@@ -11796,7 +11826,7 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
-        return (
+        notify = (
             self._has_awaiting_user()
             or "user" in triggers
             or not (
@@ -11804,6 +11834,94 @@ class Session:
             )
             or self._run_notify_requested
         ) or kind == "error"
+        if notify and kind != "error" and self._aida_cadence_banner_veto(event):
+            notify = False
+        return notify
+
+    def _aida_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Whether one of HER check-in runs must stay SILENT despite notify=True.
+
+        THE OPERATOR'S REQUIREMENT, made decidable. With no surface attached
+        her check-in must be able to banner when something needs action — and
+        must NOT banner when there is nothing to say, because a daily
+        "(no action needed)" toast is how a chief of staff gets muted, which
+        silences the actionable ones too. The row can only declare INTENT
+        (``WakeSchedule.notify``); the reply is the evidence, and this is the
+        one place that reads it. Conditions, all required:
+
+        * the session is HERS (``_aida_duty``) — one attribute read for every
+          other session on the machine;
+        * the run has at least one recorded wake id and EVERY one is
+          cadence-family (``proactive.is_cadence_family_row``): the cadence or
+          an escalation extra. A trigger check-in, a user-armed wake, a
+          peer/job/user input — anything else in the run — keeps its normal
+          semantics; user intent is never silenced by this.
+
+        Then any ONE of these quiets it:
+
+        * her greeting ledger is not ``delivered``/``skipped`` — FAIL CLOSED
+          (design §3): an unreadable ledger is not evidence she has met the
+          operator, and the never-contact-before-first-engagement rule wins
+          over the banner;
+        * the rolling banner budget is spent (``MAX_BANNERS_PER_DAY`` in 24 h);
+        * the run's last assistant reply is empty, the quiet sentinel
+          (``proactive.reply_is_quiet`` — case/whitespace/wrapper tolerant), or
+          a tip reply (``proactive.reply_is_tip``; a silent row by decision,
+          reversible via ``TIP_REPLY_NOTIFIES``).
+
+        Runs on the event loop (``_emit``), so nothing here takes a lock: the
+        ledger and budget reads are the lock-free atomic file reads both
+        helpers document. Never raises by construction: every read degrades to
+        the value its docstring names (the ledger to veto, the budget to
+        allow), and a defect in a row id can at worst mis-classify a run the
+        same way ``_note_run_input`` already would have.
+        """
+        if not getattr(self, "_aida_duty", False):
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return False
+        from local_operator.aida import onboarding, proactive
+
+        if not all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids):
+            return False
+        try:
+            settled = onboarding.greeting_state(self._config_dir) in (
+                onboarding.GREETING_DELIVERED,
+                onboarding.GREETING_SKIPPED,
+            )
+        except Exception:  # noqa: BLE001 — fail CLOSED: see the docstring
+            logger.debug("aida: could not read the greeting ledger", exc_info=True)
+            settled = False
+        if not settled:
+            return True
+        try:
+            if proactive.banner_budget_spent(self._config_dir):
+                return True
+        except Exception:  # noqa: BLE001 — the budget is a net, never a reason to eat a banner
+            logger.debug("aida: could not read the banner budget", exc_info=True)
+        reply = self._run_last_assistant_text(event)
+        if not reply:
+            return True
+        return proactive.reply_is_quiet(reply) or proactive.reply_is_tip(reply)
+
+    def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
+        """The run's LAST assistant reply text, or ``""`` when it produced none.
+
+        The veto's evidence, read off the end event's own messages (the run
+        that is settling). No ``has_entry`` filter — unlike the publish
+        anchor's scan, this is not naming a durable row, it is reading the
+        reply the operator would have been shown, and demanding a transcript
+        entry here would veto a real reply in any window where persistence
+        lagged the emission.
+        """
+        for message in reversed(event.messages):
+            if getattr(message, "role", None) != "assistant":
+                continue
+            text = getattr(message, "text", "")
+            if text:
+                return str(text)
+        return ""
 
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
@@ -11969,6 +12087,27 @@ class Session:
                     cause=cause,
                     notify=notify,
                 )
+                if notify and getattr(self, "_aida_duty", False):
+                    # THE BANNER BUDGET'S STAMP (``aida.proactive``
+                    # ``MAX_BANNERS_PER_DAY``): one timestamp per True publish
+                    # of HERS, so ``banner_budget_spent`` can veto her 4th
+                    # banner inside a rolling day. AFTER the row is durable —
+                    # a crash between the two must count a banner that may
+                    # not have been raised rather than forget one that was —
+                    # and OFF the loop, like every locked aida write: the
+                    # cross-process lock waits up to 5 s and this runs in a
+                    # turn's ``finally`` on a serving loop. Best-effort: a
+                    # stamp failure is bookkeeping, never the outcome it
+                    # describes. The deferred-publish path (store contention)
+                    # lands its row via ``_republish_journalled_outcome`` and
+                    # does not stamp; the cap errs loud by one in a shape that
+                    # needs the store to be contended twice.
+                    try:
+                        from local_operator.aida import proactive as _aida_proactive
+
+                        await asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir)
+                    except Exception:  # noqa: BLE001 — see above
+                        logger.debug("aida: could not stamp the banner budget", exc_info=True)
             except AttentionWriteDeferred as deferred:
                 # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
                 # is STILL not lost -- but "the next boot re-imports it" was never
@@ -13004,6 +13143,7 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_wake_ids = set()
         for message in initial:
             self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
@@ -20106,6 +20246,15 @@ class Session:
                 "wake_catchup": True,
                 "text": text,
                 "notify": self._resume_catchup_notify,
+                # §14.3: WHICH schedules this fold stands for. ``_deliver_wake``
+                # stamps one ``wake_id`` per live delivery, but the catch-up
+                # aggregates several rows into one message, and the Aida banner
+                # veto needs the ids to tell her check-in catch-up (all
+                # cadence-family → reply-aware) from any fold that includes a
+                # user-armed wake (→ never silenced). Stamped at TAKE time,
+                # when the fold set is still complete: the per-fire discards in
+                # ``_deliver_wake_catchup`` only start after the message exists.
+                "wake_ids": sorted(self._resume_catchup_ids),
             },
         )
 

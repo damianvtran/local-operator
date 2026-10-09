@@ -193,6 +193,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if not activation.human_surface_present():
                 logger.info("aida: no human surface at boot; not auto-activating")
                 return
+            # R17's third signal (2026-10-09): a pty carries a RUN, not a
+            # person, when HOME is not the user's — a rig, a container or an
+            # orchestrator under `lop serve` must not create her session, arm a
+            # cadence and install a wake supervisor for a store nobody owns.
+            # Same comparison as the toast gate, through activation's one
+            # spelling; "cannot tell" fails open (behaves as before).
+            if not activation.home_is_the_users():
+                logger.info("aida: boot HOME is not the user's; not auto-activating")
+                return
             await ensure_session(config_dir)
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
             logger.warning("aida: boot ensure failed", exc_info=True)

@@ -34,9 +34,21 @@ Calls = list[tuple[tuple[Any, ...], dict[str, Any]]]
 
 
 def _boot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, token: str | None, terminal: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token: str | None,
+    terminal: bool,
+    home_is_users: bool = True,
 ) -> Path:
-    """Point the app at a scratch root and choose the boot's surface signals."""
+    """Point the app at a scratch root and choose the boot's surface signals.
+
+    ``home_is_users`` pins the THIRD signal (R17's home check): every test runs
+    under a redirected HOME, so the real predicate would refuse every boot.
+    The default patches the INPUT (``supervisors.real_home``) to agree with
+    ``$HOME`` — the shape of a user's own machine. The redirected-home cell
+    passes ``False`` and leaves the real predicate in place.
+    """
     root = tmp_path / ".local-operator"
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
@@ -48,6 +60,12 @@ def _boot(
     from local_operator.aida import activation
 
     monkeypatch.setattr(activation, "_has_terminal", lambda: terminal)
+    if home_is_users:
+        # Patch the PREDICATE, not its input: patching ``real_home`` would make
+        # the tmp root resolve as addressable to the supervisor-install guard,
+        # and the explicit-ensure cell below runs the REAL bootstrap. The
+        # predicate's own branches are pinned in test_aida_activation.py.
+        monkeypatch.setattr(activation, "home_is_the_users", lambda: True)
     return root
 
 
@@ -99,6 +117,28 @@ def test_a_terminal_boot_is_auto_activated(
     with TestClient(app) as client:
         _settle_boot(client)
     assert len(calls) == 1, "a daemon run from a terminal auto-activates her"
+
+
+def test_a_redirected_home_boot_is_not_auto_activated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: Calls
+) -> None:
+    """T9: a pty is a RUN, not a person, when HOME is not the user's.
+
+    The two original signals each have a gap this closes: a pty-allocating
+    ``lop serve`` under a rig/container HOME satisfies the terminal check, and
+    a desktop token under one satisfies the desktop check. Neither is a seat
+    the user is in, and the toast gate already refuses such a process — the
+    boot hook must agree before it creates a session, a cadence and a wake
+    supervisor for a store nobody owns.
+
+    Mutation: drop the HOME term from the boot hook — ``calls`` becomes 1.
+    """
+    root = _boot(tmp_path, monkeypatch, token=None, terminal=True, home_is_users=False)
+    with TestClient(app) as client:
+        _settle_boot(client)
+    assert calls == [], "a redirected-home boot must not auto-create her"
+    assert not (root / "aida").exists()
+    assert not (root / "sessions").exists()
 
 
 def test_an_explicit_ensure_still_creates_her_on_a_cloud_install(
