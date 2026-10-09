@@ -94,6 +94,18 @@ _KIND_LABELS: dict[str, str] = {
     "unknown": "provider error",
 }
 
+#: The label an HTTP 402 renders under INSTEAD of ``_KIND_LABELS["quota"]``.
+#:
+#: A 402 is classified ``kind="quota"`` on purpose (see :func:`_classify_fields`:
+#: rotation and the direct-credential refresh skip key off it), but the WORDS the
+#: user reads must not follow that kind. "rate limit or quota exceeded" tells a
+#: signed-in user with a zero balance to wait out a window that never reopens,
+#: and the downstream incident classifier (``incidents.classify_incident``) read
+#: the same words and filed the failure as ``rate-limit`` rather than
+#: ``billing``. The label is chosen at render time from the STATUS, so the kind,
+#: and everything that dispatches on it, is untouched.
+_OUT_OF_CREDITS_LABEL = "out of credits"
+
 #: Substrings that mean "you have run out" UNAMBIGUOUSLY, wherever the provider
 #: chose to put them. Matched against the provider's own message because the
 #: status alone is not enough: anthropic answers an OAuth credential used
@@ -929,7 +941,14 @@ class ProviderError(RenderedStreamError):
             facts.append(f"HTTP {self.status}")
         if self.retry_after_ms:
             facts.append(f"retry in {_format_retry_delay(self.retry_after_ms)}")
-        label = _KIND_LABELS.get(self.kind, _KIND_LABELS["unknown"])
+        # Chosen from the status, not the kind: see ``_OUT_OF_CREDITS_LABEL``.
+        # 402 is the only status this applies to, and it is always ``quota``-kind
+        # unless a caller stated a kind outright (an abort is handled above).
+        label = (
+            _OUT_OF_CREDITS_LABEL
+            if self.status == 402 and self.kind == "quota"
+            else _KIND_LABELS.get(self.kind, _KIND_LABELS["unknown"])
+        )
         detail = f" ({', '.join(facts)})" if facts else ""
         return f"{label}{detail}: {self.message}"
 
@@ -1590,6 +1609,28 @@ def is_rendered_usage_limit_error(rendered_error: str) -> bool:
     this same label, which is the fact a display gate can act on.
     """
     return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["quota"])
+
+
+def is_rendered_out_of_credits_error(rendered_error: str) -> bool:
+    """Whether a RENDERED error string is the out-of-credits (HTTP 402) refusal.
+
+    The sibling of :func:`is_rendered_auth_error`, for the same reason: the
+    display layers hold the rendered text, not the exception, and this module is
+    the only writer of the label, so the prefix is its own statement rather than
+    a guess about a provider's wording.
+
+    The LEGACY rendering of the same failure also counts: before the 402 got
+    its own label it read ``rate limit or quota exceeded (HTTP 402): ...``, and
+    a runtime older than this one can still hand its rendered error to a newer
+    display layer (a follower attached to an older owner). The quota label is
+    only accepted together with the ``(HTTP 402`` fact, so a 429 never matches.
+    """
+    if not rendered_error:
+        return False
+    lowered = rendered_error.lower()
+    return lowered.startswith(_OUT_OF_CREDITS_LABEL) or lowered.startswith(
+        f"{_KIND_LABELS['quota']} (http 402"
+    )
 
 
 def is_usage_limit_error(error: BaseException) -> bool:

@@ -1,7 +1,8 @@
-"""Radient usage-limit recovery: the sentence a quota failure carries.
+"""Radient out-of-credits recovery: the account-aware text a 402 carries.
 
 WHY THIS EXISTS. A Radient request that runs out of credit fails with a bare
-``rate limit or quota exceeded (HTTP 402): insufficient credits`` — true, and
+``out of credits (HTTP 402): insufficient credits`` (rendered, before the 402
+label split, as ``rate limit or quota exceeded (HTTP 402): ...``) — true, and
 useless: the account's free signup grant may simply be UNCLAIMED (the grant is
 withheld until the operator follows the verification link emailed at signup),
 in which case the remedy is an email, not a top-up. Nothing in the provider's
@@ -16,13 +17,37 @@ object, sibling to ``account``/``identity``::
     "verification": {"email_verified": bool,
                      "signup_grant": "claimed" | "pending" | "expired" | "none",
                      "grant_amount": <number, optional — captured at issue>,
-                     "claim_url": "https://console.radienthq.com/dashboard/verification"}
+                     "claim_url": "https://console.radienthq.com/dashboard/verification",
+                     "first_topup": {            # optional, newer backends only
+                         "bonus_amount": <number>,       # the registration bonus
+                         "minimum_purchase": <number>,   # card top-up that earns it
+                         "bonus_received": bool,         # true once no longer a first purchase
+                         "topup_url": "https://console.radienthq.com/dashboard/billing"}}
 
 ``email_verified`` is Radient's OWN Turnstile-gated claim state and is NEVER
 derived from Google/Microsoft OAuth claims, so it is read from this endpoint
 and nowhere else. The object is ABSENT on an older backend and every consumer
-must tolerate that: absence degrades to the generic console line, never an
-error and never a blank.
+must tolerate that: absence degrades to the neutral out-of-credits text, never
+an error and never a blank. Every field of ``first_topup`` is optional too: the
+bonus line is an OFFER, so it is stated only when every figure it quotes was
+read and ``bonus_received`` is exactly ``false``.
+
+WHAT THE TEXT SAYS, by account state (the copy is shared with the desktop UI
+and written for this surface):
+
+* not verified (``pending`` / ``expired``, or ``none`` with ``email_verified``
+  false) — free credits are WAITING behind verification, so that comes first;
+* verified (``claimed`` or ``email_verified``) — the credits are spent, so the
+  top-up link, plus the first-top-up bonus line while the bonus is unclaimed;
+* state unreadable (signed out, offline, ``/me`` failed, older backend) — a
+  neutral message naming BOTH links conditionally. It never claims a state it
+  could not read.
+
+THE TRIGGER IS THE 402, NOT THE QUOTA KIND. A 429 is a rate limit whose remedy
+is waiting, and advice about balances would be wrong for it. The gate therefore
+reads the out-of-credits label ``failover`` writes for HTTP 402 (and, for a
+transcript or follower written by an older runtime, the legacy quota label
+carrying ``HTTP 402``).
 
 HOW THE PROBE IS BOUNDED, and why it is shaped this way. A short-TTL process
 cache fronts one bounded GET (failures swallowed — a non-200, an unparseable
@@ -80,7 +105,9 @@ hint to a surface that does not own it.
 from __future__ import annotations
 
 import logging
+import math
 import os
+import re
 import threading
 import time
 from collections.abc import Mapping
@@ -97,6 +124,10 @@ logger = logging.getLogger(__name__)
 #: The claim page the frozen contract names. Used whenever the payload does not
 #: carry its own ``claim_url`` (a missing field is tolerated, never fatal).
 CLAIM_URL = "https://console.radienthq.com/dashboard/verification"
+
+#: Where a top-up happens when the payload does not name a page (an older
+#: backend carries no ``first_topup``), and the page the neutral text points at.
+TOPUP_URL = "https://console.radienthq.com/dashboard/billing"
 
 #: The account console, for the generic fallback (fetch failed, older backend,
 #: or a state this module has no branch for).
@@ -122,23 +153,33 @@ _PROBE_TIMEOUT = httpx.Timeout(
     pool=_READ_TIMEOUT_S,
 )
 
-#: Stable PREFIXES carried by every sentence this module appends: each quota
-#: branch line opens with ``Radient: `` and the no-sign-in remedy opens with
-#: its own words. Deliberately NOT the console URL: the payload's ``claim_url``
-#: may be any URL the backend supplies, so a URL-based marker silently stopped
-#: matching a line built from a non-console URL — and a branch flip between
-#: retries then stacked a second remedy (review round 1, R2). A retried render
-#: carrying a DIFFERENT branch's line must not stack under the first, which
-#: exact-line matching alone would miss.
-_FAMILY_MARKERS = ("Radient: ", "No Radient account is signed in")
-
-_GENERIC_LINE = f"Radient: check your account and credit balance at {CONSOLE_URL}."
-
-_NO_SIGN_IN_LINE = (
-    "No Radient account is signed in — to fix: `/login radient` in the TUI, "
-    "`local-operator login radient` from a shell, or Settings → Radient account "
-    "in the desktop app."
+#: Stable PREFIXES carried by every text this module appends, one per branch
+#: (plus ``Radient: ``, which only a runtime older than this one wrote and a
+#: replayed transcript may still carry). A retried render carrying a DIFFERENT
+#: branch's text — the grant was claimed between two attempts — must not stack
+#: under the first, which exact-line matching alone would miss. Deliberately
+#: NOT the console URLs: the payload's URLs may be any https page the backend
+#: supplies (review round 1, R2 on the previous revision), so a URL-based
+#: marker would stop matching a line built from one of them.
+_FAMILY_MARKERS = (
+    "Radient: ",
+    "You haven't verified your email yet",
+    "You're out of credits",
 )
+
+
+@dataclass(frozen=True)
+class FirstTopupFacts:
+    """The optional ``first_topup`` object, parsed tolerantly.
+
+    ``bonus_received`` is None (not stated) rather than False when the payload
+    omits or mangles it: only a definite ``false`` earns the bonus line.
+    """
+
+    bonus_amount: float | None = None
+    minimum_purchase: float | None = None
+    bonus_received: bool | None = None
+    topup_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +196,7 @@ class VerificationFacts:
     signup_grant: str | None = None
     grant_amount: float | None = None
     claim_url: str | None = None
+    first_topup: FirstTopupFacts | None = None
 
 
 @dataclass(frozen=True)
@@ -207,71 +249,155 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _https_url(value: Any) -> str | None:
+    """``value`` when it is a plain https URL, else None.
+
+    These URLs come off the wire and are PRINTED into a terminal, so a value
+    that is not https, or that carries whitespace or a control character (an
+    escape sequence in a buggy or hostile body), is dropped for the known
+    console page rather than echoed.
+    """
+    if isinstance(value, str) and re.fullmatch(r"https://[^\s\x00-\x1f\x7f]+", value):
+        return value
+    return None
+
+
+def _number(value: Any) -> float | None:
+    """A finite non-bool number, else None (a bool is a number to Python, not to us)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _money(value: float | None) -> str | None:
+    """``5.0`` as ``$5`` and ``2.5`` as ``$2.50``; None for an unusable amount.
+
+    Whole numbers drop the cents, matching the verification email's subject so
+    the figure reads the same in the inbox and in the terminal.
+    """
+    if value is None or value <= 0:
+        return None
+    return f"${int(value)}" if value.is_integer() else f"${value:,.2f}"
+
+
+def parse_first_topup(value: Any) -> FirstTopupFacts | None:
+    """Parse the optional ``first_topup`` object; ``None`` when it is absent."""
+    if not isinstance(value, Mapping):
+        return None
+    received = value.get("bonus_received")
+    return FirstTopupFacts(
+        bonus_amount=_number(value.get("bonus_amount")),
+        minimum_purchase=_number(value.get("minimum_purchase")),
+        bonus_received=received if isinstance(received, bool) else None,
+        topup_url=_https_url(value.get("topup_url")),
+    )
+
+
 def parse_verification(value: Any) -> VerificationFacts | None:
     """Parse the ``verification`` object; ``None`` when it is absent.
 
     Absence (an older backend) is distinct from emptiness on purpose: the
-    caller renders the generic console line for ``None`` and a branch-specific
-    sentence for an object, and the two must stay distinguishable so
-    "not stated" never reads as "no grant".
+    caller renders the neutral text for ``None`` and a branch-specific sentence
+    for an object, and the two must stay distinguishable so "not stated" never
+    reads as "no grant".
     """
     if not isinstance(value, Mapping):
         return None
     grant = value.get("signup_grant")
     if not isinstance(grant, str) or grant not in ("claimed", "pending", "expired", "none"):
         grant = None
-    amount = value.get("grant_amount")
-    if not isinstance(amount, (int, float)) or isinstance(amount, bool):
-        amount = None
     verified = value.get("email_verified")
     if not isinstance(verified, bool):
         verified = None
-    claim_url = value.get("claim_url")
-    if not isinstance(claim_url, str) or not claim_url.strip():
-        claim_url = None
     return VerificationFacts(
         email_verified=verified,
         signup_grant=grant,
-        grant_amount=float(amount) if amount is not None else None,
-        claim_url=claim_url,
+        grant_amount=_number(value.get("grant_amount")),
+        claim_url=_https_url(value.get("claim_url")),
+        first_topup=parse_first_topup(value.get("first_topup")),
+    )
+
+
+def _first_topup_line(first_topup: FirstTopupFacts | None) -> str | None:
+    """The first-top-up bonus sentence, only while the bonus is still on offer.
+
+    No block (older backend), ``bonus_received`` true or not stated, or a
+    figure that did not parse, all produce NO line: the bonus is an offer, and
+    an offer that cannot be quoted exactly must not be made.
+    """
+    if first_topup is None or first_topup.bonus_received is not False:
+        return None
+    bonus = _money(first_topup.bonus_amount)
+    minimum = _money(first_topup.minimum_purchase)
+    if bonus is None or minimum is None:
+        return None
+    return f"Get an extra {bonus} free on your first top-up of {minimum} or more."
+
+
+def _neutral_text() -> str:
+    """The out-of-credits text that is true of EVERY account state.
+
+    For an account this process could not read (signed out, offline, ``/me``
+    failed, an older backend with no ``verification``). Both remedies are named
+    behind their own condition, so a verified user is not told to verify and an
+    unverified one is not told their credits are already spent.
+    """
+    return (
+        "You're out of credits. If you haven't verified your email yet, verify it "
+        f"to claim your free credits: {CLAIM_URL}\n"
+        f"Otherwise, top up in the Radient console: {TOPUP_URL}"
     )
 
 
 def recovery_line(facts: RecoveryFacts) -> str:
-    """The user-facing sentence for ``facts``. Never empty, never raises.
+    """The user-facing text for ``facts``. Never empty, never raises.
 
-    The pending branch is the one this feature exists for: it says WHERE the
-    remedy is (the verification email) and what it is worth when the account
-    states an amount. ``expired``/``none`` deliberately do NOT claim an email
-    is waiting — the link is not in flight for either. ``claimed`` and every
-    unknown state fall to the generic console line, which is the only claim
-    that is true without knowing more.
+    Decided in this order, each branch stating only what the payload proved:
+
+    1. **verified** (``claimed`` grant, or ``email_verified`` true) — the free
+       credits are spent: the top-up link, plus the first-top-up bonus line
+       while the bonus is unclaimed.
+    2. **unverified** (``pending`` / ``expired``, or any grant with an explicit
+       ``email_verified: false``) — free credits are WAITING behind
+       verification, so that comes before any top-up. ``pending`` points at the
+       inbox; ``expired`` at requesting a new link, because the mail itself is
+       dead; anything else just opens the page.
+    3. **unreadable** — the neutral text, which makes no claim about the
+       account. That covers signed out too: the contract words the signed-out
+       case as neutral, and a 402 proves a credential WAS spent somewhere this
+       process may not see (an env key, a runtime override), so "you are not
+       signed in" would be a claim it cannot support.
     """
-    if facts.signed_in is False:
-        return _NO_SIGN_IN_LINE
     verification = facts.verification
     if verification is not None:
         claim = verification.claim_url or CLAIM_URL
-        if verification.signup_grant == "pending":
-            if verification.grant_amount is not None:
-                credits = f"claim ${verification.grant_amount:,.2f} in free credits"
+        verified = verification.signup_grant == "claimed" or verification.email_verified is True
+        if verified:
+            topup = (
+                verification.first_topup.topup_url if verification.first_topup else None
+            ) or TOPUP_URL
+            lines = [f"You're out of credits. Top up in the Radient console: {topup}"]
+            bonus = _first_topup_line(verification.first_topup)
+            if bonus:
+                lines.append(bonus)
+            return "\n".join(lines)
+        if verification.signup_grant in ("pending", "expired") or (
+            verification.email_verified is False
+        ):
+            amount = _money(verification.grant_amount)
+            credits = f"{amount} in free credits" if amount else "your free credits"
+            head = (
+                "You haven't verified your email yet. "
+                f"Verify to claim {credits} and start using Local Operator for free."
+            )
+            if verification.signup_grant == "pending":
+                action = f"Check your inbox for the Radient verification email, or open {claim}"
+            elif verification.signup_grant == "expired":
+                action = f"Your verification link has expired. Request a new one at {claim}"
             else:
-                credits = "claim your free credits"
-            return (
-                "Radient: the free signup credits are unclaimed — check your email "
-                f"for the Radient verification link and {credits}: {claim}"
-            )
-        if verification.signup_grant == "expired":
-            return (
-                "Radient: the signup grant's claim window has expired — open "
-                f"{claim} to check the account or request a new link."
-            )
-        if verification.signup_grant == "none":
-            return (
-                "Radient: no signup grant is attached to this account — open "
-                f"{claim} to check the account."
-            )
-    return _GENERIC_LINE
+                action = f"Open {claim} to verify your email."
+            return f"{head}\n{action}"
+    return _neutral_text()
 
 
 def _resolve_token(store: AuthStore) -> str | None:
@@ -484,16 +610,22 @@ def usage_limit_recovery_pending(
 
 
 def usage_limit_recovery_applies(rendered_error: str, provider: str | None) -> bool:
-    """The trigger: a usage-limit-classified error on the Radient provider.
+    """The trigger: an out-of-credits (HTTP 402) refusal on the Radient provider.
+
+    The function keeps the name it shipped under (``usage_limit``) so its three
+    call sites, the TUI, the session journal and the headless renderer, did not
+    change shape; what it gates on is narrower than the name says. A 429 is a
+    rate limit whose remedy is waiting, and advice about verification or
+    top-ups would be wrong for it, so only the 402 label qualifies.
 
     The provider is normalized through ``credential_provider_id`` — the same
     translation every credential lookup uses — so a request that ran as the
     ``radient-key`` login flavour (which stores under ``radient``) is covered,
     while an unknown or unrelated provider is not.
     """
-    from local_operator.providers.failover import is_rendered_usage_limit_error
+    from local_operator.providers.failover import is_rendered_out_of_credits_error
 
-    if not is_rendered_usage_limit_error(rendered_error):
+    if not is_rendered_out_of_credits_error(rendered_error):
         return False
     try:
         from local_operator.providers.registry import credential_provider_id
