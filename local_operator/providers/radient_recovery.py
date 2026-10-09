@@ -61,7 +61,7 @@ was ~10s in the pathological case (blackholed connect, then a stalled body)
 and review round 1 measured 5.04s on the connect phase alone. The token is the
 STORED one, deliberately not refreshed: a refresh is a network write (and a
 rotation) triggered by a turn that just failed, while a stale token merely
-fails the probe and degrades to the generic line.
+fails the probe and degrades to the neutral text.
 
 THREE ACCESS PATTERNS, and the caller each one serves. THE AWAITED ARM
 (:func:`append_usage_limit_recovery_async`) probes on a cache miss while
@@ -77,7 +77,7 @@ the sentence still lands. THE BOUNDED SYNC ARM
 (:func:`append_usage_limit_recovery`) blocks its caller for up to the probe
 envelope and exists for exactly one surface: the headless renderer, whose
 one-shot process exits with the line, so a cache-only answer there would
-render the generic fallback forever. Loop-side callers must not use it.
+render the neutral fallback forever. Loop-side callers must not use it.
 
 NOTHING HERE RAISES. Every branch returns a string: a recovery sentence is an
 ADDITION to an error the user is already being shown, so a store read, a parse
@@ -94,10 +94,10 @@ display site without double-firing.
 
 CACHING AND WHO INVALIDATES IT. The cache holds FETCH-BACKED facts only (a
 probe ran); the "no stored credential" answer is a cheap local read and is
-never cached, because the moment it changes — the operator logging in — is
-exactly the moment a stale "not signed in" would hurt. A successful-login
-invalidation is NOT wired in: the worst a stale entry can do is pick a
-different sentence for at most ``_TTL_S`` seconds on a path that is already
+never cached, because the moment it changes — the operator signing in — is
+exactly the moment the process must stop answering from memory. A
+successful-login invalidation is NOT wired in: the worst a stale entry can do
+is pick a different sentence for at most ``_TTL_S`` seconds on a path that is already
 failing, and reaching into the login flow to invalidate it would couple this
 hint to a surface that does not own it.
 """
@@ -107,12 +107,13 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -128,10 +129,6 @@ CLAIM_URL = "https://console.radienthq.com/dashboard/verification"
 #: Where a top-up happens when the payload does not name a page (an older
 #: backend carries no ``first_topup``), and the page the neutral text points at.
 TOPUP_URL = "https://console.radienthq.com/dashboard/billing"
-
-#: The account console, for the generic fallback (fetch failed, older backend,
-#: or a state this module has no branch for).
-CONSOLE_URL = "https://console.radienthq.com"
 
 #: TTL of the process cache. Inside the 2-5 minute band the frozen contract
 #: asks for: long enough that a quota storm costs one probe, short enough that
@@ -153,19 +150,41 @@ _PROBE_TIMEOUT = httpx.Timeout(
     pool=_READ_TIMEOUT_S,
 )
 
-#: Stable PREFIXES carried by every text this module appends, one per branch
-#: (plus ``Radient: ``, which only a runtime older than this one wrote and a
-#: replayed transcript may still carry). A retried render carrying a DIFFERENT
-#: branch's text — the grant was claimed between two attempts — must not stack
-#: under the first, which exact-line matching alone would miss. Deliberately
-#: NOT the console URLs: the payload's URLs may be any https page the backend
-#: supplies (review round 1, R2 on the previous revision), so a URL-based
-#: marker would stop matching a line built from one of them.
+#: Stable phrases carried by every text this module appends, matched
+#: case-insensitively by :func:`_carries_family_text`.
+#:
+#: DELIBERATELY NOT THE SENTENCE OPENERS (agent review round 1, R1-2). The
+#: guard used to key on "You're out of credits" / "You haven't verified your
+#: email yet", which are ordinary English a provider's OWN 402 body can carry:
+#: ``str(ProviderError(402, "You're out of credits. Add funds to continue."))``
+#: made the substring guard read the provider's words as this module's remedy
+#: and suppress the append. Each phrase below appears in every branch text this
+#: module can produce and in nothing a provider writes about a refusal: "top up
+#: in the radient console" (the verified top-up line, and the neutral text's
+#: own second line) and "start using local operator for free" (the verification
+#: head that pending/expired/none share). The line the old runtime wrote
+#: ("Radient: …") is not a marker either: it can only reach this module through
+#: a text that is already ours, and "Radient: " alone is a prefix ordinary tool
+#: errors carry. Deliberately not the URLs: the payload's may be any https page
+#: the backend supplies, so a URL-based marker would stop matching a line built
+#: from one of them (review round 1, R2 on the previous revision).
 _FAMILY_MARKERS = (
-    "Radient: ",
-    "You haven't verified your email yet",
-    "You're out of credits",
+    "top up in the radient console",
+    "start using local operator for free",
 )
+
+
+def _carries_family_text(text: str) -> bool:
+    """Whether ``text`` already carries a text this module appended.
+
+    Case-insensitive, so the two spellings of the console sentence ("Top up"
+    opening a line, "top up" mid-sentence in the neutral text) are one marker;
+    the match lives here rather than at each call site so the guard, the
+    scheduler and the append cannot drift. Never raises — nothing on this path
+    may.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in _FAMILY_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -201,14 +220,16 @@ class VerificationFacts:
 
 @dataclass(frozen=True)
 class RecoveryFacts:
-    """What the recovery sentence is built from.
+    """What the recovery text is built from.
 
-    ``signed_in`` is TRI-state because the two failure answers differ in tone:
-    a definite ``False`` (no stored credential at all) earns the "no Radient
-    account is signed in" remedy, ``True`` continues to the verification
-    branches, and ``None`` means the probe could not tell (the store read
-    failed) so the sentence must not claim sign-in state either way and falls
-    to the generic console line.
+    ``signed_in`` is tri-state for what it says about the PROBE, not for two
+    different texts: ``False`` (no stored credential) and ``None`` (the
+    credential store could not be read) both render the neutral text, because
+    a 402 proves a credential was spent somewhere this process may not see —
+    an environment key or a runtime override — and "no Radient account is
+    signed in" would be a claim the evidence cannot support (the frozen
+    contract words the signed-out case as neutral too). Only ``True``
+    continues to the verification branches.
     """
 
     signed_in: bool | None
@@ -252,14 +273,30 @@ def _bearer(token: str) -> dict[str, str]:
 def _https_url(value: Any) -> str | None:
     """``value`` when it is a plain https URL, else None.
 
-    These URLs come off the wire and are PRINTED into a terminal, so a value
-    that is not https, or that carries whitespace or a control character (an
-    escape sequence in a buggy or hostile body), is dropped for the known
-    console page rather than echoed.
+    These URLs come off the wire and are PRINTED into a terminal, so the shape
+    is checked rather than trusted (agent review round 1, R1-3). Rejected:
+    anything but ``https`` with a host; whitespace; control characters — C0
+    AND C1, the latter reaching a terminal as escape/CSI introducers; FORMAT
+    characters (``Cf``: bidi overrides like U+202E and zero-width joiners that
+    can reorder or hide what a reader sees); and any netloc carrying
+    ``userinfo``, because ``https://console.radienthq.com@evil.example/p``
+    reads as the console host while addressing ``evil.example``. A rejected
+    value falls back to the known console page at the call site.
     """
-    if isinstance(value, str) and re.fullmatch(r"https://[^\s\x00-\x1f\x7f]+", value):
-        return value
-    return None
+    if not isinstance(value, str) or not value:
+        return None
+    for char in value:
+        if char.isspace() or unicodedata.category(char) in ("Cc", "Cf"):
+            return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.netloc:
+        return None
+    if "@" in parts.netloc:
+        return None
+    return value
 
 
 def _number(value: Any) -> float | None:
@@ -567,7 +604,7 @@ def usage_limit_recovery_line_cached(*, store: AuthStore | None = None) -> str |
     Cache-only by construction: it never probes and never blocks. The answers
     knowable without the wire are still computed — a warm cache, and the
     network-free "no stored credential" read (a store that cannot be read
-    degrades to the generic line, the same answer :func:`get_recovery_facts`
+    degrades to the neutral text, the same answer :func:`get_recovery_facts`
     gives it). ``None`` means exactly one thing: only a probe could decide, so
     a caller that can kick one off the event loop should (see
     :func:`usage_limit_recovery_pending`), and a caller that cannot renders
@@ -604,7 +641,7 @@ def usage_limit_recovery_pending(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return False
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return False
     return usage_limit_recovery_line_cached(store=store) is None
 
@@ -644,7 +681,7 @@ def append_recovery_line_once(text: str, line: str) -> str:
     """
     if not line:
         return text
-    if line in text or any(marker in text for marker in _FAMILY_MARKERS):
+    if line in text or _carries_family_text(text):
         return text
     if not text:
         return line
@@ -662,7 +699,7 @@ async def append_usage_limit_recovery_async(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = await usage_limit_recovery_line(store=store)
     return append_recovery_line_once(rendered_error, line)
@@ -681,7 +718,7 @@ def append_usage_limit_recovery_cached(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = usage_limit_recovery_line_cached(store=store)
     return append_recovery_line_once(rendered_error, line or "")
@@ -693,7 +730,7 @@ def append_usage_limit_recovery(
     """The BOUNDED blocking twin, for the one surface that cannot await.
 
     That surface is the headless renderer: its one-shot process exits with
-    the line it prints, so a cache-only answer would render the generic
+    the line it prints, so a cache-only answer would render the neutral
     fallback forever, and it cannot await. Everything loop-side must use the
     awaited or cached variants instead (see the module docstring's access
     patterns). Bounded like every path here: the worst case is one probe
@@ -702,7 +739,7 @@ def append_usage_limit_recovery(
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
-    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+    if _carries_family_text(rendered_error):
         return rendered_error
     line = usage_limit_recovery_line_sync(store=store)
     return append_recovery_line_once(rendered_error, line)

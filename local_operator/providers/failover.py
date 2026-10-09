@@ -1593,24 +1593,6 @@ def is_rendered_auth_error(rendered_error: str) -> bool:
     return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["auth"])
 
 
-def is_rendered_usage_limit_error(rendered_error: str) -> bool:
-    """Whether a RENDERED error string is the usage-limit (quota) kind.
-
-    The string-form sibling of :func:`is_rendered_auth_error`, with the same
-    contract: the failover module itself put ``_KIND_LABELS["quota"]`` at the
-    front of every quota-kind error it rendered, so the prefix is its own
-    statement rather than a guess about a provider's wording. The display
-    sites hold the rendered string rather than the original exception, which
-    is why the kind is read back out of text here too.
-
-    402 is INCLUDED by construction even though :func:`_is_usage_limit` keeps
-    it out for the sticky-credential reason documented there:
-    :func:`_classify_fields` names 402 as quota and both routes render through
-    this same label, which is the fact a display gate can act on.
-    """
-    return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["quota"])
-
-
 def is_rendered_out_of_credits_error(rendered_error: str) -> bool:
     """Whether a RENDERED error string is the out-of-credits (HTTP 402) refusal.
 
