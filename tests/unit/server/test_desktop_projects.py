@@ -778,3 +778,34 @@ async def test_the_listing_rows_do_not_grow_the_patch_only_flag(api) -> None:
     )
     row = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
     assert "forced_done" not in row
+
+
+async def test_forced_done_is_true_only_for_the_call_that_made_the_transition(api) -> None:
+    """Review F1 / QA Q1: `forced_done` means "THIS call closed the project over
+    open work". A re-send, a double-click, or a flag riding an unrelated edit on
+    an already-closed row must answer false, or a client toasting "closed with N
+    open" would repeat the notice on every later edit."""
+    client, _root = api
+    project_id = await _project_with_open_milestone(client)
+    url = f"/v1/desktop/projects/{project_id}"
+
+    first = await client.patch(url, json={"status": "done", "force_done": True})
+    assert first.json()["result"]["forced_done"] is True
+
+    for body in (
+        {"status": "done", "force_done": True},  # re-send / double-click
+        {"force_done": True},  # the flag alone
+        {"progress": "wrapped up", "force_done": True},  # an unrelated edit
+    ):
+        again = await client.patch(url, json=body)
+        assert again.status_code == 200, body
+        result = again.json()["result"]
+        assert result["status"] == "done" and result["forced_done"] is False, body
+
+    # Reopen and close over the same open milestone again: a NEW transition, so
+    # the force is real again.
+    assert (await client.patch(url, json={"status": "paused"})).json()["result"]["status"] == (
+        "paused"
+    )
+    reclosed = await client.patch(url, json={"status": "done", "force_done": True})
+    assert reclosed.json()["result"]["forced_done"] is True

@@ -486,3 +486,50 @@ def test_force_done_must_be_a_real_boolean(bad) -> None:
     )
     assert refused.status_code == 422 and refused.json()["code"] == "project_invalid"
     assert client.get(f"/api/projects/{project_id}").json()["project"]["status"] == "active"
+
+
+def test_forced_done_is_true_only_for_the_call_that_made_the_transition() -> None:
+    """The desktop rule (review F1 / QA Q1), asserted on the relay: only the
+    call that moves the project INTO done over open work reports a force."""
+    client = _client()
+    project_id = _project_with_open_milestone(client)
+    url = f"/api/projects/{project_id}"
+
+    first = client.patch(url, json={"status": "done", "force_done": True})
+    assert first.json()["project"]["forced_done"] is True
+
+    for body in (
+        {"status": "done", "force_done": True},
+        {"force_done": True},
+        {"progress": "wrapped up", "force_done": True},
+    ):
+        again = client.patch(url, json=body)
+        assert again.status_code == 200, body
+        assert again.json()["project"]["forced_done"] is False, body
+
+    assert client.patch(url, json={"status": "paused"}).status_code == 200
+    reclosed = client.patch(url, json={"status": "done", "force_done": True})
+    assert reclosed.json()["project"]["forced_done"] is True
+
+
+def test_a_refusals_extra_can_never_clobber_error_or_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review F2: `ProjectRouteError.extra` is additive by contract; the daemon
+    must spread it first so a reserved key cannot overwrite `error`/`code`."""
+    from local_operator.mobile import projects as mobile_projects
+
+    def refuse(*_args, **_kwargs):
+        raise mobile_projects.ProjectRouteError(
+            422, "project_done_incomplete", "the real sentence", {"error": "x", "code": "y", "n": 1}
+        )
+
+    monkeypatch.setattr(mobile_projects, "patch_payload", refuse)
+    client = _client()
+    refused = client.patch("/api/projects/anything", json={"status": "done"})
+    assert refused.status_code == 422
+    assert refused.json() == {
+        "error": "the real sentence",
+        "code": "project_done_incomplete",
+        "n": 1,
+    }

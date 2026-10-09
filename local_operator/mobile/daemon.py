@@ -6219,8 +6219,9 @@ def build_app(daemon: MobileDaemon):
         except mobile_projects.ProjectRouteError as exc:
             # `extra` is empty for every refusal but `project_done_incomplete`
             # (its `incomplete` names), so the common body stays {error, code}.
+            # `extra` is spread FIRST so it can never clobber `error`/`code`.
             return JSONResponse(
-                {"error": exc.message, "code": exc.code, **exc.extra}, status_code=exc.status
+                {**exc.extra, "error": exc.message, "code": exc.code}, status_code=exc.status
             )
         return JSONResponse(payload)
 

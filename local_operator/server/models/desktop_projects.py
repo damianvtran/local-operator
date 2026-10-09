@@ -179,9 +179,12 @@ class ProjectPatched(ProjectSummary):
     """The ``PATCH`` answer: the summary plus whether the call force-closed.
 
     ``forced_done`` is True only when the caller sent ``force_done: true`` AND
-    the project ended ``done`` AND at least one milestone is still incomplete
-    (:func:`local_operator.projects.closed_with_open_milestones`, the same
-    predicate the ``project`` tool's receipt uses). WHY IT IS HERE: the tool
+    THIS call moved the project into ``done`` (it was not done before) AND at
+    least one milestone is still incomplete
+    (:func:`local_operator.projects.closed_with_open_milestones` with
+    ``was_done``, the tool receipt's predicate narrowed to the transition). A
+    re-send, or an edit that merely carries the flag on an already-closed row,
+    answers False. WHY IT IS HERE: the tool
     records a forced close as receipt text only — nothing is persisted, so the
     row alone cannot say "this was closed over open work". The response is the
     only moment a client can say so ("closed with N milestones open"; N is

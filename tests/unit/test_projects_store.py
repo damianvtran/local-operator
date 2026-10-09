@@ -1215,6 +1215,12 @@ def test_closed_with_open_milestones_is_true_only_for_a_real_force() -> None:
     assert closed_with_open_milestones(row("done", open_ms), force_done=False) is False
     assert closed_with_open_milestones(row("paused", open_ms), force_done=True) is False
     assert closed_with_open_milestones(row("done", done_ms), force_done=True) is False
+    # `was_done` narrows to the transition; the default keeps the tool's
+    # state-describing receipt as it always was.
+    assert (
+        closed_with_open_milestones(row("done", open_ms), force_done=True, was_done=True) is False
+    )
+    assert closed_with_open_milestones(row("done", open_ms), force_done=True) is True
     assert closed_with_open_milestones(row("done"), force_done=True) is False
 
 

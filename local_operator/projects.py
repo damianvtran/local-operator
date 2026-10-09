@@ -595,7 +595,9 @@ def _refuse_done_if_incomplete(milestones: Sequence[ProjectMilestone]) -> None:
     )
 
 
-def closed_with_open_milestones(project: Project, *, force_done: bool) -> bool:
+def closed_with_open_milestones(
+    project: Project, *, force_done: bool, was_done: bool = False
+) -> bool:
     """Did a ``force_done`` update leave ``project`` done with milestones open?
 
     The store records NOTHING about a forced close: the milestones stay open
@@ -606,9 +608,18 @@ def closed_with_open_milestones(project: Project, *, force_done: bool) -> bool:
     the flag was passed AND the resulting status is ``done`` AND something is
     still incomplete. ``force_done`` on any other status, or with nothing open,
     is a harmless no-op and answers False.
+
+    ``was_done`` (the status BEFORE the call) narrows this to the TRANSITION:
+    the PATCH answer's ``forced_done`` means "THIS call closed the project over
+    open work", so a re-send, a double-click, or a progress-only edit that
+    merely carries the flag on an already-closed row must answer False — a
+    client toasting "closed with N open" off it would repeat the notice on every
+    later edit. It defaults False so the ``project`` tool's receipt, which has
+    always described the resulting state, is unchanged.
     """
     return (
         force_done
+        and not was_done
         and project.status == "done"
         and any(milestone.completed_at is None for milestone in project.milestones)
     )
