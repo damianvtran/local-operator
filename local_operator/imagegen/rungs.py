@@ -41,17 +41,33 @@ import base64
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from pydantic import SecretStr
 
+from local_operator.artifacts.progress import ProgressFn, emit_progress
+from local_operator.artifacts.progress import (
+    progress_details as _generic_progress_details,
+)
+from local_operator.artifacts.rung import CancelHandle, RungResult, RungSkipped
+from local_operator.artifacts.walk import PauseFn
 from local_operator.clients._http import APIError
 from local_operator.imagegen import ImageRoute, MediaAsset
 from local_operator.imagegen.errors import api_error_from_httpx_response
 from local_operator.imagegen.media import download_asset
+
+__all__ = [
+    "CancelHandle",
+    "ProgressFn",
+    "PauseFn",
+    "RungResult",
+    "RungSkipped",
+    "best_effort_cancel",
+    "emit_progress",
+    "progress_details",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +108,8 @@ FAL_DEFAULT_MODEL = "fal-ai/flux/dev"
 #: early (raising ``ImageGenerationCancelled``) when the user's abort signal
 #: fires, so the rare no-cancellation race becomes a clean receipt instead of
 #: a turn that waits out the provider. ``None`` in tests and library use.
-PauseFn = Callable[[float], Awaitable[None]]
+# ``PauseFn`` itself now lives in :mod:`local_operator.artifacts.walk`
+# (imported above); the protocol is unchanged.
 
 
 def _poll_interval(elapsed_s: float) -> float:
@@ -220,67 +237,10 @@ async def _download_rows(
 OPENAI_DEFAULT_IMAGE_MODEL = "gpt-image-1"
 OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
 
-#: The tool's live-progress callback: one bounded line plus a JSON-safe mapping.
-ProgressFn = Callable[[str, dict[str, Any]], None]
-
-
-class RungSkipped(Exception):
-    """A rung the walk REACHED but did not spend, with the honest reason.
-
-    Not a failure — the cascade records it as a ``skipped`` attempt and moves
-    to the next rung. Two producers: the Radient affordability probe (the
-    account cannot fund this request) and a capability mismatch (OpenAI has no
-    image-to-image route in v1). ``reason_class`` is closed vocabulary.
-    """
-
-    def __init__(self, message: str, *, reason_class: str) -> None:
-        super().__init__(message)
-        self.reason_class = reason_class
-
-
-@dataclass
-class CancelHandle:
-    """What a best-effort provider cancel needs, updated as the walk proceeds.
-
-    The cascade owns one per call and threads it through the rungs: a rung
-    FILLS it the instant a provider job exists, and CLEARS it the instant the
-    job reaches a terminal state — so a cancel attempt after completion reads
-    "none" (nothing left to cancel) rather than firing an ALREADY_COMPLETED
-    round-trip. ``credential`` is held only in process memory and never
-    printed; it exists so the cancel path does not have to re-resolve (and
-    potentially re-refresh) a credential under a 5 s budget.
-    """
-
-    provider: ImageRoute | None = None
-    request_id: str | None = None
-    model: str | None = None
-    #: The hub base the Radient cancel posts to (paths hang off it; kept so
-    #: the cancel path does not need a second config resolution under a 5 s
-    #: budget). FAL's cancel travels on the absolute ``cancel_url`` instead.
-    base_url: str | None = None
-    #: FAL's response-carried cancel URL (or the derived fallback).
-    cancel_url: str | None = None
-    credential: SecretStr | None = None
-
-    def clear(self) -> None:
-        self.provider = None
-        self.request_id = None
-        self.model = None
-        self.base_url = None
-        self.cancel_url = None
-        self.credential = None
-
-
-@dataclass(frozen=True)
-class RungResult:
-    """One successful rung run: the downloaded assets and the provider facts."""
-
-    assets: list[MediaAsset]
-    model: str
-    generation_id: str | None = None
-    #: Radient reports per-generation cost; FAL/OpenAI bill the key silently.
-    cost_usd: float | None = None
-
+# ``RungSkipped``, ``CancelHandle`` and ``RungResult`` — with ``ProgressFn``/
+# ``PauseFn`` beside them — moved to :mod:`local_operator.artifacts` in media
+# wave-2 (the kind-neutral rung seam) and are imported above under these exact
+# names, so the lane's pinned imports (tests, the tool) keep resolving here.
 
 # ---------------------------------------------------------------------------
 # Shared HTTP plumbing
@@ -373,21 +333,10 @@ def _num(value: Any) -> int | None:
         return None
 
 
-def emit_progress(emit: ProgressFn | None, text: str, **details: Any) -> None:
-    """One progress line; a broken emitter must never break a generation.
-
-    Public beside the private helpers because the cascade's failure updates
-    (another module) emit through it — one guarded spelling for "progress is
-    presentation, never control flow". The tool's own terminal updates route
-    through ITS guarded emitter (``image_tool._progress_emitter``'s closure),
-    which carries the same contract.
-    """
-    if emit is None:
-        return
-    try:
-        emit(text, details)
-    except Exception:  # noqa: BLE001 - progress is presentation, never control flow
-        logger.debug("image progress emitter raised; continuing", exc_info=True)
+# ``emit_progress`` moved to :mod:`local_operator.artifacts.progress` (imported
+# above) and is re-exported here under its exact name: the lane's own tests
+# call it from this module, and it is the one guarded spelling for "progress is
+# presentation, never control flow".
 
 
 def progress_details(
@@ -404,41 +353,24 @@ def progress_details(
 ) -> dict[str, Any]:
     """The canonical payload every ``generate_image`` update carries.
 
-    The canonical field set — ``stage``, ``queue_position``,
-    ``progress_fraction``, ``log_lines``, ``error``, ``error_type`` — is
-    emitted by THIS lane; the surfaces align their adapters afterwards (Q7
-    wire-side split, manager scope 2026-10-09). Every key is PRESENT on every
-    update; a value no provider supplied is ``None``, never a synthesized
-    stand-in. Constraints, each from what the rungs actually receive:
-
-    - ``stage`` vocabulary: ``queued`` / ``in_progress`` / ``completed`` /
-      ``cancelled`` / ``cancelling`` (the cancel-confirmation hold), and
-      ``None`` on a mid-walk failure update whose semantics ride
-      ``error``/``error_type`` instead.
-    - ``progress_fraction`` stays ``None`` until a provider reports one:
-      neither the hub's media route nor FAL's queue status carries a fraction
-      today, and elapsed-vs-budget is a TIMEOUT, not progress — it is
-      deliberately never synthesized into a bar.
-    - ``log_lines`` is the provider's own ``logs`` list passed through
-      verbatim (``[{message, timestamp}]``), ``None`` where the payload
-      carried none.
-    - ``error``/``error_type`` are the platform's sentence and the structured
-      code beside it; on a rung failure they carry the SAME classification as
-      that attempt's ``reason_class`` so the two can never disagree.
+    This lane's binding of the generic builder: the frozen ``tool_name`` slot
+    is pinned to THIS tool here, so every call site in the lane keeps today's
+    exact signature (the pinned call sites in tests, the rungs' update lines,
+    the tool's terminal stages). Field contract, constraints and the stage
+    vocabulary: :func:`local_operator.artifacts.progress.progress_details`.
     """
-    return {
-        "tool_name": "generate_image",
-        "stage": stage,
-        "provider": provider,
-        "model": model,
-        "elapsed_s": elapsed_s,
-        "num_images": num_images,
-        "queue_position": queue_position,
-        "progress_fraction": None,
-        "log_lines": log_lines,
-        "error": error,
-        "error_type": error_type,
-    }
+    return _generic_progress_details(
+        tool="generate_image",
+        stage=stage,
+        provider=provider,
+        model=model,
+        elapsed_s=elapsed_s,
+        num_images=num_images,
+        queue_position=queue_position,
+        log_lines=log_lines,
+        error=error,
+        error_type=error_type,
+    )
 
 
 # ---------------------------------------------------------------------------
