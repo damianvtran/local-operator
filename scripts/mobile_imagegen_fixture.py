@@ -6,7 +6,7 @@ Login at http://127.0.0.1:<port>. The password is NOT fixed and never printed:
 pass it as the second argument (or set ``LOP_MOBILE_FIXTURE_PASSWORD``) — see
 the sibling fixtures' note on why a literal here would be a reusable credential.
 
-Eight sessions, one per state the image-generation card ships in round 1 of the
+Ten sessions, one per state the image-generation card ships in round 1 of the
 surfaces lane — tap each from the list with the shot script beside this file:
 
 * ``Image gen queued``           — announced, nothing started: the state line
@@ -16,9 +16,16 @@ surfaces lane — tap each from the list with the shot script beside this file:
 * ``Image gen running``          — the tile + the indeterminate bar. THE CANCEL
   TAP IS CAPTURED HERE: the shot script presses the card's own cancel and
   photographs the ``cancelling…`` hold before any confirmation lands.
-* ``Image gen progress``         — the determinate branch: ``progress: 0.42``
-  plus a log tail, and a carried ``elapsed_s`` (the row's clock cell) so the
-  "when the feed carries a number" branches are all visible at once.
+* ``Image gen cancelling``       — the wire's OWN hold (``stage:
+  "cancelling"``): the same card the press produces, arriving from the feed
+  alone — no click, so a feed-driven hold is photographed rather than inferred.
+* ``Image gen progress``         — the determinate branch: ``progress_fraction:
+  0.42`` plus a ``log_lines`` tail, and a carried ``elapsed_s`` (the row's
+  clock cell) so the "when the feed carries a number" branches are all visible
+  at once.
+* ``Image gen mid-walk failure`` — a rung-failure beat (``stage: None``, the
+  semantics in ``error``/``error_type``) while the walk continues: the call is
+  still live, so the card keeps its live state and the pair rides the row.
 * ``Image gen done``             — a finished artifact. The fixture seeds a REAL
   transcript for this session (see ``_seed_done_transcript``), so the frame
   renders bytes served by the production ``/api/sessions/{id}/image`` route —
@@ -32,10 +39,12 @@ surfaces lane — tap each from the list with the shot script beside this file:
   ``cancelled`` with no restart control (the slot is unwired in the app; see
   the card's own tests for the wired demonstration).
 
-The live-detail fields (``queue_position``/``progress``/``logs``) are read from
-``details`` BY THE ADAPTER (``web/src/lib/image-gen.ts``), which is the single
-place their wire spelling appears — when the relay freezes the names, this
-fixture moves with that one module.
+The canonical live-detail bag (``stage``/``queue_position``/
+``progress_fraction``/``log_lines``/``error``/``error_type``) is read from
+``details`` BY THE ADAPTER (``web/src/lib/image-gen.ts``), the single place
+their wire spelling appears. The fixture seeds the canonical bag — every key
+present, ``None`` when unsupplied — the shape every ``generate_image`` update
+carries since the harness lane's freeze (PR #2089).
 
 No runtime scanner and no registrant sockets (``dial_registrants=False``), so
 this never touches the operator's live daemon or their sessions. HOME and
@@ -78,6 +87,15 @@ DONE_ENTRY_ID = "tc-call-img-done"
 PROVIDER_ERROR = "This generation failed before producing output."
 PROVIDER_ERROR_TYPE = "media_rejected"
 
+#: The platform sentence the canonical cancel-conflict result carries beside
+#: ``error_type: media_already_completed`` (harness lane, PR #2089). The card
+#: states "already finished" and does not paint it — seeded because the
+#: canonical shape carries it, and the adapter's ABSENCE path for this state
+#: is pinned in its unit tests.
+CANCEL_CONFLICT_SENTENCE = (
+    "The generation had already completed when the cancel arrived; " "its result was discarded."
+)
+
 
 def required_password(args: list[str]) -> str:
     """The password this run serves with, or a refusal naming the contract."""
@@ -116,6 +134,25 @@ def _image_card_entry(**over: object) -> TranscriptEntry:
     return entry
 
 
+def _live_details(**over: object) -> dict[str, object]:
+    """The canonical update bag: EVERY key present, ``None`` when unsupplied.
+
+    The harness lane freezes this shape (PR #2089): every ``generate_image``
+    update carries all six keys, and a value no provider supplied is ``None``
+    — never a synthesized stand-in.
+    """
+    details: dict[str, object] = {
+        "stage": None,
+        "queue_position": None,
+        "progress_fraction": None,
+        "log_lines": None,
+        "error": None,
+        "error_type": None,
+    }
+    details.update(over)
+    return details
+
+
 def _projection(
     session_id: str, name: str, pid: int, entry: TranscriptEntry, *, running: bool
 ) -> SessionProjection:
@@ -145,7 +182,11 @@ def _queued_projection() -> SessionProjection:
         "imagegen-queued",
         "Image gen queued",
         900201,
-        _image_card_entry(tool_state="queued", summary="waiting to run generate_image"),
+        _image_card_entry(
+            tool_state="queued",
+            summary="waiting to run generate_image",
+            details=_live_details(stage="queued"),
+        ),
         running=False,
     )
 
@@ -158,7 +199,7 @@ def _queued_position_projection() -> SessionProjection:
         _image_card_entry(
             tool_state="queued",
             summary="waiting to run generate_image",
-            details={"queue_position": 2},
+            details=_live_details(stage="queued", queue_position=2),
         ),
         running=False,
     )
@@ -169,7 +210,24 @@ def _running_projection() -> SessionProjection:
         "imagegen-running",
         "Image gen running",
         900203,
-        _image_card_entry(tool_state="running"),
+        _image_card_entry(tool_state="running", details=_live_details(stage="in_progress")),
+        running=True,
+    )
+
+
+def _cancelling_projection() -> SessionProjection:
+    """The wire's OWN cancelling hold (``stage: "cancelling"``).
+
+    Distinct from the press-driven hold the shot script captures by clicking
+    the running row: this row is what a feed that already reports the
+    cancellation looks like, and the card must hold the same shape without a
+    local press.
+    """
+    return _projection(
+        "imagegen-cancelling",
+        "Image gen cancelling",
+        900209,
+        _image_card_entry(tool_state="running", details=_live_details(stage="cancelling")),
         running=True,
     )
 
@@ -182,15 +240,39 @@ def _progress_projection() -> SessionProjection:
         _image_card_entry(
             tool_state="running",
             elapsed_s=42.0,
-            details={
-                "progress": 0.42,
-                "logs": [
-                    "diffusion step 12/30",
-                    "diffusion step 18/30",
-                    "sampling 24/30 (cfg 7.5)",
-                    "decoding latents",
+            details=_live_details(
+                stage="in_progress",
+                progress_fraction=0.42,
+                log_lines=[
+                    {"message": "diffusion step 12/30", "timestamp": "2026-10-09T12:00:00Z"},
+                    {"message": "diffusion step 18/30", "timestamp": "2026-10-09T12:00:01Z"},
+                    {"message": "sampling 24/30 (cfg 7.5)", "timestamp": "2026-10-09T12:00:02Z"},
+                    {"message": "decoding latents", "timestamp": "2026-10-09T12:00:03Z"},
                 ],
-            },
+            ),
+        ),
+        running=True,
+    )
+
+
+def _mid_walk_failure_projection() -> SessionProjection:
+    """A mid-walk failure beat (``stage: None``, semantics in error/error_type).
+
+    The walk continues after a rung fails — the next update (the next rung's
+    ``queued``) replaces this one — so the call is still live and the card
+    keeps its live state; the pair rides the row for the settle that follows.
+    """
+    return _projection(
+        "imagegen-mid-walk",
+        "Image gen mid-walk failure",
+        900210,
+        _image_card_entry(
+            tool_state="running",
+            details=_live_details(
+                stage=None,
+                error="Radient exceeded its 120s generation budget.",
+                error_type="timeout",
+            ),
         ),
         running=True,
     )
@@ -219,7 +301,7 @@ def _failed_projection() -> SessionProjection:
         _image_card_entry(
             tool_state="failed",
             error=PROVIDER_ERROR,
-            details={"error_type": PROVIDER_ERROR_TYPE},
+            details={"error": PROVIDER_ERROR, "error_type": PROVIDER_ERROR_TYPE},
         ),
         running=False,
     )
@@ -228,10 +310,11 @@ def _failed_projection() -> SessionProjection:
 def _already_finished_projection() -> SessionProjection:
     """The cancel conflict: the stop raced an already-completed job.
 
-    The frozen provider contract: this answers with
-    ``error_type: media_already_completed`` and the card must state "already
-    finished" — never an error, because nothing failed. Seeded with NO error
-    sentence, which is also the absence path this state has to look right on.
+    The canonical result (harness lane, PR #2089): ``error_type:
+    media_already_completed`` beside the ``stage: "cancelled"`` word and the
+    platform's own sentence. The card must state "already finished" — never
+    an error, because nothing failed — and the adapter's ABSENCE path for
+    this state is pinned in its unit tests rather than seeded here.
     """
     return _projection(
         "imagegen-finished",
@@ -239,7 +322,11 @@ def _already_finished_projection() -> SessionProjection:
         900208,
         _image_card_entry(
             tool_state="failed",
-            details={"error_type": "media_already_completed"},
+            details={
+                "stage": "cancelled",
+                "error": CANCEL_CONFLICT_SENTENCE,
+                "error_type": "media_already_completed",
+            },
         ),
         running=False,
     )
@@ -359,7 +446,9 @@ async def main() -> None:
         _queued_projection(),
         _queued_position_projection(),
         _running_projection(),
+        _cancelling_projection(),
         _progress_projection(),
+        _mid_walk_failure_projection(),
         _done_projection(),
         _failed_projection(),
         _already_finished_projection(),

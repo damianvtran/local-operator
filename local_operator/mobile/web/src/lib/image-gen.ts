@@ -5,19 +5,23 @@
  * The programme wires agent-driven image generation end to end
  * (provider → harness tool `generate_image` → every surface). This module is
  * the phone's whole share of the contract, and it exists as a module rather
- * than inline in the card because the LIVE DETAIL FIELDS ARE NOT FROZEN YET
- * (queue position, progress fraction, log lines, error payload). Everything
- * that reads one of those names lives here and nowhere else, so the day the
- * relay freezes their wire spelling this is the one file that changes — and
- * the card, its tests and the capture fixtures keep rendering.
+ * than inline in the card because the LIVE DETAIL FIELDS ARE FROZEN HERE:
+ * every `generate_image` update carries the canonical bag — `stage`,
+ * `queue_position`, `progress_fraction`, `log_lines`, `error`, `error_type` —
+ * every key present, `None` when no provider supplied a value (the harness
+ * lane's freeze, 2026-10-09). Everything that reads one of those names lives
+ * here and nowhere else, so a future rename is a one-file change — and the
+ * card, its tests and the capture fixtures keep rendering.
  *
- * THE WIRE VOCABULARY IS NOT THIS VOCABULARY. The provider (FAL) reports
- * IN_QUEUE / IN_PROGRESS / COMPLETED / CANCELLED with `queue_position: int`
- * when queued, `logs: string[]` and the provider's own error text; those
- * arrive through the harness/relay, which folds them into the SAME
- * `TranscriptEntry` shape every tool call already uses (`tool_state`,
- * `details`, `error`). This module maps that shape onto the card's view
- * states: queued → running → done | failed | cancelled, plus `cancelling`.
+ * THE WIRE VOCABULARY IS NOT THIS VOCABULARY. The canonical `stage` words are
+ * `queued` / `in_progress` / `completed` / `cancelled` / `cancelling`, and
+ * `None` on a mid-walk failure whose semantics ride `error`/`error_type`.
+ * FAL's own IN_QUEUE / IN_PROGRESS / COMPLETED / CANCELLED, its
+ * `queue_position: int`, its `logs` rows and its error prose are folded into
+ * that bag ABOVE this module — a surface never sees vendor names. This module
+ * maps the canonical shape (plus the `TranscriptEntry` fields every tool call
+ * already uses — `tool_state`, `error`) onto the card's view states:
+ * queued → running → done | failed | cancelled, plus `cancelling`.
  *
  * ABSENCE RENDERS THE REDUCED STATE HONESTLY. Every live field below is
  * presence-gated: a field the feed does not carry yet (or carries malformed)
@@ -65,11 +69,11 @@ export type ImageGenCardState =
 /** Everything the card's body renders, and nothing else. */
 export interface ImageGenView {
 	state: ImageGenCardState;
-	/** FAL's `queue_position`, when the feed carries an integer. */
+	/** The canonical `queue_position`, when the feed carries an integer. */
 	queuePosition: number | null;
-	/** The progress fraction (0..1), when the feed carries one. */
+	/** The canonical `progress_fraction` (0..1), when the feed carries one. */
 	progress: number | null;
-	/** The provider's log tail, last lines only; empty when absent. */
+	/** The canonical `log_lines` rows' messages, tail only; empty when absent. */
 	logs: string[];
 	/**
 	 * The failure message, verbatim — and it IS the provider's actual error in
@@ -99,12 +103,40 @@ export interface ImageGenView {
 const ERROR_TYPE_ALREADY_COMPLETED = "media_already_completed";
 
 /**
+ * The canonical `stage` words this surface acts on. The freeze defines two
+ * more (`completed`, `cancelled`); the mapping below explains why those are
+ * deliberately NOT refinements of a live row. One spelling each, read from
+ * the one module in `src/` that reads field names.
+ */
+const STAGE_QUEUED = "queued";
+const STAGE_IN_PROGRESS = "in_progress";
+const STAGE_CANCELLING = "cancelling";
+const STAGE_CANCELLED = "cancelled";
+
+/**
  * How many log lines the card shows. A phone card is a glance, not a log
  * viewer: the TAIL is what a watcher reads ("what is it doing now"), and
  * three one-line rows fit under the progress bar without pushing the
  * controls off screen. The adapter slices, so the card never re-decides.
  */
 const LOG_TAIL_LINES = 3;
+
+/**
+ * The paint text of one canonical `log_lines` row, or null.
+ *
+ * The canonical bag passes the provider's own rows through verbatim —
+ * `{message, timestamp}` — and the card paints the message. A row of any
+ * other shape (a bare string, a number, an object without a string message)
+ * is a shape this adapter does not recognise: it drops the row rather than
+ * guessing a rendering the feed did not send.
+ */
+function logLineText(row: unknown): string | null {
+	if (typeof row === "object" && row !== null) {
+		const message = (row as { message?: unknown }).message;
+		if (typeof message === "string") return message;
+	}
+	return null;
+}
 
 /**
  * Map one image-gen tool entry onto the card's view model.
@@ -130,6 +162,20 @@ export function imageGenView(
 	const errorType =
 		typeof details.error_type === "string" ? details.error_type : "";
 
+	/* The canonical live word. Only the THREE words that name a live interim
+	   refine the live view below — `queued` (a provider-side queue the card's
+	   own `tool_state` is already `running` through), `in_progress`, and the
+	   wire's own `cancelling` hold. `completed` and `cancelled` are
+	   settled-end words: while the row is live they are IGNORED, because the
+	   settle that follows IS the confirmation — a beat of optimism before it
+	   is exactly what the cancel contract forbids. `None` rides mid-walk
+	   failures, whose semantics live in `error`/`error_type` while the walk
+	   continues; a live row keeps its own state and the settle carries the
+	   outcome. An unknown word reads as absent — a stranger's vocabulary may
+	   not repaint the card. */
+	const rawStage = details.stage;
+	const stage = typeof rawStage === "string" ? rawStage : "";
+
 	/* `interrupted` is the fold's own word for a call a stop or a steer cut
 	   off; the card states it as `cancelled`, the frozen vocabulary's word.
 	   `composing` (the model still dictating the call) maps to `queued`: the
@@ -145,31 +191,59 @@ export function imageGenView(
 	   as whichever verdict its emitter chose), never to `failed`/`cancelled`,
 	   because nothing failed and nothing was stopped. A `done` settle stays
 	   `done`: the artifact could exist, and "already finished" is what a
-	   failed-looking settle means, not what a success is re-worded into. */
+	   failed-looking settle means, not what a success is re-worded into.
+
+	   And a failure-shaped settle whose canonical `stage` says `cancelled`
+	   (with no conflict code) is a cancel that LANDED, not a failure: the
+	   cancel path builds its result error-shaped while its details name the
+	   cancel, so without this read a deliberate stop would paint in the
+	   failure ink. Only an otherwise-unclassified failure is refined — any
+	   other `error_type` keeps its own arm. */
 	let state: ImageGenCardState;
 	switch (entry.tool_state) {
 		case "running":
-			state = cancelRequested ? "cancelling" : "running";
+			state = "running";
 			break;
 		case "done":
 			state = "done";
 			break;
 		case "failed":
 			state =
-				errorType === ERROR_TYPE_ALREADY_COMPLETED ? "finished" : "failed";
+				errorType === ERROR_TYPE_ALREADY_COMPLETED
+					? "finished"
+					: errorType === "" && stage === STAGE_CANCELLED
+						? "cancelled"
+						: "failed";
 			break;
 		case "interrupted":
 			state =
 				errorType === ERROR_TYPE_ALREADY_COMPLETED ? "finished" : "cancelled";
 			break;
 		default:
-			state = cancelRequested ? "cancelling" : "queued";
+			state = "queued";
 			break;
 	}
 
-	/* FAL's queue_position when queued. Integer only — a float, a numeric
-	   string or a negative is a shape this adapter does not recognise, and
-	   rendering one would dress a maybe for a fact. */
+	/* The live stage word refines only the live view (see above). */
+	if (state === "queued" || state === "running") {
+		if (stage === STAGE_QUEUED) state = "queued";
+		else if (stage === STAGE_IN_PROGRESS) state = "running";
+		else if (stage === STAGE_CANCELLING) state = "cancelling";
+	}
+
+	/* A pending cancel outranks every not-yet-settled state, and never a
+	   settle: the press is a request, the settle is the result. */
+	if (
+		cancelRequested &&
+		(state === "queued" || state === "running" || state === "cancelling")
+	) {
+		state = "cancelling";
+	}
+
+	/* The canonical `queue_position` when the feed carries an integer (the
+	   harness folds FAL's own field under this name). Integer only — a float,
+	   a numeric string or a negative is a shape this adapter does not
+	   recognise, and rendering one would dress a maybe for a fact. */
 	const rawQueuePosition = details.queue_position;
 	const queuePosition =
 		typeof rawQueuePosition === "number" &&
@@ -178,11 +252,13 @@ export function imageGenView(
 			? rawQueuePosition
 			: null;
 
-	/* The progress fraction (0..1). Out-of-range values are NOT clamped:
-	   clamping 42 into a full bar would state 100% off a value that never
-	   meant a fraction, so anything outside 0..1 renders the indeterminate
-	   bar instead — the reduced state, honestly. */
-	const rawProgress = details.progress;
+	/* The canonical `progress_fraction` (0..1). It stays absent until a
+	   provider reports one — the harness lane deliberately never synthesizes
+	   one — and out-of-range values are NOT clamped: clamping 42 into a full
+	   bar would state 100% off a value that never meant a fraction, so
+	   anything outside 0..1 renders the indeterminate bar instead — the
+	   reduced state, honestly. */
+	const rawProgress = details.progress_fraction;
 	const progress =
 		typeof rawProgress === "number" &&
 		Number.isFinite(rawProgress) &&
@@ -191,9 +267,12 @@ export function imageGenView(
 			? rawProgress
 			: null;
 
-	const rawLogs = details.logs;
-	const logs = Array.isArray(rawLogs)
-		? rawLogs.filter((line): line is string => typeof line === "string").slice(-LOG_TAIL_LINES)
+	const rawLogLines = details.log_lines;
+	const logs = Array.isArray(rawLogLines)
+		? rawLogLines
+				.map(logLineText)
+				.filter((line): line is string => line !== null)
+				.slice(-LOG_TAIL_LINES)
 		: [];
 
 	/* The failure message as the settle carried it, verbatim. Per the frozen
