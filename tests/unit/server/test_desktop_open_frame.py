@@ -364,16 +364,18 @@ async def test_head_cut_is_true_when_a_cap_stops_the_extension(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_the_first_frame_waits_briefly_for_its_facts(tmp_path: Path) -> None:
-    """The facts are worth a bounded wait, and the wait is never open-ended.
+async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
+    tmp_path: Path,
+) -> None:
+    """The facts come out of the read's own budget, never on top of it.
 
-    A frame that waited forever for an index scan would be a read that hangs on a
-    118 MB journal; one that never waited would make every first open condense a
-    run twice. So the frame awaits the refresh for its own small budget (the same
-    one the rail's first paint gives), and the two arms are both stated here: a
-    scan that lands inside it answers READY with facts, a scan that does not
-    answers ``building`` and leaves the client on today's path until the next
-    frame.
+    THE RENDERER STILL HAS TO PAINT, so the wait is a DEADLINE
+    (``OPEN_FRAME_SNAPSHOT_BUDGET_S``, measured from the request reaching the
+    bridge) and not a fixed sleep: a scan that lands inside what is left answers
+    READY with facts, and one that does not answers ``building`` so the client
+    keeps today's path until the next frame. Both arms are stated here, and the
+    second one also pins the deadline itself — a frame whose budget is already
+    spent must not wait at all.
     """
     async with _Harness(tmp_path) as harness:
         harness.seed(turns=4)
@@ -409,7 +411,20 @@ async def test_the_first_frame_waits_briefly_for_its_facts(tmp_path: Path) -> No
         # Bounded by the budget, not by the scan (2 s) and not by the request
         # deadline: the frame answers without its facts rather than making the
         # open pay for them.
-        assert elapsed < 1.5
+        assert elapsed < 1.0
+
+        # THE DEADLINE ITSELF, at the seam a slow page read produces: a read whose
+        # budget is already spent starts the build (so the frame after it is
+        # cheap) and waits for none of it.
+        ti._reset_for_tests()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(ti, "refresh_index", slow_refresh)
+            async with harness.pool.session(harness.session_id, read=True) as bridge:
+                started = time.monotonic()
+                index = await bridge._frame_index(time.monotonic() - 1.0)
+                elapsed_deadline = time.monotonic() - started
+        assert index is None
+        assert elapsed_deadline < 0.5
 
 
 @pytest.mark.asyncio

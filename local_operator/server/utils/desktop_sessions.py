@@ -111,6 +111,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_MAX_EXTRA_ROWS,
     OPEN_FRAME_MAX_RAW_PAGES,
     OPEN_FRAME_MAX_ROWS,
+    OPEN_FRAME_SNAPSHOT_BUDGET_S,
     align_page,
     build_frame,
     page_seq_bounds,
@@ -3129,6 +3130,11 @@ class DesktopSessionBridge:
     async def snapshot(
         self, *, entry_times: bool = False, open_frame: bool = False
     ) -> dict[str, Any]:
+        # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
+        # everything this method does before the page (the attention glance, the
+        # canonical state) is time the renderer pays for too, so it comes out of
+        # the same budget rather than being spent on top of it.
+        started = time.monotonic()
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -3224,7 +3230,15 @@ class DesktopSessionBridge:
             # and reads stay bounded by their OWN source's cut: see
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
-            history = await self.history(entry_times=entry_times, open_frame=open_frame)
+            history = await self.history(
+                entry_times=entry_times,
+                open_frame=open_frame,
+                # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
+                # read may spend what REMAINS of it on facts and nothing more. See
+                # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
+                # why the renderer's own paint time is the reason for it.
+                deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
+            )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3264,6 +3278,7 @@ class DesktopSessionBridge:
         limit: int = 100,
         entry_times: bool = False,
         open_frame: bool = False,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3362,6 +3377,15 @@ class DesktopSessionBridge:
                 after=after,
                 limit=limit,
                 entry_times=entry_times,
+                deadline=(
+                    deadline
+                    if deadline is not None
+                    # A request that arrives on its own route carries its own
+                    # budget from this point; the snapshot threads its earlier
+                    # one through so a page embedded in it cannot buy time the
+                    # client did not agree to.
+                    else time.monotonic() + OPEN_FRAME_SNAPSHOT_BUDGET_S
+                ),
             )
         if self.remote_row is not None:
             if around_id is not None:
@@ -3428,6 +3452,7 @@ class DesktopSessionBridge:
         after: int | None,
         limit: int,
         entry_times: bool,
+        deadline: float,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -3486,7 +3511,7 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries)
-            anchored_index = await self._frame_index()
+            anchored_index = await self._frame_index(deadline)
             result = build_frame(
                 anchored,
                 index=anchored_index,
@@ -3553,7 +3578,7 @@ class DesktopSessionBridge:
             # ``open_frame.tail_head_reachable``) and a run too long to reach is
             # left to ``runs`` rather than paid for in bytes.
             if index is None and attempt == 0:
-                index = await self._frame_index()
+                index = await self._frame_index(deadline)
                 if index is not None and not tail_head_reachable(index, limit=limit):
                     break
             if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
@@ -3572,7 +3597,7 @@ class DesktopSessionBridge:
             if not cursor:
                 break
         if index is None:
-            index = await self._frame_index()
+            index = await self._frame_index(deadline)
         # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
         # ``limit`` paintable rows, starting at a user row when one is in reach,
         # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
@@ -3627,7 +3652,7 @@ class DesktopSessionBridge:
             [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
         )
 
-    async def _frame_index(self) -> Any:
+    async def _frame_index(self, deadline: float) -> Any:
         """The index this frame's run facts come from, or ``None``.
 
         TWO BOUNDED STEPS, and neither of them scans unboundedly on the open path
@@ -3635,21 +3660,20 @@ class DesktopSessionBridge:
 
         1. an index already RESIDENT and current for the journal's stat (two
            ``stat`` calls, no I/O);
-        2. otherwise a refresh, awaited for ``OPEN_FRAME_FACTS_WAIT_S`` — the same
-           200 ms budget ``checkpoints_view`` gives its first paint. A refresh
-           with a usable cache file costs 3/19/62 ms at 5.9/35/118 MB, so this
-           step is cheap in the common re-open case; a genuinely cold scan costs
-           28/169/559 ms, which fits for everything up to about 35 MB and does not
-           for the largest journals. Those answer ``runs_state: "building"`` and
-           the next frame carries the facts — the client keeps its own
-           condensation meanwhile, exactly as it does today.
+        2. otherwise a refresh, awaited only for WHAT IS LEFT of the read's own
+           deadline (``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S``, measured from
+           the request reaching the bridge). The wait is spent out of the SAME
+           budget as the page read, never on top of it: the renderer still has to
+           paint in the 300 ms wall, and a slow index must degrade the frame's
+           facts rather than the first paint. Past the deadline the answer is
+           ``building``, the refresh runs on, and the next frame — or the
+           ``/history`` that follows inside the same open — carries the facts.
 
-        Paying it ONCE per session per process is what buys an exact bar on the
-        first paint, which is the point of the whole contract; a client that did
-        not negotiate the flag never reaches this method.
+        The refresh is STARTED either way, which is the promise that makes that
+        follow-up read cheap: by the time the client asks again the index is
+        resident, or its cache file exists so the refresh costs 3-62 ms.
         """
         from local_operator.session import transcript_index as index_module
-        from local_operator.session.open_frame import OPEN_FRAME_FACTS_WAIT_S
 
         index = index_module.fresh_resident(self.root, self.session_id)
         if index is not None:
@@ -3659,7 +3683,10 @@ class DesktopSessionBridge:
         except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
             logger.debug("open frame: refresh start failed", exc_info=True)
             return None
-        done, _pending = await asyncio.wait({task}, timeout=OPEN_FRAME_FACTS_WAIT_S)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        done, _pending = await asyncio.wait({task}, timeout=remaining)
         if task not in done:
             return None
         try:

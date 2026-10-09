@@ -60,18 +60,23 @@ OPEN_FRAME_MAX_ROWS = 400
 #: an order of magnitude below it.
 OPEN_FRAME_MAX_BYTES = 1_572_864
 
-#: How long a frame may WAIT for its run facts when no index is resident, before
-#: answering ``runs_state: "building"``.
+#: The core's budget for ONE open-frame read, measured from the moment the request
+#: reaches the bridge. A DEADLINE, NOT A FIXED WAIT: the facts wait gets whatever
+#: is left of it, and a read that has already spent the budget answers
+#: ``runs_state: "building"`` rather than spending more of the client's time.
 #:
-#: The same budget ``checkpoints_view`` gives its own first paint, and the same
-#: reasoning: a refresh that has a usable cache file costs 3/19/62 ms at
-#: 5.9/35/118 MB (measured), so awaiting it is cheaper than making the client
-#: condense a run twice; a genuinely COLD scan costs 28/169/559 ms at those sizes
-#: (measured), which lands inside this budget for everything up to about 35 MB
-#: and does not for the largest journals — those answer ``building`` and the next
-#: frame carries the facts. Paying it once per session per process is the price of
-#: an exact bar on the first paint, which is what this whole contract is for.
-OPEN_FRAME_FACTS_WAIT_S = 0.2
+#: 120 ms BECAUSE THE RENDERER STILL HAS TO PAINT. On this host the desktop's own
+#: first contentful paint costs 88-133 ms AFTER the bytes arrive, against a
+#: snapshot read of 3-27 ms warm, so a core that spends 200 ms waiting on an index
+#: takes the whole 300 ms wall for itself and misses the target for every client.
+#: The read is the part that must fit; the facts are worth only what is left.
+#: Measured: a page read is about 20-50 ms warm, and a refresh with a usable cache
+#: file costs 3/19/62 ms at 5.9/35/118 MB, so a re-open normally gets its facts
+#: inside what remains. A genuinely COLD scan costs 28/169/559 ms at those sizes,
+#: which fits for the fixtures and not for the largest journals — those answer
+#: ``building``, the refresh is already running, and the next frame carries the
+#: facts while the client falls back to exactly today's behaviour.
+OPEN_FRAME_SNAPSHOT_BUDGET_S = 0.12
 
 #: How many rows the head hunt may ADD to the page beyond ``limit``.
 #:
