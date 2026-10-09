@@ -54,6 +54,7 @@ from local_operator.server.routes import (
     desktop_monitors,
     desktop_profiles,
     desktop_projects,
+    desktop_quota,
     desktop_radient,
     desktop_runtimes,
     desktop_sessions,
@@ -759,6 +760,13 @@ app.include_router(desktop_radient.router)
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
 # template that could swallow it.
 app.include_router(desktop_tunnel.router)
+# `/v1/desktop/quota-notice`, the pre-emptive no-quota notice (design:
+# "pre-emptive no-quota notice"). A single-segment literal path with nothing
+# registered above it that could swallow it, and its own module rather than a
+# `desktop_catalogues` child for two reasons: the model-access work edits that
+# module, and the catalogue usage route returns credential identities that
+# this advisory must never echo. See `routes/desktop_quota.py`.
+app.include_router(desktop_quota.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
