@@ -765,6 +765,9 @@ without a call: the live model called `+ 4| === c2 done rc=0 <ts> ===`
 monitor's every transition. The gate's suppress classes describe bookkeeping
 that *changed*; an added record is the rubric's own MATERIAL. Not applied to a
 truncated snapshot, where a tail edit beyond the window looks like an insert.
+The classifier therefore no longer bounds an append-only source at all — a
+chatty one is bounded by the ordinary rate cap (§9.4), which counts every
+delivery including pure additions.
 
 ### 8.2 The service seam
 

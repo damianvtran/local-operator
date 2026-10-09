@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from local_operator.monitors import diff
 
 
@@ -114,3 +116,23 @@ def test_is_pure_addition_still_refuses_a_gutter_only_change() -> None:
     from local_operator.monitors.diff import is_pure_addition
 
     assert not is_pure_addition("3| x", "4| x")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("a", "a\nb", True),  # append
+        ("a\nc", "a\nb\nc", True),  # insert-mid (spot-checked, review R6)
+        ("a", "x\na", True),  # prepend (newest-first listing)
+        ("", "ERROR x", True),  # empty old: grep/ls first match
+        ("a\nb", "a", False),  # delete
+        ("a\nb", "a\nc", False),  # replace
+        ("a\nb", "b\na", False),  # reorder without sort_lines
+        ("a", "a\n2| <ts>", False),  # timestamp-only add
+        ("a", "a\n\n", False),  # blank-only add
+    ],
+)
+def test_is_pure_addition_table(old: str, new: str, expected: bool) -> None:
+    from local_operator.monitors.diff import is_pure_addition
+
+    assert is_pure_addition(old, new) is expected
