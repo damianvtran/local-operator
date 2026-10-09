@@ -186,14 +186,15 @@ async def _download_rows(
         if pause is not None:
             await pause(0.0)
         elapsed = int(time.monotonic() - started)
-        _emit(
+        emit_progress(
             emit,
             f"Generating via {label}: downloading {index}/{total} — {elapsed}s",
-            tool_name="generate_image",
-            stage="downloading",
-            provider=str(provider),
-            elapsed_s=elapsed,
-            num_images=total,
+            **progress_details(
+                stage="in_progress",
+                provider=str(provider),
+                elapsed_s=elapsed,
+                num_images=total,
+            ),
         )
         assets.append(
             await download_asset(
@@ -372,14 +373,70 @@ def _num(value: Any) -> int | None:
         return None
 
 
-def _emit(emit: ProgressFn | None, text: str, **details: Any) -> None:
-    """One progress line; a broken emitter must never break a generation."""
+def emit_progress(emit: ProgressFn | None, text: str, **details: Any) -> None:
+    """One progress line; a broken emitter must never break a generation.
+
+    Public beside the private helpers because the cascade's failure updates
+    and the tool's terminal updates emit through it too — one guarded
+    spelling for "progress is presentation, never control flow".
+    """
     if emit is None:
         return
     try:
         emit(text, details)
     except Exception:  # noqa: BLE001 - progress is presentation, never control flow
         logger.debug("image progress emitter raised; continuing", exc_info=True)
+
+
+def progress_details(
+    *,
+    stage: str | None,
+    provider: str | None = None,
+    model: str | None = None,
+    elapsed_s: int | None = None,
+    num_images: int | None = None,
+    queue_position: int | None = None,
+    log_lines: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    """The canonical payload every ``generate_image`` update carries.
+
+    The canonical field set — ``stage``, ``queue_position``,
+    ``progress_fraction``, ``log_lines``, ``error``, ``error_type`` — is
+    emitted by THIS lane; the surfaces align their adapters afterwards (Q7
+    wire-side split, manager scope 2026-10-09). Every key is PRESENT on every
+    update; a value no provider supplied is ``None``, never a synthesized
+    stand-in. Constraints, each from what the rungs actually receive:
+
+    - ``stage`` vocabulary: ``queued`` / ``in_progress`` / ``completed`` /
+      ``cancelled`` / ``cancelling`` (the cancel-confirmation hold), and
+      ``None`` on a mid-walk failure update whose semantics ride
+      ``error``/``error_type`` instead.
+    - ``progress_fraction`` stays ``None`` until a provider reports one:
+      neither the hub's media route nor FAL's queue status carries a fraction
+      today, and elapsed-vs-budget is a TIMEOUT, not progress — it is
+      deliberately never synthesized into a bar.
+    - ``log_lines`` is the provider's own ``logs`` list passed through
+      verbatim (``[{message, timestamp}]``), ``None`` where the payload
+      carried none.
+    - ``error``/``error_type`` are the platform's sentence and the structured
+      code beside it; on a rung failure they carry the SAME classification as
+      that attempt's ``reason_class`` so the two can never disagree.
+    """
+    return {
+        "tool_name": "generate_image",
+        "stage": stage,
+        "provider": provider,
+        "model": model,
+        "elapsed_s": elapsed_s,
+        "num_images": num_images,
+        "queue_position": queue_position,
+        "progress_fraction": None,
+        "log_lines": log_lines,
+        "error": error,
+        "error_type": error_type,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -663,24 +720,31 @@ async def run_radient(
                     code=code,
                 )
             queue_position = _num(status_payload.get("queue_position"))
-            stage = "queued" if status == "IN_QUEUE" else "running"
-            queue_note = f", #{queue_position}" if stage == "queued" and queue_position else ""
+            queued = status == "IN_QUEUE"
+            # Wire value vs display word (Q7 split): ``stage`` carries the
+            # canonical ``in_progress``; the line keeps the friendly "running".
+            stage = "queued" if queued else "in_progress"
+            queue_note = f", #{queue_position}" if queued and queue_position else ""
             log_note = ""
             logs = status_payload.get("logs")
+            log_lines = logs if isinstance(logs, list) else None
             if isinstance(logs, list) and logs:
                 last = logs[-1]
                 if isinstance(last, dict) and isinstance(last.get("message"), str):
                     log_note = " — " + " ".join(str(last["message"]).split())[:120]
-            _emit(
+            emit_progress(
                 emit,
-                f"Generating via Radient ({model_id}): {stage}{queue_note} — {elapsed}s{log_note}",
-                tool_name="generate_image",
-                stage=stage,
-                provider=str(ImageRoute.RADIENT),
-                model=model_id,
-                elapsed_s=elapsed,
-                queue_position=queue_position,
-                num_images=num_images,
+                f"Generating via Radient ({model_id}): "
+                f"{'queued' if queued else 'running'}{queue_note} — {elapsed}s{log_note}",
+                **progress_details(
+                    stage=stage,
+                    provider=str(ImageRoute.RADIENT),
+                    model=model_id,
+                    elapsed_s=elapsed,
+                    num_images=num_images,
+                    queue_position=queue_position,
+                    log_lines=log_lines,
+                ),
             )
 
         result_payload = await _request_json(
@@ -849,18 +913,23 @@ async def run_fal(
                     code="upstream",
                 )
             queue_position = _num(status_payload.get("queue_position"))
-            stage = "queued" if status == "IN_QUEUE" else "running"
-            queue_note = f", #{queue_position}" if stage == "queued" and queue_position else ""
-            _emit(
+            queued = status == "IN_QUEUE"
+            stage = "queued" if queued else "in_progress"
+            queue_note = f", #{queue_position}" if queued and queue_position else ""
+            logs = status_payload.get("logs")
+            emit_progress(
                 emit,
-                f"Generating via FAL ({model_path}): {stage}{queue_note} — {elapsed}s",
-                tool_name="generate_image",
-                stage=stage,
-                provider=str(ImageRoute.FAL),
-                model=model_path,
-                elapsed_s=elapsed,
-                queue_position=queue_position,
-                num_images=num_images,
+                f"Generating via FAL ({model_path}): "
+                f"{'queued' if queued else 'running'}{queue_note} — {elapsed}s",
+                **progress_details(
+                    stage=stage,
+                    provider=str(ImageRoute.FAL),
+                    model=model_path,
+                    elapsed_s=elapsed,
+                    num_images=num_images,
+                    queue_position=queue_position,
+                    log_lines=logs if isinstance(logs, list) else None,
+                ),
             )
 
         result_payload = await _request_json(
@@ -1000,16 +1069,17 @@ async def run_openai(
                 if pause is not None:
                     await pause(0.0)
                 elapsed = int(time.monotonic() - started)
-                _emit(
+                emit_progress(
                     emit,
                     f"Generating via OpenAI ({model_id}): downloading {index}/{len(items)} — "
                     f"{elapsed}s",
-                    tool_name="generate_image",
-                    stage="downloading",
-                    provider=str(ImageRoute.OPENAI),
-                    model=model_id,
-                    elapsed_s=elapsed,
-                    num_images=len(items),
+                    **progress_details(
+                        stage="in_progress",
+                        provider=str(ImageRoute.OPENAI),
+                        model=model_id,
+                        elapsed_s=elapsed,
+                        num_images=len(items),
+                    ),
                 )
                 assets.append(await download_asset(url, client=http))
         if not assets:

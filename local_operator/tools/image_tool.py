@@ -260,11 +260,24 @@ _CANCEL_PHRASES = {
 }
 
 
+#: The ``error`` sentence beside ``error_type: media_already_completed`` —
+#: the surfaces' frozen cancel-conflict branch (their words for it are
+#: "already finished", never an error's ink). A platform sentence; the
+#: provider's prose never rides here.
+_CANCEL_CONFLICT_SENTENCE = (
+    "The generation had already completed when the cancel arrived; its result was discarded."
+)
+
+
 def _progress_emitter(
     on_update: Callable[[AgentToolUpdate], None] | None,
 ) -> image_rungs.ProgressFn | None:
     """Adapt the cascade's ``emit(text, details)`` onto ``AgentToolUpdate``.
 
+    The emitter never raises (same contract as the rungs' own wrapper): a
+    progress line is presentation, and — because the terminal ``cancelling``/
+    ``[redacted]`` lines emit from inside cancellation handlers — an
+    emitter failure must never replace the ``CancelledError`` being handled.
     Updates are LIVE-ONLY by design (design §4.4): the transcript receives the
     final result, and no surface should expect historical progress rows.
     """
@@ -272,9 +285,35 @@ def _progress_emitter(
         return None
 
     def emit(text: str, details: dict[str, Any]) -> None:
-        on_update(AgentToolUpdate(content=[TextContent(text=text)], details=dict(details)))
+        try:
+            on_update(AgentToolUpdate(content=[TextContent(text=text)], details=dict(details)))
+        except Exception:  # noqa: BLE001 - progress is presentation, never control flow
+            logger.debug("image progress emitter raised; continuing", exc_info=True)
 
     return emit
+
+
+def _emit_cancel_stage(
+    progress: image_rungs.ProgressFn | None,
+    handle: image_rungs.CancelHandle,
+    stage: str,
+    text: str,
+) -> None:
+    """A cancel-phase update (``cancelling`` → ``[redacted]``).
+
+    ``provider``/``model`` come off the handle: a cancel can land before any
+    submit (both absent — honest nulls) or after one (both set).
+    """
+    if progress is None:
+        return
+    progress(
+        text,
+        image_rungs.progress_details(
+            stage=stage,
+            provider=str(handle.provider) if handle.provider is not None else None,
+            model=handle.model,
+        ),
+    )
 
 
 def _cancel_handle_details(handle: image_rungs.CancelHandle) -> dict[str, Any] | None:
@@ -399,6 +438,7 @@ async def execute_generate_image(
     from local_operator.paths import config_dir
 
     handle = image_rungs.CancelHandle()
+    progress = _progress_emitter(on_update)
     try:
         outcome = await run_image_cascade(
             prompt=params.prompt,
@@ -411,22 +451,36 @@ async def execute_generate_image(
             model=params.model,
             signal=signal,
             handle=handle,
-            emit=_progress_emitter(on_update),
+            emit=progress,
         )
     except ImageGenerationCancelled:
+        _emit_cancel_stage(progress, handle, "cancelling", "Cancelling the generation…")
         receipt = await image_rungs.best_effort_cancel(handle)
+        _emit_cancel_stage(progress, handle, "cancelled", _cancel_receipt(receipt))
+        details: dict[str, Any] = {
+            "cancel_handle": _cancel_handle_details(handle),
+            "stage": "cancelled",
+        }
+        if receipt == "already_completed":
+            # The cancel conflict is NOT a failure: the surfaces' frozen
+            # branch renders it as "already finished" off this pair (Q7).
+            details["error"] = _CANCEL_CONFLICT_SENTENCE
+            details["error_type"] = "media_already_completed"
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="generate_image",
             is_error=True,
             content=[TextContent(text=_cancel_receipt(receipt))],
-            details={"cancel_handle": _cancel_handle_details(handle)},
+            details=details,
         )
     except asyncio.CancelledError:
         # The loop's cancellation. The best-effort cancel is bounded (5 s),
         # never raises and never masks the cancellation — a second stop
-        # abandons it (see ``rungs.best_effort_cancel``).
-        await image_rungs.best_effort_cancel(handle)
+        # abandons it (see ``rungs.best_effort_cancel``). The terminal
+        # updates go through the guarded emitter for the same reason.
+        _emit_cancel_stage(progress, handle, "cancelling", "Cancelling the generation…")
+        receipt = await image_rungs.best_effort_cancel(handle)
+        _emit_cancel_stage(progress, handle, "cancelled", _cancel_receipt(receipt))
         raise
     except ImageGenerationUnavailable as exc:
         return ToolResult(
@@ -434,7 +488,26 @@ async def execute_generate_image(
             tool_name="generate_image",
             is_error=True,
             content=[TextContent(text=_unavailable_text(exc))],
-            details={"attempts": _attempt_list(exc.attempts)},
+            details={
+                "attempts": _attempt_list(exc.attempts),
+                "error": _unavailable_text(exc),
+                # The last attempt's classification is the walk's final word;
+                # ``attempts`` beside it carries the full story, so the two
+                # cannot contradict.
+                "error_type": exc.attempts[-1].reason_class if exc.attempts else None,
+            },
+        )
+
+    if progress is not None:
+        progress(
+            f"Generation complete — {len(outcome.assets)} image(s) via "
+            f"{RUNG_LABELS.get(outcome.route, str(outcome.route))} ({outcome.model}).",
+            image_rungs.progress_details(
+                stage="completed",
+                provider=str(outcome.route),
+                model=outcome.model,
+                num_images=len(outcome.assets),
+            ),
         )
 
     return _generated_result(tool_call_id, params, outcome, handle)
