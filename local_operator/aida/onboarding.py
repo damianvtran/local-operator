@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.aida import naming, state
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,9 @@ def request_greeting(config_dir: Path | str, surface: str, *, now_ms: int | None
             return False
         _set_greeting(config_dir, GREETING_REQUESTED, now, surface=surface)
         return True
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the greeting request", exc)
+        return False
     except Exception:  # noqa: BLE001 — a contended lock leaves it owed; retried next time
         logger.warning("aida: could not record the greeting request", exc_info=True)
         return False
@@ -345,6 +349,11 @@ def mark_delivered(config_dir: Path | str, now_ms: int | None = None) -> None:
         if greeting_state(config_dir) == GREETING_DELIVERED:
             return
         _set_greeting(config_dir, GREETING_DELIVERED, now)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # The delivery is the turn's fact, not the ledger's: a refused lock here
+        # leaves the stamp for the next fire, and the caller's turn runs either
+        # way. Quiet, per :func:`state.note_lock_refusal`.
+        state.note_lock_refusal("the greeting delivery stamp", exc)
     except Exception:  # noqa: BLE001 — the turn runs regardless of the ledger
         logger.warning("aida: could not stamp the greeting delivery", exc_info=True)
 
@@ -368,6 +377,10 @@ def clear_greeted(config_dir: Path | str) -> None:
         if greeting_state(config_dir) != GREETING_ARMED:
             return
         _set_greeting(config_dir, GREETING_REQUESTED, int(time.time() * 1000))
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # The next resume or the owner's reconcile asks again; a refused lock
+        # simply means this attempt did not get to move the state.
+        state.note_lock_refusal("the greeting re-owing", exc)
     except Exception:  # noqa: BLE001
         logger.warning("aida: could not re-owe the greeting", exc_info=True)
 
@@ -463,6 +476,11 @@ def cadence_allowed(config_dir: Path | str) -> bool:
                 _set_greeting(config_dir, GREETING_SKIPPED, int(time.time() * 1000))
                 return True
         return False
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the cadence gate's ledger read", exc)
+        # Fail-open, exactly as the broad arm below does: an existing user losing
+        # their check-in to a ledger refusal is the worse failure.
+        return True
     except Exception:  # noqa: BLE001
         logger.warning("aida: cadence gate could not read the greeting ledger", exc_info=True)
         return True
@@ -731,6 +749,12 @@ async def greet(
             return "failed"
         mark_greeted(root, now)
         return "greeted"
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        # A greeting must never fail its caller, and a refused lock is a refusal
+        # like any other here: the row stays ``requested`` and the next attended
+        # moment — or the live owner's reconcile — arms it (:func:`greeting_armable`).
+        state.note_lock_refusal("the greeting arm", exc)
+        return "failed"
     except Exception:  # noqa: BLE001 — a greeting must never fail its caller
         logger.warning("aida: greet failed", exc_info=True)
         return "failed"
@@ -791,10 +815,6 @@ def nudge_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | N
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     window_ms = _nudge_days(root) * 86_400_000
-    # Lazy, matching :mod:`local_operator.aida.state`'s own reach for the lock
-    # module: the two refusals are the only names this function needs, and a
-    # contended lock is the documented ``None`` (the handler below).
-    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     try:
         with state.locked(root):
@@ -810,18 +830,12 @@ def nudge_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | N
             data["nudge_offers"] = int(data.get("nudge_offers") or 0) + 1
             state.write_json(path, data)
     except (WakeLockBusy, WakeLockUnavailable) as exc:
-        # A LOCK REFUSAL, which this handler's own broad arm already called
-        # expected ("a lock refusal must not cost the cadence") while still
-        # printing a full traceback for it: the boot writers hold this store
-        # lock concurrently by design (the launch hook's task and the app's
-        # first-run route, the runtime's reconcile, the supervisor), so a peer
-        # holding it is a normal miss — the window it writes means the next
-        # attempt offers the nudge, and a first-run boot must not log a stack
-        # as the operator's first experience of the feature. Quiet, with the
-        # exception's own sentence so the cause is still readable; the broad
-        # arm below stays for genuine defects. Same split, and the same
-        # reasoning, as ``proactive.ensure_armed``'s handler.
-        logger.info("aida: the nudge window was not recorded (%s); the next tick retries", exc)
+        # A refused lock is the documented ``None``. This handler's own broad arm
+        # already called a lock refusal expected ("a lock refusal must not cost
+        # the cadence") while printing a stack for it; the shape it takes now is
+        # :func:`state.note_lock_refusal`'s, shared with every other site on this
+        # seam so the family cannot drift apart one handler at a time.
+        state.note_lock_refusal("the nudge window", exc)
         # A REFUSED LOCK PUBLISHES NOTHING. The clause is only ever handed back
         # WITH its stamp written in the same locked write (the two-effects rule
         # above), and this return is what keeps that true when the lock was
@@ -945,7 +959,6 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
     """
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     try:
         if greeting_state(root) not in (GREETING_DELIVERED, GREETING_SKIPPED):
@@ -971,11 +984,11 @@ def tip_offer(config_dir: Path | str, *, now_ms: int | None = None) -> str | Non
             data["tip_offered_at"] = now
             state.write_json(path, data)
     except (WakeLockBusy, WakeLockUnavailable) as exc:
-        # Same refusal, same reasoning as the nudge window's handler above: a
-        # peer's hold is a miss for this tick, not a defect — an unseen tip is
-        # offered again on a later cadence — and it is logged as one quiet line
-        # rather than a traceback into the operator's log.
-        logger.info("aida: the tip was not recorded (%s); the next tick retries", exc)
+        # Same refusal, same shared shape (:func:`state.note_lock_refusal`) as the
+        # nudge window's handler above: a peer's hold is a miss for this tick, an
+        # unseen tip is offered again on a later cadence, and it must not print a
+        # stack into the operator's log.
+        state.note_lock_refusal("the tip", exc)
         # No stamp, no clause — and no fall-through to the indexed return below,
         # which needs ``choice`` from inside the lock that was never entered.
         return None

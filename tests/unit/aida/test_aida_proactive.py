@@ -327,6 +327,17 @@ async def test_a_contended_store_lock_is_a_quiet_retryable_refusal(
     _root_with_session(isolated_root)
 
     class _Held:
+        # Both faces of the same lock: ``acquire`` is what the off-loop take
+        # calls (round 3d's ``asyncio.to_thread``), ``__enter__`` is what every
+        # synchronous ``with state.locked(...)`` site calls. A stub that offers
+        # only one of them would look like a defect (AttributeError caught by
+        # the broad arm) rather than a refusal.
+        def acquire(self) -> None:
+            raise WakeLockBusy("held by a peer")
+
+        def release(self) -> None:
+            return
+
         def __enter__(self) -> None:
             raise WakeLockBusy("held by a peer")
 
@@ -334,7 +345,16 @@ async def test_a_contended_store_lock_is_a_quiet_retryable_refusal(
             return False
 
     monkeypatch.setattr(state, "locked", lambda *a, **k: _Held())
-    with caplog.at_level(logging.INFO, logger="local_operator.aida.proactive"):
+    # BOTH doors, because the seam takes both: the row write and the tray drain
+    # go through ``state.locked``/``state.wake_lock`` (the drain on a worker
+    # thread since round 3d), and a peer holding the store locks out whichever
+    # one it reaches — which is what makes this cell's refusal reachable at all.
+    monkeypatch.setattr(state, "wake_lock", lambda *a, **k: _Held())
+    # Root-level capture, not the proactive logger alone: the refusal's line now
+    # comes from the shared helper in ``local_operator.aida.state`` (round 3d),
+    # and a capture scoped to one logger would read "silent" for a family word
+    # emitted next door.
+    with caplog.at_level(logging.INFO):
         word = await proactive.ensure_armed(isolated_root, SESSION_ID)
 
     assert word == "busy"
@@ -350,6 +370,55 @@ async def test_a_contended_store_lock_is_a_quiet_retryable_refusal(
         if record.name.startswith("local_operator.aida") and record.levelno >= logging.WARNING
     ]
     assert noisy == [], noisy
+
+
+@pytest.mark.asyncio
+async def test_the_tray_drain_takes_its_lock_off_the_event_loop(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wakes.lock`'s documented pattern: acquire and release on worker threads.
+
+    ``state.locked`` acquires on the CALLER's thread, so a contended take parks
+    whoever runs it for the whole ``LOCK_WAIT_S`` — measured 5.09 s parked on
+    this seam in the two-hook overlap this round also orders away, with the app
+    unable to paint and no way for the peer to release, since the peer is
+    blocked on the lock this wait holds open. The drain is the one aida lock
+    holder that runs ON the event loop, so it takes the worker-thread pattern
+    (``state.wake_lock`` + ``asyncio.to_thread``), pinned here by WHERE the
+    acquire runs rather than by a timing window.
+
+    Mutation: go back to ``with state.locked(root)`` and the recorder is never
+    asked — this cell goes red.
+    """
+    import threading
+
+    loop_thread = threading.get_ident()
+    ran_on: list[int] = []
+
+    class _Recorder:
+        def acquire(self) -> None:
+            ran_on.append(threading.get_ident())
+
+        def release(self) -> None:
+            return
+
+    monkeypatch.setattr(state, "wake_lock", lambda *a, **k: _Recorder())
+    _root_with_session(isolated_root)
+
+    notes = await proactive._drain_tray_external(
+        isolated_root, SESSION_ID, proactive.policy(isolated_root), int(time.time() * 1000)
+    )
+
+    assert notes == []
+    assert ran_on, "the drain never took the lock at all"
+    # ANY worker-thread take proves the drain's own take is off-loop: the take
+    # happens before the body, so the body's own synchronous uses of the same
+    # lock (``consume_escalations``, ``update_state``) can only run on the loop
+    # thread and cannot manufacture this. Reverting to ``with state.locked(root)``
+    # puts every take on the loop thread and reddens the cell.
+    assert any(
+        where != loop_thread for where in ran_on
+    ), "every take ran on the event loop; a contended lock parks the app there"
 
 
 @pytest.mark.asyncio

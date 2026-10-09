@@ -64,6 +64,7 @@ because "disabled installs" are installs that never wanted her.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ from typing import Any, Mapping, Sequence
 
 from local_operator.aida import state
 from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES, WakeSchedule
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 from local_operator.wakes.store import is_patience_row
 
 logger = logging.getLogger(__name__)
@@ -1112,6 +1114,9 @@ def _cadence_allowed(config_dir: Path | str) -> bool:
         from local_operator.aida import onboarding as _onboarding
 
         return _onboarding.cadence_allowed(config_dir)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the cadence gate's ledger read", exc)
+        return True
     except Exception:  # noqa: BLE001
         logger.warning("aida: cadence gate failed; allowing", exc_info=True)
         return True
@@ -1123,6 +1128,8 @@ def _clear_greeted(config_dir: Path | str) -> None:
         from local_operator.aida import onboarding as _onboarding
 
         _onboarding.clear_greeted(config_dir)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the greeting un-stamp", exc)
     except Exception:  # noqa: BLE001 — a stamp must not cost a pause/reconcile
         logger.warning("aida: could not clear the greeting stamp", exc_info=True)
 
@@ -1286,7 +1293,6 @@ async def ensure_armed(
         arm_wake,
         repair_index,
     )
-    from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -1369,35 +1375,32 @@ async def ensure_armed(
                 result = "present"
         await _drain_tray_external(root, session_id, pol, now)
         return result
-    except WakeLockBusy:
+    except WakeLockBusy as exc:
         # A PEER HOLDS THE STORE LOCK, and that is a normal answer here rather
-        # than a failure — the reason it needs saying is that this function has
-        # two attended callers at boot and they run CONCURRENTLY: the launch
-        # hook (`tui/__init__.py`'s ``_aida_boot_ensure``, an asyncio task) and
-        # the app's first-run route (``App._route_first_run_boot`` →
-        # ``_open_aida_first_run`` → ``ensure_session`` → here). Both arm the
-        # same row, both take ``state.locked`` for the row write and again for
-        # the escalation tray, and the loser waits :data:`state.LOCK_WAIT_S`
-        # (5 s, one large conversation's worth of writing) before the lock
-        # module answers as it is designed to: "a peer's temporary hold and
-        # re-running is the fix". Whoever loses arms nothing, the row it would
-        # have written is the row the winner is writing, and the next tick or
-        # boot arms it anyway. Reported as ``logger.warning(..., exc_info=True)``
-        # this printed a full traceback into the operator's log for a first-run
-        # boot that was working correctly (CI `tui-e2e (ubuntu-latest, 1)`, run
-        # 37886200214: the clean-log contract caught `aida: ensure_armed failed`
-        # over `WakeLockBusy`, 2 runs in 10) — so the refusal keeps its own word
-        # and no stack, and the catch-all below stays for genuine defects.
-        logger.info("aida: the store lock is held by a peer; the cadence arms on a later tick")
+        # than a failure. Why it needs saying: this seam has several attended
+        # writers (the TUI launch hook's ensure task, the app's first-run
+        # route, the runtime's reconcile, the wake supervisor), and the two
+        # boot hooks used to RUN CONCURRENTLY — the launch hook is an asyncio
+        # task and the route armed the same row from its own coroutine. Both
+        # take the store lock for the row write and again for the tray, so one
+        # waited out the peer and was refused; the app's first-run boot then
+        # printed a traceback for a boot that was working correctly (CI
+        # `tui-e2e (ubuntu-latest, 1)`, run 37886200214). Two things prevent
+        # that now: ``App._route_first_run_boot`` awaits the launch hook's task
+        # before its own ensure (order, not race), and this refusal — the
+        # fallback for a peer OUTSIDE this process — is answered quietly
+        # through :func:`state.note_lock_refusal`, sharing one shape with every
+        # other site on the seam. "busy" is a miss for this tick: whoever loses
+        # arms nothing, the row it would have written is the row the winner is
+        # writing, and the next tick or boot arms it anyway.
+        state.note_lock_refusal("the cadence arm", exc)
         return "busy"
     except WakeLockUnavailable as exc:
         # Not retryable, unlike the busy lock: the lock FILE could not be
         # created at all, so the next attempt is refused too (the lock module's
-        # own distinction). The exception's sentence is the whole diagnosis and
-        # names the remedy, so it is logged as one line WITHOUT a stack — the
-        # failure is the store's permissions, not this code path — and the word
-        # stays ``"failed"`` so callers keep treating it as one.
-        logger.warning("aida: the store lock could not be created: %s", exc)
+        # own distinction) — the word stays ``"failed"`` so callers keep
+        # treating it as one, and the line is quiet for the same reason.
+        state.note_lock_refusal("the cadence arm", exc)
         return "failed"
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
         logger.warning("aida: ensure_armed failed", exc_info=True)
@@ -1427,7 +1430,19 @@ async def _drain_tray_external(
     entry = wake_store.read_entry(root, session_id)
     ids = _row_ids(entry)
     taken = 0
-    with state.locked(root):
+    # ACQUIRED OFF THE LOOP — `wakes.lock`'s own documented pattern for a lock
+    # held across awaits (``WakeWriteLock``'s docstring; ``state.wake_lock``
+    # exists for exactly this). ``state.locked`` acquires on the CALLER's
+    # thread, so a contended take parks whoever runs it for the whole
+    # ``LOCK_WAIT_S`` — measured 5.09 s on this seam, with the app unable to
+    # paint for the duration and no way for the peer to release early, since
+    # the peer is blocked on a lock this wait holds open. On a worker thread
+    # the wait costs a thread rather than the frame, and the refusal still
+    # arrives as the same ``WakeLockBusy`` — answered quietly by
+    # :func:`state.note_lock_refusal` where the caller asked for the arm.
+    lock = state.wake_lock(root)
+    await asyncio.to_thread(lock.acquire)
+    try:
         # CONSUMED INSIDE THE LOCK, like the in-session branch (review round
         # 1, M1b): a contended lock must leave the tray untouched rather than
         # eat it on the way to writing a note about a file that is gone.
@@ -1514,6 +1529,8 @@ async def _drain_tray_external(
             taken += 1
         if taken:
             state.update_state(root, extras=dict(ledger, armed=armed + taken))
+    finally:
+        await asyncio.to_thread(lock.release)
     # WARNING, not info (QA round 2, Q3): every note here is an operation the
     # operator asked for that did NOT take effect (a refusal) or was handed to
     # another writer — and `lop serve` configures its console logging at the
@@ -1692,6 +1709,8 @@ async def resume(config_dir: Path | str, session_id: str, *, now_ms: int | None 
         from local_operator.aida import onboarding as _onboarding
 
         await _onboarding.greet(root, session_id, now_ms=now)
+    except (WakeLockBusy, WakeLockUnavailable) as exc:
+        state.note_lock_refusal("the resume's greeting arm", exc)
     except Exception:  # noqa: BLE001 — a greeting must not fail the resume
         logger.warning("aida: could not re-arm the greeting on resume", exc_info=True)
     return await ensure_armed(root, session_id, now_ms=now)
