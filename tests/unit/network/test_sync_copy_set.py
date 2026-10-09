@@ -386,6 +386,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``PUSH_WORKER_STATE_NAME``: the mobile push-worker state file under the "
         "config root — not an entry of a session directory",
     ),
+    # The relay transfer's receipt store (`mobile/transfer_receipts.py`): machine
+    # state about moves, not session content. Its ONE construction site passes
+    # `config_dir()` (`mobile/daemon.py`), so the file sits at the config root,
+    # beside the seen-store and the push registries — never an entry of a session
+    # directory, and never met by a copy walk of one.
+    "local_operator/mobile/transfer_receipts.py": (
+        1,
+        "``TRANSFER_RECEIPTS_NAME``: the relay transfer's receipt store under the "
+        "config root, beside the seen-store and the push registries — machine "
+        "state about moves, never an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         5,
         "``secrets/`` and its registration ticket: the credential store at the config root. "
