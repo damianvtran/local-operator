@@ -186,6 +186,56 @@ def test_an_existing_install_with_an_untouched_ledger_keeps_its_cadence(
     assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
 
 
+@pytest.mark.asyncio
+async def test_a_born_journal_does_not_settle_the_greeting_or_arm_the_cadence(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session materialised but never typed in is not "an install with conversations".
+
+    The SCAN keeps counting it — R22's fail-closed arm, pinned above — but the
+    ledger stamp is permanent and the cadence follows it, and that pair is what
+    a fresh install lost to: a boot that materialised a session before the
+    greeting hook ran read as "used", so the ledger went ``skipped`` and the
+    check-in armed (tips and all) in the same millisecond as her session's
+    ``created_at`` (CI ``tui-e2e``, ubuntu-latest, 2026-10-09). Built through
+    ``bootstrap._create_session_dir`` so the journal is the SHIPPED born shape —
+    her title and birth rows, no message.
+    """
+    from local_operator.aida import bootstrap
+
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    await bootstrap._create_session_dir(isolated_root, "555566667777")
+    assert onboarding.other_user_sessions(isolated_root) == ["555566667777"]
+
+    assert onboarding.cadence_allowed(isolated_root) is False
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_OWED
+    # Nothing was spent: the greeting is not settled, so an attended exit that
+    # finds the install fresh (as it does once the boot's own session is the
+    # one her id names) still arms it.
+    assert onboarding.greeting_record(isolated_root).get("skipped_at") is None
+
+
+def test_a_torn_transcript_still_settles_the_greeting(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed for what cannot be READ: a torn row is not "nothing was said".
+
+    The settlement's evidence rule discounts only the shape that positively
+    says nothing happened — a journal that parses cleanly and holds no message.
+    A half-written line is the opposite: the reader cannot tell, so the
+    conservative direction wins and the existing user keeps her cadence.
+    """
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    torn = isolated_root / "sessions" / "888899990000"
+    torn.mkdir(parents=True)
+    (torn / "transcript.jsonl").write_text(
+        '{"type": "message", "payload": {"kind": "mess', encoding="utf-8"
+    )
+
+    assert onboarding.cadence_allowed(isolated_root) is True
+    assert onboarding.greeting_state(isolated_root) == onboarding.GREETING_SKIPPED
+
+
 def test_a_legacy_greeted_at_stamp_reads_as_delivered(isolated_root: Path) -> None:
     """MIGRATION: the pre-state-machine file carried only an arm-time stamp."""
     path = isolated_root / "aida" / "onboarding.json"

@@ -63,6 +63,7 @@ unknown failure degrades to "not yet".
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -380,15 +381,74 @@ def greeting_armable(config_dir: Path | str) -> bool:
     return greeting_state(config_dir) == GREETING_REQUESTED and provider_configured(config_dir)
 
 
+def _settles_the_greeting(config_dir: Path | str, others: list[str]) -> bool:
+    """Whether the sessions scan is evidence a PERSON has been here.
+
+    The scan's own verdict (:func:`other_user_sessions`) is deliberately
+    fail-closed, and that is the right answer for ROUTING: never re-route
+    somebody who may have conversations. It is the wrong one for SETTLING,
+    because the ledger's ``skipped`` is permanent and no later attended surface
+    can undo it. So the stamp asks a narrower question of the same sessions:
+
+      * a real ``Message`` row — they talked: evidence;
+      * bytes this reader cannot classify at all (a torn line, a file it cannot
+        open) — cannot tell: evidence, the same fail-closed direction;
+      * a transcript that parses cleanly and holds NO message row — positively
+        nothing was said here: NOT evidence. This is the shape that cost the
+        CI leg (2026-10-09): a session materialised at boot writes a born
+        journal (title and birth custom rows), never a message, and settling
+        over it stamped ``skipped`` on a fresh isolated root while the same
+        millisecond's ``state.created_at`` shows her own session being created.
+    """
+    from local_operator.session.runtime.engagement import (
+        TRANSCRIPT_FILENAME,
+        session_has_durable_history,
+    )
+
+    root = _sessions_root(config_dir)
+    for session_id in others:
+        try:
+            if session_has_durable_history(session_id, root=config_dir):
+                return True
+        except Exception:  # noqa: BLE001 — unknown: do not discount it
+            logger.warning("aida: could not read session %s", session_id, exc_info=True)
+            return True
+        try:
+            lines = (
+                (root / session_id / TRANSCRIPT_FILENAME)
+                .read_text(encoding="utf-8", errors="replace")
+                .splitlines()
+            )
+        except FileNotFoundError:
+            continue  # nothing was ever written: no evidence either way
+        except OSError:
+            return True  # cannot read it: not evidence that nothing was said
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except ValueError:
+                return True  # a torn row: cannot tell
+    return False
+
+
 def cadence_allowed(config_dir: Path | str) -> bool:
     """Whether the daily cadence may arm: she has met the user, or never will.
 
     ``delivered``/``skipped`` allow it, and so does a legacy install (read as
-    delivered). ``owed`` on an install with human conversations is migrated to
-    ``skipped`` here, so an EXISTING install whose ledger predates this change
-    keeps its check-in without waiting for a greeting that will never come.
-    Fail-OPEN on error for that same population: a read failure must not
-    silently stop an existing user's cadence.
+    delivered). ``owed`` is the interesting state: an EXISTING install whose
+    ledger predates this change is migrated to ``skipped`` here, so its check-in
+    keeps coming without waiting for a greeting that will never arrive — but
+    only when the scan is real evidence of a person
+    (:func:`_settles_the_greeting`), and the cadence follows that same verdict
+    (CI `tui-e2e`, ubuntu-latest, 2026-10-09: settling over a boot-materialised
+    session's born journal both spent the greeting and armed the cadence, so the
+    check-in ran before she had ever introduced herself). An install that is
+    neither delivered nor provably used keeps an OWED ledger and no cadence —
+    nothing spent, and the next positive evidence settles it.
+    Fail-OPEN on error for the same population the migration exists for: a read
+    failure must not silently stop an existing user's cadence.
     """
     try:
         current = greeting_state(config_dir)
@@ -396,7 +456,10 @@ def cadence_allowed(config_dir: Path | str) -> bool:
             return True
         if current == GREETING_OWED:
             others = other_user_sessions(config_dir)
-            if others or _her_conversation_had(config_dir):
+            if _her_conversation_had(config_dir):
+                _set_greeting(config_dir, GREETING_SKIPPED, int(time.time() * 1000))
+                return True
+            if others and _settles_the_greeting(config_dir, others):
                 _set_greeting(config_dir, GREETING_SKIPPED, int(time.time() * 1000))
                 return True
         return False
@@ -547,7 +610,13 @@ def _her_conversation_had(config_dir: Path | str) -> bool:
     from local_operator.session.runtime.engagement import session_has_durable_history
 
     try:
-        return session_has_durable_history(hers, root=_sessions_root(config_dir))
+        # The CONFIG dir, not ``sessions/``: ``session_has_durable_history``
+        # appends ``sessions/<id>/`` itself, so passing the sessions root asked
+        # for ``<config>/sessions/sessions/<id>/`` — a path that never exists,
+        # which made every answer here False and the "met her before the ledger
+        # existed" branch below dead code. Found while wiring
+        # :func:`_settles_the_greeting` to the same reader.
+        return session_has_durable_history(hers, root=config_dir)
     except Exception:  # noqa: BLE001 — unknown: do not greet over a conversation
         return True
 
