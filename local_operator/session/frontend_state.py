@@ -7960,7 +7960,15 @@ def _validate_state_field(key: str, value: Any) -> Any:
     if adapter is None:
         # The key space is the model's finite field set, so this cache is
         # intrinsically bounded and avoids rebuilding pydantic schemas per delta.
-        adapter = _STATE_FIELD_ADAPTERS[key] = TypeAdapter(field.annotation)
+        annotation = field.annotation
+        if annotation is None:
+            # ``model_fields`` entries are built from class annotations, so a
+            # field reaching here always carries one; the check narrows
+            # ``FieldInfo.annotation``'s ``TypeForm[Any] | None`` (pydantic
+            # 2.14) for the checker and refuses a field without one loudly,
+            # rather than caching a NoneType adapter that rejects every value.
+            raise ValueError(f"frontend state field has no annotation: {key}")
+        adapter = _STATE_FIELD_ADAPTERS[key] = TypeAdapter(annotation)
     return adapter.validate_python(value)
 
 

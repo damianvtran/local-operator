@@ -419,6 +419,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "
         "the canceller for the abort line of the tool result, never a peer's prose",
     ),
+    # ``mobile/daemon.py`` joined this scan with the mesh half's own import
+    # (``MeshRefusal``) — the base file named ``local_operator.network`` nowhere.
+    # The read below predates that and is not a mesh value: it is the session's
+    # OWN attention record's reason, authored on this device by the runtime's
+    # cut-off classifier (``session/attention.py`` stores ``render_cut_off_reason``'s
+    # sentence plus the machine token), the same field the TUI poller reads
+    # (``_poll_completion_attention`` above, declared "not a mesh reason"). It
+    # feeds ``harness/rows.py``'s ``completion_notice``, the row builder both
+    # surfaces share, so the phone's notice sentence and the TUI's cannot
+    # disagree; no peer's wire token reaches this site.
+    ("local_operator/mobile/daemon.py", "_projection_frame", "reason"): (
+        1,
+        "the session's own attention record's reason, fed to the shared "
+        "completion_notice row builder — never a peer's wire value; the module "
+        "joined the scan with the mesh half's MeshRefusal import",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent

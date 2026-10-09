@@ -75,7 +75,7 @@ PASTE_IS_API_KEY_ATTR = "__lo_paste_is_api_key__"
 #: surfaces that switch on them (the speech lane's cascade, the desktop's
 #: composer), and a typo'd ``"speech"`` would look like a provider that simply
 #: serves nothing rather than like a mistake.
-CAPABILITY_VOCABULARY = frozenset({"chat", "tts", "stt"})
+CAPABILITY_VOCABULARY = frozenset({"chat", "tts", "stt", "image", "video"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,6 +185,17 @@ class ProviderDefinition:
     #: :func:`is_decision_only`, kept in step by
     #: ``tests/unit/providers/test_speech_only.py``.
     speech_only: bool = False
+    #: This provider serves GENERATIVE MEDIA (images and video), never chat completions.
+    #:
+    #: FAL is the case this exists for: the row is login-capable ON PURPOSE (a
+    #: bring-your-own key has to be storable for the image-generation cascade,
+    #: ``local_operator.imagegen``) while its queue answers no chat route at all,
+    #: so a session could never run a turn on it. Same shape as ``speech_only``
+    #: above and enforced at the same doors — every surface that offers or
+    #: resolves a CHAT model asks :func:`is_media_only` beside
+    #: :func:`is_speech_only`, kept in step by
+    #: ``tests/unit/providers/test_media_only.py``.
+    media_only: bool = False
     #: What this provider's WIRE actually serves, from
     #: :data:`CAPABILITY_VOCABULARY` (``chat``/``tts``/``stt``).
     #:
@@ -772,6 +783,14 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # place it is written — and the one a hand-set bare value has to agree
         # with on the ``/v1`` segment.
         base_url=DEFAULT_RADIENT_API_BASE_URL,
+        # The wire fact, declared where the wire is: the Radient hub serves
+        # CHAT and the media tools the image-generation cascade calls. No
+        # enforcement flag rides on this — ``media_only`` would be false (the
+        # hub DOES serve chat), and ``speech_only`` is untouched — so nothing
+        # consumes the member yet; it is the fact the surfaces WILL gate on,
+        # kept next to the wire it describes so there is no second table to
+        # drift.
+        capabilities=frozenset({"chat", "image", "video"}),
     ),
     ProviderDefinition(
         id="radient-key",
@@ -870,6 +889,30 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Test (mock)",
         allows_missing_api_key=True,
         wire="mock",
+    ),
+    # Appended at the END of the registry on purpose: the append rule every
+    # picker and listing inherits is that a new row never re-orders the rows
+    # already shipped, so adding a provider cannot churn a surface's stored
+    # selection or its listings' stable order.
+    ProviderDefinition(
+        id="fal",
+        name="FAL",
+        env_keys="FAL_API_KEY",
+        login=create_api_key_login(
+            "FAL",
+            "https://fal.ai/dashboard/keys",
+            "Paste a key from your FAL dashboard.",
+        ),
+        base_url="https://queue.fal.run",
+        # MEDIA-ONLY (agent image generation, 2026-10-08): the key is storable
+        # so the image-generation cascade (``local_operator.imagegen``) can run
+        # a FAL rung; the provider is deliberately absent from every surface
+        # that offers or resolves a CHAT model (``media_only`` above documents
+        # the enforcement sites).
+        media_only=True,
+        # The wire fact behind the flag: FAL's queue serves generative media
+        # (text-to-image, image-to-video app endpoints) and no chat route.
+        capabilities=frozenset({"image", "video"}),
     ),
 ]
 
@@ -1070,6 +1113,38 @@ def speech_only_message(provider_id: str) -> str:
     return (
         f"Hosting '{provider_id}' serves {speech_wire_noun(provider_id)}, not chat "
         "completions, so no session can run on it."
+    )
+
+
+def is_media_only(provider_id: str | None) -> bool:
+    """Whether ``provider_id`` serves generative media and never chat completions.
+
+    The sibling of :func:`is_speech_only`, with the same contract: ONE exported
+    predicate (alias-aware, case/padding-normalised, tolerant of ``None``,
+    ``False`` for unknown ids), so every door that skips a speech-only provider
+    skips a media-only one the same way. FAL is the row this protects: its key
+    exists so the image-generation cascade can run, and a session that selected
+    it as hosting could never answer a turn.
+    """
+    if not provider_id:
+        return False
+    canonical = str(provider_id).strip().lower()
+    definition = get_provider_definition(canonical)
+    return bool(definition is not None and definition.media_only)
+
+
+def media_only_message(provider_id: str) -> str:
+    """The ONE sentence for a media-only provider, refused as a chat hosting.
+
+    Shared by every door that refuses one, for the same reason
+    :func:`speech_only_message` is: the fact must have one spelling, and the
+    sentence stops at the fact so each caller can append the remedy its own
+    surface can offer (``/model`` from inside a session, `local-operator config
+    edit` from a config file).
+    """
+    return (
+        f"Hosting '{provider_id}' serves generative media (images and video), not "
+        "chat completions, so no session can run on it."
     )
 
 

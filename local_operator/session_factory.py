@@ -520,7 +520,9 @@ def _not_chat_hosting_message(hosting: str, source: str = "config") -> str:
     """
     from local_operator.providers.registry import (
         decision_only_message,
+        is_media_only,
         is_speech_only,
+        media_only_message,
         speech_only_message,
     )
 
@@ -531,9 +533,12 @@ def _not_chat_hosting_message(hosting: str, source: str = "config") -> str:
     # two spellings of it. The REMEDY stays local because it is per-surface —
     # this one knows whether the value came from the config file, a flag, an
     # agent record or a stored row.
-    fact = (
-        speech_only_message(hosting) if is_speech_only(hosting) else decision_only_message(hosting)
-    )
+    if is_media_only(hosting):
+        fact = media_only_message(hosting)
+    elif is_speech_only(hosting):
+        fact = speech_only_message(hosting)
+    else:
+        fact = decision_only_message(hosting)
     return f"{fact} {remedy}"
 
 
@@ -543,8 +548,9 @@ def _refuse_non_chat(provider: str, source: str) -> None:
     One spelling for a check that sits at several doors — the resolved config /
     agent / flag hosting, a resume's ``--hosting``/``--model`` pair, and the
     desktop pick boundary's own gate — because the failure it reports is the
-    same fact every time (a decision-only provider like TypeSafe's Jev, or a
-    speech-only one like ElevenLabs) and its message is the only place that
+    same fact every time (a decision-only provider like TypeSafe's Jev, a
+    speech-only one like ElevenLabs, or a media-only one like FAL) and its
+    message is the only place that
     fact is explained (see :func:`_not_chat_hosting_message`).
 
     Deliberately a raise rather than a predicate: every caller that needs the
@@ -552,9 +558,13 @@ def _refuse_non_chat(provider: str, source: str) -> None:
     instead of raise (the pick boundary, which answers a 422) does its own check
     where its own error shape lives.
     """
-    from local_operator.providers.registry import is_decision_only, is_speech_only
+    from local_operator.providers.registry import (
+        is_decision_only,
+        is_media_only,
+        is_speech_only,
+    )
 
-    if is_decision_only(provider) or is_speech_only(provider):
+    if is_decision_only(provider) or is_speech_only(provider) or is_media_only(provider):
         raise HostingNotChatError(_not_chat_hosting_message(provider, source), provider, source)
 
 
@@ -653,6 +663,7 @@ def resolve_hosting_model_with_source(
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_media_only,
         is_speech_only,
     )
     from local_operator.session.model_selection import (
@@ -781,10 +792,11 @@ def resolve_hosting_model_with_source(
         raise HostingUnknownError(
             _unknown_hosting_message(hosting, hosting_source), hosting, hosting_source
         )
-    if is_decision_only(hosting) or is_speech_only(hosting):
+    if is_decision_only(hosting) or is_speech_only(hosting) or is_media_only(hosting):
         # A KNOWN provider that can never serve a chat completion (TypeSafe's
-        # Jev, every host rejects ``chat/completions``; or ElevenLabs, whose wire
-        # serves speech-to-text only). Refused HERE, at the same preflight as an
+        # Jev, every host rejects ``chat/completions``; ElevenLabs, whose wire
+        # serves speech-to-text only; FAL, whose queue serves generative media
+        # only). Refused HERE, at the same preflight as an
         # unknown id, for the same reason: this is the one point every front end
         # classifies, so the condition reaches the guided setup state where
         # ``/model`` supplies a chat provider, instead of booting a session that
@@ -2538,14 +2550,26 @@ def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_Classificatio
     return tuple(rows)
 
 
-#: The session-management tools the ``tool`` kind may offer, in the order the
-#: roster carries them (``sessions`` first: the incident this kind answers was
-#: a resumed-sessions turn; then the messaging pair; then the job trio).
+#: The tools the ``tool`` kind may offer, in the order the roster carries
+#: them (``sessions`` first: the incident this kind answers was a
+#: resumed-sessions turn; then the messaging pair; then the job trio), plus —
+#: since the image-generation workstream — capability-recommendable built-ins
+#: whose AVAILABILITY is itself part of the signal (``generate_image`` exists
+#: only in sessions whose provider gate passed, so the row appearing means the
+#: capability is really there).
 #: MEMBERSHIP IS THE WHOLE GATE — a tool this session does not hold is simply
 #: not in the built list (``sessions``/``task``/``wait``/``jobs`` are gated on
 #: the delegation surface, ``hub`` on subagent comms), so the roster can never
 #: point the model at a capability the session lacks.
-_TOOL_ROSTER_NAMES: tuple[str, ...] = ("sessions", "send", "hub", "task", "wait", "jobs")
+_TOOL_ROSTER_NAMES: tuple[str, ...] = (
+    "sessions",
+    "send",
+    "hub",
+    "task",
+    "wait",
+    "jobs",
+    "generate_image",
+)
 
 #: One tool row's description bound — the same scannable-row precedent the
 #: project kind applies (``_PROJECT_ROSTER_DESCRIPTION_LIMIT``), so neither

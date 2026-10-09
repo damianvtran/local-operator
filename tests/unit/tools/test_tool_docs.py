@@ -205,6 +205,16 @@ _WALK_DEPTH_CAP = 2
 #: ``send``/``ask`` also gained notes, but their shorter descriptions (which
 #: the doc renders too) outweigh them; ``sessions`` fell 981 -> 802 for the
 #: same reason.
+#: RE-MEASURED 2026-10-08 on the MERGED tree (context diet + image-generation
+#: restore, ``feat/image-generation-tool``) — the merge of the two landed the
+#: same day, so this table was measured once, after both: ``generate_image``
+#: is NEW at 608 — the default surface grew by one createIf-gated tool (bound
+#: in ``scripts/real_tool_surface`` the way the browser/console gates are,
+#: because an unbound answer would depend on which machine ran it), and the
+#: diet's collapse applies to its doc too (635 pre-diet -> 608 here). EVERY
+#: other entry is byte-identical to the diet's table above, and the same
+#: schema is the whole of ``scripts/bench_context_budget.py``'s raise — the
+#: two ledgers move together.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 786,
     "ask": 1005,
@@ -214,6 +224,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "console": 1096,
     "edit": 351,
     "eval": 376,
+    "generate_image": 608,
     "glob": 91,
     "grep": 337,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
@@ -312,9 +323,11 @@ def default_surface(hermetic_config: Path) -> list[AgentTool]:
 
     Reuses ``scripts/real_tool_surface.build_real_tools`` so these drift tests
     and the ``context-budget`` CI guard cannot disagree about what "the default
-    surface" is: it forces the two machine-probing createIf gates (browser and
-    console) deterministically ON, which is what makes a CI runner and a
-    developer box measure the same 34 tools. Function-scoped (not module-scoped)
+    surface" is: it forces the three machine-probing createIf gates (browser,
+    console and the image provider) deterministically ON, which is what makes a
+    CI runner and a developer box measure the same surface — the count is
+    ``len(DEFAULT_TOOL_NAMES)``, asserted below rather than spelled here.
+    Function-scoped (not module-scoped)
     because the builders read the config at BUILD time, so each test's
     :func:`hermetic_config` must apply to its own render; the fixture is taken
     for its env side effect alone.
