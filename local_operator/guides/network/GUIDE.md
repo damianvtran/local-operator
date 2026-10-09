@@ -246,13 +246,13 @@ lop network member grant <network> <device-id> delete      # may delete sessions
 lop network member grant <network> <device-id> unattended  # may start unattended sessions here
 ```
 
-The device id is the one a refusal prints or `lop network show <network>
---json` lists — a name does not resolve for this verb. `unattended` is the
-grant `--yolo` needs, and the device that would RUN the session is the one that
-decides it; the rule and the refusal are in
-"Which device should run this session". Pairing with `--role admin` carries
-the whole capability vocabulary at once, and the member row — not the role
-name — is what says which grant a device actually holds.
+The device is the one a refusal prints or `lop network show <network> --json`
+lists, and this verb resolves what that listing shows: a name, a device id, or
+an unambiguous TAIL of one. `unattended` is the grant `--yolo` needs, and the
+device that would RUN the session is the one that decides it; the rule and the
+refusal are in "Who the session on the peer runs as". Pairing with `--role
+admin` carries the whole capability vocabulary at once, and the member row —
+not the role name — is what says which grant a device actually holds.
 
 **A MEMBER IS NOT NECESSARILY A SESSION PATH.** A device can show in `ls` and
 still be unable to hold work, and a device that is unreachable is a `doctor`
@@ -346,13 +346,17 @@ Create the session ON the peer when the work is new:
 
 ```bash
 lop network sessions --peer <id> --create --name <n> --prompt <p> --json
-# → the receipt names `session_id` and the `peer` that holds it, plus `admitted`
+# → `{ok, session_id, admitted, agent, model, team, duplicate, detail, record}`
+#   (plus `unattended_notice` on an implied `--yolo` that fell back): the DEVICE
+#   is the `--peer` you passed, NOT a `peer` key; the human receipt says
+#   "created on <peer>"
 ```
 
 The create mints the id on that device, reconciles the definitions it names
 (`--profile`, `--team`, `--agent`) onto it first, and says in the receipt what
-the session runs as. The full flag set, the precedence rules and the refusals
-for an unnameable name are in "Which device should run this session".
+the session runs as. The flag set is the table in "Which device should run this
+session"; the precedence rule, and the by-name refusal for a profile, team or
+agent that does not resolve there, are in "Who the session on the peer runs as".
 
 Then drive the conversation where it lives. Each act takes an id OR a name and
 returns the owner's receipt, which names the device that actually acted:
@@ -362,9 +366,10 @@ returns the owner's receipt, which names the device that actually acted:
   device.
 - `--peek` is the family's READ and drives nothing — a stored session refuses
   it and names the warm-up rather than starting a runtime nobody is watching.
-- `--engage` warms a stored conversation; `--stop` ends the turn it is running;
-  `--archive`/`--unarchive` hide or restore it there, and `--delete` is a dry
-  run until `--yes`.
+- `--engage` warms a stored conversation; `--stop` ends the session — on one
+  whose turn is in flight it SKIPS (`outcome: skipped`, rc 1, the target left
+  UNTOUCHED) unless you add `--force`; `--archive`/`--unarchive` hide or
+  restore it there, and `--delete` is a dry run until `--yes`.
 
 The exact flags, the text-positional rule and the `--stop`/`--force` contract
 are the table and the paragraphs in "Which device should run this session".
@@ -721,8 +726,9 @@ lop network member grant <network> <device-id> move     # may take sessions from
 lop network member grant <network> <device-id> delete   # may delete sessions here
 ```
 
-or pair that device with `--role admin`. The device id is the one the refusal
-prints (a name will not resolve for this verb). Read the `code` before retrying:
+or pair that device with `--role admin`. The device is the one the refusal
+prints — a name, a device id, or an unambiguous TAIL of one all resolve here.
+Read the `code` before retrying:
 the identical move succeeds unchanged once the grant is in place, and re-pairing to
 "fix" it burns the device id instead.
 
