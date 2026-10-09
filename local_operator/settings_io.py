@@ -3209,7 +3209,10 @@ SETTINGS: tuple[Setting, ...] = (
         section="compaction",
         label="Threshold (tokens)",
         kind=Kind.INT,
-        default=600_000,
+        # Literal, not DEFAULT_THRESHOLD_TOKENS: importing local_operator.compaction
+        # here drags the whole pass engine into every settings read. A unit test
+        # pins this to the constant so the two cannot drift.
+        default=400_000,
         help="Absolute trigger. The smaller of this and the percentage wins.",
         minimum=1,
     ),
