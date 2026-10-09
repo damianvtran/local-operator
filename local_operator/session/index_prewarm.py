@@ -256,9 +256,40 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
             logger.debug("index prewarm failed for %s", session_id, exc_info=True)
             continue
         started += 1 if was_started else 0
+        # The same queue writes the tail anchor for this journal (see
+        # ``session.tail_anchor``): the cold reader is not allowed to write, and
+        # these are exactly the journals whose next cold open pays for it. Off
+        # the hot path, behind the guards re-checked above, and best-effort — a
+        # journal the anchor cannot describe simply keeps the walking reader.
+        try:
+            await asyncio.to_thread(write_tail_anchor, root, session_id)
+        except Exception:  # noqa: BLE001 — an unwritable anchor is a slower read, not a failure
+            logger.debug("tail anchor not written for %s", session_id, exc_info=True)
         await asyncio.sleep(0)
     logger.debug("index prewarm started %d refresh(es)", started)
     return started
+
+
+def write_tail_anchor(root: str | Path, session_id: str) -> bool:
+    """Record this journal's newest checkpoint row — or prove it has none.
+
+    Idempotent and cheap when the record already holds: the existing sidecar is
+    validated first (one stat, plus a scan of anything appended since), so a
+    journal warmed twice in one day costs one stat the second time. Returns
+    whether a NEW record was written.
+    """
+    from local_operator.session.tail_anchor import (
+        build_anchor,
+        read_anchor,
+        validate_anchor,
+        write_anchor,
+    )
+
+    directory = Path(root) / "sessions" / session_id
+    if validate_anchor(directory, read_anchor(directory)) is not None:
+        return False
+    anchor = build_anchor(directory)
+    return write_anchor(directory, anchor) if anchor is not None else False
 
 
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:

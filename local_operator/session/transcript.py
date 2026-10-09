@@ -1571,6 +1571,23 @@ def read_replay_suffix(
         else tuple(opportunistic_types or ())
     )
     collectible = wanted + opportunistic
+    # A REQUIRED TYPE MAY ALREADY BE PROVEN ABSENT (``session.tail_anchor``).
+    # Without the proof, "this journal has no checkpoint row anywhere" is a
+    # whole-file fact, so the walk below is a scan to BOF — 570-650 ms of CPU on a
+    # 35 MB checkpointless journal, once per fresh process, and the one cost the
+    # replay cache in ``attached`` cannot remove. The sidecar is written by the
+    # pre-warm job (see ``index_prewarm``), never by a reader, and it is believed
+    # only after validation against THIS journal version (inode, a file that has
+    # not shrunk, and a scan of the bytes appended since the record). What it
+    # relaxes is one requirement of the stop condition below; the compaction
+    # boundary is still required, so a proven-absent checkpoint can never cut a
+    # journal short of the replay's own boundary.
+    proven_absent: set[str] = set()
+    if wanted:
+        from local_operator.session.tail_anchor import ANCHOR_CUSTOM_TYPE, proves_absent
+
+        if ANCHOR_CUSTOM_TYPE in wanted and proves_absent(path.parent):
+            proven_absent.add(ANCHOR_CUSTOM_TYPE)
     checkpoints: dict[str, dict[str, Any]] = {}
     checkpoint_order: dict[str, int] = {}
     met = 0  # 1-based: the scan walks newest-first, so lower means newer
@@ -1636,7 +1653,7 @@ def read_replay_suffix(
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = all(name in checkpoints for name in wanted)
+            checkpoint_seen = all(name in checkpoints or name in proven_absent for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
