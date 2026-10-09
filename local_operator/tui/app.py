@@ -324,6 +324,7 @@ from local_operator.tui.session_presentation import (
     activity_phase_clock,
     live_projection_call_ids,
     live_tool_start_epochs,
+    tool_result_image_blocks,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
@@ -15606,13 +15607,7 @@ class OperatorApp(App[None]):
                 details=details,
                 duration_s=duration_s,
             )
-        self._append_image_blocks(
-            [
-                block
-                for block in (getattr(result, "content", None) or [])
-                if isinstance(block, ImageContent)
-            ]
-        )
+        self._append_image_blocks(tool_result_image_blocks(getattr(result, "content", None)))
 
     def _replay_tool_call(
         self,
@@ -54077,9 +54072,7 @@ class OperatorApp(App[None]):
         # screenshot) shows them under the card, so the user watches the same
         # pixels the model is about to reason over. After the card settles, so
         # the picture lands beneath its own caption row rather than above it.
-        self._append_image_blocks(
-            [block for block in event.result.content if isinstance(block, ImageContent)]
-        )
+        self._append_image_blocks(tool_result_image_blocks(event.result.content))
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         """Surface a session notice without starting the message view.

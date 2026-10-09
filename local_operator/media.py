@@ -54,6 +54,17 @@ SUPPORTED_AUDIO_MIME_TYPES = frozenset(
     }
 )
 
+#: Video containers the desktop attachment fetch route may serve under their
+#: own content type, for artifacts the output-attachment contract registers.
+#: Unlike the image and audio sets there is NO sniffer behind this one: video
+#: arrives from a producing tool that already knows what its provider returned,
+#: so the set is the contract's closed vocabulary rather than a content-verified
+#: output set, and everything outside it still degrades to the fallback. The
+#: stakes are also lower by construction — video has no provider-bound path
+#: (nothing sends it to a model), so a miss is a renderer's fallback, never a
+#: mid-turn 400.
+SUPPORTED_VIDEO_MIME_TYPES = frozenset({"video/mp4", "video/webm", "video/quicktime"})
+
 #: Recognised but NOT directly sendable — a caller must transcode first (see
 #: ``helpers.convert_heic_to_png_file``). Named here anyway because "I do not
 #: know what this is" and "this is an iPhone screenshot you must convert" are

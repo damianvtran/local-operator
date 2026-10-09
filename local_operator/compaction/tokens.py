@@ -103,7 +103,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from local_operator.harness.types import Message, TextContent
+from local_operator.harness.types import AttachmentContent, Message, TextContent
 from local_operator.optional import missing_extra_error
 
 logger = logging.getLogger(__name__)
@@ -516,6 +516,13 @@ def _compute_tokens(message: Message) -> int:
     for block in message.content:
         if isinstance(block, TextContent):
             text_parts.append(block.text)
+        elif isinstance(block, AttachmentContent):
+            # An output artifact NEVER reaches a provider (dispatch renders
+            # text/image/audio and stops), so charging it an image estimate
+            # would over-count a ruler whose job is "as sent on the wire"
+            # (agent review round 1, F4). Zero, explicitly, beside the wire
+            # reader's own zero below.
+            continue
         else:
             total += IMAGE_TOKEN_ESTIMATE
 
@@ -603,6 +610,13 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
         for block in message.content:
             if isinstance(block, TextContent):
                 total += len(block.text)
+            elif isinstance(block, AttachmentContent):
+                # Never serialized to a provider, so it contributes nothing to
+                # the wire — the same rule as `_compute_tokens` above. Without
+                # this arm ANY history holding an artifact raised here (agent
+                # review round 1, F1): the block has no `data`, and it never
+                # will, because its bytes live in the store.
+                continue
             else:
                 total += len(block.data)
         for call in message.tool_calls or ():

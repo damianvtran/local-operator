@@ -14,6 +14,7 @@ from typing import Any
 
 from local_operator.compaction.tokens import estimate_messages_tokens
 from local_operator.harness.types import (
+    AttachmentContent,
     AudioContent,
     ChatRequest,
     ImageContent,
@@ -46,6 +47,13 @@ def _message_key(message: Message) -> tuple[Any, ...]:
     # for both, because both carry data + mime_type and a changed payload must
     # change the key for the same reason an id-preserving edit must: the
     # measure this key feeds is only valid for the exact conversation counted.
+    # OUTPUT artifacts key on (type, kind, digest, size): the digest IS the
+    # content identity, so a regenerated or swapped artifact re-measures for
+    # the same reason an id-preserving edit does. `.data`/`.text` do not exist
+    # on this block, and the older arms raised on it — measured on a hot path:
+    # every provider stream call measures first, so ONE artifact in a
+    # conversation's history killed the next request before dispatch (agent
+    # review round 1, F2).
     return (
         message.id,
         message.role,
@@ -53,7 +61,16 @@ def _message_key(message: Message) -> tuple[Any, ...]:
             (
                 (block.type, hash(block.data), block.mime_type)
                 if isinstance(block, (ImageContent, AudioContent))
-                else (block.type, hash(block.text))
+                else (
+                    (
+                        block.type,
+                        block.kind,
+                        block.attachment,
+                        block.size_bytes,
+                    )
+                    if isinstance(block, AttachmentContent)
+                    else (block.type, hash(block.text))
+                )
             )
             for block in message.content
         ),
