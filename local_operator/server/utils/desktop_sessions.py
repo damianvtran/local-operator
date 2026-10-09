@@ -108,6 +108,7 @@ from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.open_frame import (
     OPEN_FRAME_MAX_BYTES,
+    OPEN_FRAME_MAX_EXTRA_ROWS,
     OPEN_FRAME_MAX_RAW_PAGES,
     OPEN_FRAME_MAX_ROWS,
     build_frame,
@@ -115,6 +116,8 @@ from local_operator.session.open_frame import (
     page_seq_bounds,
     paintable,
     served_bytes,
+    tail_head_reachable,
+    trim_to_limit,
 )
 from local_operator.session.page_cache import load_transcript_page
 
@@ -3484,7 +3487,7 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries)
-            anchored_index = self._frame_index()
+            anchored_index = await self._frame_index()
             result = build_frame(
                 anchored,
                 index=anchored_index,
@@ -3504,28 +3507,33 @@ class DesktopSessionBridge:
         has_more = False
         cursor_missing = False
         cursor = before_id
+        index: Any = None
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
                     directory,
                     before_id=cursor,
                     # ``through_id`` bounds the FIRST read only: the pages pulled
-                    # above it (the extension) are strictly older, so re-applying
-                    # the bound would ask for rows the bound already excluded.
+                    # above it (the head hunt) are strictly older, so re-applying
+                    # the bound would be a second cut over rows the caller's own
+                    # bound never described.
                     through_id=through_id if not collected else None,
                     limit=limit,
                 )
             except FileNotFoundError:
-                if not collected:
-                    return {
-                        "entries": [],
-                        "has_more": False,
-                        "cursor_missing": bool(before_id or through_id),
-                        "runs": [],
-                        "runs_state": "unsupported",
-                        "head_cut": False,
-                    }
-                break
+                if collected:
+                    break
+                # A draft's journal does not exist yet. The empty page is the
+                # documented answer (see ``history``), and the frame says its
+                # facts are unsupported rather than promising a scan of nothing.
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": bool(before_id or through_id),
+                    "runs": [],
+                    "runs_state": "unsupported",
+                    "head_cut": False,
+                }
             if not collected:
                 cursor_missing = page.reconciled
             has_more = page.has_more
@@ -3533,22 +3541,45 @@ class DesktopSessionBridge:
             if not rows:
                 break
             collected = rows + collected
+            if not collected:
+                break
             paintable_rows = paintable(collected)
             if len(paintable_rows) >= limit and head_reached(paintable_rows):
                 break
-            if not page.has_more:
+            # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
+            # what the client asked for and it must not wait behind a scan, while
+            # the head hunt is the part that can be called off. With an index in
+            # hand the reachability test is one subtraction (see
+            # ``open_frame.tail_head_reachable``) and a run too long to reach is
+            # left to ``runs`` rather than paid for in bytes.
+            if index is None and attempt == 0:
+                index = await self._frame_index()
+                if index is not None and not tail_head_reachable(index, limit=limit):
+                    break
+            if len(paintable_rows) >= limit + OPEN_FRAME_MAX_EXTRA_ROWS:
                 break
             if (
                 len(paintable_rows) >= OPEN_FRAME_MAX_ROWS
                 or served_bytes(paintable_rows) >= OPEN_FRAME_MAX_BYTES
             ):
-                # The caps have bound: the next page cannot be served whole, so
-                # pulling it would only pay for rows this answer drops.
+                break
+            if not page.has_more:
                 break
             cursor = str(collected[0].get("id") or "")
-            if not cursor or attempt == OPEN_FRAME_MAX_RAW_PAGES - 1:
+            if not cursor:
                 break
-        index = self._frame_index()
+        if index is None:
+            index = await self._frame_index()
+        if index is not None and not head_reached(paintable(collected)):
+            # THE HEAD HUNT FAILED, SO IT IS NOT PAID FOR. With an index in hand
+            # this is a fact rather than a guess: the page's oldest row is not a
+            # user row, so the oldest run on it is a fragment — and rows pulled
+            # past ``limit`` cannot complete it. The page the client asked for is
+            # served instead, with ``head_cut: true`` saying why and ``runs``
+            # carrying that run's true size. WITHOUT an index the extension is
+            # kept: those extra rows are paintable rows for a client that has no
+            # facts at all, which is the case the walk was written for.
+            collected = list(trim_to_limit(collected, limit))
         result = build_frame(
             collected,
             index=index,
@@ -3591,26 +3622,46 @@ class DesktopSessionBridge:
             [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
         )
 
-    def _frame_index(self) -> Any:
+    async def _frame_index(self) -> Any:
         """The index this frame's run facts come from, or ``None``.
 
-        THE HOT PATH DOES NOT SCAN (docs/DESKTOP_API.md §"The open frame"): a
-        usable index is one already resident and current for the journal's stat —
-        two ``stat`` calls — and anything else starts a refresh and answers
-        without facts (``runs_state: "building"``). Measured on this host, a full
-        scan is 28 ms on a 5.9 MB journal but 169 ms at 35 MB and 559 ms at
-        118 MB, against a whole open budget of 300 ms; an incremental refresh of
-        an appended journal is 8/54/160 ms at those sizes.
+        TWO BOUNDED STEPS, and neither of them scans unboundedly on the open path
+        (docs/DESKTOP_API.md §"The open frame"):
+
+        1. an index already RESIDENT and current for the journal's stat (two
+           ``stat`` calls, no I/O);
+        2. otherwise a refresh, awaited for ``OPEN_FRAME_FACTS_WAIT_S`` — the same
+           200 ms budget ``checkpoints_view`` gives its first paint. A refresh
+           with a usable cache file costs 3/19/62 ms at 5.9/35/118 MB, so this
+           step is cheap in the common re-open case; a genuinely cold scan costs
+           28/169/559 ms, which fits for everything up to about 35 MB and does not
+           for the largest journals. Those answer ``runs_state: "building"`` and
+           the next frame carries the facts — the client keeps its own
+           condensation meanwhile, exactly as it does today.
+
+        Paying it ONCE per session per process is what buys an exact bar on the
+        first paint, which is the point of the whole contract; a client that did
+        not negotiate the flag never reaches this method.
         """
         from local_operator.session import transcript_index as index_module
+        from local_operator.session.open_frame import OPEN_FRAME_FACTS_WAIT_S
 
         index = index_module.fresh_resident(self.root, self.session_id)
-        if index is None:
-            try:
-                index_module.start_refresh(self.root, self.session_id)
-            except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
-                logger.debug("open frame: refresh start failed", exc_info=True)
-        return index
+        if index is not None:
+            return index
+        try:
+            task, _started = index_module.start_refresh(self.root, self.session_id)
+        except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
+            logger.debug("open frame: refresh start failed", exc_info=True)
+            return None
+        done, _pending = await asyncio.wait({task}, timeout=OPEN_FRAME_FACTS_WAIT_S)
+        if task not in done:
+            return None
+        try:
+            return task.result()
+        except Exception:  # noqa: BLE001 — a failed scan is an absent fact, not an error
+            logger.debug("open frame: refresh failed", exc_info=True)
+            return None
 
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
