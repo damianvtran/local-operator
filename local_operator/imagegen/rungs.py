@@ -487,10 +487,17 @@ async def _radient_affordable(
         return None
     balance = _as_float(payload.get("total_balance"))
     if balance is None:
-        # Some deployments wrap the row; one known sibling shape.
-        row = payload.get("data")
-        if isinstance(row, dict):
-            balance = _as_float(row.get("total_balance"))
+        # Some deployments wrap the row. Measured live 2026-10-08: the
+        # production hub answers {"msg": ..., "result": {"total_balance": ...}}
+        # -- the result envelope. "data" is its sibling shape; the read stays
+        # tolerant on purpose (a shape this probe cannot parse must fall back
+        # to the optimistic path, never strand a working rung).
+        for key in ("result", "data"):
+            row = payload.get(key)
+            if isinstance(row, dict):
+                balance = _as_float(row.get("total_balance"))
+                if balance is not None:
+                    break
     if balance is None:
         return None
     return balance >= unit_price * num_images

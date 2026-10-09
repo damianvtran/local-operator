@@ -58,9 +58,7 @@ def test_radient_env_never_lights_the_gate(
     assert availability.radient_available(config_root) is False
 
 
-def test_radient_lights_from_a_stored_row(
-    store: AuthStore, config_root: Path
-) -> None:
+def test_radient_lights_from_a_stored_row(store: AuthStore, config_root: Path) -> None:
     store.upsert_credential(
         "radient",
         {
@@ -125,9 +123,7 @@ def test_openai_oauth_rows_never_answer_only_api_keys_do(
     assert availability.openai_images_key(config_root) == "sk-test"
 
 
-def test_openai_store_row_then_export(
-    config_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_openai_store_row_then_export(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "local_operator.providers.registry.provider_secret_value",
         lambda name, *, base=None: "store-row-key" if name == "OPENAI_API_KEY" else None,

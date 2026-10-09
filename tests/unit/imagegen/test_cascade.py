@@ -15,7 +15,7 @@ import pytest
 
 from local_operator.clients._http import APIError
 from local_operator.harness.types import AbortSignal
-from local_operator.imagegen import MediaAsset, ImageRoute
+from local_operator.imagegen import ImageRoute, MediaAsset
 from local_operator.imagegen import availability as image_availability
 from local_operator.imagegen import cascade
 from local_operator.imagegen import rungs as image_rungs
@@ -32,7 +32,9 @@ def _pin_probes(
         return radient
 
     monkeypatch.setattr(cascade, "has_persisted_radient_credential", fake_radient)
-    monkeypatch.setattr(image_availability, "fal_key", lambda config_dir=None: "fk" if fal else None)
+    monkeypatch.setattr(
+        image_availability, "fal_key", lambda config_dir=None: "fk" if fal else None
+    )
     monkeypatch.setattr(
         image_availability, "openai_images_key", lambda config_dir=None: "ok" if openai else None
     )
@@ -62,9 +64,7 @@ async def test_priority_is_radient_then_fal_then_openai(
 
 
 @pytest.mark.asyncio
-async def test_no_rung_names_every_remedy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_no_rung_names_every_remedy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _pin_probes(monkeypatch)
     resolution = await cascade.resolve_image_route(tmp_path)
     assert resolution.route == ImageRoute.NONE
@@ -121,9 +121,7 @@ async def test_first_available_rung_wins_and_later_ones_never_run(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_rung_fails_forward(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_a_failed_rung_fails_forward(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _pin_probes(monkeypatch, radient=True, fal=True)
     failure = APIError("out of credits", status_code=402)
     fake, calls = _make_route_script(
