@@ -560,13 +560,13 @@ readings.
 | POST `/v1/desktop/sessions/draft` | `{request_id, cwd, target?, model?}` | `{draft_id, replayed?}`; registers an in-memory warmable draft — no directory, no runtime, no listing row (`session_draft_warm`) |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
-| GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1` | snapshot frame below (**read envelope**); `entry_ts=1` also applies to the page embedded in `payload.history` |
-| GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
+| GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
 | GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`, index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
-| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` governs the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
+| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1`, `open_frame=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` and `open_frame=1` govern the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
@@ -1425,6 +1425,148 @@ changes: the row keeps the serve-stamp it has always received and carries
 `ts_source: "served"`. The matching capability key is `entry_ts` in
 `GET /v1/capabilities`' `features`, so a renderer can check before asking.
 
+### The open frame: a turn-aligned, paint-only page (`open_frame: 1`)
+
+The open is the one read every surface performs and the one whose shape every
+surface then re-derives. `open_frame=1` asks the backend for the page in the
+unit the surfaces actually PAINT — rows, runs and their facts — so a renderer
+can draw its final layout from one answer instead of reconciling and
+re-condensing for the next several hundred milliseconds. It is additive in both
+directions: without the flag every answer is byte-for-byte today's, and a
+renderer that reads none of the new fields sees today's page inside them.
+
+**Negotiation.** `open_frame=1` on `GET .../{id}` (the snapshot), `GET
+.../{id}/history` and `GET .../{id}/events` (where it governs the page embedded
+in the open frame's snapshot, exactly as `entry_ts=1` does). The matching
+capability key is `open_frame` in `GET /v1/capabilities`' `features`, so a
+renderer can check before asking. A client sends the flag on all three or on
+none: the snapshot's embedded page and `/history` are served by the same reader,
+and two shapes for one page is the defect the capability exists to prevent.
+
+#### What the flag changes
+
+1. **`limit` counts PAINTABLE rows.** A paintable row is one that survives the
+   strip below — the rows a transcript paints. Today the count is journal
+   entries, so bookkeeping rows (a 349 KB checkpoint, a 716 KB compaction, a
+   `session_spend.v1` row) take window slots AND bytes: on the operator's 40
+   largest journals 1,480 of 3,999 served rows on the tail pages were
+   bookkeeping customs or compactions. `limit` is unchanged in range (1..500);
+   its unit is.
+2. **The page cut extends back to the oldest included run's opening user row.**
+   A page that ends mid-run is what makes a client condense a partial run and
+   then re-condense it as pages land: the run's head is the row that says the
+   run started, and its absence is the whole reason the desktop's align walk
+   exists. After the extension the oldest run on the page has its own opening
+   user row, so a client's condensation of that run is complete rather than
+   provisionally end-loaded.
+3. **Hard caps, and an honest flag when they bind.** The extension stops at
+   `OPEN_FRAME_MAX_ROWS` (400) paintable rows or `OPEN_FRAME_MAX_BYTES`
+   (1,572,864) of served entries, whichever comes first — a 600-row run must not
+   turn a 300 ms open into a mega-payload. `head_cut: true` is how the page says
+   the extension was refused: the page is then the plain `limit`-row tail, the
+   oldest run on it has no opening user row, and the run facts below (not the
+   page) are what carry that run's true size. It is `false` on every page the
+   extension satisfied, which is the ordinary case. A client must not read
+   `head_cut: false` as "the page holds whole runs" — only as "the extension was
+   not refused by a cap".
+4. **Non-painted bytes are stripped.** The strip is built from what each client
+   actually reads, checked in all three repositories before anything was
+   deleted (the file each read was found in is named below, and the whole list
+   is in the PR):
+   - **Dropped whole.** A `custom` row whose `custom_type` is
+     `frontend_state_checkpoint_v1`, `session_spend.v1` or `session_state`:
+     the desktop reducer lists all three in `SILENT_CUSTOM_TYPES` and never
+     mints a record for them, the relay web and the native app read neither the
+     row nor the type, and the mobile daemon's fold skips them. `hub_communication`,
+     `wake_schedule` and `prune` are the rest of that silent set and are dropped
+     with them.
+     `system_prefix` and `selected_model` **stay**: they are prefix rows that
+     PAINT (a statement row and the model notice), so dropping them would have
+     changed what the desktop draws — the reason the enumeration is done from
+     the clients rather than from a byte-share table.
+   - **Compaction rows** keep their envelope and three payload keys:
+     `{id, ts, type, payload: {tokens_before, preview_text}}`. `tokens_before`
+     is the pairing fingerprint the reducer matches a live pass against
+     (`transcript-reducer.ts`), and `preview_text` is the marker's own one-line
+     summary (capped at 200 characters) for a surface that wants a caption. The
+     full `summary`, `preserve_data`, `preserved_user_turns*`,
+     `first_kept_entry_id` and `tokens_before`'s siblings are gone: no client
+     in the three repositories reads any of them from a history row, and they
+     are ~700 KB each on this machine.
+   - **Message rows** lose, inside `provider_payload`, `native_replay`,
+     `system_fingerprint` and the response `id` — the provider-replay material
+     the backend needs and no renderer paints (28% of message-row bytes on the
+     real tail pages) — and lose the top-level `usage`. Everything else a
+     renderer reads stays: `content`, `kind`, `role`, `custom_type`,
+     `custom_type`'s `details`, `tool_calls`, `tool_call_id`, `tool_name`,
+     `stop_reason`, `is_error`, `attribution`, and inside `provider_payload`:
+     `details` (tool paths, diffs, counts, `__fault`, `delivery`),
+     `duration_s`, `useless` and `harness_injected`.
+5. **Per-run facts**, for every run that intersects the page, derived from
+   `session/transcript_index.py` (already cached and incremental):
+
+   | field | meaning |
+   | --- | --- |
+   | `run_key` | the run's closing answer id, or its last row's id while it has no answer — the client's own `TurnRun.key` |
+   | `opening_user_id` | the run's opening user row; `null` for a run that opens off a non-user row |
+   | `closing_answer_id` | the run's elected answer row, or `null` |
+   | `settled` | the run's outcome was recorded — a marker resolves it, or a newer settled run followed it |
+   | `outcome` | `complete` / `error` / `interrupted` / `open` / `null`, the rail's own vocabulary |
+   | `action_count` | tool rows in the run |
+   | `failed_count` | tool rows whose outcome is a genuine error, by the client's own predicate (a partial `send` delivery, a never-sent call, a stopped call and an interrupted fault are excluded) |
+   | `worked_seconds` | the sum of the run's `duration_s` values — the same quantity the bar and the turn's foot already state |
+   | `started_ts` / `ended_ts` | the run's opening row and its closing row, on the journal's clock |
+   | `complete` | `true` unless the index had to drop a row body inside this run (a row over the scanner's 2 MiB keep limit), in which case a count below is a lower bound. Measured 0 of 65,755 tool rows across the twelve largest journals here exceed that limit — the flag exists so a pathological row can never be reported as an exact count |
+
+   **`settled` is the honesty gate.** The count fields are filled ONLY for a
+   settled run. A run still in flight gets `settled: false`, no counts and no
+   `worked_seconds`: a live tail's tool rows are still arriving, so a number
+   taken now is a number the client would have to correct — the exact class of
+   after-paint change this contract exists to remove. A client keeps its own
+   fold for a run it does not find facts for.
+
+   **`runs_state` says where the facts came from**, and it is not decoration:
+   `"ready"` (facts present), `"building"` (no fresh index, so a background
+   scan was started and this answer carries none), `"unavailable"` (no index
+   could be built), `"unsupported"` (this page's source cannot carry facts —
+   see the remote scope below).
+
+   **Why `building` rather than a scan on the hot path.** The index is the only
+   whole-journal source for a run's counts, and its cost was measured on this
+   host before it was put on the open path: `_scan_full` is 28 ms on the 5.9 MB
+   S3 fixture but 169 ms at 35 MB and 559 ms at 118 MB, against a whole open
+   budget of 300 ms. A full scan therefore does NOT ride the open. Facts are
+   served from an index that is already resident and current for the journal's
+   stat (the `checkpoints_view` fast path, one stat); when there is none, the
+   route starts the refresh and answers without facts, and the very next frame
+   — the client's own follow-up, the rail's poll, the reconnect — carries them.
+   An incremental refresh (the append case) measured 8/54/160 ms at 5.9/35/118 MB,
+   which is why a warm index stays cheap and why an unchanged journal costs a
+   stat.
+
+#### Scope: local journals only, and the seams
+
+**A peer's conversation keeps today's shape** — with or without the flag. A
+peer-owned id is served by different readers (`_remote_history` for the wire
+window, `_peer_stored_history` through `net_session_history` for the owner's
+stored journal), so its page is built by the OWNER and arrives over the mesh;
+stripping it here would be a second page builder for the same rows, and the
+remote-cost lane owns that change. The seam is stated rather than left to be
+discovered: when the owner-side read gains the same strip and facts, the client
+needs nothing new, because `runs_state: "unsupported"` is already the value it
+must tolerate today. A renderer MUST treat `unsupported` and an absent `runs`
+alike: draw today's page and keep its own condensation.
+
+**The relay's first frame is not served from this builder in this revision**,
+and the reason is a precondition rather than an appetite: the phone's projection
+folds todos, subagents and asks from rows the strip removes, so a fold started
+from this page would lose derived state that no later read can restore (the
+`/history` fold cannot recover a row the window never carried). The seam is the
+module itself — `local_operator/session/open_frame.py` is a pure function of
+(rows, index facts, limits) with no HTTP or bridge in it, so the daemon can call
+it the day its fold has a bounded suffix to fold from. Until then the daemon
+keeps `DurableFoldCache` and the mobile plane is unchanged by this contract.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -1453,8 +1595,23 @@ Frames carry `{session_id,epoch,seq,type,payload}`; `heartbeat` and overflow `ga
 carry only `{session_id,type}`. This outer epoch/seq is the HTTP **semantic receipt
 cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 
-1. `open` supplies `{subscription_id,gap,watch_ttl_seconds}`. Its seq is connection
+1. `open` supplies `{subscription_id,gap,watch_ttl_seconds,attaching}`. Its seq is connection
    metadata, **not** permission to discard replay up through that number.
+   `attaching` is the SAME fact the snapshot that follows carries, stated one
+   frame earlier so a client can paint a neutral working cue on the open frame
+   instead of committing to "nothing is running" and then correcting itself:
+   `true` means an authenticated dial is in flight and canonical state has not
+   arrived, so live is COMING and the cold frame under it is a placeholder, not
+   an answer. It is `false` on a session with no runtime at all, which is the
+   distinction that matters to a viewer (nothing is coming, so the cold paint IS
+   the answer). Additive: a client that ignores it keeps today's behaviour.
+   **The stream does NOT hold its first frame for that dial.** The read
+   envelope already spends `READ_FIRST_FRAME_GRACE_S` (50 ms) on the attach
+   before this generator runs, and on the fixture S4 the attach landed 356-985 ms
+   after the open — a second 50 ms hold would delay every attaching open for a
+   frame that does not land inside it, which is the cost this contract refuses.
+   What a client gets instead is the truth at the moment of the open, and the
+   `frontend.replace`/rollover frame it already handles when the attach lands.
    `gap:false` is a claim the bridge can honour, and it means exactly this: every
    frame this bridge published after the cursor supplied on the query is in the
    replay that follows, in order. It does **not** mean the painted state is
@@ -1483,10 +1640,12 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    aging budget lands (R10), a frame can still report a frozen owner as live; the
    reader's own budget is `LIVE_FRESHNESS_BUDGET_S`
    (`session/runtime/types.py`). Its
-   history page is the transcript's durable tail — the newest ≤100 entries,
-   `limit` unchanged — read once for this frame, which is the same unbounded read
-   `/history` serves. `has_more` means *older rows exist below the page*, not that
-   the page is partial or lossy: `before_id` paging reaches them, and this is also
+   history page is the transcript's durable tail — the newest ≤100 entries
+   without `open_frame=1`, or the turn-aligned, paint-only page of §"The open
+   frame" with it (`limit` then counts paintable rows; see that section for the
+   strip, the `head_cut` flag and `runs`) — read once for this frame, which is
+   the same read `/history` serves. `has_more` means *older rows exist below the
+   page*, not that the page is partial or lossy: `before_id` paging reaches them, and this is also
    the flag that can now flip to `true` on a reopen where it previously read
    `false` with the older rows silently absent. `frontend.snapshot.history_cursor`
    / `live_cursor` are the DEDUPE watermark for the paired state, NEVER a
@@ -2236,6 +2395,7 @@ absent.
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
 | `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
+| `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
