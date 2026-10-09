@@ -18143,7 +18143,7 @@ class Session:
         """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
         Hosts need the session's configured provider and credentials for small
-        side errands — conversation auto-naming is the only caller — and
+        side errands — conversation and checkpoint naming — and
         rebuilding a client from the spec would duplicate the whole auth
         cascade. The call carries no tools, no history and no abort signal: it
         is not a turn and must not appear in the transcript.
@@ -18233,6 +18233,28 @@ class Session:
             # logs it and returns CALL_FAILED.
             return await self._drain_errand(self._errand_request(session_spec, system, prompt))
 
+    async def complete_once_on_session_model(self, system: str, prompt: str) -> str:
+        """``complete_once``, but answered by the model serving THIS conversation.
+
+        For an errand a person asked for (``/title --refresh``), where the
+        operator's expectation is that the conversation's own model — the one
+        that has been answering every turn — writes the answer. The ``lo`` tier
+        is a cost preference for UNATTENDED errands; spending it on a command
+        someone typed swaps a model they chose for one they did not, and the
+        tier's slow tail (measured up to ~10 s) overran the routed refresh's
+        8 s budget, so the receipt read "could not reach the model" while the
+        session model would have answered in ~2 s.
+
+        Same request shape as :meth:`complete_once` (isolated, not replayable,
+        token-capped, tools-free) and the same effort clamp. No tier fallback
+        and no tier block: the tier is never consulted, so it can neither be
+        blamed for a failure here nor rescue one.
+
+        Fast mode is cleared, as on every errand (see :meth:`_errand_request`).
+        """
+        spec = self._lowest_effort(self.effective_model)
+        return await self._drain_errand(self._errand_request(spec, system, prompt))
+
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.
 
@@ -18241,6 +18263,11 @@ class Session:
         ``isolated``, ``replayable=False``, the token cap and the empty tool
         surface by construction rather than by two field lists staying in sync.
         """
+        # Fast mode buys the TURN a priority lane at a priority price. An errand
+        # is decoration, so it never pays that premium, on whichever route it
+        # lands: the tier, the session model, or the retry after a dead tier.
+        if model.fast_mode:
+            model = model.model_copy(update={"fast_mode": False})
         return ChatRequest(
             model=model,
             purpose="naming",

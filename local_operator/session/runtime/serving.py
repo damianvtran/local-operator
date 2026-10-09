@@ -7285,8 +7285,11 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.session import naming
 
         setter = getattr(session, "set_conversation_name", None)
-        complete_once = getattr(session, "complete_once", None)
-        if not callable(setter) or not callable(complete_once):
+        # Two jobs: `complete_once` is the readiness seam every session shape
+        # has, and requiring it keeps `refresh_completer`'s fallback from
+        # raising. The probe that follows is the callable the refresh will use.
+        complete = naming.refresh_completer(session) if hasattr(session, "complete_once") else None
+        if not callable(setter) or not callable(complete):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         current = getattr(session, "conversation_name", "") or ""
         # One budget over the history read AND the naming call, and one failure
