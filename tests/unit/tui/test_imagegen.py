@@ -77,8 +77,9 @@ def test_a_provider_word_wins_only_when_it_names_a_live_state() -> None:
     """A LIVE card may say ``queued``/``running``/``cancelling`` because the
     provider knows better than the card does; a TERMINAL word is refused while
     the call still runs, because claiming ``done`` would preempt the settle's
-    own receipt. (The provider's RAW words are normalized by
-    :func:`live_from_details` — ``pending`` arrives here already ``queued``.)"""
+    own receipt. (The provider's RAW stages are normalized by
+    :func:`live_from_details` — ``in_progress`` arrives here already
+    ``running``.)"""
     assert imagegen.imagegen_state_word("running", "queued") == "queued"
     assert imagegen.imagegen_state_word("running", "cancelling") == "cancelling"
     assert imagegen.imagegen_state_word("running", "done") == "running"
@@ -87,16 +88,36 @@ def test_a_provider_word_wins_only_when_it_names_a_live_state() -> None:
     assert imagegen.imagegen_state_word("running", "not-a-state") == "running"
 
 
+def test_the_canonical_stage_map_and_the_none_failure_arm() -> None:
+    """The frozen stage set (PR #2089) maps one-to-one, and ``None`` — the
+    mid-walk failure whose semantics ride ``error``/``error_type`` — reads as
+    no state word: the reduced state. An unknown word does too."""
+    cases: list[tuple[object, str | None]] = [
+        ("queued", "queued"),
+        ("in_progress", "running"),
+        ("cancelling", "cancelling"),
+        ("completed", "done"),
+        ("cancelled", "cancelled"),
+        (None, None),
+        ("who-knows", None),
+    ]
+    for stage, expected in cases:
+        assert imagegen.live_from_details({"stage": stage}).state == expected, stage
+
+
 # --- the adapter -----------------------------------------------------------
 
 
 def test_the_adapter_reads_every_frozen_field() -> None:
     view = imagegen.live_from_details(
         {
-            "state": "in_progress",
+            "stage": "in_progress",
             "queue_position": 3,
             "progress_fraction": 0.42,
-            "log_lines": ["step 12/28", "step 13/28"],
+            "log_lines": [
+                {"message": "step 12/28", "timestamp": 1700000000},
+                {"message": "step 13/28", "timestamp": 1700000001},
+            ],
             "error": "This generation failed before producing output.",
             "error_type": "media_failed",
             "artifact_ref": "opic://artifacts/1",
@@ -110,7 +131,7 @@ def test_the_adapter_reads_every_frozen_field() -> None:
     assert view.error_type == "media_failed"
     assert view.artifact_ref == "opic://artifacts/1"
     assert set(view.keys) == {
-        "state",
+        "stage",
         "queue_position",
         "progress_fraction",
         "log_lines",
@@ -118,6 +139,34 @@ def test_the_adapter_reads_every_frozen_field() -> None:
         "error_type",
         "artifact_ref",
     }
+
+
+def test_a_canonical_null_everywhere_reads_as_the_reduced_state() -> None:
+    """The frozen wire carries EVERY key on every update, ``None`` for what no
+    provider supplied (PR #2089): that update must read exactly like an empty
+    one — nothing invented, nothing synthesized."""
+    canonical = {
+        "tool_name": "generate_image",
+        "stage": None,
+        "provider": None,
+        "model": None,
+        "elapsed_s": None,
+        "num_images": None,
+        "queue_position": None,
+        "progress_fraction": None,
+        "log_lines": None,
+        "error": None,
+        "error_type": None,
+    }
+    view = imagegen.live_from_details(canonical)
+    assert view.state is None
+    assert view.queue_position is None
+    assert view.fraction is None
+    assert view.log_lines == ()
+    assert view.error is None
+    assert view.error_type is None
+    assert view.artifact_ref is None
+    assert view.keys == ()
 
 
 @pytest.mark.parametrize("details", [None, {}, [], "nope", 7])
@@ -175,13 +224,25 @@ def test_queue_position_accepts_a_non_negative_int_deliberately(
 
 
 def test_the_log_tail_is_bounded_and_counts_what_it_dropped() -> None:
-    rows = [f"row {index}" for index in range(imagegen.LOG_TAIL_LIMIT + 7)]
+    rows = [
+        {"message": f"row {index}", "timestamp": 1700000000 + index}
+        for index in range(imagegen.LOG_TAIL_LIMIT + 7)
+    ]
     view = imagegen.live_from_details({"log_lines": rows})
-    assert view.log_lines == tuple(rows[-imagegen.LOG_TAIL_LIMIT :])
+    assert view.log_lines == tuple(
+        f"row {index}" for index in range(7, imagegen.LOG_TAIL_LIMIT + 7)
+    )
     assert view.log_dropped == 7
-    # A string payload splits on newlines, the same tail.
+    # The canonical shape is ``{message, timestamp}`` rows; a bare string is
+    # not a log line (the freeze replaced the earlier string variants), and a
+    # row without a string message is not a row.
     view = imagegen.live_from_details({"log_lines": "one\ntwo"})
-    assert view.log_lines == ("one", "two")
+    assert view.log_lines == ()
+    assert view.log_dropped == 0
+    view = imagegen.live_from_details(
+        {"log_lines": [{"timestamp": 1}, "loose", {"message": "kept"}]}
+    )
+    assert view.log_lines == ("kept",)
     assert view.log_dropped == 0
 
 
@@ -191,7 +252,7 @@ def test_the_log_tail_and_error_strip_control_sequences() -> None:
     outputs)."""
     view = imagegen.live_from_details(
         {
-            "log_lines": ["safe \x1b[2J now"],
+            "log_lines": [{"message": "safe \x1b[2J now", "timestamp": 1}],
             "error": "boom \x1b[31mred\x1b[0m",
         }
     )
