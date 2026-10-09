@@ -2196,6 +2196,74 @@ async def test_follower_model_picker_lists_the_owners_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_takeover_republishes_the_catalogue_and_the_access_claim() -> None:
+    """Q2 (QA round 1): a takeover is an adoption, and both adoption paths
+    publish — the claim `_adopt_session`'s comment has made since D3.
+
+    A takeover replaces the owner whose credentials the catalogue and the
+    claim describe, so the new owner's rows must be republished there too.
+    Before this, only the boot path did it and a viewer -> owner takeover
+    kept a stale (or absent) claim until the next switch or login edge.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    model = FrontendModelSpec(provider="openrouter", model_id="deepseek/deepseek-chat")
+
+    class StoreSession(_SwitchableSession):
+        # Runtime role (SessionProtocol): the incoming OWNER runs in this
+        # process, while the outgoing one is an attached viewer.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._frontend_state_store = FrontendStateStore(
+                FrontendSessionState(
+                    session_id="sess",
+                    epoch="new-owner",
+                    selected_model=model,
+                    effective_model=model,
+                )
+            )
+
+    class Remoteish(FakeSession):
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
+
+        def set_takeover_callback(self, callback: Any) -> None:
+            self.takeover_callback = callback
+
+    remote = Remoteish()
+    replacement = StoreSession()
+    ctrl = _AccessController(stored=("openrouter",))
+    app = OperatorApp(lambda: _factory(remote), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(60):
+            await pilot.pause()
+            if app._session is remote:
+                break
+        await app._adopt_takeover_session(replacement)
+        for _ in range(5):
+            await pilot.pause()
+
+    store = replacement._frontend_state_store
+    published = {f"{row['provider']}/{row['model_id']}" for row in store.state.model_catalogue}
+    # The aggregated row is deliberately not published (only the live list can
+    # enumerate it); the direct rows are the ones the picker lists for a
+    # follower, and they are what this edge must carry.
+    assert published == {"anthropic/claude-opus-5", "ollama/qwen3:8b"}, published
+    claim = store.state.model_access
+    assert claim is not None, "the takeover must publish a claim for the new owner"
+    assert (claim.state, claim.provider) == ("ok", "openrouter"), claim
+
+
+@pytest.mark.asyncio
 async def test_model_picker_first_frame_is_initial_catalogue_not_live() -> None:
     """P1-c: opening /model paints initial_catalogue; live_catalogue is a worker.
 
@@ -8642,6 +8710,58 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
     assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
 
 
+@pytest.mark.asyncio
+async def test_tab_with_no_matches_keeps_the_query_exactly_as_typed() -> None:
+    """Tab is this app's completion key; with nothing to complete it must not edit
+    the command (UX review round 1, U1).
+
+    The miss state is not exotic — it is where a user types a model they cannot
+    yet see, and where the feature's own primary path lives: `-` invites
+    finishing `--all` in the footer, and the word then has to reach the buffer
+    unedited for Enter to run it. Before the fix Tab fell through to the
+    ``TextArea`` and inserted four spaces INTO the query (`/model -` became
+    `/model -    `), stranding the gesture with a generic usage error once the
+    word was finished.
+    """
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        editor = app.query_one(Editor)
+        await pilot.press("minus")
+        await pilot.pause()
+        before = editor.text
+        assert before.endswith("/model -"), before
+        width = max(picker.size.width, 40)
+        # The partial-keyword row the user is looking at: it invites finishing
+        # the word, which is exactly the offer Tab must not corrupt.
+        plain = picker.render_text(width).plain
+        assert "--all is a command — keep typing" in plain, plain
+
+        await pilot.press("tab")
+        await pilot.pause()
+        after = editor.text
+        # Re-read rather than assumed: the state the user is mid-way through
+        # must survive the gesture.
+        plain_after = picker.render_text(width).plain
+
+        # …and the word still reaches dispatch when the user finishes it the way
+        # the row invites: `-` was already typed, so three more keys complete
+        # `--all` and Enter runs the toggle. This is the half that failed with
+        # the usage error while the buffer carried the Tab's spaces.
+        await pilot.press("minus", "a", "l", "l")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        offered = {row.selector for row in picker.rows()}
+
+    assert after == before, f"Tab edited the query: {before!r} -> {after!r}"
+    assert "--all is a command — keep typing" in plain_after, plain_after
+    assert "anthropic/claude-opus-5" in offered, offered
+
+
 async def _type_model_argument(app, pilot, argument: str) -> None:
     """Type ``argument`` after the open ``/model `` query, then Enter.
 
@@ -8707,7 +8827,7 @@ async def test_model_all_reveals_the_rows_the_filter_hides() -> None:
         "anthropic/claude-opus-5",
     }, offered
     assert "login required" in plain, plain
-    assert "showing all — 1 need sign-in — /model --all hides" in plain, plain
+    assert "showing all — 1 needs sign-in — /model --all hides" in plain, plain
     # The dim is the claim that the row cannot be run, and it is asserted
     # rather than assumed: the block above says a user reading a lit row would
     # take it for a choice.
@@ -8759,13 +8879,20 @@ async def test_the_show_all_list_is_painted_whole_not_at_the_fallback_width() ->
         picker = app.query_one(Editor).model_picker
         assert picker.size.width > 20, "the fixture must lay the list out wider than the fallback"
         # ``render()`` is the widget's own renderable — what the compositor
-        # painted, as opposed to ``render_text(width)``'s hypothetical.
+        # painted, as opposed to ``render_text(width)``'s hypothetical. Its
+        # declared return is a union (``ConsoleRenderable | RichCast | str |
+        # Visual | SupportsVisual``), so the concrete type ``Static.render``
+        # yields (``Content``) is asserted before reading ``.plain``: pyright
+        # rejected the bare read (agent review round 1, R1-1).
+        from textual.content import Content
+
         painted = picker.render()
+        assert isinstance(painted, Content), type(painted)
         width = picker.size.width
 
     assert "openrouter/deepseek/deepseek-chat" in painted.plain, painted.plain
     assert "anthropic/claude-opus-5" in painted.plain, painted.plain
-    assert "showing all — 1 need sign-in — /model --all hides" in painted.plain, painted.plain
+    assert "showing all — 1 needs sign-in — /model --all hides" in painted.plain, painted.plain
     assert all(
         len(line) == width for line in painted.plain.splitlines()
     ), "a row was painted at a width other than the widget's"
@@ -9043,6 +9170,57 @@ async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> Non
         text = _transcript_text(app)
     assert session.model_label == "anthropic/claude-opus-5"
     assert "anthropic needs login — /login anthropic" in text, text
+
+
+class _ClaimTrackedSession(_SwitchableSession):
+    """A switchable session carrying a REAL frontend store, so a test can read
+    the canonical claim a publication leaves behind."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            FrontendModelSpec,
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        model = FrontendModelSpec(provider="openrouter", model_id="deepseek/deepseek-chat")
+        self._frontend_state_store = FrontendStateStore(
+            FrontendSessionState(
+                session_id="sess",
+                epoch="test",
+                selected_model=model,
+                effective_model=model,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_routed_model_switch_republishes_the_access_claim() -> None:
+    """The phone's `/model <selector>` lands in the ROUTED lane, and the claim
+    must move with the switch there too (agent review round 1, R1-2).
+
+    ``run_slash_authoritative`` is the owner-side backend every remote follower
+    and the mobile daemon reach; before this it applied ``set_model`` and
+    returned, leaving ``model_access`` describing the PREVIOUS model — the
+    stale claim the field's own docstring rules worse than none. The local
+    lane published already, which is what made this a missed peer edge.
+    """
+    session = _ClaimTrackedSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        result = await app.run_slash_authoritative(
+            "model", "anthropic/claude-opus-5", locality="remote"
+        )
+        assert result["kind"] == "notice", result
+        claim = session._frontend_state_store.state.model_access
+
+    assert session.model_label == "anthropic/claude-opus-5", session.model_label
+    assert claim is not None, "the routed switch must publish a claim, not keep the old one"
+    assert (claim.state, claim.provider) == ("ok", "anthropic"), claim
+    assert "Anthropic" in claim.label, claim
 
 
 class _OpenAILiveController(_AccessController):
@@ -12739,6 +12917,11 @@ async def test_the_help_model_row_is_a_sentence_and_still_fits_at_80() -> None:
     assert not description.startswith("Switch;"), row
     # It still names the command that persists — that is what the row is for.
     assert "/model default" in description, row
+    # `--all` is deliberately NOT on this row: it cannot fit beside the two
+    # literals this test and D14 pin (the column folds past ~55 cells and the
+    # row measures 54), and the dangling forms that fit are the fragments D7
+    # removed. The picker footer teaches the flag instead.
+    assert "--all" not in description, row
     # The same measured 74-cell ceiling the copy/paste rows carry: one more
     # cell wraps at 80 columns and the tail lands in the name gutter.
     assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"

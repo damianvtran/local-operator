@@ -799,6 +799,12 @@ class ModelPicker(Static):
         be and a shrinking window never hands the annotation the cells it freed.
         """
         if not row.connected:
+            # The `login required` tag rides THIS run, so it is dropped with the
+            # whole numbers column below ``_NUMBERS_MIN_WIDTH`` (56; 58/59-column
+            # terminals) — below the picker's supported 60x20 floor. Recorded,
+            # not fixed (design review round 1, D4): a monochrome client below
+            # the floor reads the dim row without the tag, and trimming the cell
+            # further to save the tag would cost either the count or the id.
             return "login required"
         short_window = width is not None and width < _SHORT_WINDOW_MIN_WIDTH
         parts = [
