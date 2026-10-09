@@ -3198,7 +3198,7 @@ async def _construct_child_session(
         convert_to_llm=parent_session._convert_to_llm,
         # The parent's compaction budget. A one-shot child was assumed to be
         # too short to need compaction, but a real review child ran 48
-        # requests / 1.5M tokens before its default (600k-cap) threshold
+        # requests / 1.5M tokens before its default (then 600k-cap) threshold
         # ever fired — the CAP the parent's operator set must bound the child
         # too, or a delegated task silently bypasses the very knob that keeps
         # long sessions alive. Defensively COPIED so the child can never

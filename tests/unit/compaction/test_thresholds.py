@@ -3,6 +3,8 @@ strategy, recovery band."""
 
 import logging
 
+import pytest
+
 from local_operator.compaction import thresholds as thresholds_module
 from local_operator.compaction.thresholds import (
     DEFAULT_THRESHOLD_PERCENT,
@@ -27,7 +29,7 @@ def test_defaults_match_contract():
     assert s.reserve_tokens is None  # None = defaulted (provenance, not value)
     assert s.keep_recent_tokens == 20000
     assert s.threshold_percent == 0.80
-    assert s.threshold_tokens == 600_000
+    assert s.threshold_tokens == 400_000
     assert s.auto_continue is True
     assert s.mid_turn_enabled is True
     assert not hasattr(s, "max_threshold_tokens")  # superseded by threshold_tokens
@@ -46,17 +48,17 @@ def test_effective_reserve_floors_at_15_percent():
 def test_trigger_is_the_smaller_of_percent_and_absolute():
     """THE rule: ``min(percent x window, absolute)``.
 
-    A 1M-context model resolves to 600k (the absolute ceiling: 80% would be
+    A 1M-context model resolves to 400k (the absolute ceiling: 80% would be
     800k, and re-sending 800k on every request is slow and expensive even
-    though it fits). A 200k model resolves to 160k (the percentage: a 600k
+    though it fits). A 200k model resolves to 160k (the percentage: a 400k
     absolute trigger could never fire on a 200k window, and min() makes it
     inert rather than disabling compaction).
     """
     s = CompactionSettings()
-    assert resolve_threshold_tokens(1_000_000, s) == 600_000
+    assert resolve_threshold_tokens(1_000_000, s) == 400_000
     assert resolve_threshold_tokens(200_000, s) == 160_000
     assert resolve_threshold_tokens(40_000, s) == 32_000
-    assert resolve_threshold_tokens(1_050_000, s) == 600_000
+    assert resolve_threshold_tokens(1_050_000, s) == 400_000
 
 
 def test_regression_1m_session_does_not_compact_at_235k():
@@ -67,18 +69,18 @@ def test_regression_1m_session_does_not_compact_at_235k():
     ``compacting context… 234.8k -> 33.2k`` receipt, i.e. 23% of the window.
     The cause was a second absolute knob (a defensive ``max_threshold_tokens``
     ceiling of 250k) resolving the trigger independently of the percentage.
-    With one resolver there is exactly one number, and it is 600k.
+    With one resolver there is exactly one number, and it is 400k.
     """
     s = CompactionSettings()
     window = 1_000_000
     assert should_compact(234_800, window, s) is False
-    assert should_compact(500_000, window, s) is False
-    assert should_compact(600_000, window, s) is False  # at threshold: stable
-    assert should_compact(600_001, window, s) is True
+    assert should_compact(399_999, window, s) is False
+    assert should_compact(400_000, window, s) is False  # at threshold: stable
+    assert should_compact(400_001, window, s) is True
 
 
 def test_small_window_absolute_knob_is_inert_not_disabling():
-    """The 600k absolute default is larger than a 200k window entirely; min()
+    """The 400k absolute default is larger than a 200k window entirely; min()
     must leave the percentage governing, never resolve to "never compact"."""
     s = CompactionSettings()
     for window in (200_000, 128_000, 32_000, 8_000):
@@ -90,9 +92,9 @@ def test_small_window_absolute_knob_is_inert_not_disabling():
 
 def test_both_knobs_are_settable_and_either_can_win():
     # Percentage lowered: it now governs a 1M window.
-    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=0.5)) == 500_000
-    # Percent spelling: 50 and 0.5 mean the same thing.
-    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=50)) == 500_000
+    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=0.3)) == 300_000
+    # Percent spelling: 30 and 0.3 mean the same thing.
+    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=30)) == 300_000
     # Absolute lowered: it governs a small window too (forcing early passes).
     assert resolve_threshold_tokens(200_000, CompactionSettings(threshold_tokens=3_000)) == 3_000
     # Raising the absolute knob cannot push past the percentage.
@@ -166,7 +168,7 @@ def test_invalid_percent_falls_back_to_default_with_warning(caplog):
     assert caplog.text.count("threshold_percent") == 3  # one warning per bad value
     # The resolved trigger degrades to the documented default, not to 0 or to
     # "never compact".
-    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=0)) == 600_000
+    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_percent=0)) == 400_000
     assert resolve_threshold_tokens(200_000, CompactionSettings(threshold_percent=-1.0)) == 160_000
     # Valid range, both spellings, no warning.
     assert resolve_threshold_percent(CompactionSettings(threshold_percent=0.9)) == 0.9
@@ -186,8 +188,8 @@ def test_invalid_absolute_tokens_falls_back_to_default_with_warning(caplog):
         )
     assert "threshold_tokens" in caplog.text
     # -1 used to mean "unset"; it must not disable compaction now.
-    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_tokens=-1)) == 600_000
-    assert should_compact(600_001, 1_000_000, CompactionSettings(threshold_tokens=-1)) is True
+    assert resolve_threshold_tokens(1_000_000, CompactionSettings(threshold_tokens=-1)) == 400_000
+    assert should_compact(400_001, 1_000_000, CompactionSettings(threshold_tokens=-1)) is True
 
 
 def test_warnings_are_deduplicated_per_value(caplog):
@@ -273,3 +275,56 @@ def test_wire_bytes_trigger_fires_with_an_unknown_window() -> None:
     # The disabled/off short-circuit outranks it, unknown window or not.
     assert should_compact(0, 0, CompactionSettings(enabled=False), wire_bytes=2_000_000) is False
     assert should_compact(0, 0, CompactionSettings(strategy="off"), wire_bytes=2_000_000) is False
+
+
+# --- The 400k default (lowered from 600k) --------------------------------------
+#
+# These pin the CONSEQUENCES of the default rather than restating the constant:
+# which window sizes the absolute term binds on, that an explicit user value is
+# never reinterpreted, and that the two places that carry the number agree.
+
+
+def test_default_absolute_trigger_is_400k_in_code_and_in_the_settings_registry():
+    """``settings_io`` restates the default as a literal (importing
+    ``local_operator.compaction`` there would drag the whole pass engine into
+    every settings read), so THIS is what turns a drift into a red test."""
+    from local_operator import settings_io
+
+    assert DEFAULT_THRESHOLD_TOKENS == 400_000
+    assert CompactionSettings().threshold_tokens == 400_000
+    assert settings_io.BY_KEY["compaction.threshold_tokens"].default == DEFAULT_THRESHOLD_TOKENS
+
+
+def test_unset_config_resolves_by_window_with_the_400k_default():
+    """Which term binds, per window: 80% of the window below 500k, the 400k
+    absolute term above it. The crossover is 500k, so a 400k window is on the
+    percentage side (320k) and a 1M window on the absolute side."""
+    s = CompactionSettings()
+    assert resolve_threshold_tokens(1_000_000, s) == 400_000  # 0.8 x 1M = 800k, absolute binds
+    assert resolve_threshold_tokens(500_000, s) == 400_000  # the crossover: both terms agree
+    assert resolve_threshold_tokens(400_000, s) == 320_000  # percentage binds
+    assert resolve_threshold_tokens(200_000, s) == 160_000  # percentage binds
+
+
+def test_a_compaction_block_without_threshold_tokens_gets_the_400k_default():
+    """A user who configured OTHER compaction keys is on the new default too:
+    nothing in the load path seeds ``threshold_tokens`` into their file."""
+    s = CompactionSettings.model_validate({"enabled": True, "keep_recent_tokens": 30_000})
+    assert s.threshold_tokens == 400_000
+    assert resolve_threshold_tokens(1_000_000, s) == 400_000
+
+
+@pytest.mark.parametrize("explicit", [600_000, 800_000])
+def test_an_explicit_absolute_trigger_is_respected_not_clamped_to_the_new_default(explicit):
+    """The lowering moves the DEFAULT only. A user who wrote 600000 (or raised
+    it further) keeps exactly that on a window large enough for it to bind."""
+    s = CompactionSettings.model_validate({"threshold_tokens": explicit})
+    assert resolve_threshold_tokens(1_000_000, s) == explicit
+    # ...and the percentage still wins where it is smaller.
+    assert resolve_threshold_tokens(200_000, s) == 160_000
+
+
+def test_the_legacy_ceiling_key_is_still_respected_over_the_new_default():
+    s = CompactionSettings.model_validate({"max_threshold_tokens": 600_000})
+    assert s.threshold_tokens == 600_000
+    assert resolve_threshold_tokens(1_000_000, s) == 600_000
