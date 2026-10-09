@@ -382,6 +382,32 @@ html :focus-visible {
 	}
 }
 
+/* The image-generation tile: the square the finished picture will land in,
+   swept by the same highlight the streaming text uses (`lo-shimmer`'s own
+   keyframes), so the placeholder reads as work flowing toward the artifact
+   rather than as a broken or empty image. The ramp stays on the GROUND
+   tokens (sunken -> elevated): the tile is a placeholder, and the accent is
+   reserved for the live control beside it — a tile pulsing in accent ink
+   would compete with the progress bar for the same "here it comes" signal.
+   Reduced motion drops the sweep and keeps the resting ground, matching
+   every other lo-* animation on this surface. */
+.lo-gen-tile {
+	background-color: var(--color-sunken);
+	background-image: linear-gradient(
+		100deg,
+		transparent 40%,
+		var(--color-elevated) 50%,
+		transparent 60%
+	);
+	background-size: 200% 100%;
+	animation: lo-shimmer 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-gen-tile {
+		animation: none;
+	}
+}
+
 /*
  * Sheet entrance: the only 240ms motion in the app, spent on something
  * entering the screen. The sheet rises from the bottom edge; the scrim fades.
