@@ -616,9 +616,9 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
-    # Stamped from the packaged reviewer at install: the seed moved to 1.2.0
-    # in the 2026-10-06 reporting-rule revision (was 1.1.0).
-    assert verdict.installed_version == "1.2.0"
+    # Stamped from the packaged reviewer at install: the seed moved to 1.3.0
+    # in the 2026-10-09 delivery-rule revision (was 1.2.0).
+    assert verdict.installed_version == "1.3.0"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -756,8 +756,8 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's own version, untouched by the body-only move:
-    # 1.2.0 since the 2026-10-06 reporting-rule revision (was 1.1.0).
-    assert verdict.installed_version == verdict.packaged_version == "1.2.0"
+    # 1.3.0 since the 2026-10-09 delivery-rule revision (was 1.2.0).
+    assert verdict.installed_version == verdict.packaged_version == "1.3.0"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 
