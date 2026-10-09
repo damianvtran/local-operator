@@ -13,6 +13,17 @@ TWO JOBS, one cheap entry point (CI job `i18n`, and a unit test):
    reports — the repository's fail-closed rule. The one known blind spot is
    documented at ``_arguments`` (string concatenation via ``+``).
 
+   **ENFORCEMENT IS SCOPED (RFC §9: P1 ships ADVISORY).** The baseline carries
+   an ``enforced`` list of path prefixes (and exact file paths). Findings
+   OUTSIDE that scope are printed as ``advisory:`` lines and DO NOT fail
+   (exit 0): the ratchet reports the tree's real state without turning every
+   unrelated PR in a fleet of concurrent sessions red before an extraction
+   slice exists to give a string a key. Findings INSIDE the scope fail, as do
+   catalogue parity and generation drift EVERYWHERE (those only involve
+   i18n-owned files). The list starts with the i18n package and its tooling;
+   extraction slices ACTIVATE their area by adding that area's prefix in a
+   reviewed change, and P5 flips the whole tree to enforced.
+
 2. **Catalogue checks.** Every message parses in the shipped subset; keys are
    lower snake_case and namespaced; per namespace, every locale's key set,
    argument tuples (name AND kind) and plural categories match ``en``; a
@@ -22,12 +33,14 @@ TWO JOBS, one cheap entry point (CI job `i18n`, and a unit test):
 The ratchet's counts are a SNAPSHOT, not a truth: they pin what "the tree as
 it stands" means so a diff's effect is measurable. ``--init`` is therefore
 one-time by design (it refuses to overwrite an existing baseline without
-``--force``); a legitimate scanner-coverage change is a reviewed PR that
-re-runs ``--init --force`` and says so in its body.
+``--force``); a legitimate scanner-coverage change or a full re-snapshot on a
+moved base re-runs ``--init --force`` and says so in its PR body — that
+preserves ``enforced`` and its note, which are REVIEW STATE, not counts.
 
 Usage:
     python scripts/i18n/check.py                 # ratchet + parity (CI)
     python scripts/i18n/check.py --init          # capture the baseline once
+    python scripts/i18n/check.py --init --force  # full re-snapshot (moved base / scanner change)
     python scripts/i18n/check.py --update <path> # lower a file's ceiling
 """
 
@@ -53,6 +66,21 @@ from local_operator.i18n import catalogues  # noqa: E402
 from local_operator.i18n import runtime as msg_runtime  # noqa: E402
 
 PRODUCT_TREE = "local_operator"
+#: The scanned corpus, repo-relative. `scripts/i18n/` is scanned because it is
+#: inside the initial enforced scope: the tooling must not grow user-visible
+#: prose of its own (its existing developer-diagnostic prints are frozen at
+#: their baseline counts; a NEW file there starts at 0 like anywhere else).
+SCAN_ROOTS = (PRODUCT_TREE, "scripts/i18n")
+#: Fallback enforcement scope when the baseline carries no `enforced` field
+#: (a pre-schema-2 file): the i18n package and its tooling — the code this
+#: program itself owns. Slices extend the list; P5 flips the whole tree.
+DEFAULT_ENFORCED = ("local_operator/i18n/", "scripts/i18n/")
+BASELINE_NOTE = (
+    "enforced = blocking scope (path prefixes or exact paths); findings elsewhere are "
+    "advisory (report-only) until the area's extraction slice adds its prefix. "
+    "files = per-file literal ceilings (shrink-only; new files start at 0). "
+    "See scripts/i18n/check.py."
+)
 BASELINE = REPO / "i18n" / "baseline.json"
 ALLOWLIST = REPO / "i18n" / "allowlist.toml"
 PRAGMA_RE = re.compile(r"#\s*i18n:\s*ignore\s+\S")
@@ -217,15 +245,18 @@ def scan_source(path: str, source: str) -> list[Violation]:
 
 
 def scan_tree(root: Path) -> dict[str, list[Violation]]:
-    """Scan ``local_operator/**/*.py`` under ``root``, repo-relative keys."""
+    """Scan the corpus (``SCAN_ROOTS``) under ``root``, repo-relative keys."""
     results: dict[str, list[Violation]] = {}
-    tree = root / PRODUCT_TREE
-    for path in sorted(tree.rglob("*.py")):
-        rel = path.relative_to(root).as_posix()
-        source = path.read_text(encoding="utf-8")
-        violations = scan_source(rel, source)
-        if violations:
-            results[rel] = violations
+    for base in SCAN_ROOTS:
+        tree = root / base
+        if not tree.is_dir():  # a fixture or partial tree need not carry every root
+            continue
+        for path in sorted(tree.rglob("*.py")):
+            rel = path.relative_to(root).as_posix()
+            source = path.read_text(encoding="utf-8")
+            violations = scan_source(rel, source)
+            if violations:
+                results[rel] = violations
     return results
 
 
@@ -278,17 +309,109 @@ def allowlisted(path: str, entries: list[tuple[str, str]]) -> str | None:
     return None
 
 
-def load_baseline(path: Path) -> dict[str, int]:
+def load_baseline(path: Path) -> dict[str, Any]:
+    """The whole baseline object: ``enforced`` (scope) and ``files`` (ceilings).
+
+    Missing or damaged shapes are tolerated as EMPTY rather than fatal: the
+    file is data, and a hand-edit mistake should surface as a normal check
+    failure (counted files read as "not in baseline"), not a traceback. A
+    MISSING ``enforced`` key falls back to ``DEFAULT_ENFORCED`` (fail closed —
+    a schema-1 file must not silently un-enforce the code this program owns);
+    a PRESENT-but-empty list is respected as the deliberate "nothing is
+    enforced" state.
+    """
     if not path.is_file():
-        return {}
+        return {"schema": 2, "enforced": list(DEFAULT_ENFORCED), "files": {}}
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        data = {}
     files = data.get("files", {})
-    return {str(p): int(c) for p, c in files.items()}
+    enforced = data.get("enforced", list(DEFAULT_ENFORCED))
+    return {
+        "schema": data.get("schema", 1),
+        "note": data.get("note", BASELINE_NOTE),
+        "enforced": [str(p) for p in enforced] if isinstance(enforced, list) else [],
+        "files": {str(p): int(c) for p, c in files.items()} if isinstance(files, dict) else {},
+    }
 
 
-def save_baseline(path: Path, files: dict[str, int]) -> None:
-    payload = {"schema": 1, "files": {k: files[k] for k in sorted(files)}}
+def save_baseline(path: Path, files: dict[str, int], enforced: list[str], note: str) -> None:
+    payload = {
+        "schema": 2,
+        "note": note,
+        "enforced": list(enforced),
+        "files": {k: files[k] for k in sorted(files)},
+    }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _activation_state(path: Path) -> tuple[list[str], str]:
+    """``(enforced, note)`` to PRESERVE across ``--init --force``.
+
+    These are review state, not counts: a re-snapshot on a moved base must not
+    walk an area's activation back. Presence of the key selects defaults, not
+    truthiness — a deliberate empty list stays empty (round-1 n3's lesson,
+    applied to the new field).
+    """
+    if not path.is_file():
+        return list(DEFAULT_ENFORCED), BASELINE_NOTE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return list(DEFAULT_ENFORCED), BASELINE_NOTE
+    if not isinstance(data, dict):
+        return list(DEFAULT_ENFORCED), BASELINE_NOTE
+    enforced = data.get("enforced", list(DEFAULT_ENFORCED))
+    return (
+        [str(p) for p in enforced] if isinstance(enforced, list) else list(DEFAULT_ENFORCED),
+        str(data.get("note", BASELINE_NOTE)),
+    )
+
+
+def in_enforced_scope(rel: str, enforced: list[str]) -> bool:
+    """Whether ``rel`` sits inside the blocking scope.
+
+    A value ending in ``/`` is a path-segment prefix (``local_operator/i18n/``);
+    anything else is an exact file path. No globs by design — ``fnmatch``'s
+    ``*`` crosses ``/``, which is the trap the package-data guard documents
+    (round-1 m4).
+    """
+    for entry in enforced:
+        if entry.endswith("/"):
+            if rel.startswith(entry):
+                return True
+        elif rel == entry:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One counted file that exceeds — or is missing from — its ceiling."""
+
+    path: str
+    count: int
+    ceiling: int | None  # None = not in the baseline: a new file, starts at 0
+
+    def line(self) -> str:
+        if self.ceiling is None:
+            return (
+                f"{self.path}: {self.count} literal(s) — not in baseline.json; "
+                "a NEW file starts at 0"
+            )
+        return f"{self.path}: {self.count} literal(s) against a ceiling of {self.ceiling}"
+
+
+def findings(counts: dict[str, int], files: dict[str, int]) -> list[Finding]:
+    out: list[Finding] = []
+    for rel in sorted(counts):
+        ceiling = files.get(rel)
+        count = counts[rel]
+        if ceiling is None:
+            out.append(Finding(rel, count, None))
+        elif count > ceiling:
+            out.append(Finding(rel, count, ceiling))
+    return out
 
 
 def _counts(scanned: dict[str, list[Violation]], entries: list[tuple[str, str]]) -> dict[str, int]:
@@ -458,6 +581,9 @@ def main(argv: list[str] | None = None) -> int:
     entries = load_allowlist(ALLOWLIST)
     scanned = scan_tree(REPO)
     counts = _counts(scanned, entries)
+    baseline = load_baseline(BASELINE)
+    enforced = baseline["enforced"]
+    files = baseline["files"]
 
     if args.init:
         # ANY existing baseline refuses, empty or not: an empty file used to be
@@ -469,20 +595,23 @@ def main(argv: list[str] | None = None) -> int:
                 "scanner-coverage change (say so in the PR body)."
             )
             return 2
-        save_baseline(BASELINE, counts)
+        preserved_enforced, note = _activation_state(BASELINE)
+        save_baseline(BASELINE, counts, enforced=preserved_enforced, note=note)
         total = sum(counts.values())
-        print(f"check.py --init: baseline written: {len(counts)} file(s), {total} literal(s)")
+        print(
+            f"check.py --init: baseline written: {len(counts)} file(s), {total} literal(s); "
+            f"enforced: {', '.join(preserved_enforced) or 'none'}"
+        )
         return 0
 
     if args.update:
-        baseline = load_baseline(BASELINE)
         for rel in args.update:
             rel = Path(rel).as_posix()
             if allowlisted(rel, entries) is not None:
                 print(f"check.py --update: {rel} is allowlisted; nothing to lower")
                 continue
             new = counts.get(rel, 0)
-            old = baseline.get(rel)
+            old = files.get(rel)
             if old is None:
                 if new > 0:
                     print(
@@ -498,38 +627,41 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
             if new:
-                baseline[rel] = new
+                files[rel] = new
             else:
-                baseline.pop(rel, None)
-        save_baseline(BASELINE, baseline)
-        print(f"check.py --update: baseline now {len(baseline)} file(s)")
+                files.pop(rel, None)
+        save_baseline(BASELINE, files, enforced=enforced, note=baseline["note"])
+        print(f"check.py --update: baseline now {len(files)} file(s)")
         return 0
 
-    baseline = load_baseline(BASELINE)
     failures: list[str] = []
-    for rel, count in sorted(counts.items()):
-        if rel not in baseline:
-            failures.append(
-                f"{rel}: {count} literal(s) — not in baseline.json; a NEW file starts at 0"
-            )
-            continue
-        if count > baseline[rel]:
-            failures.append(f"{rel}: {count} literal(s) against a ceiling of {baseline[rel]}")
+    advisories: list[str] = []
+    for finding in findings(counts, files):
+        line = finding.line()
+        if in_enforced_scope(finding.path, enforced):
+            failures.append(line)
+        else:
+            advisories.append(f"advisory: {line}")
     problems = check_catalogues()
-    for line in failures + problems:
+    for line in advisories + failures + problems:
         print(line)
     if failures or problems:
         print(
-            f"check.py: FAILED — {len(failures)} ratchet finding(s), "
-            f"{len(problems)} catalogue problem(s). "
-            "Extract the string, add `# i18n: ignore <reason>`, or (for a file-level exemption) "
-            "record it in i18n/allowlist.toml with a reason."
+            f"check.py: FAILED — {len(failures)} ratchet finding(s) in the enforced scope, "
+            f"{len(problems)} catalogue problem(s) ({len(advisories)} advisory finding(s) "
+            "outside it). Extract the string, add `# i18n: ignore <reason>`, or (for a "
+            "file-level exemption) record it in i18n/allowlist.toml with a reason."
         )
         return 1
     total = sum(counts.values())
+    suffix = (
+        f"; {len(advisories)} advisory finding(s) (report-only until activated)"
+        if advisories
+        else ""
+    )
     print(
         f"check.py: ok — {len(scanned)} file(s) scanned, {total} literal(s) at or "
-        f"below the baseline, catalogues consistent"
+        f"below the baseline, catalogues consistent{suffix}"
     )
     return 0
 

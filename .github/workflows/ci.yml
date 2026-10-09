@@ -384,8 +384,11 @@ jobs:
         run: isort --check .
 
   # The i18n gate: the committed `Intl` tables and per-key modules must match
-  # their generator, and the string ratchet + catalogue parity must pass. Both
-  # scripts are stdlib-only and the generator needs only the runner's Node, so
+  # their generator (blocking), and the string ratchet + catalogue parity run
+  # from check.py — blocking for the enforced scope and catalogue problems,
+  # advisory (visible in the log, exit 0) everywhere else until an extraction
+  # slice activates its area (RFC §9: P1 ships advisory). Both scripts are
+  # stdlib-only and the generator needs only the runner's Node, so
   # this job installs NOTHING — it cannot fail (or go slow) for install
   # reasons, which makes it the cheapest real gate in this workflow.
   i18n:

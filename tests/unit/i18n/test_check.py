@@ -22,6 +22,20 @@ def _write(root: Path, files: dict[str, str]) -> None:
         path.write_text(content, encoding="utf-8")
 
 
+def _activate(tree: Path, prefixes: list[str]) -> None:
+    """Point a fixture's enforcement scope at its mini-tree (test helper).
+
+    The default scope (the i18n package + tooling) matches nothing under the
+    mini trees, so every fixture finding would be advisory; tests that want a
+    BLOCKING finding activate the fixture path first — the same one-line
+    activation an extraction slice performs on the real baseline.
+    """
+    path = tree / "i18n" / "baseline.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["enforced"] = prefixes
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 @pytest.fixture()
 def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check) -> Path:
     (tmp_path / "local_operator").mkdir()
@@ -89,16 +103,27 @@ text = Text("constructed prose")
 
 
 class TestRatchet:
-    def test_init_then_green_then_new_file_fails(self, tree, i18n_check) -> None:
-        _write(
-            tree,
-            {
-                "local_operator/old.py": 'print("existing")\n',
-            },
-        )
+    def test_new_file_outside_the_enforced_scope_is_advisory(
+        self, tree, i18n_check, capsys
+    ) -> None:
+        # Round-3 C1: outside the enforced scope a NEW file's literals are
+        # REPORTED but never fail — what keeps unrelated PRs in a concurrent
+        # fleet green before their extraction slice exists.
+        _write(tree, {"local_operator/old.py": 'print("existing")\n'})
         assert i18n_check.main(["--init"]) == 0
         assert i18n_check.main([]) == 0
-        # A NEW file with a literal is a failure: new files start at 0.
+        _write(tree, {"local_operator/new.py": 'print("brand new prose")\n'})
+        assert i18n_check.main([]) == 0
+        out = capsys.readouterr().out
+        assert "advisory: local_operator/new.py: 1 literal(s)" in out
+
+    def test_new_file_inside_the_enforced_scope_fails(self, tree, i18n_check) -> None:
+        _write(tree, {"local_operator/old.py": 'print("existing")\n'})
+        assert i18n_check.main(["--init"]) == 0
+        _activate(tree, ["local_operator/"])
+        assert i18n_check.main([]) == 0
+        # Inside the scope a NEW file with a literal is a failure: new files
+        # start at 0.
         _write(tree, {"local_operator/new.py": 'print("brand new prose")\n'})
         assert i18n_check.main([]) == 1
         # And its ceiling cannot be recorded.
@@ -107,6 +132,7 @@ class TestRatchet:
     def test_update_may_only_shrink(self, tree, i18n_check) -> None:
         _write(tree, {"local_operator/old.py": 'print("existing")\n'})
         assert i18n_check.main(["--init"]) == 0
+        _activate(tree, ["local_operator/"])
         _write(tree, {"local_operator/old.py": 'print("existing")\nprint("added")\n'})
         assert i18n_check.main([]) == 1
         assert i18n_check.main(["--update", "local_operator/old.py"]) == 1
@@ -129,6 +155,12 @@ class TestRatchet:
         (tree / "i18n" / "baseline.json").write_text("{}\n", encoding="utf-8")
         assert i18n_check.main(["--init"]) == 2
         assert i18n_check.main(["--init", "--force"]) == 0
+        # Round-3 C1: a forced re-snapshot preserves the REVIEW STATE — an
+        # activated scope must survive it (only counts are re-captured).
+        _activate(tree, ["local_operator/old.py"])
+        assert i18n_check.main(["--init", "--force"]) == 0
+        saved = json.loads((tree / "i18n" / "baseline.json").read_text(encoding="utf-8"))
+        assert saved["enforced"] == ["local_operator/old.py"]
 
     def test_allowlisted_file_is_exempt(self, tree, i18n_check) -> None:
         _write(
@@ -152,10 +184,36 @@ class TestRatchet:
         )
         assert i18n_check.main([]) == 0
 
+    def test_enforced_scope_matching(self, i18n_check) -> None:
+        assert i18n_check.in_enforced_scope(
+            "local_operator/i18n/runtime.py", ["local_operator/i18n/"]
+        )
+        assert not i18n_check.in_enforced_scope(
+            "local_operator/tui/app.py", ["local_operator/i18n/"]
+        )
+        assert i18n_check.in_enforced_scope("i18n/x.py", ["i18n/x.py"])
+        assert not i18n_check.in_enforced_scope("i18n/xy.py", ["i18n/x.py"])
+
     def test_the_real_tree_passes_the_ratchet(self, i18n_check) -> None:
         # The committed baseline matches the committed tree — the unit-test
-        # half of RFC §2.7's "run as a unit test and as a CI job".
+        # half of RFC §2.7's "run as a unit test and as a CI job". Findings
+        # OUTSIDE the enforced scope never fail (round-3 C1), so this also
+        # pins that a fleet-grown tree cannot break the suite.
         assert i18n_check.main([]) == 0
+
+    def test_the_enforced_scope_itself_is_finding_free(self, i18n_check) -> None:
+        # The scope M0 activates (the i18n package + its tooling) must stay
+        # literal-clean: no advisories hiding inside the blocking area.
+        baseline = i18n_check.load_baseline(i18n_check.BASELINE)
+        entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
+        scanned = i18n_check.scan_tree(i18n_check.REPO)
+        counts = i18n_check._counts(scanned, entries)
+        scoped = [
+            finding.path
+            for finding in i18n_check.findings(counts, baseline["files"])
+            if i18n_check.in_enforced_scope(finding.path, baseline["enforced"])
+        ]
+        assert scoped == []
 
 
 class TestCatalogueParity:
