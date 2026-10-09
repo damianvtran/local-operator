@@ -23,6 +23,7 @@ from local_operator import scratchpad as scratchpad_module
 from local_operator.scratchpad import (
     SCRATCHPAD_DIRNAME,
     SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
@@ -863,22 +864,42 @@ def test_a_fresh_pad_footprints_at_zero(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_scratchpad_refusal_is_the_write_paths_own_sentence(tmp_path: Path) -> None:
-    """The shell audit's reuse point, pinned to byte-identity: the clause it
-    returns is exactly what ``check_scratchpad_write`` raises behind ``{url}:``,
-    for both name arms — so the after-the-fact line cannot say something the
-    write path would not."""
+def test_scratchpad_refusal_is_the_shared_clause_composed_for_the_card(tmp_path: Path) -> None:
+    """The shell audit's reuse point, pinned at the seam that matters: the
+    fragment it returns opens with the SAME refused-name clause
+    ``check_scratchpad_write`` raises — asserted beside it, byte-for-byte for
+    the refusal — so the after-the-fact line cannot disagree with the write
+    path about what was refused. Only the tail and the address differ, because
+    one sentence is drawn for a cropped card row and the other lands in a
+    refusal (design review round 1, D1: finding first, short tail, pad-relative
+    subject)."""
     root = _pad(tmp_path)
-    segment = f"'build' is a build or dependency directory, not scratch. {SCRATCHPAD_ELSEWHERE}"
-    suffix = f"'.o' is a compiled, archived or model artefact, not scratch. {SCRATCHPAD_ELSEWHERE}"
+    write_segment = (
+        f"'build' is a build or dependency directory, not scratch. {SCRATCHPAD_ELSEWHERE}"
+    )
+    write_suffix = (
+        f"'.o' is a compiled, archived or model artefact, not scratch. {SCRATCHPAD_ELSEWHERE}"
+    )
+    audit_segment = (
+        f"'build' is a build or dependency directory — {SCRATCHPAD_ELSEWHERE_SHORT} (build/x.md)."
+    )
+    audit_suffix = (
+        f"'.o' is a compiled, archived or model artefact — {SCRATCHPAD_ELSEWHERE_SHORT} (art.o)."
+    )
 
-    assert scratchpad_refusal(root / "build" / "x.md", root) == segment
-    assert scratchpad_refusal(root / "art.o", root) == suffix
+    assert scratchpad_refusal(root / "build" / "x.md", root) == audit_segment
+    assert scratchpad_refusal(root / "art.o", root) == audit_suffix
+    assert audit_segment.startswith("'build' is a build or dependency directory")
 
     with pytest.raises(ScratchpadContentError) as excinfo:
         check_scratchpad_write(root / "build" / "x.md", root, "scratchpad://build/x.md")
 
-    assert str(excinfo.value) == f"scratchpad://build/x.md: {segment}"
+    assert str(excinfo.value) == f"scratchpad://build/x.md: {write_segment}"
+
+    with pytest.raises(ScratchpadContentError) as suffix_excinfo:
+        check_scratchpad_write(root / "art.o", root, "scratchpad://art.o")
+
+    assert str(suffix_excinfo.value) == f"scratchpad://art.o: {write_suffix}"
 
 
 def test_scratchpad_refusal_is_silent_where_nothing_is_refused(tmp_path: Path) -> None:

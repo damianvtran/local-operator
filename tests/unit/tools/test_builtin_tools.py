@@ -42,6 +42,7 @@ from local_operator.harness.types import (
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_PATH_ENV,
 )
@@ -3394,8 +3395,11 @@ async def test_a_pad_over_budget_is_flagged_on_the_real_result(
 ) -> None:
     """The channel the guide used to call unpoliced, driven through the REAL
     bash tool: the command took the pad over budget, and the result says so —
-    in the head window (line 2, under the exit code), one line, naming the
-    bytes held and the budget its tools enforce.
+    in the head window (line 2, under the exit code), one line, naming the size
+    held and the budget in the unit a reader parses (MiB once it is one,
+    design review round 1, D2) and claiming exactly what the write path refuses
+    — writes that add (F3: the earlier "refuse further writes" overstated a
+    shrinking overwrite's fate).
 
     Both variable spellings, because either is how a session writes the pad and
     a gate that missed one would be silent exactly half the time.
@@ -3405,9 +3409,8 @@ async def test_a_pad_over_budget_is_flagged_on_the_real_result(
     text = await _run_bash(context, f'mkdir -p "{spelling}/logs"')
 
     expected = (
-        f"[scratch] The pad now holds at least {held:,} bytes — over the "
-        f"{held - 1:,}-byte budget its tools enforce, which now refuse further writes. "
-        f"{SCRATCHPAD_ELSEWHERE}"
+        f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
+        f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
     )
     assert text.splitlines()[1] == expected, text
 
@@ -3428,8 +3431,8 @@ async def test_a_pad_past_its_entry_cap_is_flagged_as_a_tree(tmp_path, monkeypat
     text = await _run_bash(context, 'mkdir "$LOCAL_OPERATOR_SCRATCHPAD/logs"')
 
     expected = (
-        f"[scratch] The pad holds more than {cap:,} entries, a tree rather than a pad. "
-        f"{SCRATCHPAD_ELSEWHERE}"
+        f"[scratch] The pad holds {cap:,}+ entries — a tree rather than a pad; "
+        f"{SCRATCHPAD_ELSEWHERE_SHORT}."
     )
     assert text.splitlines()[1] == expected, text
 
@@ -3442,12 +3445,12 @@ async def test_a_pad_past_its_entry_cap_is_flagged_as_a_tree(tmp_path, monkeypat
             'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build" && echo x > '
             '"$LOCAL_OPERATOR_SCRATCHPAD/build/notes.md"',
             "build/notes.md",
-            "'build' is a build or dependency directory, not scratch.",
+            "'build' is a build or dependency directory",
         ),
         (
             'cp /etc/hosts "$LOCAL_OPERATOR_SCRATCHPAD/art.o"',
             "art.o",
-            "'.o' is a compiled, archived or model artefact, not scratch.",
+            "'.o' is a compiled, archived or model artefact",
         ),
     ],
 )
@@ -3455,15 +3458,15 @@ async def test_a_refused_name_created_by_the_command_is_flagged(
     tmp_path, monkeypatch, command, relative, clause
 ) -> None:
     """The shape arm, on the REAL result and against a HEALTHY pad: the line
-    comes from the name the command created, not from the pad's size — and it
-    is the write tools' own sentence, ``[scratch]``-tagged, so the after arm
-    cannot say something the write path would not."""
+    comes from the name the command created, not from the pad's size — the
+    write tools' own name rule, composed for the card (design review round 1,
+    D1: finding first, the short tail, the pad-relative subject), so the after
+    arm cannot say something the write path would not."""
     context, pad, _ = _scratchpad_context(tmp_path)
 
     text = await _run_bash(context, command)
 
-    target = (pad / relative).resolve()
-    expected = f"[scratch] {target}: {clause} {SCRATCHPAD_ELSEWHERE}"
+    expected = f"[scratch] {clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({relative})."
     assert text.splitlines()[1] == expected, text
     assert (pad / relative).exists(), "the command itself really ran"
 
@@ -3496,7 +3499,7 @@ async def test_the_literal_pad_path_is_named_too(tmp_path, monkeypatch) -> None:
 
     text = await _run_bash(context, f'mkdir -p "{pad}/logs"')
 
-    assert text.splitlines()[1].startswith("[scratch] The pad now holds at least"), text
+    assert text.splitlines()[1].startswith("[scratch] The pad now holds ≥"), text
 
 
 @pytest.mark.asyncio
@@ -3531,6 +3534,149 @@ async def test_a_command_that_does_not_name_the_pad_is_never_walked(tmp_path, mo
     monkeypatch.setattr(builtin, "scratchpad_footprint", spy)
 
     text = await _run_bash(context, "echo hello")
+
+    assert "[scratch]" not in text, text
+    assert walked == []
+
+
+#: The suffix arm's clause, spelled once: every ``.tar.gz`` row below asserts
+#: the same finding and only the derived name differs.
+_TAR_GZ_CLAUSE = "'.tar.gz' is a compiled, archived or model artefact"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_template", "relative", "clause"),
+    [
+        # The pad as `cp`/`mv` DESTINATION — the ordinary way to copy into it —
+        # creates the SOURCE's basename, a name no operand spells, so these
+        # were silent on every pad (review round 1, F2: the silent class was
+        # exactly the refused material, archives and trees, arriving this way).
+        ('cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"', "x.tar.gz", _TAR_GZ_CLAUSE),
+        ('cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD"', "x.tar.gz", _TAR_GZ_CLAUSE),
+        ('mv "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/"', "x.tar.gz", _TAR_GZ_CLAUSE),
+        # The control: an explicit destination file name fired before this
+        # round and still does — the derivation widened the arm, it did not
+        # replace it.
+        (
+            'cp "{iso}/x.tar.gz" "$LOCAL_OPERATOR_SCRATCHPAD/x2.tar.gz"',
+            "x2.tar.gz",
+            _TAR_GZ_CLAUSE,
+        ),
+        # Multiple sources: the FIRST refused derived child is the one the
+        # single line reports.
+        (
+            'cp "{iso}/x.tar.gz" "{iso}/notes.md" "$LOCAL_OPERATOR_SCRATCHPAD/"',
+            "x.tar.gz",
+            _TAR_GZ_CLAUSE,
+        ),
+        # A tree copied into a directory BELOW the pad: the created child
+        # carries the refused parent segment — the tree half of F2's "refused
+        # suffixes and trees copied in that way are silent".
+        (
+            'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build"'
+            ' && cp -R "{iso}/tree" "$LOCAL_OPERATOR_SCRATCHPAD/build"',
+            "build/tree",
+            "'build' is a build or dependency directory",
+        ),
+    ],
+)
+async def test_a_name_copied_into_the_pad_is_flagged(
+    tmp_path, monkeypatch, command_template, relative, clause
+) -> None:
+    """The destination-derivation arm, on the REAL tool: a copy whose
+    destination is the pad root (or a directory below it) lands the source's
+    basename there, so each source's derived child is judged by the same
+    parent-segment + leaf-suffix rule explicit destinations always were.
+
+    The existence check is half the row: the derived NAME has to be the file
+    the command actually created, not a path the audit guessed."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "x.tar.gz").write_bytes(b"x" * 16)
+    (source / "notes.md").write_text("x")
+    (source / "tree").mkdir()
+    (source / "tree" / "leaf.md").write_text("x")
+
+    text = await _run_bash(context, command_template.format(iso=source))
+
+    expected = f"[scratch] {clause} — {SCRATCHPAD_ELSEWHERE_SHORT} ({relative})."
+    assert text.splitlines()[1] == expected, text
+    assert (pad / relative).exists(), "the command itself really ran"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_to_a_directory_outside_the_pad_is_not_derived_into_a_line(
+    tmp_path, monkeypatch
+) -> None:
+    """The derivation's negative half, or the extension would report paths the
+    pad never received: the pad IS named (the gate opens) and the destination
+    is an ordinary directory outside it — nothing may fire, and the result
+    carries no line at all on a healthy pad."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "x.tar.gz").write_bytes(b"x" * 16)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    text = await _run_bash(
+        context,
+        f'cp "{source}/x.tar.gz" "{outside}/" && mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/logs"',
+    )
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["~/", "$HOME/", "${HOME}/"])
+async def test_a_home_spelled_pad_is_flagged(tmp_path, monkeypatch, spelling) -> None:
+    """The gate's third family, on the real result: a leading ``~/``, ``$HOME/``
+    or ``${HOME}/`` spelling NAMES the pad exactly as the variable does — the
+    scan always expanded it (``_pad_target``), but the gate dropped the command
+    first, so the same target fired spelled absolutely and went silent through
+    the home directory (review round 1, F1; the temp nudge's v0.62.3 fix closed
+    this asymmetry for its arm).
+
+    HOME is pointed at the fixture root so the home spelling resolves to the
+    fixture pad on BOTH sides: the scan (``Path.home()``) and the shell that
+    really runs it (the child inherits this process's environment). The file's
+    existence is what keeps a miss loud — if the child had resolved elsewhere,
+    neither the line nor the file would be here."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    text = await _run_bash(context, f"echo x > {spelling}sessions/sess-pad/scratchpad/art.o")
+
+    expected = (
+        f"[scratch] '.o' is a compiled, archived or model artefact — "
+        f"{SCRATCHPAD_ELSEWHERE_SHORT} (art.o)."
+    )
+    assert text.splitlines()[1] == expected, text
+    assert (pad / "art.o").exists(), "the home spelling really landed in the pad"
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelled_command_aimed_elsewhere_is_never_walked(
+    tmp_path, monkeypatch
+) -> None:
+    """F1's other half: widening the gate must not turn every ``~`` into a
+    trigger. A home-spelled command aimed at anything else keeps the zero-work
+    guarantee — the pad is left OVER BUDGET, so silence can only come from the
+    gate, and the spy proves no walk happened."""
+    context, pad, _ = _pad_over_budget(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    walked = []
+    real_footprint = builtin.scratchpad_footprint
+
+    def spy(root):
+        walked.append(root)
+        return real_footprint(root)
+
+    monkeypatch.setattr(builtin, "scratchpad_footprint", spy)
+
+    text = await _run_bash(context, "echo x > ~/notes.md")
 
     assert "[scratch]" not in text, text
     assert walked == []

@@ -2302,6 +2302,70 @@ def test_a_failure_wraps_its_reason_and_still_clips_its_captured_output() -> Non
     assert body[-1].rstrip().endswith("…")
 
 
+#: A real shipped advisory, the shape the pad audit appends to a bash result
+#: (``_pad_budget_line``): 154 cells, remedy at cell 65. Reused by the two rows
+#: below so they describe the same object the shell channel writes.
+PAD_ADVISORY = (
+    "[scratch] The pad now holds ≥257 MiB, over its 256 MiB budget — "
+    "build/dependency trees belong in a git worktree, not the pad; "
+    "writes that add are refused."
+)
+
+
+def _advisory_rows(body: list[str]) -> list[str]:
+    """The advisory block's text: the body indent removed, lines collected
+    from the ``[scratch]`` row to the row before the next section marker."""
+    start = next(index for index, line in enumerate(body) if "[scratch]" in line)
+    rows: list[str] = []
+    for line in body[start:]:
+        text = line[OUTPUT_INDENT:]
+        if text.startswith("--- "):
+            break
+        rows.append(text)
+    return rows
+
+
+def test_a_scratch_advisory_wraps_and_rides_the_advisory_ink() -> None:
+    """D1/D3: the pad advisory is OUR prose on a card of captured bytes.
+
+    Measured on the card before this fix: the per-line crop kept only the
+    prologue at 80/100/150 columns — on the refused-name arm only the pad path
+    was visible — so the remedy was unreachable in every rendered state. The
+    carve-out: ``[scratch]``-leading lines wrap at the measure and ride
+    ``tool.live.advisory``'s warning ink, the pair the live memory advisory was
+    already given, rather than the stdout ``dim`` they were indistinguishable
+    in. The wrap splits on spaces, so joining the rows must restore the line
+    exactly — that is what "wrapped, not cropped" means here."""
+    card = ToolCard("t", "bash", {"command": "cp x.tar.gz $LOCAL_OPERATOR_SCRATCHPAD/"})
+    card.mark_done("exit code: 0\n" + PAD_ADVISORY + "\n--- stdout ---\n(empty)")
+    card.toggle_expanded()
+
+    content = card._build_content(80)
+    rows = _advisory_rows(content.plain.splitlines()[2:])
+
+    assert len(rows) > 1, rows
+    assert " ".join(rows) == PAD_ADVISORY, rows
+    assert all(not row.rstrip().endswith("…") for row in rows), rows
+
+    ink = _style_at(content, "[scratch]")
+    assert ink == bindings.style("tool.live.advisory")
+    assert ink != bindings.style("tool.output.dim")
+
+
+def test_a_scratch_advisory_stays_bounded_on_a_narrow_frame() -> None:
+    """The wrap inherits the reason block's budget: a pathological width spends
+    REASON_MAX_ROWS advisory rows plus the hidden-count marker, never an
+    unbounded block."""
+    card = ToolCard("t", "bash", {"command": "cp x.tar.gz $LOCAL_OPERATOR_SCRATCHPAD/"})
+    card.mark_done("exit code: 0\n" + PAD_ADVISORY + "\n--- stdout ---\n(empty)")
+    card.toggle_expanded()
+
+    rows = _advisory_rows(card._build_content(16).plain.splitlines()[2:])
+
+    assert len(rows) == REASON_MAX_ROWS + 1, rows
+    assert rows[-1].startswith("… "), rows
+
+
 def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:
     """The expansion is the tool's OUTPUT — no synthetic row restating the row.
 

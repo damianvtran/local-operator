@@ -64,19 +64,22 @@ Left in their tree, this is litter they cannot tell apart from output.
   `node_modules`/`target`/`dist`/`out` directory, a
   `*-build`/`_build`/`*-cache`/ `cmake-build-*`/`bazel-*` tree, a
   `libfoo.so.1.2`, a `foo.tar.gz` — and refuse a write that would take the
-  WHOLE pad past its cap. Build it in a git worktree instead (`git worktree add
-  <path>` in a worktree root outside the session store — never in the pad),
-  where the output is wanted and can be rebuilt from the commit
-  rather than carried as bytes. A pad is the wrong home for it both ways: it is
+  WHOLE pad past its cap. Build it in a git worktree instead: run `git worktree
+  add <path>` in a worktree root outside the session store, never in the pad.
+  That is where the output is wanted and can be rebuilt from the commit rather
+  than carried as bytes. A pad is the wrong home for it both ways: it is
   billed to a disk shared with every other session, and it ends with the
   session. **This rule is enforced at the TOOLS, and the shell channel is
   CHECKED AFTER THE FACT.** `write` and `edit` carry their payload inline and
   are refused before the write; `bash` and the `eval` kernel get this pad as a
   path (`$LOCAL_OPERATOR_SCRATCHPAD`) and are never refused — so a
   `pnpm install`, a `cargo build` or a redirect into the pad still succeeds —
-  but a pad-touching command's result carries a `[scratch]` line when it took
-  the pad over its budget or entry cap, or added a refused name. It reports; it
-  cannot undo what a shell has already put there.
+  but a command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its path, or a
+  leading `~/`, `$HOME/` or `${HOME}/` spelling of it) carries a `[scratch]`
+  line when it took the pad over its budget or entry cap, or put a refused name
+  in it — whether the command spelled the name or copied it in. The `eval`
+  kernel gets the budget and entry-cap line only. It reports; it cannot undo
+  what a shell has already put there.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text. (`bash mktemp -d`
   with NO template lands in `$TMPDIR`, the per-user temp directory; a template

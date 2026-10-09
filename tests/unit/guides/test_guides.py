@@ -622,10 +622,15 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     it build output is what let it read as somebody else's problem.
 
     The boundary MOVED when the shell channel gained its own after-the-fact
-    check: the tools still refuse BEFORE the write, while a pad-touching command
-    now gets a ``[scratch]`` line on its result when it took the pad over its
-    budget or entry cap, or added a refused name — reported, never undone. The
-    pin covers that new pair for the same reason it covered the old one.
+    check: the tools still refuse BEFORE the write, while a command that NAMES
+    the pad — the variable, its path, or a leading home spelling — now gets a
+    ``[scratch]`` line on its result when it took the pad over its budget or
+    entry cap, or put a refused name in it (a name the command spelled or one a
+    copy brought in), and the ``eval`` kernel gets the budget and entry-cap
+    line only. The precise trigger and the channel split are pinned together
+    with the claim (design review round 1, D4): "pad-touching" read as every
+    command, and the reader who sees no line on an alias spelling or a
+    Python-side creation must not take that for a clean run.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -639,8 +644,12 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
     # The boundary: a write is refused before it lands; the shell channel is
-    # checked AFTER the command and can only be reported on.
+    # checked AFTER the command and can only be reported on — and the check's
+    # trigger is the pad being NAMED, not any command that touched it.
     assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
+    assert "a command that names the pad" in collapsed
+    assert "copied it in" in collapsed
+    assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
     assert "it cannot undo" in collapsed
 
 
