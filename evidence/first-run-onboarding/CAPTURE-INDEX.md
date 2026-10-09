@@ -66,3 +66,25 @@ The rigs live in the authoring session's scratchpad rather than `scripts/`
 because they are PR evidence, not reusable tooling; `scripts/shot_login.py`,
 `scripts/shot_welcome.py` and `scripts/visual_gallery.py` in the tree are the
 reusable capture harnesses they build on.
+
+## Round 3f — the `fal` rows (design review, head `b134200e5c`)
+
+Six frames, captured from the PR worktree's real `OperatorApp` in an isolated
+`HOME` (`scripts.visual_capture.save_capture`), for the row `main` added after
+this branch's last merge: `fal` (media-only, image/video) covered by the login
+catalogue's three maps. Rig: `shot_fal.py` in the reviewing session's
+scratchpad; every pair is settled (consecutive captures byte-identical).
+
+| # | File | Shows |
+| --- | --- | --- |
+| 1 | `frames/r3f-fal-setup-picker-tail-80` | setup state, `/login` picker scrolled to the bottom: `fal` absent, list ends at `Your endpoint` — no gap, no dangling group |
+| 2 | `frames/r3f-fal-setup-listing-80` | setup state, bare `/login` listing: no `Not for chat` group |
+| 3 | `frames/r3f-fal-picker-tail-80` | configured install, `/login` picker at the bottom: `FAL — Media only; not for chat — needs login`, whole, in context |
+| 4 | `frames/r3f-fal-picker-tail-120` | the same at 120 columns |
+| 5 | `frames/r3f-fal-listing-80` | bare `/login` listing: `connect an AI account — Not for chat` with `FAL` last |
+| 6 | `frames/r3f-fal-listing-120` | the same at 120 columns |
+
+`measured-logs/r3f-fal-measurements.json` carries the numbers behind frames
+3-5: per-scene screen size, picker width, primary/detail column cells, match
+count, and the fal row's painted string (80: 24-cell description in a 37-cell
+allowance; 120: 41-cell allowance — both whole, no ellipsis).
