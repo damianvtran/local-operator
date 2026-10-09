@@ -162,9 +162,14 @@ def test_fraction_accepts_only_a_real_fraction(fraction: object, expected: float
     ("position", "expected"),
     [(0, 0), (3, 3), ("3", None), (-1, None), (2.5, None), (True, None)],
 )
-def test_queue_position_accepts_only_a_non_negative_int(
+def test_queue_position_accepts_a_non_negative_int_deliberately(
     position: object, expected: int | None
 ) -> None:
+    """0 is a REAL reading, not a malformed one: FAL documents the field as
+    "the number of requests ahead of yours, present only while IN_QUEUE", so
+    zero means nothing is ahead (reviewer F2). Negative, non-int and bool
+    values still read as absent.
+    """
     view = imagegen.live_from_details({"queue_position": position})
     assert view.queue_position == expected
 
@@ -257,7 +262,9 @@ def test_the_determinate_bar_is_proportional_and_labelled() -> None:
     assert imagegen.progress_graphic(0.42).plain == "▰▰▰▰▱▱▱▱▱▱ 42%"
     assert imagegen.progress_graphic(0.0).plain == "▱" * 10 + " 0%"
     assert imagegen.progress_graphic(1.0).plain == "▰" * 10 + " 100%"
-    assert imagegen.progress_graphic(0.99).plain == "▰" * 10 + " 99%"
+    # The fill floors to the label's own percent, so at 99% the last cell
+    # stays hollow — the bar can never read ahead of its number (reviewer F3).
+    assert imagegen.progress_graphic(0.99).plain == "▰" * 9 + "▱" + " 99%"
 
 
 def test_the_canvas_is_the_same_footprint_as_the_bar(
