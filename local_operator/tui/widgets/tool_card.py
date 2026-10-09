@@ -1933,6 +1933,7 @@ class ToolCard(ExpandableActionBlock):
         cut_off: bool = False,
         reason: str = "",
         measured_s: float | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         """Turn ended before this tool completed: dim state, and WHY it ended.
 
@@ -1957,6 +1958,12 @@ class ToolCard(ExpandableActionBlock):
         its own start still prints its own elapsed below, which is the one clock
         here that is true.
 
+        ``details`` is the result payload the END EVENT carried, read through
+        the imagegen adapter exactly as :meth:`mark_done` and
+        :meth:`mark_failed` read it: the finished conflict is settle-class
+        agnostic, and a payload that only ever arrived with the result must
+        reach the expansion on THIS arm too (reviewer F1 / QA Q1).
+
         ``reason`` is the harness's own sentence for why the call was cut short
         (an abort receipt, a skip verdict). It is stored to the EXPANSION rather
         than to the status cell for the reason :meth:`_outcome_runs` documents:
@@ -1967,6 +1974,11 @@ class ToolCard(ExpandableActionBlock):
         """
         was_composing = self._state in ("composing", "queued")
         self._settle_live()
+        # The result's payload, on the arm the END EVENT drove — read exactly
+        # as done and failed read it, because a payload that arrived only with
+        # the result must reach the expansion here too (the finished conflict
+        # is not error-only; reviewer F1 / QA Q1). Retirement passes nothing.
+        self._absorb_imagegen_payload(details)
         if was_composing:
             # The call was never sent, so the row must stop saying it is being
             # written. It keeps the size as a record of how far the model got.
@@ -2443,6 +2455,28 @@ class ToolCard(ExpandableActionBlock):
 
     # -- the imagegen variant's timers and fields ---------------------------
 
+    def _absorb_imagegen_payload(self, details: dict[str, Any] | None) -> None:
+        """Retain the imagegen payload a settle's own ``details`` carry.
+
+        Called from EVERY settle class that can carry one — done, failed and
+        interrupted — because the finished conflict (``media_already_completed``)
+        is not an error-class fact: the wire freeze may settle it as done,
+        interrupted or error, and the note must survive whichever arm lands
+        (reviewer F1 / QA Q1). ``_settle_live`` already retained anything the
+        live updates carried; this read runs after it, so a details-carried
+        payload wins as the fresher account — the precedence
+        :meth:`_absorb_result` documents. Retirement
+        (``_retire_live_tool_cards``) has no result to read and therefore
+        passes nothing; whatever the live updates retained is all there is.
+        """
+        if not self._is_imagegen():
+            return
+        settled = imagegen_mod.live_from_details(details)
+        if settled.error:
+            self._imagegen_error = settled.error
+        if settled.error_type:
+            self._imagegen_error_type = settled.error_type
+
     def _is_imagegen(self) -> bool:
         """Whether this card wears the image-generation live variant.
 
@@ -2792,18 +2826,11 @@ class ToolCard(ExpandableActionBlock):
         Write/edit tools prefer their rendered diff; all other tools expand to
         cleaned result text.
         """
-        # The imagegen variant's SETTLED read of the adapter: the result's
-        # details may carry the provider's error payload where the live updates
-        # never did (and vice versa — `_settle_live` retained the live one, and
-        # this line runs after it, so a details-carried error wins as the
-        # fresher account). Parsed at the settlement's own entry point so both
-        # carriers reach the failure body through one field.
-        if self._is_imagegen():
-            settled = imagegen_mod.live_from_details(details)
-            if settled.error:
-                self._imagegen_error = settled.error
-            if settled.error_type:
-                self._imagegen_error_type = settled.error_type
+        # The imagegen variant's SETTLED read of the adapter happens through
+        # the shared helper, which every settle class calls — see its
+        # docstring for the precedence and why the finished conflict cannot
+        # be an error-arm-only concern.
+        self._absorb_imagegen_payload(details)
         self._added, self._removed = _diff_counts(details)
         # Reset per result, like the flags below and for the same reason: a card
         # written once is still rebuilt from a payload, and neither of these may
@@ -3270,6 +3297,18 @@ class ToolCard(ExpandableActionBlock):
             self._append_output_body(row, width)
         else:
             self._append_input_body(row, width)
+        # The imagegen payload note rides EVERY settle class (reviewer F1 /
+        # QA Q1): the finished conflict may arrive as done, interrupted or
+        # error — the wire freeze decides — and the note must paint on any of
+        # the three. The error/interrupted arm paints it inside its dedicated
+        # body above; success owns no other imagegen body, so its note lands
+        # here, last, after the standard receipt block.
+        if self._state == "success" and self._is_imagegen():
+            note = imagegen_mod.provider_error_note(
+                self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
+            )
+            if note:
+                self._append_imagegen_note(row, width, note[0])
         return row
 
     def _append_live_body(self, row: Text, width: int) -> None:
@@ -3450,26 +3489,49 @@ class ToolCard(ExpandableActionBlock):
         the generic body could not already carry the payload
         (`imagegen.provider_error_note`, re-derived here rather than threaded so
         the deciding predicate and the painted text cannot disagree).
+
+        The FINISHED conflict takes the other shape: no promoted-reason lead
+        and no error furniture at all, whatever arm settled it (reviewer F1:
+        an error receipt must not frame this type as an error). The note is the
+        account; the result's head line is already the row's status text, and
+        any remaining result lines stay available as captured rows.
         """
         dim = bindings.style("tool.output.dim")
-        ink = bindings.style("tool.output.error")
+        # State-derived, the same rule the plain-result body uses: captured
+        # rows wear the failure ink only on the ERROR arm. The interrupted arm
+        # keeps its dim tier (the \u2298 receipt), so a carried sentence there
+        # reads as the record it is, not as a fresh failure.
+        ink = bindings.style("tool.output.error") if self._state == "error" else dim
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        glyph, lead_ink = self._promoted_paint(ink)
-        self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         note = imagegen_mod.provider_error_note(
             self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
         )
+        if note and note[1] == imagegen_mod.ERROR_KIND_FINISHED:
+            self._append_imagegen_note(row, width, note[0])
+            self._append_captured_rows(row, line_width, indent, dim, ink)
+            return
+        glyph, lead_ink = self._promoted_paint(ink)
+        self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         if note:
-            text, kind = note
-            if kind == imagegen_mod.ERROR_KIND_FINISHED:
-                # One fixed, short sentence in the neutral ink: the conflict
-                # has no wrap budget to spend and no error glyph to wear.
-                row.append("\n" + indent, style=dim)
-                row.append(truncate_cells(text, line_width), style=dim)
-            else:
-                self._append_wrapped_rows(row, text, line_width, indent, dim, ink, glyph=ICON_ERROR)
+            self._append_wrapped_rows(row, note[0], line_width, indent, dim, ink, glyph=ICON_ERROR)
         self._append_captured_rows(row, line_width, indent, dim, ink)
+
+    def _append_imagegen_note(self, row: Text, width: int, text: str) -> None:
+        """One neutral note line under a settled imagegen body.
+
+        The payload note (``already finished``, or a carried sentence on a
+        non-error arm) makes NO outcome claim — the settle's own receipt does
+        that — so it never wears a glyph or the danger ink, and it is one
+        unwrapped line because both callers carry a status token, not prose.
+        (A DANGER-kind sentence on the error arm keeps its wrapped ``\u2717``
+        block instead — see :meth:`_append_imagegen_failure_body` — where the
+        card is claiming failure anyway.)
+        """
+        dim = bindings.style("tool.output.dim")
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        row.append("\n" + " " * OUTPUT_INDENT, style=dim)
+        row.append(truncate_cells(text, line_width), style=dim)
 
     def _append_input_body(self, row: Text, width: int) -> None:
         """The arguments the call was made with, one labelled block per key.
