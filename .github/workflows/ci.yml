@@ -132,6 +132,7 @@ jobs:
       audit: ${{ steps.classify.outputs.audit }}
       cli: ${{ steps.classify.outputs.cli }}
       server: ${{ steps.classify.outputs.server }}
+      i18n: ${{ steps.classify.outputs.i18n }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -381,6 +382,40 @@ jobs:
 
       - name: Run isort
         run: isort --check .
+
+  # The i18n gate: the committed `Intl` tables and per-key modules must match
+  # their generator, and the string ratchet + catalogue parity must pass. Both
+  # scripts are stdlib-only and the generator needs only the runner's Node, so
+  # this job installs NOTHING — it cannot fail (or go slow) for install
+  # reasons, which makes it the cheapest real gate in this workflow.
+  i18n:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.i18n != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          # The emitter calls `Intl` on the same Node major the mobile-web
+          # workflow uses, so the generated tables and the TS surfaces are
+          # anchored to one `Intl`.
+          node-version: '24'
+
+      - name: Generated artifacts are current
+        run: python scripts/i18n/generate.py --check
+
+      - name: Ratchet and catalogue parity
+        run: python scripts/i18n/check.py
 
   type-check:
     needs: [changes]
