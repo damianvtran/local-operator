@@ -3986,12 +3986,25 @@ class Session:
         self._resume_catchup_text: str | None = None
         self._resume_catchup_sent = False
         #: §14.4: the OR of the folded schedules' notify bits, carried on the
-        #: aggregated catch-up delivery. False until a catch-up is prepared.
+        #: aggregated catch-up delivery. False until a catch-up is prepared;
+        #: re-read from the LIVE rows at take time (review round 2, R9) so the
+        #: legacy-row upgrade landing between load and take is not missed by
+        #: the install's first catch-up.
         self._resume_catchup_notify = False
-        #: Ids of the overdue schedules the catch-up text folds. The shim
-        #: swallows only these (see _deliver_wake_catchup); empty when there
-        #: is no catch-up pending, so the shim is then a pure passthrough.
+        #: Ids of the overdue schedules the catch-up text folds. The take
+        #: stamps them into the message and then CLEARS this set (review
+        #: round 2, R7): nothing else may keep swallowing fires for them, or
+        #: the row's next REAL occurrence matches a stale id and disappears
+        #: (a whole day's check-in lost, silently). Empty when there is no
+        #: catch-up pending.
         self._resume_catchup_ids: set[str] = set()
+        #: The load-time fires the catch-up still owes a swallow. Seeded with
+        #: the fold ids at prepare; each fire that matches consumes its id
+        #: ONCE (see :meth:`_deliver_wake_catchup`). Kept SEPARATE from the
+        #: fold set so the take can clear the fold without un-suppressing the
+        #: remaining same-batch phantom fires — and so the next occurrence,
+        #: one interval later, matches neither set and delivers normally.
+        self._resume_catchup_phantoms: set[str] = set()
         self._load_wake_schedules()
         # Rebuild this session's wake-index entry from the transcript on EVERY
         # open. The index (``local_operator.wakes.store``) is a derived file
@@ -20247,8 +20260,14 @@ class Session:
         # The ids the catch-up text AGGREGATES. The shim uses this to swallow
         # only these schedules' fires — a wake that comes due later is NOT in
         # the folded text, so swallowing it would lose its message entirely
-        # (review round 3, M1).
+        # (review round 3, M1). The take clears it once the ids are stamped
+        # into the message (review round 2, R7); the leftover load-time fires
+        # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        # The swallow bookkeeping starts here: every folded row still OWES its
+        # load-time fire (the pump re-armed each to now + grace), and the shim
+        # must swallow each exactly once — see _deliver_wake_catchup.
+        self._resume_catchup_phantoms = set(self._resume_catchup_ids)
         # §14.4: the folded delivery carries the OR of the aggregated
         # schedules' notify bits, so a catch-up of reminders the user asked to
         # be told about keeps notifying while an all-quiet set stays quiet.
@@ -20277,6 +20296,23 @@ class Session:
         if catchup is not None:
             self._deliver_resume_catchup(catchup)
 
+    def _catchup_notify_from_live_rows(self) -> bool:
+        """The fold's notify intent, re-read from the scheduler's CURRENT rows.
+
+        Ours to keep honest across the load→take window (review round 2, R9):
+        ``_prepare_missed_wake_catchup`` computes the OR from the row objects
+        load returned, and a legacy cadence row (``notify=False``) is upgraded
+        in place by the first reconcile AFTER load — so the first catch-up an
+        upgraded install ever sends would carry the stale False and stay
+        silent one fire longer. Never raises: an unreadable scheduler is no
+        reason to change a delivery's shape, so the prepared value stands.
+        """
+        try:
+            live = {row.id: row for row in self._wake.schedules}
+        except Exception:  # noqa: BLE001 — see the docstring
+            return False
+        return any(bool(live[i].notify) for i in self._resume_catchup_ids if i in live)
+
     def _take_resume_catchup(self) -> CustomMessage | None:
         """Build the catch-up message once grace has passed, else None.
 
@@ -20295,10 +20331,13 @@ class Session:
         text, self._resume_catchup_text = self._resume_catchup_text, None
         self._resume_catchup_sent = True
         self._missed_wake_occurrences = {}
-        # The fold set is NOT cleared here: the catch-up shim consumes it one
-        # fire at a time (several folded fires arrive in the same pump), and
-        # a later PUNCTUAL fire of a recurring schedule must find its id gone
-        # so it delivers normally instead of being swallowed or doubled.
+        # The notify bit is re-read from the LIVE rows first (review round 2,
+        # R9): prepare computed it from the rows LOAD found, and the legacy-row
+        # upgrade runs on the first reconcile AFTER load — without this the
+        # install's first catch-up would carry the pre-upgrade False.
+        self._resume_catchup_notify = (
+            self._resume_catchup_notify or self._catchup_notify_from_live_rows()
+        )
         # The receipt event fires HERE, at take time, so both delivery modes
         # (own turn via ``_deliver_resume_catchup``, or inlined ahead of a user
         # turn in ``prompt``) paint the expandable catch-up line. It is a
@@ -20307,7 +20346,7 @@ class Session:
         # (``wake_catchup``), so this event is the only place the missed wakes
         # are surfaced.
         self._emit_nowait(WakeDeliveredEvent(text=text, catchup=True))
-        return CustomMessage(
+        message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
             details={
@@ -20319,12 +20358,24 @@ class Session:
                 # aggregates several rows into one message, and the Aida banner
                 # veto needs the ids to tell her check-in catch-up (all
                 # cadence-family → reply-aware) from any fold that includes a
-                # user-armed wake (→ never silenced). Stamped at TAKE time,
-                # when the fold set is still complete: the per-fire discards in
-                # ``_deliver_wake_catchup`` only start after the message exists.
+                # user-armed wake (→ never silenced). Stamped HERE, before the
+                # set is spent below — this is the only reader of the fold set
+                # once the take has run.
                 "wake_ids": sorted(self._resume_catchup_ids),
             },
         )
+        # THE FOLD IS SPENT HERE, and only here (review round 2, R7) — AFTER
+        # the stamp above, the one place the folded ids are needed. From this
+        # point on no fire may be swallowed BY THE FOLD: a stale id left
+        # behind is matched by the row's NEXT REAL occurrence (24 h for the
+        # cadence), whose fire takes the swallow branch — no turn, no banner,
+        # no error, one whole day's check-in lost until the one after. The
+        # load-time fires still owed (the pump re-armed each folded row to
+        # now + grace) stay covered by ``_resume_catchup_phantoms``, consumed
+        # one fire at a time — so a same-batch fire arriving after this take
+        # is still swallowed, while an occurrence one interval later is not.
+        self._resume_catchup_ids = set()
+        return message
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
         """Deliver the catch-up as its own turn (or a steering message mid-turn).
@@ -20347,15 +20398,16 @@ class Session:
     async def _deliver_wake_catchup(self, due: DueWake) -> None:
         """Deliver hook while the resume catch-up is pending.
 
-        Swallows ONLY the fires the catch-up text aggregates (``due.schedule.id
-        in _resume_catchup_ids``): those are covered by the folded prompt, and
-        the schedule is still advanced + persisted by pump, so nothing
-        re-fires. Any OTHER fire — one that came due after load, so its message
-        is not in the folded text — falls through to a normal delivery;
-        swallowing it would lose the message entirely (review round 3, M1).
-        After the catch-up is sent the hook is a plain passthrough.
+        Swallows ONLY the catch-up's load-time fires (``due.schedule.id in
+        _resume_catchup_phantoms``): those are covered by the folded prompt,
+        and the schedule is still advanced + persisted by pump, so nothing
+        re-fires. Any OTHER fire — one that came due after load, so its
+        message is not in the folded text — falls through to a normal
+        delivery; swallowing it would lose the message entirely (review round
+        3, M1). Once every phantom has fired the hook is a plain passthrough,
+        and the row's NEXT occurrence delivers normally (review round 2, R7).
         """
-        if due.schedule.id in self._resume_catchup_ids:
+        if due.schedule.id in self._resume_catchup_phantoms:
             # The fire is folded into the catch-up text, so it never gets its
             # own delivery — pump already advanced the schedule. If no other
             # trigger has delivered the catch-up yet, deliver it HERE, on the
@@ -20367,29 +20419,18 @@ class Session:
             # calls). A resumed TUI session delivers the catch-up ahead of
             # its first prompt instead.
             #
-            # The fold set is consumed PER FIRE, not cleared at take: several
-            # folded fires arrive in the SAME pump (every overdue schedule was
-            # re-armed to the same deadline), and the second must still be
-            # swallowed after the first delivered the catch-up — while a
-            # LATER punctual fire of a recurring schedule, whose id has been
-            # consumed by then, delivers normally instead of being lost.
+            # THE PHANTOM IS CONSUMED PER FIRE, the fold only by its take
+            # (review round 2, R7): several folded fires arrive in the SAME
+            # pump (every overdue schedule was re-armed to the same deadline)
+            # and each must be swallowed exactly once — after the first
+            # delivered the catch-up, the rest still must not deliver (their
+            # content is in the folded text), while an occurrence one
+            # interval later matches neither set and delivers normally.
             if not self._resume_catchup_sent:
                 catchup = self._take_resume_catchup()
                 if catchup is not None:
                     self._deliver_resume_catchup(catchup)
-            # AN ID IS DROPPED ONLY ONCE THE FOLD IS SECURED (QA round 1, Q1):
-            # this fire can land a millisecond BEFORE the grace deadline (the
-            # re-armed due in ``wake`` and ``_resume_grace_ends_ms`` here are
-            # stamped from two different clocks), so the take above returns
-            # None with the delivery left to the grace timer. Discarding
-            # unconditionally then built the catch-up message from an EMPTY
-            # set — ``wake_ids: []`` — and a quiet day banner-ed, because the
-            # veto read the empty fold as "no Aida rows".
-            # ``_resume_catchup_sent`` is the signal the take has happened:
-            # only then does the message exist with every remaining id, and
-            # only then is this row's id spent.
-            if self._resume_catchup_sent:
-                self._resume_catchup_ids.discard(due.schedule.id)
+            self._resume_catchup_phantoms.discard(due.schedule.id)
             return
         await self._deliver_wake(due)
 

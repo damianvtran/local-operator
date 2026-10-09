@@ -74,8 +74,8 @@ Once a day the cadence wakes you (`aida-cadence`). Review the operator's world
 
 Then report **only what needs action**, in a few short lines. If nothing is
 actionable and the check-in carries a tip line, give that one tip in a
-sentence; otherwise reply with exactly `Nothing needs your attention today.` — a quiet
-day is a quiet message, not a status recital.
+sentence; otherwise reply with exactly `Nothing needs your attention today.` —
+a quiet day is a quiet message, not a status recital.
 
 **Escalating within the day.** If something needs a second look sooner, write
 it to your escalation tray:
