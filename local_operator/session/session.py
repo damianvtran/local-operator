@@ -13963,6 +13963,21 @@ class Session:
         """
         from local_operator.hook_forwarding import HookIdentity, run_post_tool_hooks
 
+        # CODE-REQUEST DETECTION rides this seam rather than a hook of its own, and it
+        # is deliberately independent of the operator's hooks: the interesting fact is
+        # "this call created PR #1904", which must be recorded whether or not a hook is
+        # configured. It writes one small ledger row and returns no notes, so the tool
+        # result the model sees is byte-identical to what it would have been; a detector
+        # failure is swallowed exactly as the forwarded hooks' is (AGENTS.md: a hook
+        # must never break a turn).
+        #
+        # OFF THE EVENT LOOP: the detector's inputs — the gh/glab/tea config and the MCP
+        # server list — are file reads with their own caches, and the row append is a
+        # write. Both hop to a worker thread so a cold cache costs latency, never the
+        # loop; the whole path is also gated by ``could_matter`` inside the worker, so an
+        # ordinary tool result costs one thread hop and no work.
+        await self._detect_code_requests(tool_name, args, call_id, result)
+
         is_child = self._job_id is not None
         transcript_path: str | None = None
         with contextlib.suppress(Exception):
@@ -13986,6 +14001,40 @@ class Session:
             is_error=result.is_error,
             duration_s=result.duration_s,
         )
+
+    async def _detect_code_requests(
+        self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
+    ) -> None:
+        """Record any code request this tool result proves the session opened or acted on.
+
+        The detection itself (``code_requests/hook.py``) owns every rule; this method is
+        the session's half: what it may write, and where it must NOT intrude. Nothing is
+        written for a session without a transcript directory (a speculative runtime), and
+        a failure is a debug line rather than a warning, because an unknown session id or
+        a read-only directory is not an operator-visible fault.
+        """
+        try:
+            if self._transcript.directory is None:
+                return
+            from local_operator.code_requests import hook as code_requests_hook
+
+            context = await code_requests_hook.load_context_async(self._cwd)
+            servers = await asyncio.to_thread(code_requests_hook.load_mcp_servers, self._cwd)
+            detections = code_requests_hook.classify(
+                self,
+                tool_name,
+                args,
+                result.text,
+                is_error=result.is_error,
+                context=context,
+                mcp_servers=servers,
+            )
+            if detections:
+                await code_requests_hook.record_detections(
+                    self, detections, tool=tool_name, call_id=call_id
+                )
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks a turn
+            logger.debug("code-request detection skipped", exc_info=True)
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
