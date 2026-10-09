@@ -506,3 +506,72 @@ def test_the_store_publishes_rows_and_child_costs_that_sum_to_the_ledger() -> No
         state.subagent_cost or 0.0
     )
     assert sum(state.child_costs.values()) == pytest.approx(state.subagent_cost or 0.0)
+
+
+# -- review round 1 ----------------------------------------------------------------
+
+
+def test_the_harvest_tolerates_id_less_rows_from_reduced_hosts() -> None:
+    """R1/Q1: the 1 Hz poll must not raise on a job object that carries no ``id``.
+
+    Reduced/embedder hosts and the notify-wiring doubles hand the harvest bare
+    ``SimpleNamespace`` rows; main read ``job.id`` only for a priced row, and an
+    AttributeError on the timer takes the band repaint down with it.
+    """
+
+    class _Session(FakeSession):
+        @property
+        def model_label(self) -> str:
+            return "radient/auto"
+
+    session = _Session()
+    unreported = SimpleNamespace(type="task", status="running", queued=True)
+    priced = SimpleNamespace(
+        usage=Usage(input_tokens=1_000_000), model_label="radient/auto", descendant_usage=[]
+    )
+    session.jobs = SimpleNamespace(list=lambda: [unreported, priced])  # type: ignore[assignment]
+    app = OperatorApp(_async_factory(session))
+    app._session = session
+    with _priced():
+        app._harvest_subagent_costs()
+    assert app._subagent_costs == {}
+
+
+def test_a_malformed_descendant_keeps_the_rows_own_spend_as_a_lower_bound() -> None:
+    """R5: one unreadable descendant must not erase the row's own usage."""
+    job = SimpleNamespace(
+        id="p",
+        usage=Usage(input_tokens=1_000_000, provider="radient", model_id="auto"),
+        model_label="radient/auto",
+        descendant_usage=[
+            {"input_tokens": "not-a-number"},
+            Usage(input_tokens=1_000_000, provider="anthropic", model_id="haiku"),
+        ],
+        child_jobs=None,
+    )
+    with _priced():
+        cost, lower = job_subtree_cost(job, default_model_label="radient/auto")
+    assert cost == pytest.approx(2.0)  # $1 own + $1 readable descendant
+    assert lower is True
+
+
+def test_a_cold_viewer_parent_with_descendants_but_no_usage_is_still_priced() -> None:
+    """R4: a parent that never reported usage itself but settled descendants."""
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.session import _subagent_job_row
+
+    parent = _row(
+        "p",
+        model="radient/auto",
+        status="completed",
+        descendants=[Usage(provider="anthropic", model_id="m", estimated_usd_cost=1.25)],
+    )
+    rows = AttachedSession._durable_roster(
+        cast(Any, SimpleNamespace()),
+        FrontendSessionState(session_id="s", epoch="e"),
+        payload={"jobs": [_subagent_job_row(parent)]},
+    )
+    (cold,) = rows
+    assert cold.direct_cost == pytest.approx(1.25)
+    assert cold.direct_cost_knowledge == CostKnowledge.EXACT

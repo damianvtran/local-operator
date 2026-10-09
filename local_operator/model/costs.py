@@ -232,11 +232,13 @@ def subtree_components(job: Any) -> SubtreeComponents:
     """
     from local_operator.harness.jobs import job_subtree_summary
 
+    problems: list[str] = []
     try:
-        return SubtreeComponents(job_subtree_summary(job))
+        return SubtreeComponents(job_subtree_summary(job, problems=problems), not problems)
     except Exception:  # noqa: BLE001 — the live branch failed; keep the settled part
+        problems = []
         try:
-            return SubtreeComponents(job_subtree_summary(job, live=False), False)
+            return SubtreeComponents(job_subtree_summary(job, live=False, problems=problems), False)
         except Exception:  # noqa: BLE001
             return SubtreeComponents([], False)
 

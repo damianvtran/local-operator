@@ -310,6 +310,12 @@ LABEL_FLOOR = 12
 #: and one digit, appended to the LABEL rather than given a column of its own:
 #: it is a property of the name (see :func:`_lay_out`), and a second column
 #: would re-solve a layout that already has a ladder for the label.
+#:
+#: A row carrying this mark shows its WHOLE subtree's spend in its cost cell (its
+#: own calls plus every nested child, running or settled), so the rows on a page
+#: add up to the footer's subagent total; the context and elapsed cells stay the
+#: row's own. No separate glyph says so — the trailing ``+`` already means "lower
+#: bound" and this mark already means "there is a level below".
 CHILDREN_MARKER = "⊞"
 
 #: The widest a SCOPE label may be before the header truncates it with `…`.
