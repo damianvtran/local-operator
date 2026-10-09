@@ -435,6 +435,12 @@ final, and the 2026-10-08 UTC bucket (which is where the real-key run's
 | `CAN1-DataTransfer-Out-Bytes` | 0.0003737075 GB | $0.0000336347 |
 | `CAN1-DataTransfer-Regional-Bytes` | 0.0091578598 GB | $0.0000915783 |
 | `CAN1-DataTransfer-In-Bytes` | 0.0623752751 GB | $0 |
+| `CAN1-USE1-AWS-Out-Bytes` | 0.0000216216 GB | $0.0000004324 |
+| `CAN1-USE1-AWS-In-Bytes` | 0.0000173962 GB | $0 |
+
+The two `CAN1-USE1-AWS-*` rows are the task's cross-region traffic (`USE1` is `us-east-1`, so
+this is not the intra-region `CAN1-DataTransfer-*` pair); being non-Fargate usage they sit in the
+`Usage` record type alongside the three `CAN1-DataTransfer-*` rows.
 
 ```sh
 aws ce get-cost-and-usage --time-period Start=2026-10-05,End=2026-10-09 \
@@ -451,7 +457,7 @@ exactly the day's `SavingsPlanCoveredUsage` record, so the rate and the billed h
 | --- | --- |
 | `SavingsPlanCoveredUsage` | **$0.0463253312** |
 | `SavingsPlanNegation` | **−$0.0463253335** |
-| `Usage` (the data-transfer rows above, and only those) | $0.0001256454 |
+| `Usage` (the five data-transfer rows above — the three `CAN1-DataTransfer-*` and the two cross-region `CAN1-USE1-AWS-*`) | $0.0001256454 |
 | **ECS service total, 2026-10-07** | **$0.0001256431** |
 
 **An existing Savings Plan paid for the Fargate charge.** `SavingsPlanCoveredUsage` is the

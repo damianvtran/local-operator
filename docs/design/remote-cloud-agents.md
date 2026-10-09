@@ -647,12 +647,13 @@ reconciliation, commands and caveats in
 [remote-cloud-agents-poc-results.md](remote-cloud-agents-poc-results.md) § Test 6).** The POC's
 whole billed Fargate usage is the single UTC day `2026-10-07`: **0.5333 task-hours**, an
 on-demand-equivalent **$0.0463253312** that an existing Savings Plan covered and negated to a
-**net unblended $0.0001256431**. The day's `owner=lopdev` total is `$0.0514468804` (≈$0.0051 of
-it non-Fargate — NAT, S3, ECR, Secrets Manager, logs), and the only POC-specific tag that
-attributes anything is that one: `lop-poc=true` returns $0 on every day, so the `lop-poc` budget
-is inert and `lop-poc-fargate` is the sole working backstop. So the estimate above is a ceiling,
-not a bill: the POC bought 0.53 task-hours, not the ten the table prices, and the plan paid for
-them.
+**net unblended $0.0001256431**. The day's `owner=lopdev` total is `$0.0514468804`, ≈$0.0050 of
+it outside ECS (NAT, S3, ECR, Secrets Manager, logs); the day's net cash is ≈$0.0051 once the
+`SavingsPlanNegation` is added back, only ≈$0.0001 of that Fargate compute. The only POC-specific
+tag that attributes anything is that one: `lop-poc=true` returns $0 on every day, so the `lop-poc`
+budget is inert and `lop-poc-fargate` is the sole working backstop. So the estimate above is a
+ceiling, not a bill: the POC bought 0.53 task-hours, not the ten the table prices, and the plan
+paid for them.
 
 ---
 
