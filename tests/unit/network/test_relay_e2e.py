@@ -10,6 +10,7 @@ human-confirmed pairing), R4 (zero trust: an unauthorised frame is refused) and 
 from __future__ import annotations
 
 import ast
+import json
 import socket
 import threading
 import time
@@ -2475,3 +2476,60 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
     # The local half, unconditionally: stopped trusting, secret gone, trail kept.
     assert store.load(record.network_id, server_b.root).trust == "disconnected"
     assert not store.secrets_path(record.network_id, server_b.root).exists()
+
+
+# ---------------------------------------------------------------------------
+# Record compression over a REAL relay-to-relay link (wire.py "Record compression")
+# ---------------------------------------------------------------------------
+
+
+def _big_ping(pad_bytes: int = 200_000) -> dict[str, Any]:
+    # A ping is answered by the peer's read loop alone (``PeerLink._handle``), so the
+    # request exercises the full production path — writer thread, ``seal``, socket,
+    # ``FrameReader``, ``open``, dispatch, ack — without touching any op's logic. The
+    # pad is repetitive on purpose: that is the shape of the journal pages this serves.
+    return {"op": "ping", "req": 77, "pad": "lorem ipsum dolor sit amet " * (pad_bytes // 27)}
+
+
+def test_a_big_frame_crosses_a_real_link_compressed_when_both_ends_negotiate_it(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record, link = _live_link(devices, monkeypatch)
+    try:
+        assert link.codec.compression is True
+        assert wire.ZLIB_RECORDS_V1 in link.capabilities
+        before = link.bytes_out
+        frame = _big_ping()
+        plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
+        reply = link.request(frame, timeout=10.0)
+        assert reply is not None and reply["op"] == "ack", reply
+        # The peer's read loop decoded it (it answered), and far fewer bytes crossed.
+        assert link.bytes_out - before < plaintext // 5
+    finally:
+        link.close("test")
+
+
+def test_a_link_to_a_peer_without_the_capability_carries_the_plain_bytes(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old-peer cell at relay level: neither end advertises the capability (both
+    relays are this build, so the LIST is what is narrowed — the same thing an old
+    build's list is), and a big frame goes out at its full plaintext size."""
+    monkeypatch.setattr(
+        wire,
+        "LINK_CAPABILITIES",
+        tuple(c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1),
+    )
+    _record, link = _live_link(devices, monkeypatch)
+    try:
+        assert link.codec.compression is False
+        before = link.bytes_out
+        frame = _big_ping()
+        plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
+        reply = link.request(frame, timeout=10.0)
+        assert reply is not None and reply["op"] == "ack", reply
+        assert link.bytes_out - before >= plaintext
+    finally:
+        link.close("test")

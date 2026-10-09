@@ -5648,8 +5648,16 @@ class RelayServer:
         if result is None:
             return {"op": "ack", "req": req, "detail": ""}
         if result.get("op") in ("ack", "error"):
-            return result
-        return {"op": "ack", "req": req, "detail": result}
+            reply = result
+        else:
+            reply = {"op": "ack", "req": req, "detail": result}
+        if granted.action in wire.NEVER_COMPRESS_OPS:
+            # A broker reply can carry a credential VALUE (a `copy` answer) and an ack
+            # has no op of its own for `seal` to key on, so the type is the marker:
+            # compressing it would put the secret's compressibility on the wire in
+            # the record length (see wire.py "Record compression").
+            return wire.UncompressedFrame(reply)
+        return reply
 
     # -- slow ops (build plan §0 finding 4) ---------------------------------
 
