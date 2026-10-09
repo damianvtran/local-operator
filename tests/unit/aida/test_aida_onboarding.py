@@ -499,6 +499,42 @@ def test_the_nudge_window_opens_once_then_closes_for_the_configured_span(
     assert data["nudge_offered_at"] == later
 
 
+def test_a_refused_lock_publishes_no_nudge_clause(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two effects are inseparable even when the lock is refused (round 3d).
+
+    ``nudge_offer`` hands back :data:`onboarding.NUDGE_CLAUSE` only from the
+    locked write that stamps the window it spends. A refusal must therefore
+    publish NOTHING: the first cut of that handler logged quietly and then fell
+    through to the clause, which nudges without spending the window — the
+    nagging bug the window exists to prevent.
+
+    Pinned DIRECTLY here, because the clean-log cell in
+    ``test_aida_proactive.py`` reaches the tip first: a nudge-only mutation of
+    that shape left every aida test green (review round 3d). Mutation: delete
+    the handler's ``return None`` and this cell goes red while the rest of the
+    suite stays green.
+    """
+    from local_operator.wakes.lock import WakeLockBusy
+
+    class _Held:
+        def __enter__(self) -> None:
+            raise WakeLockBusy("held by a peer")
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(state, "locked", lambda *a, **k: _Held())
+    t0 = 1_800_000_000_000
+
+    assert onboarding.nudge_offer(isolated_root, now_ms=t0) is None
+    # Nothing was published, so nothing was spent either.
+    ledger = isolated_root / "aida" / "onboarding.json"
+    data = json.loads(ledger.read_text(encoding="utf-8")) if ledger.exists() else {}
+    assert "nudge_offered_at" not in data, data
+
+
 def test_the_configured_nudge_days_bounds_the_window(isolated_root: Path) -> None:
     write_config(isolated_root, {"aida": {"onboarding": {"nudge_days": 1}}})
     day = 86_400_000

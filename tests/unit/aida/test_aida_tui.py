@@ -1208,6 +1208,52 @@ async def test_a_first_boot_with_a_provider_already_configured_opens_her(
 
 
 @pytest.mark.asyncio
+async def test_the_first_run_route_waits_for_the_launch_hook_task(tmp_path, monkeypatch) -> None:
+    """ORDER, not race (round 3d): the route awaits ``app._aida_boot_task`` first.
+
+    Both attended armers take the store lock for the same row, so while they
+    overlapped one of them waited out the peer for the whole ``LOCK_WAIT_S`` —
+    measured 5.09 s parked on this seam, with the app unable to paint and the
+    peer unable to release, since the park held the lock open. ``_route_first_run_boot``
+    now awaits the launch hook's task before its own store reads; pinned here by
+    holding that task open and watching whether the route's first read happens.
+
+    Mutation: delete the ordering block and this cell goes red — the route reads
+    the ledger while the hook is still pending.
+    """
+    from local_operator.aida import onboarding
+
+    reads: list[str] = []
+    real_settled = onboarding.greeting_settled
+
+    def settled(root):
+        reads.append("route-read")
+        return real_settled(root)
+
+    monkeypatch.setattr(onboarding, "greeting_settled", settled)
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # The boot above ran its own route call against the real (unscheduled)
+        # task, so the observations start clean and the held task is this cell's.
+        reads.clear()
+        release = asyncio.Event()
+
+        async def held() -> None:
+            await release.wait()
+
+        app._aida_boot_task = asyncio.create_task(held())
+        route = asyncio.create_task(app._route_first_run_boot())
+        for _ in range(20):
+            await pilot.pause()
+        assert reads == [], "the route read the store while the launch hook was still pending"
+
+        release.set()
+        await route
+    assert reads == ["route-read"], reads
+
+
+@pytest.mark.asyncio
 async def test_an_existing_install_boots_as_before_and_is_never_greeted(
     tmp_path, monkeypatch
 ) -> None:

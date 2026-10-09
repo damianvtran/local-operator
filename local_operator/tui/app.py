@@ -47072,6 +47072,23 @@ class OperatorApp(App[None]):
         (``cadence_allowed``) so it never pays this again. Best-effort: every
         failure boots exactly as before.
         """
+        # ORDER, NOT RACE — and this is what removes the park. Two attended
+        # armers exist at boot: the launch hook's task (`tui/__init__.py`'s
+        # `_aida_boot_ensure`, scheduled as a task at launch) and this route.
+        # Both take the store lock for the same row, so while they overlapped
+        # one of them waited out the peer for the whole `LOCK_WAIT_S` —
+        # measured 5.09 s, with the loop unable to paint, because the peer
+        # could not release while the park held the lock open. Awaiting that
+        # task here means this route's store reads start from a store the
+        # launch hook has finished with. A peer OUTSIDE this process can still
+        # refuse the take, and that answer is the quiet one
+        # (`aida.state.note_lock_refusal`, per the sites that take it).
+        launch_ensure = getattr(self, "_aida_boot_task", None)
+        if launch_ensure is not None and not launch_ensure.done():
+            # `asyncio.wait`, not `await`: the hook swallows its own failures, and
+            # awaiting it would re-raise a cancellation aimed at the HOOK as if
+            # this route had been cancelled.
+            await asyncio.wait({launch_ensure})
         try:
             from local_operator.aida import onboarding
             from local_operator.paths import config_dir
@@ -47212,6 +47229,7 @@ class OperatorApp(App[None]):
         from local_operator.aida import naming as aida_naming
         from local_operator.aida import proactive, state
         from local_operator.paths import config_dir
+        from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
         # Read OFF the try, so the failure receipt below can always name her:
         # ``display_name`` never raises (the default stands in for an unset or
@@ -47247,6 +47265,16 @@ class OperatorApp(App[None]):
                 notice(f"{AIDA_MARKER} {name}: active again — next check-in {when}.")
             else:
                 notice(f"{AIDA_MARKER} {name}: active again — her next boot arms the check-in.")
+        except (WakeLockBusy, WakeLockUnavailable) as error:
+            # THE REFUSAL IS THE RECEIPT — the handler below says so and then
+            # logged a stack for it. A control op takes the store lock like every
+            # other aida writer, so a peer holding it (her open session's writer,
+            # the launch hook, the tray drain) refuses this command: the lock
+            # module's sentence already states what happened and that re-running
+            # is the fix, so it goes to the notice unchanged and the log gets the
+            # quiet line instead of a `Traceback` block.
+            state.note_lock_refusal(f"the {word} command", error)
+            self._system_notice(f"could not {word} {name}: {error}", "warning")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
             self._system_notice(f"could not {word} {name}: {error}", "warning")
