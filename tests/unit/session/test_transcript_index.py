@@ -1261,3 +1261,270 @@ def test_a_build_sweeps_the_cache_of_a_deleted_session(tmp_path, monkeypatch):
     assert calls == {"full": 1, "incremental": 0}
     assert not ti.index_path(tmp_path, gone).exists()
     assert ti.index_path(tmp_path, SID).exists()  # a live session keeps its cache
+
+
+# ---------------------------------------------------------------------------
+# Runs: the open frame's per-run facts
+# ---------------------------------------------------------------------------
+
+
+def tool_row(
+    id_: str,
+    ts: float,
+    *,
+    text: str = "tool output",
+    is_error: bool = False,
+    duration_s: float | None = 2.0,
+    fault: str | None = None,
+    delivery: str | None = None,
+) -> dict[str, Any]:
+    """A tool row with the provider envelope the counters read."""
+    details: dict[str, Any] = {}
+    if fault is not None:
+        details["__fault"] = fault
+    if delivery is not None:
+        details["delivery"] = delivery
+    provider: dict[str, Any] = {"details": details, "useless": False}
+    if duration_s is not None:
+        provider["duration_s"] = duration_s
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "content": [{"text": text}],
+            "is_error": is_error,
+            "provider_payload": provider,
+        },
+    }
+
+
+def incident(id_: str, ts: float, detail: str = "the turn died") -> dict[str, Any]:
+    """The error-level custom the renderer paints as a terminal marker."""
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "custom",
+            "custom_type": "session_incident",
+            "details": {"text": detail},
+        },
+    }
+
+
+def runs_of(index: ti.TranscriptIndex) -> list[tuple[str, str, int, int, float, bool]]:
+    """Each run as (opening user, closing answer, actions, failed, worked, settled)."""
+    return [
+        (
+            run.opening_user_id,
+            run.closing_answer_id,
+            run.action_count,
+            run.failed_count,
+            run.worked_seconds,
+            run.settled,
+        )
+        for run in index.runs
+    ]
+
+
+def test_runs_partition_two_turns_and_count_their_tools(tmp_path):
+    """The two-turn shape: counts, worked seconds and outcomes per run."""
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "do the thing"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, duration_s=3.0),
+            tool_row("x2", 1.4, duration_s=1.5, is_error=True),
+            assistant("a2", 1.5, "done"),
+            marker("m1", 1.6, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1, "again"),
+            assistant("a3", 2.2, "working", tool_calls=True),
+            tool_row("x3", 2.3, duration_s=0.5),
+            assistant("a4", 2.4, "done"),
+            marker("m2", 2.5, "t2"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [
+        ("u1", "a2", 2, 1, 4.5, True),
+        ("u2", "a4", 1, 0, 0.5, True),
+    ]
+    assert [run.outcome for run in index.runs] == ["complete", "complete"]
+    # The span is the run's FIRST and LAST rows, on the journal's clock — the
+    # last row, not the answer, because that is what the page's cut is measured
+    # in (a trailing receipt belongs to the run it follows).
+    assert index.runs[0].start_ts == 1.1 and index.runs[0].end_ts == 1.6
+
+
+def test_a_steer_stays_inside_its_run(tmp_path):
+    """The client's own rule, and the reason a count is a run's, not a turn's.
+
+    A user row that arrives while the run is open and the run's last painting row
+    is a TOOL row is a steer: the run keeps its identity — its FIRST user row —
+    and its counts span both of the turn's cycles. A partition that cut here would
+    report two half-runs where the bar draws one.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "start"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, duration_s=2.0),
+            user("u2", 1.4, "actually, also this"),
+            assistant("a2", 1.5, "working", tool_calls=True),
+            tool_row("x2", 1.6, duration_s=3.0),
+            assistant("a3", 1.7, "done"),
+            marker("m1", 1.8, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [("u1", "a3", 2, 0, 5.0, True)]
+
+
+def test_a_settled_answer_lets_the_next_user_row_open_a_run(tmp_path):
+    """The closure's second arm: a run whose tail is a settled assistant row."""
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "one"),
+            assistant("a1", 1.2, "answer one"),
+            user("u2", 1.3, "two"),
+            assistant("a2", 1.4, "answer two"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert runs_of(index) == [
+        ("u1", "a1", 0, 0, 0.0, True),
+        ("u2", "a2", 0, 0, 0.0, False),
+    ]
+    # The tail run has no marker, so it is LIVE — not settled with an empty
+    # outcome, and that difference is what the wire's counts are gated on.
+    assert index.runs[-1].outcome == ti.OUTCOME_OPEN
+    assert index.runs[0].outcome is None
+
+
+def test_a_session_incident_closes_the_run_before_the_next_user_row(tmp_path):
+    """The renderer's second terminal marker, honoured by the partition."""
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "start"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3),
+            incident("i1", 1.4),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1, "try again"),
+            assistant("a2", 2.2, "done"),
+            marker("m2", 2.3, "t2"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert [run.opening_user_id for run in index.runs] == ["u1", "u2"]
+    assert index.runs[0].action_count == 1
+
+
+def test_the_failure_count_excludes_the_settled_non_failures(tmp_path):
+    """A stopped call, a never-run call and a partial delivery are not failures.
+
+    The count is only useful if it states what the client's own ``isFailedCall``
+    would have derived from the same rows, so the three exclusions are pinned
+    here: an ``is_error`` row that was aborted, one whose ``send`` delivery is
+    partial, and one that never ran. A bar reading "3 failed" for that journal is
+    a bar reporting work that did not happen.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "go"),
+            assistant("a1", 1.2, "working", tool_calls=True),
+            tool_row("x1", 1.3, is_error=True, fault="aborted"),
+            tool_row("x2", 1.4, is_error=True, fault="skipped"),
+            tool_row("x3", 1.5, is_error=True, delivery="mailbox"),
+            tool_row("x4", 1.6, is_error=True, delivery="unconfirmed"),
+            tool_row("x5", 1.7, is_error=True),
+            assistant("a2", 1.8, "done"),
+            marker("m1", 1.9, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.action_count == 5
+    assert run.failed_count == 1
+
+
+def test_a_dropped_row_body_marks_the_run_incomplete(tmp_path):
+    """A row the scanner had to drop leaves a lower bound, and the run says so."""
+    big = "z" * (3 << 20)
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.1, "go"),
+            tool_row("x1", 1.2, text=big, duration_s=4.0),
+            tool_row("x2", 1.3, duration_s=1.0),
+        ],
+    )
+    index = refreshed(tmp_path)
+    run = index.runs[0]
+    assert run.action_count == 2  # the head names the role, so it still counts
+    assert run.complete is False
+    assert run.worked_seconds == 1.0  # the dropped row's duration is unknowable
+
+
+def test_incremental_appends_agree_with_a_full_rescan(tmp_path):
+    """THE INVARIANT THE CARRIED RUN EXISTS FOR: append, refresh, rescan, equal.
+
+    An incremental scan re-derives from a resume window that can sit INSIDE a
+    run (a steer's own ``attention_started``), so the run straddling that window
+    is carried rather than re-opened. Cutting the keeps at the window instead
+    emitted the straddling run twice — once truncated, once head-cut — and the
+    two counts reconciled with nothing. This asserts the only property that
+    matters: the incremental answer equals the one a full scan of the same
+    journal gives.
+    """
+    first = [
+        start("s1", 1.0, "t1"),
+        user("u1", 1.1, "start"),
+        assistant("a1", 1.2, "working", tool_calls=True),
+        tool_row("x1", 1.3, duration_s=2.0),
+        user("u2", 1.4, "and also this"),
+        assistant("a2", 1.5, "working", tool_calls=True),
+        tool_row("x2", 1.6, duration_s=3.0),
+    ]
+    write_rows(tmp_path, first)
+    initial = refreshed(tmp_path)
+    assert len(initial.runs) == 1
+    write_rows(
+        tmp_path,
+        [
+            assistant("a3", 1.7, "done"),
+            marker("m1", 1.8, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u3", 2.1, "next"),
+            assistant("a4", 2.2, "answer"),
+        ],
+    )
+    incremental = refreshed(tmp_path)
+    full = ti._scan_full(journal_path(tmp_path), None)
+    assert runs_of(incremental) == runs_of(full)
+    assert [run.opening_user_id for run in incremental.runs] == ["u1", "u3"]
+
+
+def test_version_three_cache_is_discarded_so_runs_are_never_missing(tmp_path):
+    """A cache without the runs section must not be served as "no runs here"."""
+    write_rows(tmp_path, [user("u1", 1.1, "hi"), assistant("a1", 1.2, "hello")])
+    index = refreshed(tmp_path)
+    payload = json.loads(ti.index_path(tmp_path, SID).read_text())
+    payload["version"] = 3
+    payload.pop("runs", None)
+    ti.index_path(tmp_path, SID).write_text(json.dumps(payload))
+    assert ti._read_raw(tmp_path, SID)["version"] == 3
+    assert ti._index_from_raw(ti._read_raw(tmp_path, SID)) is None
+    assert len(index.runs) == 1
