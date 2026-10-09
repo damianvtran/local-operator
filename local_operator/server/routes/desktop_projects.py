@@ -44,8 +44,11 @@ create body is the design's frozen contract for the UI repo (§4.1).
 
 **Status codes.** 404 unknown key; 409 a free-name conflict or a row written by
 a newer build (the write guard); 422 a body or value the store refuses (the
-same sentence the tool receives, via ``projects.readable_error``); 503 the
-store lock timed out, which is retryable.
+same sentence the tool receives, via ``projects.readable_error``), with
+``project_done_incomplete`` (plus the ``incomplete`` milestone names) for the
+one refusal that has a deliberate way through — ``PATCH`` with ``status: done``
+over open milestones, resent with ``force_done: true``; 503 the store lock
+timed out, which is retryable.
 
 **One route talks to other sessions.** ``POST .../{key}/request-update`` is the
 single exception to the rule below: it hands each linked session one check-in
@@ -67,12 +70,14 @@ from pydantic import ValidationError
 from local_operator.projects import (
     MilestoneEdit,
     Project,
+    ProjectDoneGateError,
     ProjectEdit,
     ProjectNameConflictError,
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    closed_with_open_milestones,
     display_name,
     readable_error,
     scan_runtime_states,
@@ -96,6 +101,7 @@ from local_operator.server.models.desktop_projects import (
     ProjectTimeline,
     ProjectView,
     linked_session_view,
+    project_patched,
     project_summary,
     project_timeline_entry,
     project_view,
@@ -181,6 +187,21 @@ def _refusal(exc: Exception, key: str) -> HTTPException:
     if isinstance(exc, ProjectRegistryLockTimeout):
         # Contention is transient; the client retries.
         return HTTPException(503, {"code": "project_store_busy", "message": str(exc)})
+    if isinstance(exc, ProjectDoneGateError):
+        # Still 422 (the request is well-formed; it asks for a state the plan's
+        # milestones contradict), but with its OWN machine code: the remedy is
+        # a deliberate choice — complete the milestones or resend with
+        # `force_done: true` — which a client can only offer if it can tell this
+        # refusal from a malformed value. `message` is the store's exact
+        # sentence; `incomplete` names what the confirm dialog should list.
+        return HTTPException(
+            422,
+            {
+                "code": "project_done_incomplete",
+                "message": readable_error(exc),
+                "incomplete": list(exc.incomplete),
+            },
+        )
     return HTTPException(422, {"code": "project_invalid", "message": readable_error(exc)})
 
 
@@ -363,6 +384,10 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
             # "leave it alone", and the store's edit vocabulary reads the same
             # absence from `model_fields_set`.
             payload = {field: getattr(body, field) for field in body.model_fields_set}
+            # `force_done` is a flag about THIS call, not a field of the row:
+            # it never reaches `ProjectEdit` (which would not know it) and
+            # rides the registry keyword instead — the same door the tool uses.
+            force_done = bool(payload.pop("force_done", False))
             try:
                 # The EDIT MODEL is built inside the try too: it runs the same
                 # validators (dates, tag grammar, estimate bounds), and a
@@ -370,7 +395,9 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 # its ``(ReceiptConflict, ValueError)`` arm — a bare 409 string,
                 # not this route's 422 sentence.
                 fields = ProjectEdit(**payload)
-                outcome = registry.update_project(found.id, fields, reporter="operator")
+                outcome = registry.update_project(
+                    found.id, fields, reporter="operator", force_done=force_done
+                )
             except (
                 ValueError,
                 ValidationError,
@@ -380,8 +407,14 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 raise _refusal(exc, key) from exc
             updated = outcome.project
             live = _live_counts(registry, [updated])
-            return project_summary(
-                updated, live_sessions=live.get(updated.id, 0), window=_window(registry)
+            # The store persists nothing about a forced close, so this answer
+            # is the client's only chance to say "closed with N milestones
+            # open" (see `ProjectPatched`).
+            return project_patched(
+                updated,
+                live_sessions=live.get(updated.id, 0),
+                window=_window(registry),
+                forced_done=closed_with_open_milestones(updated, force_done=force_done),
             )
 
         return reply(await asyncio.to_thread(mutate))

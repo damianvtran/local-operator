@@ -216,6 +216,28 @@ class ProjectNameConflictError(ValueError):
     """
 
 
+class ProjectDoneGateError(ValueError):
+    """``status='done'`` was refused because milestones are still incomplete.
+
+    A ValueError subclass for the same reason as :class:`ProjectNameConflictError`:
+    every existing ``except ValueError`` arm (the tool's, the routes' fallbacks)
+    keeps catching it and renders the SAME sentence, while a route can map THIS
+    class to its own machine code (``project_done_incomplete``) without matching
+    on prose. The code matters because the remedy is a deliberate choice the
+    client can offer — close anyway with ``force_done`` — which a generic
+    ``project_invalid`` 422 gave it no way to tell apart from a malformed value.
+
+    ``incomplete`` carries the milestone NAMES (store order) so a confirm
+    dialog can list what it is about to close over; the message text is the
+    exact pre-existing sentence (the tool receipts, tests and the desktop's
+    refusal-copy matcher read it).
+    """
+
+    def __init__(self, message: str, incomplete: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.incomplete: tuple[str, ...] = tuple(incomplete)
+
+
 class ProjectSchemaGuardError(RuntimeError):
     """A mutation was refused because the row was written by a newer build.
 
@@ -557,17 +579,38 @@ def _refuse_done_if_incomplete(milestones: Sequence[ProjectMilestone]) -> None:
     the deliberate escape hatch (``force_done=true``) rather than letting a
     false statement through. A plan with no milestones has nothing to prove
     and closes normally: the gate blocks an unfinished plan, not a plan-less
-    row. Raises ``ValueError`` so every ``except ValueError`` arm (the tool,
-    the routes) renders the same sentence.
+    row. Raises :class:`ProjectDoneGateError` (a ``ValueError``) so every
+    ``except ValueError`` arm (the tool, the routes) renders the same sentence
+    while the routes can still map it to its own machine code.
     """
     incomplete = [milestone.name for milestone in milestones if milestone.completed_at is None]
     if not incomplete:
         return
     names = ", ".join(repr(name) for name in incomplete)
-    raise ValueError(
+    raise ProjectDoneGateError(
         f"cannot set status 'done': {len(incomplete)} milestone"
         f"{'' if len(incomplete) == 1 else 's'} still incomplete ({names}) — "
-        "complete them, or pass force_done=true to close with them open"
+        "complete them, or pass force_done=true to close with them open",
+        incomplete,
+    )
+
+
+def closed_with_open_milestones(project: Project, *, force_done: bool) -> bool:
+    """Did a ``force_done`` update leave ``project`` done with milestones open?
+
+    The store records NOTHING about a forced close: the milestones stay open
+    and no history line is written, so "this row was closed over open work" is
+    only knowable at the moment of the call. This is the one definition of that
+    moment, shared by the ``project`` tool's receipt and the desktop/relay
+    PATCH response so no surface can claim a force the others would not:
+    the flag was passed AND the resulting status is ``done`` AND something is
+    still incomplete. ``force_done`` on any other status, or with nothing open,
+    is a harmless no-op and answers False.
+    """
+    return (
+        force_done
+        and project.status == "done"
+        and any(milestone.completed_at is None for milestone in project.milestones)
     )
 
 

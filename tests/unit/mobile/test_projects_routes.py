@@ -391,3 +391,98 @@ def test_the_summary_and_view_shapes_are_the_desktop_wire_models() -> None:
     assert set(created) == set(ProjectSummary.model_fields)
     detail = client.get("/api/projects/alpha").json()
     assert set(detail["project"]) == set(ProjectView.model_fields)
+
+
+# ---------------------------------------------------------------------------
+# The deliberate force-close door on the relay: the same `force_done` flag and
+# `project_done_incomplete` code as the desktop PATCH (see
+# tests/unit/server/test_desktop_projects.py for the desktop half).
+# ---------------------------------------------------------------------------
+
+
+def _project_with_open_milestone(client: TestClient) -> str:
+    project_id = client.post("/api/projects", json={"name": "closing"}).json()["project"]["id"]
+    for body in (
+        {"name": "open ms", "target_date": "2020-01-01"},
+        {"name": "shipped ms", "completed": True},
+    ):
+        assert client.post(f"/api/projects/{project_id}/milestones", json=body).status_code == 200
+    return project_id
+
+
+def test_done_over_open_milestones_is_the_dedicated_422_with_the_names() -> None:
+    client = _client()
+    project_id = _project_with_open_milestone(client)
+
+    refused = client.patch(f"/api/projects/{project_id}", json={"status": "done"})
+
+    assert refused.status_code == 422
+    # `{error, code}` is the daemon's body; `incomplete` rides additively.
+    assert refused.json() == {
+        "error": (
+            "cannot set status 'done': 1 milestone still incomplete ('open ms') — "
+            "complete them, or pass force_done=true to close with them open"
+        ),
+        "code": "project_done_incomplete",
+        "incomplete": ["open ms"],
+    }
+
+
+def test_other_refusals_keep_the_two_key_body() -> None:
+    """`extra` is empty for everything but the done gate: the body is unchanged."""
+    client = _client()
+    refused = client.patch("/api/projects/nope", json={"status": "done"})
+    assert refused.status_code == 404 and set(refused.json()) == {"error", "code"}
+    invalid = client.post("/api/projects", json={"name": "alpha", "bogus": 1})
+    assert invalid.status_code == 422
+    assert set(invalid.json()) == {"error", "code"}
+
+
+def test_force_done_closes_over_open_milestones_and_says_so() -> None:
+    client = _client()
+    project_id = _project_with_open_milestone(client)
+
+    forced = client.patch(
+        f"/api/projects/{project_id}", json={"status": "done", "force_done": True}
+    )
+
+    assert forced.status_code == 200
+    project = forced.json()["project"]
+    assert project["status"] == "done" and project["completed_at"] is not None
+    assert project["milestones_total"] == 2 and project["milestones_completed"] == 1
+    assert project["forced_done"] is True
+    row = json.loads((config_dir() / "projects" / f"{project_id}.json").read_text())
+    assert row["status"] == "done"
+    assert {m["name"]: m.get("completed_at") for m in row["milestones"]}["open ms"] is None
+    # A request flag, never a stored field.
+    assert "force_done" not in row and "forced_done" not in row
+
+
+def test_force_done_is_a_no_op_unless_it_actually_forced() -> None:
+    client = _client()
+    project_id = _project_with_open_milestone(client)
+
+    other = client.patch(
+        f"/api/projects/{project_id}", json={"status": "paused", "force_done": True}
+    )
+    assert other.status_code == 200 and other.json()["project"]["forced_done"] is False
+
+    off = client.patch(f"/api/projects/{project_id}", json={"status": "done", "force_done": False})
+    assert off.status_code == 422 and off.json()["code"] == "project_done_incomplete"
+
+    bare = client.post("/api/projects", json={"name": "no-plan"}).json()["project"]["id"]
+    closed = client.patch(f"/api/projects/{bare}", json={"status": "done", "force_done": True})
+    assert closed.status_code == 200
+    assert closed.json()["project"]["status"] == "done"
+    assert closed.json()["project"]["forced_done"] is False
+
+
+@pytest.mark.parametrize("bad", ["yes", "true", 1, None, []])
+def test_force_done_must_be_a_real_boolean(bad) -> None:
+    client = _client()
+    project_id = _project_with_open_milestone(client)
+    refused = client.patch(
+        f"/api/projects/{project_id}", json={"status": "done", "force_done": bad}
+    )
+    assert refused.status_code == 422 and refused.json()["code"] == "project_invalid"
+    assert client.get(f"/api/projects/{project_id}").json()["project"]["status"] == "active"
