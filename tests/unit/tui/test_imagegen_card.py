@@ -35,6 +35,13 @@ from local_operator.tui.widgets.tool_card import IMAGE_INTERRUPT_HINT, ToolCard
 from .test_app_pilot import FakeSession, _factory
 
 SENTENCE = "This generation failed before producing output."
+#: The canonical cancel-conflict sentence (image_tool, PR #2089): the platform
+#: sentence travels beside the structured code, and the surface must not use
+#: the sentence as the account — it renders its own ``already finished`` words
+#: off the TYPE.
+CONFLICT_SENTENCE = (
+    "The generation had already completed when the cancel arrived; its result was discarded."
+)
 
 
 def _running_card(**details: object) -> ToolCard:
@@ -55,10 +62,13 @@ def _content(card: ToolCard, width: int = 100) -> str:
 
 def test_the_running_card_paints_the_state_line_graphic_queue_and_logs() -> None:
     card = _running_card(
-        state="running",
+        stage="running",
         queue_position=3,
         progress_fraction=0.42,
-        log_lines=["request 1/1 · model flux-schnell", "step 13/28"],
+        log_lines=[
+            {"message": "request 1/1 · model flux-schnell", "timestamp": 1},
+            {"message": "step 13/28", "timestamp": 2},
+        ],
     )
     body = _content(card)
     assert "⋯ running" in body
@@ -73,7 +83,7 @@ def test_the_running_card_paints_the_state_line_graphic_queue_and_logs() -> None
 def test_without_a_fraction_the_graphic_is_the_canvas_not_a_bar() -> None:
     """Absence renders the reduced state: no fraction means no percentage, and
     the canvas is the honest indeterminate read."""
-    card = _running_card(state="running")
+    card = _running_card(stage="running")
     body = _content(card)
     assert "░" * 10 in body
     assert "█" not in body
@@ -81,7 +91,7 @@ def test_without_a_fraction_the_graphic_is_the_canvas_not_a_bar() -> None:
 
 
 def test_the_provider_word_can_name_cancelling_while_the_call_runs() -> None:
-    card = _running_card(state="cancelling")
+    card = _running_card(stage="cancelling")
     assert "⋯ cancelling" in _content(card)
 
 
@@ -105,7 +115,7 @@ def test_the_queued_card_does_not_repeat_its_status_word() -> None:
 def test_structured_logs_win_and_the_stream_is_the_fallback() -> None:
     """ONE tail, never two: the structured rows when a producer sent them, the
     streamed text otherwise."""
-    card = _running_card(state="running", log_lines=["structured row"])
+    card = _running_card(stage="running", log_lines=[{"message": "structured row"}])
     card.set_partial_detail("streamed row")
     body = _content(card)
     assert "structured row" in body
@@ -118,8 +128,29 @@ def test_structured_logs_win_and_the_stream_is_the_fallback() -> None:
     assert "streamed row" in _content(fresh)
 
 
+def test_a_midwalk_failure_arm_paints_the_pair_beside_the_card_word() -> None:
+    """``stage=None`` is the canonical mid-walk failure (PR #2089): the update
+    says nothing about stage — the pair is the semantics — so the state line
+    keeps the card's own word (the call IS still running; the walk continues)
+    and the platform sentence shows verbatim beside it. The next rung's update
+    replaces the pair, snapshot-style."""
+    card = _running_card(
+        stage=None,
+        error="Radient exceeded its 120s generation budget.",
+        error_type="timeout",
+    )
+    body = _content(card)
+    assert "⋯ running" in body
+    assert "✗ Radient exceeded its 120s generation budget." in body
+
+    card.set_live_details({"stage": "queued", "error": None, "error_type": None})
+    fresh = _content(card)
+    assert "⋯ queued" in fresh
+    assert "exceeded" not in fresh
+
+
 def test_the_live_error_line_shows_the_platform_sentence() -> None:
-    card = _running_card(state="running", error=SENTENCE, error_type="media_failed")
+    card = _running_card(stage="running", error=SENTENCE, error_type="media_failed")
     assert f"✗ {SENTENCE}" in _content(card)
 
 
@@ -144,7 +175,7 @@ def test_the_failure_body_paints_the_platform_sentence_verbatim() -> None:
 def test_a_retained_live_error_reaches_the_settled_failure_body() -> None:
     """A provider that reported the fault on one streaming update and then went
     quiet still has its words on the failure body."""
-    card = _running_card(state="running", error=SENTENCE, error_type="media_failed")
+    card = _running_card(stage="running", error=SENTENCE, error_type="media_failed")
     card.mark_failed("image generation failed", "image generation failed")
     assert SENTENCE in _content(card)
 
@@ -162,7 +193,7 @@ def test_the_sentence_never_prints_twice() -> None:
 def test_the_already_finished_conflict_is_never_an_error() -> None:
     """`media_already_completed` — the cancel conflict against a finished job —
     reads "already finished" and never wears the error's glyph or sentence."""
-    card = _running_card(state="running", error_type="media_already_completed")
+    card = _running_card(stage="running", error_type="media_already_completed")
     body = _content(card)
     assert "already finished" in body
     assert "✗" not in body
@@ -179,7 +210,11 @@ def test_the_already_finished_conflict_is_never_an_error() -> None:
     settled.mark_failed(
         "cancelled",
         "cancelled",
-        details={"error": "conflict", "error_type": "media_already_completed"},
+        details={
+            "stage": "cancelled",
+            "error": CONFLICT_SENTENCE,
+            "error_type": "media_already_completed",
+        },
     )
     body = _content(settled)
     assert "already finished" in body
@@ -194,7 +229,11 @@ def test_the_finished_note_survives_a_success_settle() -> None:
     card = _running_card()
     card.mark_done(
         "Generation cancelled before completion.",
-        details={"error_type": "media_already_completed"},
+        details={
+            "stage": "cancelled",
+            "error": CONFLICT_SENTENCE,
+            "error_type": "media_already_completed",
+        },
     )
     body = _content(card)
     assert "already finished" in body
@@ -207,7 +246,11 @@ def test_the_finished_note_survives_an_interrupt_settle() -> None:
     card = _running_card()
     card.mark_interrupted(
         reason="Stopped before completion.",
-        details={"error_type": "media_already_completed"},
+        details={
+            "stage": "cancelled",
+            "error": CONFLICT_SENTENCE,
+            "error_type": "media_already_completed",
+        },
     )
     body = _content(card)
     assert "already finished" in body
@@ -221,7 +264,7 @@ def test_a_settled_card_carries_no_live_furniture() -> None:
     """The variant is live-only: on success the standard receipt is the whole
     card — no state line, no graphic, and no second way to carry the artifact
     (the transcript's image machinery owns that, not this widget)."""
-    card = _running_card(state="running", progress_fraction=0.42)
+    card = _running_card(stage="running", progress_fraction=0.42)
     card.mark_done("Generated 1 image (1024x1024): /tmp/opic/img_04.png")
     body = _content(card)
     assert "Generated 1 image" in body
@@ -237,13 +280,13 @@ def test_a_settled_card_carries_no_live_furniture() -> None:
 
 
 def test_the_interrupt_hint_sheds_whole_at_narrow_widths() -> None:
-    card = _running_card(state="running")
+    card = _running_card(stage="running")
     assert IMAGE_INTERRUPT_HINT in card._build_row(100).plain
     assert IMAGE_INTERRUPT_HINT not in card._build_row(30).plain
 
 
 def test_the_hint_leaves_once_the_call_is_stopped() -> None:
-    card = _running_card(state="running")
+    card = _running_card(stage="running")
     card.mark_interrupted()
     assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
     assert "interrupted" in card._build_row(100).plain
@@ -253,9 +296,47 @@ def test_the_hint_leaves_once_the_live_word_says_cancelling() -> None:
     """The hint's contract is "while the call can still be stopped": with the
     provider word on `cancelling` a stop is already in flight, so the slot
     yields (design round 1, D2) — the state line is the acknowledgement."""
-    card = _running_card(state="cancelling")
+    card = _running_card(stage="cancelling")
     assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
     assert "⋯ cancelling" in _content(card)
+
+
+def test_the_cancelling_interim_holds_through_a_terminal_stage_update() -> None:
+    """Design round 1, D1: once a live update maps to `cancelling`, the word,
+    the shed hint and the graphic state hold until the settle — the cancel
+    flow's terminal-stage emit (`cancelled`) arrives one turn before the
+    result and must not un-say the interim."""
+    card = _running_card(stage="cancelling", progress_fraction=0.4)
+    assert "⋯ cancelling" in _content(card)
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    assert card._imagegen_cancel_hold is not None
+
+    # The window: a terminal-stage update arrives before the result lands.
+    card.set_live_details({"stage": "cancelled", "progress_fraction": None})
+    body = _content(card)
+    assert "⋯ cancelling" in body
+    assert "⋯ running" not in body
+    assert "████░░░░░░ 40%" in body
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    assert card._imagegen_live is not None
+    assert card._imagegen_live.state == "cancelling"
+
+    # The settle still wins, and clears the latch with the live view.
+    card.mark_interrupted(reason="Stopped before completion.", details={"stage": "cancelled"})
+    assert "⋯ cancelling" not in _content(card)
+    assert card._imagegen_cancel_hold is None
+    assert "interrupted" in card._build_row(100).plain
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+
+
+def test_a_terminal_stage_without_an_interim_latches_nothing() -> None:
+    """The settled-word non-preemption is untouched: a live `cancelled` with
+    no prior `cancelling` claims nothing, paints the card's own word and
+    leaves no latch behind (design round 1, D1 — scope: the interim only)."""
+    card = _running_card(stage="cancelled")
+    assert "⋯ running" in _content(card)
+    assert "⋯ cancelled" not in _content(card)
+    assert card._imagegen_cancel_hold is None
 
 
 # --- non-imagegen rows are untouched ---------------------------------------
@@ -298,7 +379,7 @@ async def test_tool_updates_feed_the_adapter_through_the_app() -> None:
                     tool_name="generate_image",
                     partial_result=AgentToolUpdate(
                         details={
-                            "state": "in_progress",
+                            "stage": "in_progress",
                             "queue_position": 2,
                             "progress_fraction": 0.25,
                         }
@@ -344,7 +425,11 @@ async def test_the_finished_note_survives_every_settle_arm_through_the_app() -> 
                         tool_name="generate_image",
                         is_error=True,
                         content=[TextContent(text="image generation failed")],
-                        details={"error_type": "media_already_completed"},
+                        details={
+                            "stage": "cancelled",
+                            "error": CONFLICT_SENTENCE,
+                            "error_type": "media_already_completed",
+                        },
                     ),
                 )
             )
@@ -358,7 +443,11 @@ async def test_the_finished_note_survives_every_settle_arm_through_the_app() -> 
                         tool_call_id="b",
                         tool_name="generate_image",
                         content=[TextContent(text="Generation cancelled before completion.")],
-                        details={"error_type": "media_already_completed"},
+                        details={
+                            "stage": "cancelled",
+                            "error": CONFLICT_SENTENCE,
+                            "error_type": "media_already_completed",
+                        },
                     ),
                 )
             )
@@ -372,7 +461,12 @@ async def test_the_finished_note_survives_every_settle_arm_through_the_app() -> 
                         tool_call_id="c",
                         tool_name="generate_image",
                         content=[TextContent(text="Stopped.")],
-                        details={FAULT_KEY: "skipped", "error_type": "media_already_completed"},
+                        details={
+                            FAULT_KEY: "skipped",
+                            "stage": "cancelled",
+                            "error": CONFLICT_SENTENCE,
+                            "error_type": "media_already_completed",
+                        },
                     ),
                 )
             )
